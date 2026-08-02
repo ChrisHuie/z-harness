@@ -46,3 +46,23 @@
 
 # guard runtime logs — churn on every selftest, not authored content
 hooks/*events*.jsonl
+
+# --- added after the first push: evidence and pre-git state ---
+# git's first commit is the END state of the 2026-08-01/02 rebuild. The PRE* snapshots
+# are the ONLY record of what the harness looked like before it, and git history cannot
+# reconstruct them. reports/ and drafts/ are the findings and the derivation behind every
+# conclusion in the .md records. experiments/ (43 MB of raw run data) stays out.
+!harness-audit-20260801/reports/
+!harness-audit-20260801/reports/**
+!harness-audit-20260801/drafts/
+!harness-audit-20260801/drafts/**
+!harness-audit-20260801/misfiled-memories/
+!harness-audit-20260801/misfiled-memories/**
+!harness-audit-20260801/PRE-MIGRATION-BACKUP/
+!harness-audit-20260801/PRE-MIGRATION-BACKUP/**
+!harness-audit-20260801/PREINSTALL-20260802-085154/
+!harness-audit-20260801/PREINSTALL-20260802-085154/**
+!harness-audit-20260801/PREMEM-20260802-154631/
+!harness-audit-20260801/PREMEM-20260802-154631/**
+!harness-audit-20260801/PREHOOKS-20260802-154226/
+!harness-audit-20260801/PREHOOKS-20260802-154226/**

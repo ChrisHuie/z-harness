@@ -1,0 +1,30 @@
+---
+name: adcp-kernel-empirical-anchors
+description: "Firsthand-verified facts grounding the AdCP \"kernel\" cross-surface API + runtime conformance-helper design"
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: 0ec17d38-47f0-44c3-8dba-412e46a45e03
+---
+
+<!-- audit-2026-08-01 -->
+> **STALE as of 2026-08-01.** Verified no longer accurate during the memory-consolidation audit. Kept for history; do not act on it.
+> Evidence: The salesagent-side claims are dead. (1) 'exceptions.py ERROR_CODE_MAPPING maps CONFIGURATION_ERROR->SERVICE_UNAVAILABLE (:53), flipping terminal->transient' — that mapping NO LONGER EXISTS; grep retu
+
+
+AdCP "kernel" = standalone cross-language grounded model of the AdCP spec (github adcontextprotocol/adcp), built in /Users/quantum/Documents/GitHub/adcp-tooling. LAYER1 kernel (data + small stable query API) → LAYER2 bindings → LAYER3 surfaces (codegen, CI drift-guard, spec-linter, BDD oracle-inverter, RUNTIME agent helper, grader, reviewer). Design notes: .claude/notes/adcp-conformance-toolkit/{design.md,redteam-findings.md}.
+
+Firsthand-verified anchors (2026-06-20), all load-bearing:
+- THREE-WAY CODE-COUNT DRIFT: manifest dist/schemas/3.1.0/manifest.json error_codes=**92** (the oracle, each {recovery,description,suggestion}; error_code_policy.default_unknown_recovery="transient"; NO httpStatus; tools=64, specialisms=21). SDK generated enum (.venv adcp/types/generated_poc/enums/error_code.py)=**80**. SDK hand-table (adcp/server/helpers.py STANDARD_ERROR_CODES)=**36** (its comment lies: says "All 32 codes"). salesagent src/core/exceptions.py ERROR_CODE_MAPPING+INTERNAL_CODES is a 4th table. The drift-guard reconciles all of these.
+- RECOVERY-CLASS DRIFT (SDK helpers.py vs manifest): BUDGET_EXHAUSTED SDK=correctable/manifest=terminal; IDEMPOTENCY_CONFLICT SDK=terminal/manifest=correctable; IDEMPOTENCY_EXPIRED same. AUTH_REQUIRED in SDK table but manifest marks it DEPRECATED alias (use AUTH_MISSING/AUTH_INVALID). salesagent ERROR_CODE_MAPPING maps CONFIGURATION_ERROR→SERVICE_UNAVAILABLE (flips terminal→transient on wire).
+- COUPLING GUARD FIRES NOW: SDK get_adcp_spec_version() reads packaged ADCP_VERSION = "**3.1.0-beta.3**" (stale; beta.3 had 80 codes), manifest stamped "3.1.0". MUST normalize: wire values are release-precision (3.1, 3.1-beta.1 per core/version_envelope.json AdcpVersionEnvelope.adcp_version pattern ^\d+\.\d+(-...)?$) while manifest/ADCP_VERSION are full-semver — naive eq false-positives. SDK pkg __version__=5.7.0 (distinct axis from spec version).
+- TWO-LAYER ENVELOPE (core/protocol_envelope.py ProtocolEnvelope): payload.errors[] = canonical; envelope-level adcp_error: Error|None ("SHOULD populate BOTH on fatal"); status: TaskStatus (values include completed/failed/**rejected**/canceled — rejected is the A2A Case-1 marker); replayed: bool (idempotency cache marker). SDK helper adcp_error() builds ONLY {"errors":[...]} (payload layer) — does NOT set envelope adcp_error nor flip transport markers. That gap is exactly what the runtime helper fills.
+- UNKNOWN-CODE POLICY (core/error.py Error.code + .recovery docstrings, NORMATIVE): code is open string (max 64), receivers MUST decode unknown codes, read error.recovery, fall back to "transient" when recovery absent. error.recovery on wire is AUTHORITATIVE over enumMetadata.
+- GOVERNANCE_DENIED two-case rule (manifest entry, firsthand): Case-1 task HAS structured rejection arm (e.g. acquire_rights→AcquireRightsRejected {rights_status:const rejected, requires reason, **not:{required:[errors]}** so dual-emit = schema violation}, creative_approval→CreativeRejected) → populate arm+reason, NO errors[]/adcp_error, transport success markers stay (HTTP200/MCP isError:false/A2A succeeded). Case-2 NO arm (create_media_buy = Success/Error/Submitted only) → set BOTH errors[].code AND adcp_error.code, FLIP markers (HTTP4xx/MCP isError:true/A2A failed). GOVERNANCE_UNAVAILABLE = always Case-2 (transient). Storyboard /tmp/gd.yaml grades the whole Case-2 rejection with ONE check (error_code==GOVERNANCE_DENIED) — recovery/two-layer/marker-flip/findings are graded-silent (24-kind authored_check_kinds vocab has no recovery/message_content kind).
+
+CONSUMER-SIDE drift, firsthand (salesagent-1389/src/core/), the C1 worklist + runtime-helper validation:
+- UNKNOWN-CODE OVERRIDE BUG (context_manager.py:359-381, async/webhook path): `if wire_code not in STANDARD_ERROR_CODES (36-table): synthesize(error_code="SERVICE_UNAVAILABLE", recovery="terminal")`. Triply wrong vs manifest: keyed on 36 not 92 (crushes 56 valid codes); stamps terminal but policy says unknown→transient; labels SERVICE_UNAVAILABLE (which is transient) yet stamps terminal (self-contradiction). This is what runtime classify() prevents.
+- CORRECTION to redteam: two-layer envelope MECHANISM exists on seller side — context_manager.py:347-383 build_two_layer_error_envelope("adcp_error + errors[]"). But it's gated behind the broken 36-code wire-enforcement and has NO rejection-arm awareness. Stock SDK adcp_error() is still payload-only. emit_error() is the conformant arm-aware single entry point.
+- 4th drift table: exceptions.py ERROR_CODE_MAPPING(~55)+INTERNAL_CODES(~18). CONFIGURATION_ERROR→SERVICE_UNAVAILABLE (:53) flips manifest-terminal→transient (buyers hammer broken deploy); also in INTERNAL_CODES(:114). AUTH_REQUIRED is mapping target (:57-60) but manifest-deprecated; exceptions.py:410 admits "both define only AUTH_REQUIRED" (SDK 36-table never got 3.1 AUTH_MISSING/AUTH_INVALID split). Self-guard :128-130 asserts targets ∈ 36-table = CIRCULAR (closure over a drifted table; manifest-via-kernel is the independent oracle that breaks it).
+
+Kernel API (Part B) maps 1:1 to these 3 real defects: recovery_of(policy-folded)→unknown-override; code().deprecated→AUTH_REQUIRED; coupling_ok(normalized)→version skew. Runtime helper (Part C) emit_error Case-1(arm:AcquireRightsRejected, no errors[], success markers)/Case-2(create_media_buy, both layers, flip markers) + classify + cache_decision. Delivered to main 2026-06-20.

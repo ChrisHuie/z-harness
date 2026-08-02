@@ -1,0 +1,2 @@
+- [cmux shortcuts cheat sheet](cmux-shortcuts-cheatsheet.md) — user keeps the full cmux keyboard shortcuts at `~/cmux-shortcuts.md`
+- [worktree window helpers](worktree-window-helpers.md) — prw/iss/wt-ls zsh fns open a PR/issue in its own isolated VS Code window

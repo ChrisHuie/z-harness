@@ -1,0 +1,68 @@
+{
+  "session_id": "00000000-0000-0000-0000-000000000000",
+  "transcript_path": "/dev/null",
+  "cwd": "/tmp",
+  "prompt_id": "00000000-0000-0000-0000-000000000001",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "AskUserQuestion",
+  "tool_input": {
+    "questions": [
+      {
+        "question": "The fake imported skill has two planted red flags (a run-code-from-the-internet install script, and asking for far more access than its job needs). As the human gatekeeper, what's your call?",
+        "header": "Your call",
+        "multiSelect": false,
+        "options": [
+          {
+            "label": "Reject it (Recommended)",
+            "description": "The realistic call: red flags = no entry. Gets logged as the ledger's first rejection with you as approver; the fake stays in quarantine as a permanent example of what the gate catches."
+          },
+          {
+            "label": "Admit a cleaned-up version",
+            "description": "Strip the sketchy script and the internet access, keep the harmless changelog-drafting part, let it in with minimum permissions. Tests the 'fix it then admit it' path instead."
+          },
+          {
+            "label": "Admit as-is",
+            "description": "Wave it through untouched \u2014 tests that the ledger records even a bad call honestly (it's inert either way, so this is safe to choose if you're curious)."
+          },
+          {
+            "label": "Leave it sitting",
+            "description": "No decision; it stays on your queue with a deadline, and the 'how long do human decisions wait' meter starts ticking \u2014 which is also useful data."
+          }
+        ]
+      }
+    ]
+  },
+  "tool_response": {
+    "questions": [
+      {
+        "question": "The fake imported skill has two planted red flags (a run-code-from-the-internet install script, and asking for far more access than its job needs). As the human gatekeeper, what's your call?",
+        "header": "Your call",
+        "options": [
+          {
+            "label": "Reject it (Recommended)",
+            "description": "The realistic call: red flags = no entry. Gets logged as the ledger's first rejection with you as approver; the fake stays in quarantine as a permanent example of what the gate catches."
+          },
+          {
+            "label": "Admit a cleaned-up version",
+            "description": "Strip the sketchy script and the internet access, keep the harmless changelog-drafting part, let it in with minimum permissions. Tests the 'fix it then admit it' path instead."
+          },
+          {
+            "label": "Admit as-is",
+            "description": "Wave it through untouched \u2014 tests that the ledger records even a bad call honestly (it's inert either way, so this is safe to choose if you're curious)."
+          },
+          {
+            "label": "Leave it sitting",
+            "description": "No decision; it stays on your queue with a deadline, and the 'how long do human decisions wait' meter starts ticking \u2014 which is also useful data."
+          }
+        ],
+        "multiSelect": false
+      }
+    ],
+    "answers": {},
+    "annotations": {},
+    "afkTimeoutMillis": 60000
+  },
+  "tool_use_id": "toolu_U1",
+  "duration_ms": 60001
+}

@@ -1,0 +1,11 @@
+version: 1
+name: audit-rigor
+description: Maximum-grounding profile for reviews, audits, and claims that will be acted on — verified evidence, confidence labels, schema-checkable output, report-only.
+axes:
+  rigor: R3
+  density: D2
+  depth: E1
+  calibration: C3
+  voice: plain-prose
+  precision: P3
+  initiative: I0

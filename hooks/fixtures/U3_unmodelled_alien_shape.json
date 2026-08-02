@@ -1,0 +1,33 @@
+{
+  "session_id": "00000000-0000-0000-0000-000000000000",
+  "transcript_path": "/dev/null",
+  "cwd": "/tmp",
+  "prompt_id": "00000000-0000-0000-0000-000000000001",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "AskUserQuestion",
+  "tool_input": {
+    "questions": [
+      {
+        "question": "pick one",
+        "header": "H",
+        "options": [
+          {
+            "label": "a",
+            "description": "d"
+          }
+        ],
+        "multiSelect": false
+      }
+    ]
+  },
+  "tool_response": {
+    "resolution": {
+      "kind": "idle-timer",
+      "elapsedMs": 60000
+    },
+    "selections": []
+  },
+  "tool_use_id": "toolu_U3",
+  "duration_ms": 60001
+}

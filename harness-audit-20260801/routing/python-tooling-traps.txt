@@ -1,0 +1,10 @@
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/feedback_dependency_widen_pr_frozen_lock_masks.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/feedback_precommit_black_shifts_line_allowlists.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/feedback_refactor_makes_dead_patches_live.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/reference_httpx_ssrf_ip_pinning.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/reference_lazy_imports_load_bearing.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/reference_mcp_structured_content_bypasses_model_dump.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/reference_reload_captures_active_mock.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/reference_tox_commands_no_shell_substitution.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/uv_frozen_for_commit_drift.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/uv_venv_corruption_reinstall.md

@@ -1,0 +1,39 @@
+
+SCAN SET  root=/Users/quantum/.claude/projects
+          2586 transcript files found, 247 in window, 110 subagent contexts (44%), 0 unreadable
+
+1. DID SKILLS FIRE?   (denominator = 247 agent contexts)
+   skill                topic present   fired  capture  active
+   agent-dispatch                  17       3      17%       3
+   craft-context-file               4       1      25%       1
+   craft-prompt             no signal       0        —       0
+   craft-skill                     11       0       0%       0   <-- topic present, never fired
+   git-workflow                    98      19      19%      17
+   outbound-drafts          no signal       2        —       2
+   pr-review-method                 8      11     137%       9   <-- fired MORE than topic present (over-firing)
+   prebid-adcp                     17       2      11%       2
+   review-prompt            no signal       0        —       0
+   system-design            no signal       0        —       0
+   testing-ci                      40      19      47%      17
+   'no signal' = no ACTION distinguishes this skill's topic; capture is not computable.
+
+   contexts with >=1 skill fired: 53/247
+
+2. DID A references/ FILE GET READ AFTER ITS SKILL FIRED?   (installed skills only)
+   (this is the one link in the chain never observed in real use)
+   agent-dispatch         0 of    3 fires opened its references/
+   craft-context-file     0 of    1 fires opened its references/
+   git-workflow           0 of   19 fires opened its references/
+   outbound-drafts        0 of    2 fires opened its references/
+   pr-review-method       0 of   11 fires opened its references/
+   prebid-adcp            0 of    2 fires opened its references/
+   testing-ci             0 of   19 fires opened its references/
+   TOTAL                  0 of   57   <-- 0 here means 55 KB of deferred rules are unreachable in practice
+
+3. IS THE CURRENT ~/.claude/CLAUDE.md REACHING SESSIONS?   [INFERRED]
+   CLAUDE.md mtime: 2026-08-02 12:34
+   contexts started AFTER it (got current file): 104
+   contexts started BEFORE it (ran a stale copy): 143
+   undatable: 0
+   NOTE: inferred from session-start vs mtime. The injected block is NOT
+   persisted to transcripts, so this cannot be observed directly.

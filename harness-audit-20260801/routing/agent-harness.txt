@@ -1,0 +1,14 @@
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/crash_forensics_check_user_scope_first.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/docker_desktop_stale_singleton_after_crash.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-GitHub-agentic-prebid/memory/feedback-agent-token-budget.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-GitHub-norbert-skills/memory/feedback-timeout-is-not-an-answer.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/feedback_detecting_subagent_overconfidence.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/feedback_fanout_preflight_disk_and_docker.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/feedback_isolate_mutation_testing_reviewers_in_worktrees.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/feedback_no_mutation_agents_on_shared_worktree.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/feedback_subagent_mechanism_is_a_claim.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/feedback_two_phase_subagent_audit.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-GitHub-prompt-harness/memory/installed-skills-are-frozen-snapshots.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/reference_agent_worktree_isolation_may_provision_main.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/reference_background_agent_report_retrieval.md
+/Users/quantum/.claude/projects/-Users-quantum/memory/worktree-window-helpers.md

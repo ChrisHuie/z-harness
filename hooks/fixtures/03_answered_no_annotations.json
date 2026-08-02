@@ -1,0 +1,68 @@
+{
+  "session_id": "00000000-0000-0000-0000-000000000000",
+  "transcript_path": "/dev/null",
+  "cwd": "/tmp",
+  "prompt_id": "00000000-0000-0000-0000-000000000001",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "AskUserQuestion",
+  "tool_input": {
+    "questions": [
+      {
+        "question": "How should we restructure the work currently bundled in #1026?",
+        "header": "#1026 plan",
+        "multiSelect": false,
+        "options": [
+          {
+            "label": "Rescope #1026\u2192TIME, spin off CPA + capabilities",
+            "description": "Rewrite #1026 as the ready-to-build TIME adapter issue (corrected premises). Create 2 new issues: CPA pricing acceptance (decoupled from #1027) and 'advertise supported_pricing_models in get_adcp_capabilities'. TIME ships now; CPA/capabilities tracked cleanly in the right families."
+          },
+          {
+            "label": "Keep #1026 as umbrella + child issues",
+            "description": "Leave #1026 as a tracking parent (corrected), and create child issues for TIME, CPA, and capabilities-advertising under it. More structure and more tracker items, but a single parent to watch."
+          },
+          {
+            "label": "Rewrite #1026 in place (TIME+CPA together)",
+            "description": "One corrected issue covering both models' adapter acceptance; split out only the capabilities-advertise piece. Minimal tracker churn, but TIME stays coupled to CPA's slower settlement discussion."
+          },
+          {
+            "label": "Close #1026 as done + open fresh issues",
+            "description": "Close #1026 (serialization delivered by #1473), open clean product-scoped issues from scratch for TIME, CPA, capabilities. Cleanest slate, but loses #1026's history/epic linkage and could read as 'done' when adapter work remains."
+          }
+        ]
+      }
+    ]
+  },
+  "tool_response": {
+    "questions": [
+      {
+        "question": "How should we restructure the work currently bundled in #1026?",
+        "header": "#1026 plan",
+        "options": [
+          {
+            "label": "Rescope #1026\u2192TIME, spin off CPA + capabilities",
+            "description": "Rewrite #1026 as the ready-to-build TIME adapter issue (corrected premises). Create 2 new issues: CPA pricing acceptance (decoupled from #1027) and 'advertise supported_pricing_models in get_adcp_capabilities'. TIME ships now; CPA/capabilities tracked cleanly in the right families."
+          },
+          {
+            "label": "Keep #1026 as umbrella + child issues",
+            "description": "Leave #1026 as a tracking parent (corrected), and create child issues for TIME, CPA, and capabilities-advertising under it. More structure and more tracker items, but a single parent to watch."
+          },
+          {
+            "label": "Rewrite #1026 in place (TIME+CPA together)",
+            "description": "One corrected issue covering both models' adapter acceptance; split out only the capabilities-advertise piece. Minimal tracker churn, but TIME stays coupled to CPA's slower settlement discussion."
+          },
+          {
+            "label": "Close #1026 as done + open fresh issues",
+            "description": "Close #1026 (serialization delivered by #1473), open clean product-scoped issues from scratch for TIME, CPA, capabilities. Cleanest slate, but loses #1026's history/epic linkage and could read as 'done' when adapter work remains."
+          }
+        ],
+        "multiSelect": false
+      }
+    ],
+    "answers": {
+      "How should we restructure the work currently bundled in #1026?": "Close #1026 as done + open fresh issues"
+    }
+  },
+  "tool_use_id": "toolu_01Mpif3EGkaJH2EQF4c8JreW",
+  "duration_ms": 60001
+}

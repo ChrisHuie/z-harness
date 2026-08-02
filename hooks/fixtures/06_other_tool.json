@@ -1,0 +1,21 @@
+{
+  "session_id": "00000000-0000-0000-0000-000000000000",
+  "transcript_path": "/dev/null",
+  "cwd": "/tmp",
+  "prompt_id": "00000000-0000-0000-0000-000000000001",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Read",
+  "tool_input": {
+    "file_path": "/tmp/x"
+  },
+  "tool_response": {
+    "type": "text",
+    "file": {
+      "filePath": "/tmp/x",
+      "content": "a\n"
+    }
+  },
+  "tool_use_id": "toolu_OTHER",
+  "duration_ms": 60001
+}

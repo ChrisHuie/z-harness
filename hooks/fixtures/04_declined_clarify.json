@@ -1,0 +1,96 @@
+{
+  "session_id": "00000000-0000-0000-0000-000000000000",
+  "transcript_path": "/dev/null",
+  "cwd": "/tmp",
+  "prompt_id": "00000000-0000-0000-0000-000000000001",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "AskUserQuestion",
+  "tool_input": {
+    "questions": [
+      {
+        "question": "If the tool never judges whether code is correct, what is allowed to move a finding to \"settled\" (ball = nobody)?",
+        "header": "What settles",
+        "multiSelect": false,
+        "options": [
+          {
+            "label": "Only a human/specialist act (Recommended)",
+            "description": "Nothing the tool computes ever settles a code finding. Settlement requires an explicit act: the reviewer resolving the thread, a specialist sign-off, or a `rereview adjudicate` ruling. The tool's terminal state for a code finding is \"change located \u2014 specialist's ball\". Strongest and simplest; makes the safety property structural."
+          },
+          {
+            "label": "Split by type",
+            "description": "Non-code types the tool CAN settle because no code judgment is involved \u2014 question answered+acknowledged, nit resolved at author discretion, praise-fyi. Code types (change-request, suggestion) always route to the specialist and never self-settle. Preserves useful automation where correctness isn't at stake."
+          },
+          {
+            "label": "Tool proposes, specialist confirms",
+            "description": "The tool marks a finding \"proposed settled\" with the located change; it becomes settled only when a specialist or human confirms. Adds a state and a confirmation loop, but keeps a visible tool opinion."
+          }
+        ]
+      },
+      {
+        "question": "How strong is the correspondence claim the tool makes when it links a declaration to a code change?",
+        "header": "Correspondence",
+        "multiSelect": false,
+        "options": [
+          {
+            "label": "Model-matched location, no adequacy claim (Recommended)",
+            "description": "\"Here is the change that appears to correspond to this declaration\" \u2014 the model links declaration \u2192 specific hunks/lines, measured and allowed to abstain, explicitly making no claim that the change is correct, complete, or sufficient. The specialist decides adequacy."
+          },
+          {
+            "label": "Mechanical only \u2014 no model judgment",
+            "description": "Purely deterministic: report which anchored files/lines changed after the declaration, and hand off. No model in the loop for correspondence at all. Maximum defensibility and cheapest, but much weaker signal on multi-file or moved-code fixes, which the corpus contains."
+          },
+          {
+            "label": "Location plus an advisory adequacy hint",
+            "description": "As the recommended option, plus a non-binding \"appears to fully address / appears partial / appears unrelated\" hint for triage. Useful for prioritising the specialist's queue; risks being read as a verdict, so it would be rendered as an explicitly advisory signal."
+          }
+        ]
+      },
+      {
+        "question": "What is the handoff artifact, and does rereview decide WHICH specialized reviewer gets it?",
+        "header": "Handoff",
+        "multiSelect": false,
+        "options": [
+          {
+            "label": "Per-finding handoff lines + named domain (Recommended)",
+            "description": "Each open finding emits a handoff line \u2014 declaration, its located change (file:line at head), and the domain it belongs to (repo-specific / architecture / security / performance / etc.) drawn from configurable domain rules. rereview names the domain but does not invoke anyone; a human or another agent picks it up."
+          },
+          {
+            "label": "One handoff brief, no routing",
+            "description": "A single consolidated artifact listing every finding with its located change and current state. Simplest; leaves all triage and routing to whoever reads it."
+          },
+          {
+            "label": "Named domain AND configured reviewer identity",
+            "description": "As the recommended option, plus per-domain configuration naming the actual reviewer (a GitHub handle, team, or agent/skill) so the handoff line says who owns it. More useful, but puts routing policy and identities into the tool's config surface."
+          },
+          {
+            "label": "rereview dispatches to the specialist agent",
+            "description": "rereview actually invokes a configured specialized-reviewer skill/agent with the handoff payload. Most automated; a significant scope addition (outbound agent invocation) beyond v1's read-only-plus-one-comment posture."
+          }
+        ]
+      },
+      {
+        "question": "What happens to \u00a79's evidence-scope apparatus \u2014 `nc`, class defaults, dependency-completeness \u2014 which exists to bound a correctness claim we'd no longer be making?",
+        "header": "\u00a79 apparatus",
+        "multiSelect": false,
+        "options": [
+          {
+            "label": "Keep re-check-on-change, drop correctness bounding (Recommended)",
+            "description": "Retain the mechanism that re-locates a correspondence when the relevant files change again (a located change can go stale). Delete the dependency-completeness apparatus \u2014 `input-enumerated`/`not-proven`, security-class and global-invariant defaults, the negative-existence proof rules \u2014 since they bound a claim the tool no longer makes. Substantially simplifies \u00a79 and \u00a74.3."
+          },
+          {
+            "label": "Keep it, repurposed as location confidence",
+            "description": "Retain the machinery but re-point it at correspondence quality: how completely the evidence builder enumerated what it searched when locating the change. Preserves the audit trail and the M3 class-flag metrics at the cost of keeping complexity whose original justification is gone."
+          },
+          {
+            "label": "Delete it entirely",
+            "description": "Remove the evidence-scope apparatus including the re-check-on-change carry rules. Simplest, but loses the guard that a previously-located correspondence may no longer hold after later pushes."
+          }
+        ]
+      }
+    ]
+  },
+  "tool_response": "Error: The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). To tell you how to proceed, the user said:\nThe user wants to clarify these questions.\n    This means they may have additional information, context or questions for you.\n    Take their response into account and then reformulate the questions if appropriate.\n    Start by asking them what they would like to clarify.\n\n    Questions asked:\n- \"If the tool never judges whether code is correct, what is allowed to move a finding to \"settled\" (ball = nobody)?\"\n  (No answer provided)\n- \"How strong is the correspondence claim the tool makes when it links a declaration to a code change?\"\n  (No answer provided)\n- \"What is the handoff artifact, and does rereview decide WHICH specialized reviewer gets it?\"\n  (No answer provided)\n- \"What happens to \u00a79's evidence-scope apparatus \u2014 `nc`, class defaults, dependency-completeness \u2014 which exists to bound a correctness claim we'd no longer be making?\"\n  (No answer provided)",
+  "tool_use_id": "toolu_01PtYgr7dUXVsVVgPd9PNgBu",
+  "duration_ms": 60001
+}

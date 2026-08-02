@@ -1,0 +1,48 @@
+# Allowlist, not blocklist.
+#
+# ~/.claude is ~750 KB of authored harness inside ~1.6 GB of machine state. A blocklist
+# means the next vendor directory gets committed by accident; an allowlist means new
+# junk is invisible by default and has to be opted in.
+#
+# WARNING: `git clean -fdx` here would delete ignored files — that is 1.5 GB of
+# transcripts under projects/, the corpus every measurement in harness-audit-* came
+# from. Plain `git clean -fd` is safe; ignored files survive it. Never use -x here.
+
+# 1. ignore everything
+*
+
+# 2. un-ignore the authored surface (dirs must be re-included before their contents)
+!.gitignore
+!CLAUDE.md
+!settings.json
+!statusline.sh
+
+!skills/
+!skills/**
+!hooks/
+!hooks/**
+!agents/
+!agents/**
+!commands/
+!commands/**
+
+# 3. the harness record — docs only, not the 51 MB of backups and agent transcripts
+!harness-audit-20260801/
+!harness-audit-20260801/*.md
+!harness-audit-20260801/scripts/
+!harness-audit-20260801/scripts/**
+!harness-audit-20260801/routing/
+!harness-audit-20260801/routing/**
+!harness-audit-20260801/baselines/
+!harness-audit-20260801/baselines/**
+
+# 4. never, regardless of the above
+.credentials.json
+*.credentials.json
+**/node_modules/
+**/__pycache__/
+*.pyc
+.DS_Store
+
+# guard runtime logs — churn on every selftest, not authored content
+hooks/*events*.jsonl

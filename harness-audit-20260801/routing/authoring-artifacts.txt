@@ -1,0 +1,8 @@
+/Users/quantum/.claude/projects/-Users-quantum-Documents-GitHub-rereview-agent/memory/feedback-patterns-not-people.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/feedback_author_artifacts_with_investigation_rigor.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/feedback_final_reports_must_be_contributor_actionable.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-GitHub-agentic-advertising/memory/feedback_issue_draft_neutrality.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/feedback_no_blockquote_for_pasteable_text.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/feedback_no_issue_refs_in_comments.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/feedback_no_pointless_comments.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/feedback_pr_review_writeup_style.md

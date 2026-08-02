@@ -1,0 +1,13 @@
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/backgrounded_commit_exit_code_masks_failure.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/feedback_atomic_breaking_changes.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/feedback_cleanup_chain_use_semicolon_not_ampersand.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/feedback_feature_branch_first.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/feedback_issue_vs_pr_number.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/feedback_merge_creates_duplication_sweep_ssot.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/feedback_no_alarm_mid_operation.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/feedback_verify_branch_currency_before_rebuild.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/gh_actions_dirty_merge_skips_pull_request_workflows.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/git_mv_then_add_old_path_aborts_commit.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/reference_git_grep_ere_no_word_boundary.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/reference_release_please_pr_ci_mechanics.md
+/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/reference_stacked_pr_ci_does_not_run.md

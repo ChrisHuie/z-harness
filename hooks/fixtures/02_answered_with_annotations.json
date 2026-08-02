@@ -1,0 +1,123 @@
+{
+  "session_id": "00000000-0000-0000-0000-000000000000",
+  "transcript_path": "/dev/null",
+  "cwd": "/tmp",
+  "prompt_id": "00000000-0000-0000-0000-000000000001",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "AskUserQuestion",
+  "tool_input": {
+    "questions": [
+      {
+        "question": "For the job-run workflow awaiting an agent task's completion, which control path should be primary?",
+        "header": "Bridge await",
+        "multiSelect": false,
+        "options": [
+          {
+            "label": "Supervisor signal (Recommended)",
+            "description": "Our slot supervisor (already in the admission loop, observes slot exit) signals the Temporal workflow directly. Multica stays mirror-only (D44 clean); CDC becomes reconciliation, poll is the fallback."
+          },
+          {
+            "label": "CDC-driven signal",
+            "description": "The Postgres CDC consumer watches Multica task-state transitions and signals the workflow. Reuses the Phase-1 CDC tap as the control path \u2014 but makes a third-party DB load-bearing for control, and CDC lag delays completion."
+          },
+          {
+            "label": "Poll-only activity",
+            "description": "The dispatch activity long-polls Multica REST with heartbeats until terminal. Simplest to build, no signal plumbing \u2014 but adds polling latency/load and still trusts Multica's state as the control input."
+          }
+        ]
+      },
+      {
+        "question": "tasks.yaml declares per-task dependencies but nothing executes them today. How should plan/task DAGs be enforced?",
+        "header": "Task DAGs",
+        "multiSelect": false,
+        "options": [
+          {
+            "label": "plan-run awaits deps (Recommended)",
+            "description": "The plan-run workflow resolves the full task DAG: each task's dispatch step durably awaits its dependencies' completion. Matches existing practice (Phase-0 tasks already have cross-phase deps) and is cheap in a durable-execution engine."
+          },
+          {
+            "label": "Phases are the DAG",
+            "description": "Intra-phase dependencies forbidden (lint error); only phase gates order work. Simpler, but contradicts the live Phase-0 tasks.yaml which already uses cross-phase deps \u2014 those would need rewriting."
+          }
+        ]
+      },
+      {
+        "question": "Five decided contracts have no schema files (job/v1, loop-policy/v1, activation/v1, integration/v1, usage-grain/v1) while 30 authority schemas exist. How far should this session go?",
+        "header": "Schemas",
+        "multiSelect": false,
+        "options": [
+          {
+            "label": "Docs + D-row now, schemas too (Recommended)",
+            "description": "Write the Tier-1 designs into docs 18/22 with a new D-row + changelog, AND author the five missing JSON Schemas (strict-subset, matching the D67/D75 doctrine) so the audit's schema registry covers orchestration objects before Phase 1."
+          },
+          {
+            "label": "Docs + D-row only",
+            "description": "Land the seam designs in docs 18/22 + the decision log now; record the five schemas as named Phase-1 build items instead of authoring them today (lighter touch while the other session is active in schemas/)."
+          }
+        ]
+      }
+    ]
+  },
+  "tool_response": {
+    "questions": [
+      {
+        "question": "For the job-run workflow awaiting an agent task's completion, which control path should be primary?",
+        "header": "Bridge await",
+        "options": [
+          {
+            "label": "Supervisor signal (Recommended)",
+            "description": "Our slot supervisor (already in the admission loop, observes slot exit) signals the Temporal workflow directly. Multica stays mirror-only (D44 clean); CDC becomes reconciliation, poll is the fallback."
+          },
+          {
+            "label": "CDC-driven signal",
+            "description": "The Postgres CDC consumer watches Multica task-state transitions and signals the workflow. Reuses the Phase-1 CDC tap as the control path \u2014 but makes a third-party DB load-bearing for control, and CDC lag delays completion."
+          },
+          {
+            "label": "Poll-only activity",
+            "description": "The dispatch activity long-polls Multica REST with heartbeats until terminal. Simplest to build, no signal plumbing \u2014 but adds polling latency/load and still trusts Multica's state as the control input."
+          }
+        ],
+        "multiSelect": false
+      },
+      {
+        "question": "tasks.yaml declares per-task dependencies but nothing executes them today. How should plan/task DAGs be enforced?",
+        "header": "Task DAGs",
+        "options": [
+          {
+            "label": "plan-run awaits deps (Recommended)",
+            "description": "The plan-run workflow resolves the full task DAG: each task's dispatch step durably awaits its dependencies' completion. Matches existing practice (Phase-0 tasks already have cross-phase deps) and is cheap in a durable-execution engine."
+          },
+          {
+            "label": "Phases are the DAG",
+            "description": "Intra-phase dependencies forbidden (lint error); only phase gates order work. Simpler, but contradicts the live Phase-0 tasks.yaml which already uses cross-phase deps \u2014 those would need rewriting."
+          }
+        ],
+        "multiSelect": false
+      },
+      {
+        "question": "Five decided contracts have no schema files (job/v1, loop-policy/v1, activation/v1, integration/v1, usage-grain/v1) while 30 authority schemas exist. How far should this session go?",
+        "header": "Schemas",
+        "options": [
+          {
+            "label": "Docs + D-row now, schemas too (Recommended)",
+            "description": "Write the Tier-1 designs into docs 18/22 with a new D-row + changelog, AND author the five missing JSON Schemas (strict-subset, matching the D67/D75 doctrine) so the audit's schema registry covers orchestration objects before Phase 1."
+          },
+          {
+            "label": "Docs + D-row only",
+            "description": "Land the seam designs in docs 18/22 + the decision log now; record the five schemas as named Phase-1 build items instead of authoring them today (lighter touch while the other session is active in schemas/)."
+          }
+        ],
+        "multiSelect": false
+      }
+    ],
+    "answers": {
+      "For the job-run workflow awaiting an agent task's completion, which control path should be primary?": "Supervisor signal (Recommended)",
+      "tasks.yaml declares per-task dependencies but nothing executes them today. How should plan/task DAGs be enforced?": "plan-run awaits deps (Recommended)",
+      "Five decided contracts have no schema files (job/v1, loop-policy/v1, activation/v1, integration/v1, usage-grain/v1) while 30 authority schemas exist. How far should this session go?": "Docs + D-row now, schemas too (Recommended)"
+    },
+    "annotations": {}
+  },
+  "tool_use_id": "toolu_01Q7PgLSfqxNKEgU1cWuswWu",
+  "duration_ms": 60001
+}

@@ -121,7 +121,9 @@ attempt at the same fix.
 artifact (introspect it) → the implementation source → never its README → never a search
 summary or press release. For what it *must* do, normative text outranks the artifact — spec
 prose (MUST vs SHOULD) first, the artifact as cross-check. A lower tier never overrules a
-higher one within either ladder.
+higher one within either ladder. **When Chris is the firsthand source, his account outranks
+sanitized public documentation** — and mechanism research never re-litigates a premise he
+set from the inside.
 
 ## Verification
 

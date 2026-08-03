@@ -37,7 +37,7 @@ The what-goes-where ladder decides placement, strongest channel first: must-happ
 
 ## Step 6 — Emit: order and phrasing
 
-Stable-prefix ordering: durable rules first, volatile content last or nowhere; no timestamps or run-specific values (they also bust prefix caching — row 13). Positive instructions; "if X, then Y" decision rules over absolutes; caps reserved for hard invariants — a few per file at most. Write the file only at its sanctioned path (repo root, or the nested directory it scopes) — a copy of an always-on filename anywhere else gets auto-loaded as instructions (row 25).
+Stable-prefix ordering: durable rules first, volatile content last or nowhere; no timestamps or run-specific values (they also bust prefix caching — row 13). Positive instructions; "if X, then Y" decision rules over absolutes; caps reserved for hard invariants — a few per file at most. Narrower is stickier: banning one short word beats writing a workflow rule — the friction of typing the longer replacement forces the missing fact to surface. Write the file only at its sanctioned path (repo root, or the nested directory it scopes) — a copy of an always-on filename anywhere else gets auto-loaded as instructions (row 25).
 
 ## Step 7 — Validate, then report
 
@@ -56,6 +56,8 @@ Sweep the emitted file against `references/anti-patterns.md` — minimum rows 11
 - **A corpus-level check loads the whole set in ONE process**, is verified **by injection**, and
   **fails loud when its own anchors go missing** ("cannot safely enforce X") rather than
   silently passing.
+- **Exclude deliberately-frozen snapshot inputs from a staleness check**, or the check reports
+  drift it was built to ignore.
 - **A reference file named `claude.md` case-collides with `CLAUDE.md` and auto-injects as
   project instructions** — observed live. The sanctioned-path rule is not case-sensitive:
   disambiguate the filename.
@@ -76,6 +78,8 @@ Sweep the emitted file against `references/anti-patterns.md` — minimum rows 11
 - **When a change makes a standing decision's wording false, amend the decision row** —
   "spirit survives, letter misleads" is a trap. Flag immutable-once-set parameters where they
   are set.
+- **A triage or consolidation pass records its deliberate NON-merges**, or the next pass
+  silently undoes them — the negative decisions are the perishable half of a triage artifact.
 - **When a refactor deletes the mechanism a rule cites, re-verify the rule** — it often survives
   with a new reason. Do not retire it as stale.
 - **Cite a reference by NAME in a durable document, never by line number** — line citations

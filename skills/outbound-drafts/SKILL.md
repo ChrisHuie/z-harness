@@ -19,8 +19,9 @@ executable form, plus the rules that only fire once there is a draft.
   audience, never the artifact type.
 - **Display facts, not endorsements — mirror, don't judge.** Report what a third party's
   artifact does; grading it puts your voice into their record.
-- **The artifact IS the deliverable**, surfaced verbatim in the response. Writing it to a file
-  is additive, never the hand-off.
+- **The artifact IS the deliverable**, surfaced verbatim in the response — and when asked to
+  "see" or "show" something with structure, a rendered artifact, never a terminal dump.
+  Writing it to a file is additive, never the hand-off.
 - **Paste-bound text goes in a fenced block, never a quote-prefixed one** — a per-line prefix
   has to be stripped by hand. Discriminate on the request: "draft a comment for" is
   paste-bound; "what's the status" is read-only.

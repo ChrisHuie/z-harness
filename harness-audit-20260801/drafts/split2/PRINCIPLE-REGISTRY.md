@@ -5,8 +5,12 @@
 > other way. (2) R273/R274 shipped IN `prebid-adcp` (headroom existed) despite OUT here.
 > (3) §16.7's sanctioned R029/R073 duplicate was later cut on its own test
 > (`drafts/AUDIT-FIXES.md` F22). (4) §16.4's homeless block (R288–R301) landed when
-> `system-design` was built after this registry froze. Counts and byte figures are
-> point-in-time.
+> `system-design` was built after this registry froze. (5) R004 is delivered by
+> `hooks/askq_timeout_guard.py` (deny-and-halt, restate-and-stop text in its stopReason),
+> not by a CLAUDE.md line — the hook supersedes the prose per the routing ladder.
+> (6) R007, ruled IN here but dropped by the assembly, was restored to CLAUDE.md
+> 2026-08-03; the gap pass's five skill-destined IN rows (R321, R329, R330, R334, R335)
+> were restored the same day. Counts and byte figures are point-in-time.
 
 Every distinct principle from all four extraction passes, exactly once, with exactly one
 destination. Deduplicated on **mechanism**, not wording.

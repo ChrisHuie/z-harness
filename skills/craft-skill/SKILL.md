@@ -76,6 +76,9 @@ Sweep the scaffolded SKILL.md against `references/anti-patterns.md` — every ro
   proposed default against the corpus's actual distribution before it becomes the default.
 - **Key a heuristic to the pattern with a pluggable lexicon, never to one repo's quirk** — a
   repo-keyed heuristic is one manifestation presented as the rule.
+- **A harness or detector artifact never hardcodes a version — derive it at runtime**, or the
+  artifact commits the sin it exists to catch: validating against a stale proxy instead of
+  the derived source of truth.
 - **Every threshold is a number, and an unvalidated default says so** in the text that ships it.
 - **Strip one-off provenance** — run counts, dates, round numbers, PR ids — from a skill, an
   agent definition, and anything else publishable, unless the number is itself the evidence.

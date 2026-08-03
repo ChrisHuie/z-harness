@@ -15,7 +15,7 @@ these policies in an SDK application requires an explicit runner adapter and is 
    plugin's SessionStart hook elsewhere.
 2. **One skill source.** Root `skills/` is both Claude's live skill tree and the Codex plugin's
    declared skill directory. No generated copy is authoritative.
-3. **Adapters at real boundaries.** Hook envelopes, transcript usage records, memory discovery,
+3. **Adapters at real boundaries.** Hook envelopes, transcript usage records, host-local context,
    and status UI remain runtime-specific.
 4. **User authority stays external.** The package does not alter authentication, model choice,
    sandbox mode, approval policy, provider configuration, or hook trust.
@@ -84,7 +84,7 @@ Claude Code live tree.
 | shell guard | `PreToolUse` matcher `Bash`; uncertain patterns may `ask` | `PreToolUse` matcher `Bash`; `ask` maps to `deny` | same predicates, runtime-specific confirmation handling |
 | spawn guard | `Agent|Task`; `ask` or `deny` | `Agent` alias over `spawn_agent`; Codex lacks PreToolUse `ask` | warn/unknown maps to deny in Codex |
 | question timeout | AskUserQuestion exposes `afkTimeoutMs` | no equivalent contract used here | Claude-only; no parity claim |
-| project memory | Claude injects project `MEMORY.md` | SessionStart chooses nearest tracked project index | same authored index, labelled soft/stale in Codex |
+| project memory | Claude injects its host-local project `MEMORY.md` | no project memory is packaged; optional Codex-home context only | host-bound data stays runtime-local; no false parity claim |
 | subagents | Agent/Task and Claude worktree mechanics | native Codex subagents and SubagentStart hook | shared opt-in policy and capacity gate; runtime orchestration differs |
 | cost accounting | requestId/UUID dedupe, max provisional usage | sums per-request `last_token_usage` once, replay dedupe | tokens only; no cross-provider price inference |
 | PR delivery state | shared `git`/`gh` evidence command | same command and GitHub API | local commit, remote PR head, and exact-head CI remain separate states |
@@ -99,33 +99,41 @@ plugin's root `AGENTS.md` is not automatically a global context file, so `hooks/
 adds it as SessionStart developer context.
 
 The adapter checks Codex's active global file and the working directory's applicable `AGENTS.md`
-chain first. If Codex already sees byte-identical policy, the hook omits the copy. It also omits
-plugin policy whenever the active Git checkout has `.codex-plugin/plugin.json` with the same plugin
-name. In that checkout the native `AGENTS.md` is authoritative even when its working bytes differ
-from the installed plugin version, preventing simultaneous version-skewed policies.
+chain first. If Codex already sees byte-identical policy, the hook omits the copy. A same-name
+`.codex-plugin/plugin.json` in the active repository is not evidence that the bytes are authoritative
+and cannot suppress installed policy.
 
 For facts that apply only to one Codex host, the adapter optionally reads
-`$CODEX_HOME/z-harness/AGENTS.local.md`. That file lives outside the repository and plugin cache, is
-never packaged, and is appended only when present. Its content shares the existing 30,000-byte
-fail-closed combined-context cap. This lets the authoring host retain shell and infrastructure
-gotchas without asserting them on every plugin install.
+`$CODEX_HOME/z-harness/AGENTS.local.md`. That file lives outside the repository and plugin cache and
+is appended only when present. Mandatory policy and the resolved adapter-tool command are budgeted
+first. An unreadable or oversized optional file is omitted whole, with a diagnostic section when
+space permits; it cannot evict mandatory policy. If mandatory policy itself cannot fit the
+30,000-byte hard cap, SessionStart returns `continue:false` and stops before a model request.
 
 The adapter also runs for SubagentStart so a spawned context does not depend on an implicit parent
-copy. Its matcherless registration covers every subagent type, including internal reviewer threads,
-and constructs the full policy context on every start. `wc -c AGENTS.md` regenerates the
-per-injection policy size, and C9 prints the current byte count. The adapter never selects a
-subagent model or widens the parent's sandbox/approval boundary.
+copy. Its matcherless registration covers every subagent type and constructs the full policy
+context on every start. Codex does not mechanically stop SubagentStart on `continue:false`; if
+mandatory policy is unavailable, the hook instead injects an explicit stop-work instruction and a
+system warning. `wc -c AGENTS.md` regenerates the per-injection policy size, and C9 prints the
+current byte count. The adapter never selects a subagent model or widens the parent's
+sandbox/approval boundary.
 
-## Project-memory projection
+The hook child receives `${PLUGIN_ROOT}`, but an ordinary agent shell call does not. SessionStart
+therefore injects fully resolved installed-package commands for `tools/codex-cost.py` and
+`tools/pr-delivery-state.py`; shared `AGENTS.md` does not hardcode a Claude path or an unresolvable
+Codex placeholder.
 
-Tracked memory lives at `projects/<claude-project-slug>/memory/MEMORY.md`. On SessionStart, the
-adapter walks from the active `cwd` toward the filesystem root and selects the nearest matching
-index. The injected section says that memory is potentially stale data, not instructions or
-current-state proof.
+## Package hygiene and host-local context
 
-Only the index is injected. Referenced memory files remain on disk and can be read when needed.
-Credentials, untracked transcripts, and native Codex memory are not copied. The combined policy and
-memory context has a 30,000-byte fail-closed cap.
+The installable package contains shared policy, skills, hooks, tools, and documentation. It does not
+contain `projects/`: those directory names encode absolute authoring-host paths, and their working
+notes are neither portable nor suitable for distribution. C9 asserts that a source checkout tracks
+zero files under `projects/` and that an installed package contains none.
+
+Ignored Claude project memory can remain on the authoring machine. Codex-specific host facts belong
+in `$CODEX_HOME/z-harness/AGENTS.local.md`, outside Git and the plugin cache. Removing host-bound
+files from the current tree does not remove older Git objects; repository history must be audited
+and scrubbed before changing a private repository to public visibility.
 
 ## Hook semantics
 
@@ -145,6 +153,12 @@ the Bash guard and spawn adapter therefore change a Claude confirmation decision
 with a reason that tells the user what to inspect before retrying. This mapping prevents an invalid
 hook response from failing open and allowing the underlying command.
 
+Both PreToolUse adapters validate the top-level object and their matched tool envelope. A malformed
+matched payload or internal predicate failure exits 2 only after writing a non-empty blocking reason
+to stderr; a bare exit 2 is not treated as a block by Codex. C9 pins the exact package event set,
+requires command handlers, rejects async handlers, validates timeout types and matcher regexes, and
+C7 pins every required `(event, matcher, script, flags)` tuple including `--runtime codex`.
+
 Hooks are guardrails, not a complete security boundary: specialized tool paths can opt out, and a
 PostToolUse hook cannot undo completed side effects. Sandbox and approval policy remain the primary
 Codex authority boundary.
@@ -157,12 +171,14 @@ summing turns overcounts prior work. `tools/codex-cost.py`:
 
 1. walks every JSONL below `$CODEX_HOME/sessions`;
 2. sums each valid `last_token_usage` record once;
-3. uses persisted turn ids plus cumulative and per-request fields to deduplicate copied/replayed
-   records across files;
-4. filters individual usage records by their persisted timestamp for `--since`;
+3. normalizes version-specific missing counters and deduplicates by session plus cumulative and
+   per-request identity, independently of the turn where a replay appears;
+4. assigns each request its earliest observed timestamp before applying `--since`, so a re-stamped
+   fork copy cannot move old usage into a newer window;
 5. reports orphan snapshot count and raw token mass, reconciles copies of requests already accounted
    inside turns, and explicitly reports any remaining unattributed mass as excluded;
-6. classifies persisted subagent sessions separately; and
+6. classifies persisted subagent sessions separately and uses session cwd as a project-attribution
+   fallback when an embedded turn has no `turn_context`; and
 7. treats zero accounted turns as an error.
 
 Cached input is a subset of input and reasoning output is a subset of output. The report does not
@@ -207,7 +223,7 @@ python3 <plugin-creator-skill>/scripts/validate_plugin.py .
 
 The authoring session cannot prove fresh-session discovery. After installing, use a new task and
 exercise at least one request for `git-workflow`, one Bash command that the planted guard rejects,
-and one project with a tracked memory index.
+and one SessionStart with optional Codex-home context both present and absent.
 
 ## Troubleshooting
 
@@ -226,21 +242,16 @@ and one project with a tracked memory index.
 
 **Policy appears twice or disagrees with the checkout**
 
-1. Confirm the active Git root has `.codex-plugin/plugin.json` with name `z-harness`.
-2. Run `codex_session_start.py --selftest` to exercise byte-skew suppression.
+1. Compare the active global/project `AGENTS.md` bytes with the installed package policy.
+2. Run `codex_session_start.py --selftest` to exercise exact-byte suppression.
 3. Start a new task after changing an installed plugin; existing task context cannot be retracted.
 
 **Machine-specific guidance does not load**
 
 1. Put host-only instructions in `$CODEX_HOME/z-harness/AGENTS.local.md`.
-2. Keep the file below the remaining 30,000-byte combined-context budget.
+2. Keep it concise. If the full section does not fit the remaining 30,000-byte budget, the adapter
+   drops that section whole while preserving mandatory policy.
 3. Start a new task and run `codex_session_start.py --selftest` if the context is still absent.
-
-**Project memory does not load**
-
-1. Resolve the active task's exact `cwd`.
-2. Confirm a tracked `projects/<slug>/memory/MEMORY.md` exists for that directory or an ancestor.
-3. Run `codex_session_start.py --selftest`; do not infer success from the absence of an error.
 
 **A Codex spawn is denied in the warning band**
 

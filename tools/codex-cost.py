@@ -27,7 +27,7 @@ import sys
 import tempfile
 import time
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 USAGE_FIELDS = (
     "input_tokens",
     "cached_input_tokens",
@@ -74,6 +74,15 @@ def empty_usage():
     return {field: 0 for field in USAGE_FIELDS}
 
 
+def normalized_usage(value):
+    """Normalize absent version-specific fields to zero and reject invalid counters."""
+    return {
+        field: item if isinstance(item := value.get(field, 0), int)
+        and not isinstance(item, bool) and item >= 0 else 0
+        for field in USAGE_FIELDS
+    }
+
+
 def scan(root, cutoff, project_filter=None):
     files = sorted(glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True))
     scanset = {
@@ -94,20 +103,17 @@ def scan(root, cutoff, project_filter=None):
         "turns": 0,
     }
     turns = {}
-    seen_usage_records = set()
     observed_usage_records = {}
+    usage_occurrences = {}
+    window_request_keys = set()
     accounted_request_keys = set()
     orphan_request_keys = set()
+    files_in_window = set()
 
     for path in files:
-        try:
-            if os.stat(path).st_mtime < cutoff:
-                continue
-        except OSError:
-            continue
-        scanset["files_in_window"] += 1
         session_id = None
         session_class = "main"
+        session_cwd = ""
         current_turn = None
         try:
             handle = open(path, encoding="utf-8", errors="replace")
@@ -129,6 +135,7 @@ def scan(root, cutoff, project_filter=None):
                     # The first session_meta describes this file; later ones are copied history.
                     if session_id is None:
                         session_id = payload.get("session_id") or payload.get("id")
+                        session_cwd = payload.get("cwd") or ""
                         session_class = source_class(
                             payload.get("source"), payload.get("originator")
                         )
@@ -164,47 +171,70 @@ def scan(root, cutoff, project_filter=None):
                 if not isinstance(usage, dict):
                     scanset["missing_last_usage_snapshots"] += 1
                     continue
-                if cutoff and (observed_at is None or observed_at < cutoff):
-                    continue
-                normalized_usage = {
-                    field: value if isinstance(value := usage.get(field, 0), int)
-                    and not isinstance(value, bool) and value >= 0 else 0
-                    for field in USAGE_FIELDS
-                }
-                cumulative_key = tuple(cumulative.get(field) for field in USAGE_FIELDS)
-                usage_key = tuple(normalized_usage[field] for field in USAGE_FIELDS)
+                normalized = normalized_usage(usage)
+                normalized_cumulative = normalized_usage(cumulative)
+                cumulative_key = tuple(normalized_cumulative[field] for field in USAGE_FIELDS)
+                usage_key = tuple(normalized[field] for field in USAGE_FIELDS)
                 request_key = (session_id or f"file:{path}", cumulative_key, usage_key)
-                observed_usage_records.setdefault(request_key, normalized_usage)
+                observed_usage_records.setdefault(request_key, normalized)
+                usage_occurrences.setdefault(request_key, []).append({
+                    "turn_id": current_turn,
+                    "observed_at": observed_at,
+                    "path": path,
+                    "class": session_class,
+                    "session_id": session_id,
+                    "session_cwd": session_cwd,
+                    "usage": normalized,
+                })
                 if not current_turn:
                     scanset["orphan_usage_snapshots"] += 1
-                    scanset["orphan_usage_raw_total_tokens"] += normalized_usage["total_tokens"]
+                    scanset["orphan_usage_raw_total_tokens"] += normalized["total_tokens"]
                     orphan_request_keys.add(request_key)
-                    continue
-                accounted_request_keys.add(request_key)
-                row = turns.setdefault(current_turn, {
-                    "usage": empty_usage(),
-                    "class": session_class,
-                    "model": "unknown",
-                    "cwd": "",
-                    "session_id": session_id,
-                    "last_usage_at": None,
-                    "requests": 0,
-                    "classes_seen": {session_class},
-                })
-                row["classes_seen"].add(session_class)
-                fingerprint = (current_turn, cumulative_key, usage_key)
-                if fingerprint in seen_usage_records:
-                    scanset["replayed_usage_snapshots"] += 1
-                    continue
-                seen_usage_records.add(fingerprint)
-                if observed_at is not None:
-                    row["last_usage_at"] = max(row["last_usage_at"] or 0, observed_at)
-                row["requests"] += 1
-                scanset["accounted_usage_records"] += 1
-                for field in USAGE_FIELDS:
-                    row["usage"][field] += normalized_usage[field]
 
-    excluded_orphan_keys = orphan_request_keys - accounted_request_keys
+    for request_key, occurrences in usage_occurrences.items():
+        scanset["replayed_usage_snapshots"] += max(0, len(occurrences) - 1)
+        timestamps = [item["observed_at"] for item in occurrences
+                      if item["observed_at"] is not None]
+        first_observed_at = min(timestamps) if timestamps else None
+        if cutoff and (first_observed_at is None or first_observed_at < cutoff):
+            continue
+        window_request_keys.add(request_key)
+        in_turn = [item for item in occurrences if item["turn_id"]]
+        if not in_turn:
+            continue
+        canonical = min(
+            in_turn,
+            key=lambda item: (
+                item["observed_at"] is None,
+                item["observed_at"] if item["observed_at"] is not None else float("inf"),
+                item["path"],
+            ),
+        )
+        accounted_request_keys.add(request_key)
+        files_in_window.update(item["path"] for item in occurrences)
+        current_turn = canonical["turn_id"]
+        row = turns.setdefault(current_turn, {
+            "usage": empty_usage(),
+            "class": canonical["class"],
+            "model": "unknown",
+            "cwd": canonical["session_cwd"],
+            "session_id": canonical["session_id"],
+            "last_usage_at": None,
+            "requests": 0,
+            "classes_seen": {canonical["class"]},
+        })
+        row["classes_seen"].update(item["class"] for item in in_turn)
+        if not row["cwd"]:
+            row["cwd"] = canonical["session_cwd"]
+        if first_observed_at is not None:
+            row["last_usage_at"] = max(row["last_usage_at"] or 0, first_observed_at)
+        row["requests"] += 1
+        scanset["accounted_usage_records"] += 1
+        for field in USAGE_FIELDS:
+            row["usage"][field] += canonical["usage"][field]
+
+    excluded_orphan_keys = (orphan_request_keys - accounted_request_keys) & window_request_keys
+    scanset["files_in_window"] = len(files_in_window)
     scanset["orphan_excluded_usage_records"] = len(excluded_orphan_keys)
     scanset["orphan_excluded_total_tokens"] = sum(
         observed_usage_records[key]["total_tokens"] for key in excluded_orphan_keys
@@ -357,7 +387,7 @@ def selftest():
         check("two cumulative turns sum request deltas, not cumulative maxima",
               turns["t1"]["usage"]["total_tokens"] + turns["t2"]["usage"]["total_tokens"] == 200)
         check("copied request is deduplicated across files", len(turns) == 3)
-        check("copy/replay is observed in the scan report", scanset["replayed_usage_snapshots"] == 1)
+        check("copy/replay is observed in the scan report", scanset["replayed_usage_snapshots"] == 2)
         check("raw orphan token mass is visible", scanset["orphan_usage_snapshots"] == 2
               and scanset["orphan_usage_raw_total_tokens"] == 140)
         check("orphan copy already accounted in-turn is reconciled",
@@ -389,6 +419,85 @@ def selftest():
         recent, _ = scan(tmp, time.time() - 3600)
         check("--since filters by record timestamp, not copied-file mtime",
               "old-turn" not in recent and set(recent) == {"t1", "t2", "t3"})
+
+        sum_dir = os.path.join(tmp, "sum-property")
+        os.mkdir(sum_dir)
+        request_100 = {field: value for field, value in zip(
+            USAGE_FIELDS, (90, 20, 0, 10, 2, 100))}
+        request_150 = {field: value for field, value in zip(
+            USAGE_FIELDS, (130, 30, 0, 20, 4, 150))}
+        cumulative_250 = {field: request_100[field] + request_150[field]
+                          for field in USAGE_FIELDS}
+        write_fixture(os.path.join(sum_dir, "multi-request.jsonl"), [
+            {"timestamp": now, "type": "session_meta",
+             "payload": {"id": "sum-session", "cwd": "/repo/sum", "source": "vscode"}},
+            {"timestamp": now, "type": "event_msg",
+             "payload": {"type": "task_started", "turn_id": "sum-turn"}},
+            {"timestamp": now, "type": "turn_context",
+             "payload": {"turn_id": "sum-turn", "cwd": "/repo/sum"}},
+            {"timestamp": now, "type": "event_msg", "payload": {"type": "token_count",
+             "info": {"total_token_usage": request_100,
+                      "last_token_usage": request_100}}},
+            {"timestamp": now, "type": "event_msg", "payload": {"type": "token_count",
+             "info": {"total_token_usage": cumulative_250,
+                      "last_token_usage": request_150}}},
+        ])
+        summed, _ = scan(sum_dir, 0)
+        check("multiple requests in one turn are summed, not maxed",
+              summed["sum-turn"]["usage"]["total_tokens"] == 250
+              and summed["sum-turn"]["requests"] == 2)
+
+        window_dir = os.path.join(tmp, "window-property")
+        os.mkdir(window_dir)
+        recent_stamp = datetime.now().astimezone().isoformat()
+        old_stamp = "2020-01-01T00:00:00Z"
+        write_fixture(os.path.join(window_dir, "a-recent-copy.jsonl"), [
+            {"timestamp": recent_stamp, "type": "session_meta",
+             "payload": {"id": "copy", "session_id": "window-session", "cwd": "/repo/w"}},
+            {"timestamp": recent_stamp, "type": "event_msg",
+             "payload": {"type": "task_started", "turn_id": "copied-turn"}},
+            {"timestamp": recent_stamp, "type": "event_msg", "payload": {"type": "token_count",
+             "info": {"total_token_usage": request_100,
+                      "last_token_usage": request_100}}},
+        ])
+        write_fixture(os.path.join(window_dir, "z-old-original.jsonl"), [
+            {"timestamp": old_stamp, "type": "session_meta",
+             "payload": {"id": "window-session", "cwd": "/repo/w"}},
+            {"timestamp": old_stamp, "type": "event_msg",
+             "payload": {"type": "task_started", "turn_id": "original-turn"}},
+            {"timestamp": old_stamp, "type": "event_msg", "payload": {"type": "token_count",
+             "info": {"total_token_usage": request_100,
+                      "last_token_usage": request_100}}},
+        ])
+        windowed, window_scan = scan(window_dir, time.time() - 3600)
+        check("--since uses a request's earliest stamp regardless of file order",
+              windowed == {} and window_scan["replayed_usage_snapshots"] == 1)
+
+        replay_dir = os.path.join(tmp, "turn-replay-property")
+        os.mkdir(replay_dir)
+        cumulative_without_cache_write = dict(request_100)
+        cumulative_without_cache_write.pop("cache_write_input_tokens")
+        write_fixture(os.path.join(replay_dir, "turn-replay.jsonl"), [
+            {"timestamp": now, "type": "session_meta",
+             "payload": {"id": "replay-session", "cwd": "/repo/replay"}},
+            {"timestamp": now, "type": "event_msg",
+             "payload": {"type": "task_started", "turn_id": "first-turn"}},
+            {"timestamp": now, "type": "event_msg", "payload": {"type": "token_count",
+             "info": {"total_token_usage": cumulative_without_cache_write,
+                      "last_token_usage": request_100}}},
+            {"timestamp": now, "type": "event_msg",
+             "payload": {"type": "task_started", "turn_id": "second-turn"}},
+            {"timestamp": now, "type": "event_msg", "payload": {"type": "token_count",
+             "info": {"total_token_usage": request_100,
+                      "last_token_usage": request_100}}},
+        ])
+        replayed, replay_scan = scan(replay_dir, 0, project_filter="/repo/replay")
+        check("turn-boundary re-emission is deduplicated by request identity",
+              set(replayed) == {"first-turn"}
+              and replayed["first-turn"]["usage"]["total_tokens"] == 100
+              and replay_scan["replayed_usage_snapshots"] == 1)
+        check("session cwd supplies project attribution when turn_context is absent",
+              replayed["first-turn"]["cwd"] == "/repo/replay")
 
         import io
         buffer = io.StringIO()

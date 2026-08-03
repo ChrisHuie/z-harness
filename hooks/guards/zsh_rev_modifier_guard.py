@@ -63,7 +63,9 @@ EXPANSION = re.compile(
 # wrong). POSIX forms ${name:-x} ${name:+x} ${name:=x} ${name:?x} ${name:0:2} do not
 # collide: -, +, =, ?, digits are not modifier letters.
 EXPANSION_BRACED = re.compile(
-    r"\$\{[A-Za-z_][A-Za-z0-9_]*:([" + MODS + r"])(?=[}/:0-9])")
+    r"\$\{(?:\([^}]*\))?"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]+\])?|[0-9]+|[#?*@!$-])"
+    r":g?([" + MODS + r"])(?=[}/:0-9])")
 
 # git subcommands that take a `rev:path` / `rev:./path` argument
 REV_PATH_SUBCOMMANDS = {"show", "diff", "cat-file", "log", "ls-tree", "archive",
@@ -87,8 +89,14 @@ def is_rev_path_git(tokens):
     if j >= len(words) or words[j] != "git":
         return False
     j += 1
-    while j < len(words) and words[j] in ("-C", "-c", "--git-dir", "--work-tree"):
-        j += 2
+    options_with_args = {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}
+    while j < len(words) and words[j].startswith("-"):
+        if words[j] in options_with_args:
+            j += 2
+        else:
+            # Global switches such as --no-pager and --no-optional-locks do not
+            # change the rev:path semantics of the later subcommand.
+            j += 1
     return j < len(words) and words[j] in REV_PATH_SUBCOMMANDS
 
 
@@ -141,6 +149,20 @@ FIXTURES = [
      'git rev-parse HEAD; git show $?:tests/x.py', "deny"),
     ("RED  UNMODELLED 2026-08-02: braced WITH modifier inside - ${SHA:t} mangles too",
      'git show ${SHA:t}ests/x.py', "deny"),
+    ("RED  REVIEW: braced array modifier",
+     'git show ${revs[1]:t}ests/x.py', "deny"),
+    ("RED  REVIEW: braced positional modifier",
+     'git show ${1:t}ests/x.py', "deny"),
+    ("RED  REVIEW: braced expansion flags before the name",
+     'git show ${(U)SHA:t}ests/x.py', "deny"),
+    ("RED  REVIEW: g-prefixed substitute modifier",
+     'git show ${SHA:gs/a/b/}:src/x.py', "deny"),
+    ("RED  REVIEW: git global option does not hide the rev:path subcommand",
+     'git --no-pager show $SHA:src/x.py', "deny"),
+    ("RED  REVIEW: line continuation before subcommand",
+     "git \\" + "\n" + "show $SHA:src/x.py", "deny"),
+    ("RED  REVIEW: later single-quoted segment does not protect earlier expansion",
+     "git show $SHA:s'rc/x.py'", "deny"),
     ("GREEN braced name, colon outside - the correct form",
      'git show ${MB}:tests/bdd/steps/domain/uc004_delivery.py', "allow"),
     ("GREEN POSIX default form ${name:-x} is not a modifier",

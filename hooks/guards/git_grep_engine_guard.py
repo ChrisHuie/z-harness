@@ -49,19 +49,23 @@ def split_commands(cmd):
     Tokens are (text, quoting) where quoting is one of '', "'", '"'.
     Heredoc bodies are dropped: a `<<'EOF' ... EOF` payload is not argv.
     """
-    out, cur, tok, q, i = [], [], "", "", 0
-    tok_q = ""
-    n = len(cmd)
+    out, cur, tok_parts, tok_modes, q, i = [], [], [], set(), "", 0
     # strip heredoc bodies so python/EOF payloads never reach the tokenizer
     cmd = re.sub(r"<<-?\s*'?\"?([A-Za-z_][A-Za-z0-9_]*)'?\"?\n.*?\n\1\b",
                  " __HEREDOC__ ", cmd, flags=re.S)
     n = len(cmd)
 
+    def append_tok(text, mode=""):
+        if text:
+            tok_parts.append(text)
+            tok_modes.add(mode)
+
     def flush_tok():
-        nonlocal tok, tok_q
-        if tok or tok_q:
-            cur.append((tok, tok_q))
-        tok, tok_q = "", ""
+        nonlocal tok_parts, tok_modes
+        if tok_parts or tok_modes:
+            quoting = next(iter(tok_modes)) if len(tok_modes) == 1 else "mixed"
+            cur.append(("".join(tok_parts), quoting))
+        tok_parts, tok_modes = [], set()
 
     def flush_cmd():
         nonlocal cur
@@ -81,33 +85,34 @@ def split_commands(cmd):
                 # characters survive - which is exactly why the atom reaches git.
                 nxt = cmd[i + 1]
                 if nxt in '$`"\\\n':
-                    tok += nxt
+                    append_tok(nxt, q)
                 else:
-                    tok += c + nxt
+                    append_tok(c + nxt, q)
                 i += 2
                 continue
             else:
-                tok += c
+                append_tok(c, q)
             i += 1
             continue
         if c in ("'", '"'):
             q = c
-            tok_q = c
+            tok_modes.add(c)
             i += 1
             continue
         if c == "\\" and i + 1 < n:
-            tok += cmd[i + 1]
+            if cmd[i + 1] != "\n":
+                append_tok(cmd[i + 1])
             i += 2
             continue
-        if c == "{" and tok.endswith("$"):
+        if c == "{" and tok_parts and tok_parts[-1].endswith("$"):
             # ${...} parameter expansion stays inside its token — the zsh guard
             # scans for braced modifiers; a shredded ${r:t} would be invisible
             depth = 1
-            tok += c
+            append_tok(c)
             i += 1
             while i < n and depth:
                 ch = cmd[i]
-                tok += ch
+                append_tok(ch)
                 if ch == "{":
                     depth += 1
                 elif ch == "}":
@@ -126,7 +131,7 @@ def split_commands(cmd):
             flush_tok()
             i += 1
             continue
-        tok += c
+        append_tok(c)
         i += 1
     flush_cmd()
     return out
@@ -185,13 +190,13 @@ def decide(command):
         engine = None
         engine_src = None
         for cfg in configs:
-            if cfg.startswith("grep.patternType="):
-                val = cfg.split("=", 1)[1].strip().lower()
+            key, separator, value = cfg.partition("=")
+            if separator and key.lower() == "grep.patterntype":
+                val = value.strip().lower()
                 if val in CONFIG_ENGINE:
                     engine = CONFIG_ENGINE[val]
                     engine_src = "config"
-        pattern = None
-        pattern_q = ""
+        patterns = []
         pattern_from_file = False
         k = 0
         while k < len(argv):
@@ -213,22 +218,22 @@ def decide(command):
                 if text == "-f":
                     pattern_from_file = True
                 if k + 1 < len(argv):
-                    if text == "-e" and pattern is None:
-                        pattern, pattern_q = argv[k + 1]
+                    if text == "-e":
+                        patterns.append(argv[k + 1])
                     k += 2
                     continue
             elif text.startswith("-"):
                 if text in TAKES_ARG:
                     k += 2
                     continue
-            elif pattern is None:
-                pattern, pattern_q = text, quoting
+            elif not patterns:
+                patterns.append((text, quoting))
             k += 1
 
         if engine != "E":
             continue
         engine_desc = "-E" if engine_src == "flag" else "the grep.patternType config"
-        if pattern is None:
+        if not patterns:
             if pattern_from_file:
                 return ("ask",
                         "git grep with the ERE engine (%s) and a -f PATTERN FILE: this "
@@ -237,14 +242,14 @@ def decide(command):
                         "Out of scope for this guard - verify the file's patterns by hand "
                         "or use -P." % engine_desc)
             continue
-        if UNRESOLVED.search(pattern):
-            return ("ask",
-                    "git grep -E with a shell-expanded pattern (%s): this guard reads argv "
-                    "only and CANNOT see the final pattern, so the -E/\\b breakage is "
-                    "UNCHECKED here. Out of scope for this guard - verify by hand or use -P."
-                    % pattern[:60])
-        if PCRE_ONLY.search(pattern):
-            atoms = sorted(set(PCRE_ONLY.findall(pattern)))
+        unresolved = None
+        bad_atoms = set()
+        for pattern, _pattern_q in patterns:
+            if UNRESOLVED.search(pattern):
+                unresolved = unresolved or pattern
+                continue
+            bad_atoms.update(PCRE_ONLY.findall(pattern))
+        if bad_atoms:
             return ("deny",
                     "git grep with the ERE engine (selected by " + engine_desc + ") "
                     "cannot interpret %s. Verified on this host (git 2.46.1): "
@@ -252,7 +257,13 @@ def decide(command):
                     "matches literal 'foob' - the WRONG line. An empty result here is evidence "
                     "about the instrument, not about the repo. Re-run with -P "
                     "(NOT by dropping the flag - BRE also works, but -P is the intended engine)."
-                    % ", ".join(atoms))
+                    % ", ".join(sorted(bad_atoms)))
+        if unresolved is not None:
+            return ("ask",
+                    "git grep -E with a shell-expanded pattern (%s): this guard reads argv "
+                    "only and CANNOT see the final pattern, so the -E/\\b breakage is "
+                    "UNCHECKED here. Out of scope for this guard - verify by hand or use -P."
+                    % unresolved[:60])
     return ("allow", "")
 
 
@@ -270,6 +281,8 @@ FIXTURES = [
      """git -C /repo grep -nE '\\bstatus=' -- src/""", "deny"),
     ("RED  UNMODELLED: pattern supplied via -e AFTER other flags",
      """git grep -n -E --heading -e 'error_code\\s*=' -- src/""", "deny"),
+    ("RED  REVIEW: every -e pattern is inspected, not only the first",
+     """git grep -E -e 'safe_[a-z]+' -e 'unsafe\\b' -- src/""", "deny"),
     ("RED  UNMODELLED: env-assignment prefix + -E, pattern single-quoted",
      """GIT_PAGER=cat git grep -E '^\\s+assert ' HEAD -- src/admin/""", "deny"),
     ("ASK  UNMODELLED: pattern is a shell variable - guard cannot see it",
@@ -290,6 +303,8 @@ FIXTURES = [
      """git grep -nE 'TODO' -- 'src/**'""", "allow"),
     ("RED  UNMODELLED 2026-08-02: ERE selected via -c grep.patternType=extended, no -E flag",
      """git -c grep.patternType=extended grep -n 'harness\\b' -- README.md""", "deny"),
+    ("RED  REVIEW: git config keys are case-insensitive",
+     """git -c Grep.PatternType=EXTENDED grep -n 'harness\\b' -- README.md""", "deny"),
     ("ASK  UNMODELLED 2026-08-02: -E with a -f pattern file - guard cannot see the patterns",
      """git grep -nE -f pats.txt -- src/""", "ask"),
     ("GREEN patternType=perl via config - the intended engine",

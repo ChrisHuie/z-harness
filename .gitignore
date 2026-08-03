@@ -62,13 +62,6 @@
 # guard runtime logs — churn on every selftest, not authored content
 hooks/*events*.jsonl
 
-# 5. the authored memory layer — index + distilled facts, never transcripts.
-# projects/*/ stays ignored except each project's memory/ subtree.
-!projects/
-!projects/*/
-!projects/*/memory/
-!projects/*/memory/**
-
 # --- added after the first push: evidence and pre-git state ---
 # git's first commit is the END state of the 2026-08-01/02 rebuild. The PRE* snapshots
 # are the ONLY record of what the harness looked like before it, and git history cannot

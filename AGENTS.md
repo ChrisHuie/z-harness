@@ -83,9 +83,10 @@ felt—confident-wrong spends trust irrecoverably.
 Verification authority lives outside the model. A local passing test is one observation; the
 mechanical gate, CI verdict, and Chris's diff review are separate evidence. Report origin head,
 local-only commits, remote PR head, and live CI state as separate facts. `git commit` means local
-history only. Before saying *pushed*, *on the PR*, or *landed*, run
-`python3 <z-harness>/tools/pr-delivery-state.py --pr <number> --repo <owner/repo>` and report its
-workspace-change count, local HEAD, PR head, and non-empty exact-head check/run counts.
+history only. Before saying *pushed*, *on the PR*, or *landed*, run the resolved
+`pr-delivery-state.py --pr <number> --repo <owner/repo>` command supplied by the active harness
+adapter and report its workspace-change count, local HEAD, PR head, and non-empty exact-head
+check/run counts.
 
 For merge, rebase, transport-shape, hook-envelope, or transcript-schema changes, run the full
 quality gate. No factual claim enters code, docs, comments, memory, or PR text without evidence
@@ -116,8 +117,9 @@ the workflow did not run. Assert a non-empty run list for the exact head.
 Measure before reconstructing. Record the query that regenerates a number, not a drifting literal.
 An A/B changing two variables proves only that the pair matters.
 
-Use the runtime-specific accounting tool: `python3 ~/.claude/tools/cc-cost.py` for Claude Code and
-`python3 <z-harness>/tools/codex-cost.py` for Codex. Do not naively sum repeated usage records.
+Use the runtime-specific accounting command supplied by its adapter: `CLAUDE.md` names Claude's
+installed command, while Codex SessionStart injects the resolved plugin-cache command. Do not
+naively sum repeated usage records.
 
 ## Destructive operations and scope
 
@@ -148,5 +150,5 @@ Memory is soft, potentially stale context, never current-state proof. Keep cross
 not per-PR audits or status snapshots. Capture what was learned, not who said it. Prefer a gate over
 a promise to remember: memory < turn instruction < this file < a failing mechanical control.
 
-Project memory indexes are load-bearing context and should remain small. Verify drift-prone claims
-before acting. Do not place credentials or secrets in memory.
+Runtime-local memory indexes are load-bearing context and should remain small. Verify drift-prone
+claims before acting. Do not place credentials or secrets in memory or a distributable package.

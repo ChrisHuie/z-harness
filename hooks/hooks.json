@@ -9,7 +9,8 @@
             "type": "command",
             "command": "python3 \"${PLUGIN_ROOT}/hooks/codex_session_start.py\"",
             "timeout": 5,
-            "statusMessage": "Loading z-harness policy and project memory"
+            "additionalContextLimit": 30000,
+            "statusMessage": "Loading z-harness policy and host-local context"
           }
         ]
       }
@@ -21,6 +22,7 @@
             "type": "command",
             "command": "python3 \"${PLUGIN_ROOT}/hooks/codex_session_start.py\"",
             "timeout": 5,
+            "additionalContextLimit": 30000,
             "statusMessage": "Loading z-harness policy for subagent"
           }
         ]

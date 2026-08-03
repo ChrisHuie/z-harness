@@ -35,7 +35,7 @@ The plugin does not select a model, change sandbox/approval policy, copy authent
 its own hooks. Those remain user-controlled Codex settings.
 
 See [OpenAI/Codex integration](docs/openai-agents.md) for the architecture, compatibility matrix,
-update flow, hook semantics, memory projection, and troubleshooting.
+update flow, hook semantics, host-local context, and troubleshooting.
 
 ## Claude Code installation
 
@@ -60,14 +60,14 @@ same shared policy at both user and project scope.
 | `hooks/bash_command_guard.py` | shared adapter | shared predicates; Codex maps unsupported `ask` results to fail-closed `deny` |
 | `hooks/spawn_preflight_guard.py` | shared adapter | disk-capacity gate; maps unsupported Codex `ask` decisions to fail-closed `deny` |
 | `hooks/askq_timeout_guard.py` | Claude | AskUserQuestion AFK guard; no claimed Codex equivalent |
-| `hooks/codex_session_start.py` | Codex | injects shared policy and nearest tracked project memory without duplicate policy |
+| `hooks/codex_session_start.py` | Codex | injects mandatory shared policy, resolved adapter commands, and optional host-local context |
 | `$CODEX_HOME/z-harness/AGENTS.local.md` | local Codex host | optional non-packaged machine instructions appended by the session adapter |
 | `hooks/harness_check.py` | shared | mechanical gate over skills, hooks, context files, and plugin packaging |
 | `hooks/harness_report.py` | Claude | transcript evidence for Claude skill firing/reference reads |
 | `tools/cc-cost.py` | Claude | Claude request-deduplicated token accounting |
 | `tools/codex-cost.py` | Codex | per-request token accounting with copied/replayed record dedupe |
 | `tools/pr-delivery-state.py` | shared | proves workspace, local HEAD, PR head, and exact-head CI agree before publication claims |
-| `projects/*/memory/` | shared data | authored Claude memory indexes; Codex receives the nearest index as soft context |
+| ignored `projects/*/memory/` | Claude-local data | host-bound Claude memory remains on the authoring machine and is not packaged for Codex |
 | `harness-audit-20260801/` | record | measurements and decisions behind the original Claude rebuild |
 
 ## Health
@@ -112,3 +112,5 @@ headless model scenarios and spends API budget, so it remains manual.
   them. Never use `-x` there.
 - `.gitignore` is an allowlist. New authored surfaces must be explicitly included or git cannot see
   them.
+- Host-bound `projects/` content must stay untracked. Deleting it from the current tree does not
+  erase older Git objects; audit and scrub repository history before changing repository visibility.

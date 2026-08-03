@@ -19,7 +19,7 @@
   "interface": {
     "displayName": "z-harness",
     "shortDescription": "A portable operating harness for coding agents",
-    "longDescription": "Share operating policy, reusable skills, safety guards, project memory, and evidence tooling across Codex and Claude Code.",
+    "longDescription": "Share operating policy, reusable skills, safety guards, host-local context, and evidence tooling across Codex and Claude Code.",
     "developerName": "Chris Huie",
     "category": "Productivity",
     "capabilities": [

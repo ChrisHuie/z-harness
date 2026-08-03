@@ -33,7 +33,7 @@ import json
 import sys
 import pathlib
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 RUNTIMES = {"claude", "codex"}
 sys.path.insert(0, str(pathlib.Path(__file__).parent / "guards"))
 
@@ -47,15 +47,29 @@ GUARDS = [
 RANK = {"allow": 0, "ask": 1, "deny": 2}
 
 
+class EnvelopeError(ValueError):
+    """The matched PreToolUse envelope cannot be judged safely."""
+
+
 def decide(command):
     """-> (decision, reason). Worst decision wins; reasons accumulate."""
     worst, reasons = "allow", []
     for name, mod in GUARDS:
         try:
-            decision, reason = mod.decide(command)
-        except Exception as exc:                       # a guard must never break Bash
-            print(f"{name}: predicate raised {exc!r}; allowing", file=sys.stderr)
-            continue
+            result = mod.decide(command)
+            if not isinstance(result, tuple) or len(result) != 2:
+                raise TypeError(f"expected (decision, reason), got {result!r}")
+            decision, reason = result
+            if decision not in RANK:
+                raise ValueError(f"unknown decision {decision!r}")
+            if not isinstance(reason, str):
+                raise TypeError(f"reason is not a string: {reason!r}")
+        except Exception as exc:                       # predicate failure is not an allow
+            decision = "deny"
+            reason = (
+                f"{name}: predicate failed ({exc!r}); z-harness cannot prove this Bash "
+                "command safe, so the guard is denying it."
+            )
         if RANK[decision] > RANK[worst]:
             worst = decision
         if decision != "allow" and reason:
@@ -107,11 +121,67 @@ def selftest():
     failures += (not ok)
     print(f"  {'PASS' if ok else 'FAIL'} codex-ask-closed   want=deny  got={decision!s:<5} "
           "unsupported confirmation maps to deny")
+    class BrokenGuard:
+        @staticmethod
+        def decide(_command):
+            raise RuntimeError("planted predicate fault")
+    GUARDS.append(("planted_broken_guard", BrokenGuard))
+    try:
+        got, reason = decide("echo safe")
+    finally:
+        GUARDS.pop()
+    ok = got == "deny" and "predicate failed" in reason
+    total += 1
+    failures += (not ok)
+    print(f"  {'PASS' if ok else 'FAIL'} predicate-fault    want=deny  got={got:<5} "
+          "a broken sub-guard cannot become allow")
+    for label, raw in (
+        ("non-object payload", "[1, 2, 3]"),
+        ("non-object tool_input", json.dumps({"tool_name": "Bash", "tool_input": "x"})),
+        ("missing command", json.dumps({"tool_name": "Bash", "tool_input": {}})),
+    ):
+        rc, _out, err = run_raw(raw, runtime="codex")
+        ok = rc == 2 and bool(err.strip())
+        total += 1
+        failures += (not ok)
+        print(f"  {'PASS' if ok else 'FAIL'} envelope-closed    {label}: rc={rc}, stderr={bool(err.strip())}")
     print(f"\n  {total} checks, {failures} failures")
     if total == 0:
         print("  ZERO CHECKS RAN — treating as failure")
         return 2
     return 1 if failures else 0
+
+
+def run_raw(raw, runtime="claude"):
+    """In-process hook run for selftest -> (return code, stdout, stderr)."""
+    import io
+    out, err = io.StringIO(), io.StringIO()
+    old_out, old_err = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = out, err
+    try:
+        rc = hook_mode(raw, runtime=runtime)
+    finally:
+        sys.stdout, sys.stderr = old_out, old_err
+    return rc, out.getvalue(), err.getvalue()
+
+
+def hook_mode(raw, runtime="claude"):
+    if not raw.strip():
+        print("bash_command_guard: empty stdin — no input to judge", file=sys.stderr)
+        return 2
+    try:
+        payload = json.loads(raw)
+        output = evaluate_payload(payload, runtime=runtime)
+    except EnvelopeError as exc:
+        print(f"bash_command_guard: {exc}; refusing to run blind", file=sys.stderr)
+        return 2
+    except Exception as exc:
+        print(f"bash_command_guard: internal failure {exc!r}; refusing to run blind",
+              file=sys.stderr)
+        return 2
+    if output is not None:
+        print(json.dumps(output))
+    return 0
 
 
 def main():
@@ -135,31 +205,24 @@ def main():
         print(f"unknown flag: {args[0]}", file=sys.stderr)
         return 2
 
-    raw = sys.stdin.read()
-    if not raw.strip():
-        print("bash_command_guard: empty stdin — no input to judge", file=sys.stderr)
-        return 2
-    try:
-        payload = json.loads(raw)
-    except Exception as exc:
-        print(f"bash_command_guard: stdin is not JSON ({exc}); "
-              f"the PreToolUse envelope changed and this guard is running blind",
-              file=sys.stderr)
-        return 2
-
-    output = evaluate_payload(payload, runtime=runtime)
-    if output is not None:
-        print(json.dumps(output))
-    return 0
+    return hook_mode(sys.stdin.read(), runtime=runtime)
 
 
 def evaluate_payload(payload, runtime="claude"):
     """Return a hook output object for a blocked Bash call, otherwise None."""
-    if payload.get("tool_name") != "Bash":
+    if not isinstance(payload, dict):
+        raise EnvelopeError("PreToolUse payload is not an object")
+    tool_name = payload.get("tool_name")
+    if not isinstance(tool_name, str) or not tool_name:
+        raise EnvelopeError("PreToolUse payload has no string tool_name")
+    if tool_name != "Bash":
         return None
-    command = (payload.get("tool_input") or {}).get("command", "")
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        raise EnvelopeError("matched Bash payload has non-object tool_input")
+    command = tool_input.get("command")
     if not isinstance(command, str) or not command:
-        return None
+        raise EnvelopeError("matched Bash payload has no non-empty string command")
     decision, reason = decide(command)
     if decision == "allow":
         return None

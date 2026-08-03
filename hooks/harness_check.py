@@ -37,11 +37,12 @@ zero inputs (an empty scan set is an error, never a clean verdict).
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
 
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 METHOD_SKILLS = ["git-workflow", "pr-review-method", "testing-ci", "agent-dispatch",
@@ -87,16 +88,25 @@ ROUTING_SKILLS = ["git-workflow", "pr-review-method", "testing-ci", "agent-dispa
                   "craft-prompt", "craft-skill", "craft-context-file", "review-prompt"]
 
 RESERVED_BASENAMES = {"claude.md", "agents.md", "gemini.md"}
+CODEX_HOOK_TOP_LEVEL_KEYS = {"description", "hooks"}
+CODEX_PACKAGE_EVENTS = {"SessionStart", "SubagentStart", "PreToolUse"}
 CODEX_HOOK_ENTRY_KEYS = {"matcher", "hooks"}
 CODEX_HOOK_HANDLER_KEYS = {
-    "type", "command", "commandWindows", "timeout", "async", "statusMessage"
+    "type", "command", "commandWindows", "timeout", "async", "statusMessage",
+    "additionalContextLimit",
 }
+REQUIRED_CODEX_HANDLERS = [
+    ("SessionStart", "startup|resume|clear|compact", "hooks/codex_session_start.py", ()),
+    ("SubagentStart", None, "hooks/codex_session_start.py", ()),
+    ("PreToolUse", "^Bash$", "hooks/bash_command_guard.py", ("--runtime", "codex")),
+    ("PreToolUse", "^Agent$", "hooks/spawn_preflight_guard.py", ("--runtime", "codex")),
+]
 DELIVERY_CONTRACT = {
     "AGENTS.md": [
         "A request to create or open a PR authorizes",
         "A request to update, fix, address, or get an",
         '"commit only" or "do not push" overrides that authority.',
-        "tools/pr-delivery-state.py --pr <number> --repo <owner/repo>",
+        "pr-delivery-state.py --pr <number> --repo <owner/repo>",
     ],
     "skills/git-workflow/SKILL.md": [
         "A local commit is not on a PR.",
@@ -225,13 +235,14 @@ class Run:
     def c6_stale_patterns(self):
         me = os.path.abspath(__file__)
         targets = []
-        for rel in ("skills", "hooks", "tools"):
+        for rel in ("skills", "hooks", "tools", "docs", ".codex-plugin", ".agents"):
             for dirpath, _dirs, files in os.walk(os.path.join(self.root, rel)):
                 if "__pycache__" in dirpath:
                     continue
                 targets += [os.path.join(dirpath, f) for f in files
                             if not f.endswith((".pyc", ".jsonl"))]
-        targets += [os.path.join(self.root, name) for name in ("AGENTS.md", "CLAUDE.md")
+        targets += [os.path.join(self.root, name)
+                    for name in ("AGENTS.md", "CLAUDE.md", "README.md")
                     if os.path.isfile(os.path.join(self.root, name))]
         targets = [t for t in targets if os.path.abspath(t) != me]
         if not targets:
@@ -269,7 +280,7 @@ class Run:
         except Exception as exc:
             self.result("C7", False, f"Codex hooks config parses: {exc}")
             codex_hooks = {}
-        codex_commands = 0
+        inventory = []
         for event, entries in codex_hooks.get("hooks", {}).items():
             for entry in entries:
                 for hook in entry.get("hooks", []):
@@ -279,14 +290,29 @@ class Run:
                         self.result("C7", False,
                                     f"Codex {event}: command has no PLUGIN_ROOT script anchor")
                         continue
-                    codex_commands += 1
                     rel = match.group(1)
+                    try:
+                        argv = shlex.split(command)
+                    except ValueError:
+                        argv = []
+                    inventory.append({
+                        "event": event,
+                        "matcher": entry.get("matcher"),
+                        "rel": rel,
+                        "argv": argv,
+                    })
                     self.result("C7", os.path.isfile(os.path.join(self.root, rel)),
                                 f"Codex {event} -> {rel}")
                     self.result("C7", "timeout" in hook,
                                 f"Codex {event} {rel}: timeout set")
-        self.result("C7", codex_commands > 0,
-                    f"Codex hook commands discovered: {codex_commands}")
+        for event, matcher, rel, required_args in REQUIRED_CODEX_HANDLERS:
+            matches = [item for item in inventory
+                       if item["event"] == event and item["matcher"] == matcher
+                       and item["rel"] == rel
+                       and all(arg in item["argv"] for arg in required_args)]
+            self.result("C7", len(matches) == 1,
+                        f"required Codex handler {event} matcher={matcher!r} -> {rel} "
+                        f"args={list(required_args)!r}: {len(matches)} match(es)")
         if not self.ci:
             fp = os.path.expanduser("~/.claude/harness-audit-20260801/FINDINGS.md")
             self.result("C7", os.path.isfile(fp),
@@ -331,6 +357,35 @@ class Run:
                     f"manifest version is semver: {manifest.get('version')!r}")
         self.result("C9", manifest.get("skills") == "./skills/",
                     "manifest skills path is ./skills/")
+        self.result("C9", isinstance(manifest.get("description"), str)
+                    and bool(manifest.get("description", "").strip()),
+                    "manifest description is a non-empty string")
+        author = manifest.get("author")
+        self.result("C9", isinstance(author, dict)
+                    and isinstance(author.get("name"), str)
+                    and bool(author.get("name", "").strip()),
+                    "manifest author.name is a non-empty string")
+        interface = manifest.get("interface")
+        required_interface_strings = {
+            "displayName", "shortDescription", "longDescription",
+            "developerName", "category", "websiteURL", "brandColor",
+        }
+        missing_interface = []
+        if not isinstance(interface, dict):
+            missing_interface.append("interface: expected object")
+            interface = {}
+        for key in sorted(required_interface_strings):
+            if not isinstance(interface.get(key), str) or not interface.get(key, "").strip():
+                missing_interface.append(f"interface.{key}: expected non-empty string")
+        if not isinstance(interface.get("capabilities"), list) or not all(
+                isinstance(item, str) and item for item in interface.get("capabilities", [])):
+            missing_interface.append("interface.capabilities: expected string array")
+        prompts = interface.get("defaultPrompt")
+        if not isinstance(prompts, list) or not 1 <= len(prompts) <= 3 or not all(
+                isinstance(item, str) and 0 < len(item) <= 128 for item in prompts or []):
+            missing_interface.append("interface.defaultPrompt: expected 1-3 strings <=128 chars")
+        self.result("C9", not missing_interface,
+                    f"manifest interface contract: {missing_interface or 'complete'}")
         self.result("C9", os.path.isfile(os.path.join(self.root, "hooks", "hooks.json")),
                     "default plugin hook config exists")
 
@@ -340,60 +395,129 @@ class Run:
         except Exception as exc:
             self.result("C9", False, f"hook config parses: {exc}")
             hook_config = {}
-        unknown_hook_keys = []
+        hook_errors = []
         handler_count = 0
+        if isinstance(hook_config, dict):
+            for key in sorted(set(hook_config) - CODEX_HOOK_TOP_LEVEL_KEYS):
+                hook_errors.append(f"top-level.{key}: unknown")
+            if "description" in hook_config and not isinstance(hook_config["description"], str):
+                hook_errors.append("description: expected string")
         hook_events = hook_config.get("hooks", {}) if isinstance(hook_config, dict) else {}
         if not isinstance(hook_events, dict):
-            unknown_hook_keys.append("hooks: expected object")
+            hook_errors.append("hooks: expected object")
             hook_events = {}
+        event_names = set(hook_events)
+        if event_names != CODEX_PACKAGE_EVENTS:
+            hook_errors.append(
+                f"event set {sorted(event_names)!r}; expected {sorted(CODEX_PACKAGE_EVENTS)!r}"
+            )
         for event, entries_for_event in hook_events.items():
             if not isinstance(entries_for_event, list):
-                unknown_hook_keys.append(f"{event}: expected list")
+                hook_errors.append(f"{event}: expected list")
                 continue
             for entry_index, entry in enumerate(entries_for_event):
                 if not isinstance(entry, dict):
-                    unknown_hook_keys.append(f"{event}[{entry_index}]: expected object")
+                    hook_errors.append(f"{event}[{entry_index}]: expected object")
                     continue
                 for key in sorted(set(entry) - CODEX_HOOK_ENTRY_KEYS):
-                    unknown_hook_keys.append(f"{event}[{entry_index}].{key}")
+                    hook_errors.append(f"{event}[{entry_index}].{key}: unknown")
+                matcher = entry.get("matcher")
+                if matcher is not None:
+                    if not isinstance(matcher, str):
+                        hook_errors.append(f"{event}[{entry_index}].matcher: expected string")
+                    else:
+                        try:
+                            re.compile(matcher)
+                        except re.error as exc:
+                            hook_errors.append(
+                                f"{event}[{entry_index}].matcher: invalid regex ({exc})"
+                            )
                 handlers = entry.get("hooks", [])
                 if not isinstance(handlers, list):
-                    unknown_hook_keys.append(f"{event}[{entry_index}].hooks: expected list")
+                    hook_errors.append(f"{event}[{entry_index}].hooks: expected list")
                     continue
+                if not handlers:
+                    hook_errors.append(f"{event}[{entry_index}].hooks: empty")
                 for handler_index, handler in enumerate(handlers):
                     if not isinstance(handler, dict):
-                        unknown_hook_keys.append(
+                        hook_errors.append(
                             f"{event}[{entry_index}].hooks[{handler_index}]: expected object"
                         )
                         continue
                     handler_count += 1
                     for key in sorted(set(handler) - CODEX_HOOK_HANDLER_KEYS):
-                        unknown_hook_keys.append(
-                            f"{event}[{entry_index}].hooks[{handler_index}].{key}"
+                        hook_errors.append(
+                            f"{event}[{entry_index}].hooks[{handler_index}].{key}: unknown"
                         )
-        self.result("C9", handler_count > 0 and not unknown_hook_keys,
-                    f"Codex hook keys use installed parser subset across {handler_count} "
-                    f"handler(s): {unknown_hook_keys or 'no unknown keys'}")
+                    prefix = f"{event}[{entry_index}].hooks[{handler_index}]"
+                    if handler.get("type") != "command":
+                        hook_errors.append(f"{prefix}.type: only command handlers execute")
+                    if not isinstance(handler.get("command"), str) or not handler["command"].strip():
+                        hook_errors.append(f"{prefix}.command: expected non-empty string")
+                    timeout = handler.get("timeout")
+                    if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
+                        hook_errors.append(f"{prefix}.timeout: expected positive integer")
+                    if handler.get("async", False) is not False:
+                        hook_errors.append(f"{prefix}.async: must be absent or false")
+                    limit = handler.get("additionalContextLimit")
+                    if limit is not None and (
+                            not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0):
+                        hook_errors.append(
+                            f"{prefix}.additionalContextLimit: expected positive integer"
+                        )
+        self.result("C9", handler_count > 0 and not hook_errors,
+                    f"Codex hook runtime contract across {handler_count} handler(s): "
+                    f"{hook_errors or 'valid'}")
 
         try:
             marketplace = json.load(open(marketplace_path))
         except Exception as exc:
             self.result("C9", False, f"marketplace parses: {exc}")
             marketplace = {}
-        entries = [entry for entry in marketplace.get("plugins", [])
-                   if entry.get("name") == plugin_name]
+        marketplace_plugins = marketplace.get("plugins", []) if isinstance(marketplace, dict) else []
+        if not isinstance(marketplace_plugins, list):
+            marketplace_plugins = []
+        entries = [entry for entry in marketplace_plugins
+                   if isinstance(entry, dict) and entry.get("name") == plugin_name]
         self.result("C9", len(entries) == 1,
                     f"marketplace has one {plugin_name!r} entry: {len(entries)}")
         if entries:
             source = entries[0].get("source") or {}
+            if not isinstance(source, dict):
+                source = {}
             url = source.get("url", "")
-            self.result("C9", source.get("source") == "url" and
-                        url.startswith("https://github.com/") and "@" not in url.split("//", 1)[-1],
+            self.result("C9", source.get("source") == "url"
+                        and isinstance(url, str)
+                        and url.startswith("https://github.com/")
+                        and "@" not in url.split("//", 1)[-1]
+                        and isinstance(source.get("ref"), str)
+                        and bool(source.get("ref", "").strip()),
                         "marketplace uses a credential-free GitHub URL source")
             policy = entries[0].get("policy") or {}
-            self.result("C9", policy.get("installation") == "AVAILABLE" and
+            self.result("C9", isinstance(policy, dict)
+                        and policy.get("installation") == "AVAILABLE" and
                         policy.get("authentication") == "ON_INSTALL",
                         "marketplace install/auth policy is explicit")
+
+        git_marker = os.path.join(self.root, ".git")
+        projects_dir = os.path.join(self.root, "projects")
+        if os.path.exists(git_marker):
+            tracked = subprocess.run(
+                ["git", "-C", self.root, "ls-files", "--", "projects"],
+                capture_output=True, text=True,
+            )
+            tracked_projects = [line for line in tracked.stdout.splitlines() if line]
+            self.result("C9", tracked.returncode == 0 and not tracked_projects,
+                        f"Codex package excludes host-bound projects/: "
+                        f"{len(tracked_projects)} tracked file(s)")
+        else:
+            packaged_projects = []
+            if os.path.isdir(projects_dir):
+                packaged_projects = [os.path.join(dp, f)
+                                     for dp, _dirs, files in os.walk(projects_dir)
+                                     for f in files]
+            self.result("C9", not packaged_projects,
+                        f"installed package excludes projects/: {len(packaged_projects)} file(s)")
 
         agents_path = os.path.join(self.root, "AGENTS.md")
         claude_path = os.path.join(self.root, "CLAUDE.md")
@@ -514,6 +638,13 @@ def selftest():
         r3.c6_stale_patterns()
         expect_red("C6 goes red on planted stale pattern",
                    lambda: any(c == "C6" and "NOT INSTALLED" in d for c, d in r3.failures))
+        os.makedirs(os.path.join(td, "docs"))
+        open(os.path.join(td, "docs", "relocated.md"), "w").write("committed to the PR")
+        r3_docs = Run(td, ci=True)
+        r3_docs.c6_stale_patterns()
+        expect_red("C6 scans docs and goes red on a relocated stale claim",
+                   lambda: any(c == "C6" and "committed to the PR" in d
+                               for c, d in r3_docs.failures))
         r4 = Run(td, ci=True)
         r4.c8_reserved_basenames()
         expect_red("C8 goes red on nested claude.md",
@@ -532,6 +663,138 @@ def selftest():
         r6.c9_codex_package()
         expect_red("C9 goes red on unknown Codex hook handler key",
                    lambda: any(c == "C9" and "inventedLimit" in d for c, d in r6.failures))
+
+        valid = os.path.join(td, "valid-package")
+        for rel in (".codex-plugin", ".agents/plugins", "hooks", "skills", "tools"):
+            os.makedirs(os.path.join(valid, rel))
+        for rel in ("hooks/codex_session_start.py", "hooks/bash_command_guard.py",
+                    "hooks/spawn_preflight_guard.py"):
+            open(os.path.join(valid, rel), "w").write("# fixture\n")
+        open(os.path.join(valid, "AGENTS.md"), "w").write("# policy\n")
+        open(os.path.join(valid, "CLAUDE.md"), "w").write("@AGENTS.md\n")
+        open(os.path.join(valid, "settings.json"), "w").write("{}")
+        manifest = {
+            "name": "z-harness", "version": "0.1.0", "description": "fixture",
+            "author": {"name": "Chris"}, "skills": "./skills/",
+            "interface": {
+                "displayName": "z-harness", "shortDescription": "fixture",
+                "longDescription": "fixture", "developerName": "Chris",
+                "category": "Productivity", "websiteURL": "https://example.com",
+                "brandColor": "#10A37F", "capabilities": ["Read"],
+                "defaultPrompt": ["Use fixture"],
+            },
+        }
+        marketplace = {
+            "name": "z-harness", "plugins": [{
+                "name": "z-harness",
+                "source": {"source": "url", "url": "https://github.com/a/b.git", "ref": "main"},
+                "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
+            }],
+        }
+        hook_fixture = {
+            "description": "fixture",
+            "hooks": {
+                "SessionStart": [{"matcher": "startup|resume|clear|compact", "hooks": [{
+                    "type": "command",
+                    "command": "python3 \"${PLUGIN_ROOT}/hooks/codex_session_start.py\"",
+                    "timeout": 5,
+                }]}],
+                "SubagentStart": [{"hooks": [{
+                    "type": "command",
+                    "command": "python3 \"${PLUGIN_ROOT}/hooks/codex_session_start.py\"",
+                    "timeout": 5,
+                }]}],
+                "PreToolUse": [
+                    {"matcher": "^Bash$", "hooks": [{
+                        "type": "command",
+                        "command": "python3 \"${PLUGIN_ROOT}/hooks/bash_command_guard.py\" --runtime codex",
+                        "timeout": 5,
+                    }]},
+                    {"matcher": "^Agent$", "hooks": [{
+                        "type": "command",
+                        "command": "python3 \"${PLUGIN_ROOT}/hooks/spawn_preflight_guard.py\" --runtime codex",
+                        "timeout": 5,
+                    }]},
+                ],
+            },
+        }
+
+        def put_json(rel, value):
+            open(os.path.join(valid, rel), "w").write(json.dumps(value))
+
+        def c9_after(mutated_hooks=None, mutated_manifest=None, mutated_marketplace=None):
+            put_json("hooks/hooks.json", mutated_hooks or hook_fixture)
+            put_json(".codex-plugin/plugin.json", mutated_manifest or manifest)
+            put_json(".agents/plugins/marketplace.json", mutated_marketplace or marketplace)
+            run = Run(valid, ci=True)
+            run.c9_codex_package()
+            return run
+
+        baseline = c9_after()
+        expect_red("C9 valid fixture has no failures", lambda: not baseline.failures)
+
+        bad_top = json.loads(json.dumps(hook_fixture))
+        bad_top["version"] = 1
+        run = c9_after(mutated_hooks=bad_top)
+        expect_red("C9 rejects unknown hooks.json top-level keys",
+                   lambda: any("top-level.version" in d for _c, d in run.failures))
+
+        bad_event = json.loads(json.dumps(hook_fixture))
+        bad_event["hooks"]["SessionStrt"] = bad_event["hooks"].pop("SessionStart")
+        run = c9_after(mutated_hooks=bad_event)
+        expect_red("C9 rejects misspelled case-sensitive event names",
+                   lambda: any("event set" in d for _c, d in run.failures))
+
+        bad_matcher = json.loads(json.dumps(hook_fixture))
+        bad_matcher["hooks"]["PreToolUse"][0]["matcher"] = "^Bash(["
+        run = c9_after(mutated_hooks=bad_matcher)
+        expect_red("C9 rejects invalid matcher regexes",
+                   lambda: any("invalid regex" in d for _c, d in run.failures))
+
+        for label, key, value, marker in (
+            ("non-command handler", "type", "prompt", "only command"),
+            ("async handler", "async", True, "must be absent or false"),
+            ("string timeout", "timeout", "5", "positive integer"),
+        ):
+            mutated = json.loads(json.dumps(hook_fixture))
+            mutated["hooks"]["PreToolUse"][0]["hooks"][0][key] = value
+            run = c9_after(mutated_hooks=mutated)
+            expect_red(f"C9 rejects {label}",
+                       lambda run=run, marker=marker: any(marker in d for _c, d in run.failures))
+
+        bad_manifest = json.loads(json.dumps(manifest))
+        del bad_manifest["interface"]
+        run = c9_after(mutated_manifest=bad_manifest)
+        expect_red("C9 rejects a manifest without interface metadata",
+                   lambda: any("interface contract" in d for _c, d in run.failures))
+
+        bad_marketplace = json.loads(json.dumps(marketplace))
+        bad_marketplace["plugins"][0]["source"]["url"] = 123
+        run = c9_after(mutated_marketplace=bad_marketplace)
+        expect_red("C9 rejects non-string marketplace source fields",
+                   lambda: any("credential-free GitHub URL" in d for _c, d in run.failures))
+
+        missing_runtime = json.loads(json.dumps(hook_fixture))
+        missing_runtime["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = (
+            "python3 \"${PLUGIN_ROOT}/hooks/bash_command_guard.py\""
+        )
+        put_json("hooks/hooks.json", missing_runtime)
+        c7_run = Run(valid, ci=True)
+        c7_run.c7_anchors()
+        expect_red("C7 rejects a Bash handler without --runtime codex",
+                   lambda: any("bash_command_guard.py" in d and "0 match(es)" in d
+                               for _c, d in c7_run.failures))
+
+        put_json("hooks/hooks.json", hook_fixture)
+        put_json(".codex-plugin/plugin.json", manifest)
+        put_json(".agents/plugins/marketplace.json", marketplace)
+        os.makedirs(os.path.join(valid, "projects/private/memory"))
+        open(os.path.join(valid, "projects/private/memory/MEMORY.md"), "w").write("x")
+        run = Run(valid, ci=True)
+        run.c9_codex_package()
+        expect_red("C9 rejects projects/ content in an installed package",
+                   lambda: any("installed package excludes projects" in d
+                               for _c, d in run.failures))
 
         r7 = Run(td, ci=True)
         r7.c10_delivery_contract()

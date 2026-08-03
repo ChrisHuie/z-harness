@@ -39,10 +39,14 @@ import re
 import subprocess
 import sys
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 SPAWN_TOOLS = {"Agent", "Task", "spawn_agent"}
 RUNTIMES = {"claude", "codex"}
 DATA_VOLUME = "/System/Volumes/Data" if sys.platform == "darwin" else "/"
+
+
+class EnvelopeError(ValueError):
+    """The matched PreToolUse envelope cannot be judged safely."""
 
 
 def data_volume_use_pct():
@@ -126,6 +130,23 @@ def selftest():
     ok = rc == 0 and '"permissionDecision": "deny"' in out and "fails closed" in out
     bad += (not ok)
     print(f"  {'PASS' if ok else 'FAIL'} Codex spawn at 92%: unsupported ask maps to deny")
+    for label, raw in (
+        ("non-object payload", "false"),
+        ("missing tool_name", json.dumps({"tool_input": {"prompt": "x"}})),
+    ):
+        rc, _out, err = run_raw(raw, runtime="codex")
+        ok = rc == 2 and bool(err.strip())
+        bad += (not ok)
+        print(f"  {'PASS' if ok else 'FAIL'} {label}: rc={rc}, stderr={bool(err.strip())}")
+    os.environ["SPAWN_GUARD_DF_PCT"] = "not-an-integer"
+    try:
+        rc, _out, err = run_raw(json.dumps({"tool_name": "Agent", "tool_input": {}}),
+                                runtime="codex")
+    finally:
+        del os.environ["SPAWN_GUARD_DF_PCT"]
+    ok = rc == 2 and bool(err.strip())
+    bad += (not ok)
+    print(f"  {'PASS' if ok else 'FAIL'} unreadable capacity fails closed with reason")
     print(f"\n  selftest: {bad} failure(s)")
     return 1 if bad else 0
 
@@ -143,6 +164,19 @@ def run_payload(payload, runtime="claude"):
     return rc, buf.getvalue()
 
 
+def run_raw(raw, runtime="claude"):
+    """In-process raw hook run -> (exit_code, stdout_text, stderr_text)."""
+    import io
+    out, err = io.StringIO(), io.StringIO()
+    old_out, old_err = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = out, err
+    try:
+        rc = hook_mode(raw, runtime=runtime)
+    finally:
+        sys.stdout, sys.stderr = old_out, old_err
+    return rc, out.getvalue(), err.getvalue()
+
+
 def hook_mode(raw, runtime="claude"):
     if not raw.strip():
         sys.stderr.write("spawn_preflight_guard: empty stdin\n")
@@ -152,9 +186,22 @@ def hook_mode(raw, runtime="claude"):
     except Exception as e:
         sys.stderr.write(f"spawn_preflight_guard: stdin not JSON ({e})\n")
         return 2
-    if payload.get("tool_name") not in SPAWN_TOOLS:
+    if not isinstance(payload, dict):
+        sys.stderr.write("spawn_preflight_guard: PreToolUse payload is not an object\n")
+        return 2
+    tool_name = payload.get("tool_name")
+    if not isinstance(tool_name, str) or not tool_name:
+        sys.stderr.write("spawn_preflight_guard: PreToolUse payload has no string tool_name\n")
+        return 2
+    if tool_name not in SPAWN_TOOLS:
         return 0
-    decision, reason = decide(data_volume_use_pct())
+    try:
+        decision, reason = decide(data_volume_use_pct())
+    except Exception as exc:
+        sys.stderr.write(
+            f"spawn_preflight_guard: capacity check failed ({exc!r}); refusing to spawn blind\n"
+        )
+        return 2
     if decision == "allow":
         return 0
     if runtime == "codex" and decision == "ask":

@@ -3,7 +3,7 @@
 
 Runs from either clone (repo root auto-detected from this file's location). Checks:
 
-  C1  guard/report/accounting selftests all exit 0
+  C1  guard/report/accounting selftests exit 0 and emit a complete terminal receipt
   C2  shared-corpus reference copies are byte-identical across skills, and any
       basename appearing in >=2 skills is either SHARED or explicitly PER_SKILL —
       an unknown multi-skill basename fails loud
@@ -42,7 +42,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "2.4.0"
+VERSION = "2.5.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 METHOD_SKILLS = ["git-workflow", "pr-review-method", "testing-ci", "agent-dispatch",
@@ -91,7 +91,7 @@ RESERVED_BASENAMES = {"claude.md", "agents.md", "gemini.md"}
 CODEX_HOOK_TOP_LEVEL_KEYS = {"description", "hooks"}
 CODEX_VALID_HOOK_EVENTS = {
     "PreToolUse", "PermissionRequest", "PostToolUse", "PreCompact", "PostCompact",
-    "SessionStart", "SessionEnd", "SubagentStart", "SubagentStop",
+    "SessionStart", "SubagentStart", "SubagentStop",
     "UserPromptSubmit", "Stop",
 }
 CODEX_REQUIRED_PACKAGE_EVENTS = {"SessionStart", "SubagentStart", "PreToolUse"}
@@ -136,6 +136,21 @@ def description_of(path):
     t = open(path, encoding="utf-8").read()
     m = re.search(r"^description: (.+)$", t, re.M)
     return m.group(1) if m else ""
+
+
+def description_within_cap(path):
+    size = len(description_of(path))
+    return 0 < size <= DESC_CAP, size
+
+
+def method_body_within_cap(path):
+    size = body_chars(path)
+    return size <= BODY_CHAR_CAP, size
+
+
+def authoring_body_within_cap(path):
+    size = len(open(path, encoding="utf-8").read().splitlines())
+    return size <= BODY_LINE_CAP, size
 
 
 def validate_codex_hook_config(hook_config):
@@ -232,17 +247,41 @@ def package_paths(root):
     return "installed", paths, None
 
 
-def forbidden_package_paths(root):
-    """Find publisher-only or host-derived paths that must never ship."""
+HOST_PATH_CONTENT = re.compile(
+    rb"(?i)(?<![A-Za-z0-9/])(?:/"
+    rb"(?:Users|home|Volumes)/[^/\s]+/|[A-Z]:\\\\Users\\\\)"
+)
+
+
+def forbidden_package_path(path):
+    """Return whether a package-relative path encodes publisher or host-local data."""
+    parts = path.replace(os.sep, "/").split("/")
+    for part in parts:
+        lower = part.lower()
+        slug = lower.replace("_", "-")
+        if lower == "projects" or lower.startswith("harness-audit-"):
+            return True
+        if (slug.startswith(("-users-", "-home-", "-volumes-", "-private-"))
+                or "-users-" in slug or "-home-" in slug or "-volumes-" in slug):
+            return True
+    return False
+
+
+def forbidden_package_entries(root):
+    """Find publisher-only paths and absolute host paths in package text."""
     surface, paths, error = package_paths(root)
-    forbidden = []
+    forbidden_paths = []
+    forbidden_contents = []
     for path in paths:
-        parts = path.replace(os.sep, "/").split("/")
-        top = parts[0]
-        if (top == "projects" or top.startswith("harness-audit-")
-                or any(re.match(r"^-(?:Users|home)-", part) for part in parts)):
-            forbidden.append(path)
-    return surface, forbidden, error
+        if forbidden_package_path(path):
+            forbidden_paths.append(path)
+        try:
+            data = open(os.path.join(root, path), "rb").read()
+        except OSError:
+            continue
+        if b"\0" not in data and HOST_PATH_CONTENT.search(data):
+            forbidden_contents.append(path)
+    return surface, forbidden_paths, forbidden_contents, error
 
 
 class Run:
@@ -267,9 +306,23 @@ class Run:
                       ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"]),
                       ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"])]
         for name, cmd in suites:
-            p = subprocess.run([sys.executable, os.path.join(self.root, cmd[0])] + cmd[1:],
-                               capture_output=True, cwd=self.root)
-            self.result("C1", p.returncode == 0, f"selftest {name}: exit {p.returncode}")
+            try:
+                p = subprocess.run(
+                    [sys.executable, os.path.join(self.root, cmd[0])] + cmd[1:],
+                    capture_output=True, cwd=self.root, timeout=15,
+                )
+            except subprocess.TimeoutExpired:
+                self.result("C1", False, f"selftest {name}: exceeded 15s")
+                continue
+            receipts = re.findall(
+                rb"^SELFTEST-SUMMARY checks=(\d+) failures=(\d+)$", p.stdout, re.M
+            )
+            receipt_ok = (len(receipts) == 1 and int(receipts[0][0]) > 0
+                          and int(receipts[0][1]) == 0)
+            detail = f"selftest {name}: exit {p.returncode}; terminal receipts={len(receipts)}"
+            if len(receipts) == 1:
+                detail += f" checks={int(receipts[0][0])} failures={int(receipts[0][1])}"
+            self.result("C1", p.returncode == 0 and receipt_ok, detail)
 
     # ---- C2 ----------------------------------------------------------------
     def c2_shared_identity(self):
@@ -336,18 +389,20 @@ class Run:
     def c4_descriptions(self):
         for skill in METHOD_SKILLS + AUTHORING_SKILLS:
             p = os.path.join(self.root, "skills", skill, "SKILL.md")
-            n = len(description_of(p))
-            self.result("C4", 0 < n <= DESC_CAP, f"{skill}: description {n} chars (cap {DESC_CAP})")
+            ok, n = description_within_cap(p)
+            self.result("C4", ok, f"{skill}: description {n} chars (cap {DESC_CAP})")
 
     def c5_bodies(self):
         for skill in METHOD_SKILLS:
-            n = body_chars(os.path.join(self.root, "skills", skill, "SKILL.md"))
-            self.result("C5", n <= BODY_CHAR_CAP,
+            ok, n = method_body_within_cap(
+                os.path.join(self.root, "skills", skill, "SKILL.md")
+            )
+            self.result("C5", ok,
                         f"{skill}: body {n} chars (cap {BODY_CHAR_CAP})")
         for skill in AUTHORING_SKILLS:
             p = os.path.join(self.root, "skills", skill, "SKILL.md")
-            n = len(open(p, encoding="utf-8").read().splitlines())
-            self.result("C5", n <= BODY_LINE_CAP, f"{skill}: {n} lines (cap {BODY_LINE_CAP})")
+            ok, n = authoring_body_within_cap(p)
+            self.result("C5", ok, f"{skill}: {n} lines (cap {BODY_LINE_CAP})")
 
     # ---- C6 ----------------------------------------------------------------
     def c6_stale_patterns(self):
@@ -548,11 +603,14 @@ class Run:
                         policy.get("authentication") == "ON_INSTALL",
                         "marketplace install/auth policy is explicit")
 
-        surface, forbidden_paths, package_error = forbidden_package_paths(self.root)
-        sample = f" e.g. {forbidden_paths[:3]!r}" if forbidden_paths else ""
-        self.result("C9", package_error is None and not forbidden_paths,
-                    f"{surface} package excludes host-bound paths: "
-                    f"{len(forbidden_paths)} file(s){sample}"
+        surface, forbidden_paths, forbidden_contents, package_error = (
+            forbidden_package_entries(self.root)
+        )
+        findings = forbidden_paths + forbidden_contents
+        sample = f" e.g. {findings[:3]!r}" if findings else ""
+        self.result("C9", package_error is None and not findings,
+                    f"{surface} current-tree package excludes host-bound paths/content: "
+                    f"{len(forbidden_paths)} path(s), {len(forbidden_contents)} content hit(s){sample}"
                     + (f"; inventory error: {package_error}" if package_error else ""))
 
         agents_path = os.path.join(self.root, "AGENTS.md")
@@ -612,10 +670,11 @@ class Run:
 
 # ---- selftest: every check proves it can go red -------------------------------
 def selftest():
-    bad = 0
+    bad = checks = 0
 
     def expect_red(label, fn):
-        nonlocal bad
+        nonlocal bad, checks
+        checks += 1
         try:
             ok = fn()
         except Exception as e:
@@ -658,6 +717,25 @@ def selftest():
                    lambda: any(c == "C1" and "exit 1" in d
                                for c, d in c1_run.failures))
 
+        truncated_suite = os.path.join(td, "truncated-selftest.py")
+        open(truncated_suite, "w").write("print('PASS first check')\nraise SystemExit(0)\n")
+        c1_truncated = Run(td, ci=True)
+        c1_truncated.c1_selftests([("planted-truncation", [truncated_suite])])
+        expect_red("C1 rejects exit zero without a terminal selftest receipt",
+                   lambda: any(c == "C1" and "terminal receipts=0" in d
+                               for c, d in c1_truncated.failures))
+
+        duplicate_suite = os.path.join(td, "duplicate-receipt.py")
+        open(duplicate_suite, "w").write(
+            "print('SELFTEST-SUMMARY checks=1 failures=0')\n"
+            "print('SELFTEST-SUMMARY checks=1 failures=0')\n"
+        )
+        c1_duplicate = Run(td, ci=True)
+        c1_duplicate.c1_selftests([("planted-duplicate", [duplicate_suite])])
+        expect_red("C1 rejects ambiguous duplicate terminal receipts",
+                   lambda: any(c == "C1" and "terminal receipts=2" in d
+                               for c, d in c1_duplicate.failures))
+
         r = Run(td, ci=True)
         r.c2_shared_identity()
         expect_red("C2 goes red on diverged copies",
@@ -677,14 +755,22 @@ def selftest():
         r2 = Run(td, ci=True)
         r2.checks = 0
         for s in ["alpha"]:
-            n = len(description_of(os.path.join(sk, s, "SKILL.md")))
-            r2.result("C4", 0 < n <= DESC_CAP, f"{s}: {n}")
-            b = body_chars(os.path.join(sk, s, "SKILL.md"))
-            r2.result("C5", b <= BODY_CHAR_CAP, f"{s}: {b}")
+            skill_path = os.path.join(sk, s, "SKILL.md")
+            ok, n = description_within_cap(skill_path)
+            r2.result("C4", ok, f"{s}: {n}")
+            ok, b = method_body_within_cap(skill_path)
+            r2.result("C5", ok, f"{s}: {b}")
         expect_red("C4 goes red on 500-char description",
                    lambda: any(c == "C4" for c, d in r2.failures))
         expect_red("C5 goes red on 6,000-char body",
                    lambda: any(c == "C5" for c, d in r2.failures))
+        authoring_fixture = os.path.join(td, "authoring-over-line-cap.md")
+        open(authoring_fixture, "w").write("\n".join(["line"] * (BODY_LINE_CAP + 1)))
+        authoring_run = Run(td, ci=True)
+        ok, lines = authoring_body_within_cap(authoring_fixture)
+        authoring_run.result("C5", ok, f"authoring: {lines}")
+        expect_red("C5 goes red on an authoring skill over the line cap",
+                   lambda: any(c == "C5" for c, _d in authoring_run.failures))
         r3 = Run(td, ci=True)
         r3.c6_stale_patterns()
         expect_red("C6 goes red on planted stale pattern",
@@ -810,7 +896,15 @@ def selftest():
         expect_red("C9 rejects misspelled case-sensitive event names",
                    lambda: any("unsupported event name" in d for _c, d in run.failures))
 
-        expect_red("C9 accepts additional documented hook events",
+        unsupported_runtime_event = json.loads(json.dumps(hook_fixture))
+        unsupported_runtime_event["hooks"]["SessionEnd"] = [{"hooks": [{
+            "type": "command", "command": "true", "timeout": 5,
+        }]}]
+        run = c9_after(mutated_hooks=unsupported_runtime_event)
+        expect_red("C9 rejects SessionEnd absent from the Codex 0.144.4 runtime schema",
+                   lambda: any("SessionEnd: unsupported" in d for _c, d in run.failures))
+
+        expect_red("C9 accepts additional runtime-observed hook events",
                    lambda: not c9_after().failures)
         expect_red("C9 accepts runtime-valid enabled and trusted_hash entry keys",
                    lambda: not c9_after().failures)
@@ -869,35 +963,45 @@ def selftest():
         put_json("hooks/hooks.json", hook_fixture)
         put_json(".codex-plugin/plugin.json", manifest)
         put_json(".agents/plugins/marketplace.json", marketplace)
-        os.makedirs(os.path.join(valid, "projects/private/memory"))
-        open(os.path.join(valid, "projects/private/memory/MEMORY.md"), "w").write("x")
+        os.makedirs(os.path.join(valid, "nested/projects/private/memory"))
+        open(os.path.join(valid, "nested/projects/private/memory/MEMORY.md"), "w").write("x")
         run = Run(valid, ci=True)
         run.c9_codex_package()
-        expect_red("C9 rejects projects/ content in an installed package",
-                   lambda: any("installed package excludes host-bound paths" in d
+        expect_red("C9 rejects nested projects/ content in an installed package",
+                   lambda: any("current-tree package excludes host-bound" in d
                                for _c, d in run.failures))
 
-        audit_file = os.path.join(
-            valid, "harness-audit-20260801", "-Users-quantum-project", "record.md"
-        )
-        os.makedirs(os.path.dirname(audit_file))
-        open(audit_file, "w").write("publisher-only")
-        run = Run(valid, ci=True)
-        run.c9_codex_package()
-        expect_red("C9 rejects audit and host-slug content in an installed package",
-                   lambda: any("harness-audit-20260801" in d
-                               for _c, d in run.failures))
+        for label, path in (
+            ("nested audit directory", "nested/HARNESS-AUDIT-20260801/record.md"),
+            ("prefixed private/Users slug",
+             "records/-private-tmp-run--Users-quantum-project/record.md"),
+            ("underscore home slug", "records/_home_quantum_project/record.md"),
+            ("Volumes slug", "records/-Volumes-work-project/record.md"),
+        ):
+            expect_red(f"C9 path predicate rejects {label}",
+                       lambda path=path: forbidden_package_path(path))
+        expect_red("C9 path predicate permits ordinary private documentation",
+                   lambda: not forbidden_package_path("docs/private-notes.md"))
+
+        portable = os.path.join(valid, "host-config.txt")
+        open(portable, "w").write("tool=/" + "Users/alice/.claude/hooks/check.py\n")
+        _surface, _paths, contents, _error = forbidden_package_entries(valid)
+        expect_red("C9 rejects absolute host paths inside package text",
+                   lambda: "host-config.txt" in contents)
 
         subprocess.run(["git", "init", "--quiet", valid], check=True)
+        audit_file = os.path.join(valid, "nested", "harness-audit-20260801", "record.md")
+        os.makedirs(os.path.dirname(audit_file), exist_ok=True)
+        open(audit_file, "w").write("publisher-only")
         subprocess.run(
             ["git", "-C", valid, "add", "--",
-             "harness-audit-20260801/-Users-quantum-project/record.md"],
+             "nested/harness-audit-20260801/record.md"],
             check=True,
         )
         run = Run(valid, ci=True)
         run.c9_codex_package()
         expect_red("C9 source-tree arm rejects tracked audit content",
-                   lambda: any("source package excludes host-bound paths" in d
+                   lambda: any("source current-tree package excludes host-bound" in d
                                and "harness-audit-20260801" in d
                                for _c, d in run.failures))
 
@@ -907,6 +1011,7 @@ def selftest():
                    lambda: any(c == "C10" for c, d in r7.failures))
 
     print(f"\n  selftest: {bad} failure(s)")
+    print(f"SELFTEST-SUMMARY checks={checks} failures={bad}")
     return 1 if bad else 0
 
 

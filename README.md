@@ -89,7 +89,9 @@ python3 tools/run-skill-evals.py --validate
 
 CI runs `python3 hooks/harness_check.py --ci` on every push and pull request. Local mode adds
 machine-specific Claude anchors. `--selftest` plants defects and proves each check family can turn
-red; a zero-input scan is an error, not a clean verdict.
+red; a zero-input scan is an error, not a clean verdict. C1 also requires each aggregated suite to
+finish with exactly one `SELFTEST-SUMMARY` receipt, so an early exit 0 cannot impersonate a complete
+test run.
 
 Skill contract eval validation is free and offline. `tools/run-skill-evals.py --run` executes
 headless model scenarios and spends API budget, so it remains manual.
@@ -112,9 +114,10 @@ headless model scenarios and spends API budget, so it remains manual.
   them. Never use `-x` there.
 - `.gitignore` is an allowlist. New authored surfaces must be explicitly included or git cannot see
   them.
-- Host-bound `projects/`, `harness-audit-*`, and encoded absolute-path slugs must stay untracked.
-  Deleting them from the current tree does not erase older Git objects; audit and scrub repository
-  history before changing repository visibility.
+- C9 certifies the current tracked/installed file surface, including nested `projects/`,
+  `harness-audit-*`, encoded absolute-path slugs, and absolute host paths inside text. It deliberately
+  does not certify `.git` history. Git-backed plugin caches can retain deleted paths through history;
+  keep this repository private until that history has been separately audited and scrubbed.
 - Before fast-forwarding another clone across the commit that first untracks publisher-local audit
   files, copy or move any audit data that clone must retain. Git applies the tracked deletions during
   that first update; the new ignore rule protects the files only after they are untracked.

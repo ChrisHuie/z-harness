@@ -191,10 +191,11 @@ def fixture():
 
 
 def selftest():
-    failures = 0
+    failures = checks = 0
 
     def check(name, condition):
-        nonlocal failures
+        nonlocal failures, checks
+        checks += 1
         print(f"  {'PASS' if condition else 'FAIL'} {name}")
         failures += not condition
 
@@ -241,7 +242,8 @@ def selftest():
     _report, code = evaluate(local, pr, runs)
     check("wrong-head workflow run is an evidence error", code == 2)
 
-    print(f"\n  {8} checks, {failures} failure(s)")
+    print(f"\n  {checks} checks, {failures} failure(s)")
+    print(f"SELFTEST-SUMMARY checks={checks} failures={failures}")
     return 1 if failures else 0
 
 

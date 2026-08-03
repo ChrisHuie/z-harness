@@ -30,6 +30,7 @@ Exit codes:  0 = decision emitted on stdout (allow/deny/ask)
              2 = usage error / unknown flag / zero inputs in --selftest
 """
 import json
+import os
 import re
 import sys
 
@@ -154,7 +155,7 @@ def strip_shell_keywords(words):
 
 
 def git_grep_argv(tokens):
-    """-> (argv slice after `git [-C path|-c cfg] grep`, list of -c config values),
+    """-> (argv after git grep, config values, unresolved relevant config),
     or None when this subcommand is not a git grep."""
     words = [t for t, _ in tokens]
     k0 = 0
@@ -164,13 +165,49 @@ def git_grep_argv(tokens):
     if not words:
         return None
     j = 0
-    # allow leading env assignments  FOO=bar git grep ...
+    # Leading assignments affect the future git process. Overlay them on the
+    # hook's inherited environment so --config-env and GIT_CONFIG_COUNT can be
+    # resolved exactly when possible.
+    command_env = dict(os.environ)
     while j < len(words) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[j]):
+        key, value = words[j].split("=", 1)
+        command_env[key] = value
         j += 1
     if j >= len(words) or words[j] != "git":
         return None
     j += 1
     configs = []
+    unresolved_configs = []
+
+    count_text = command_env.get("GIT_CONFIG_COUNT")
+    if count_text is not None:
+        try:
+            count = int(count_text)
+            if count < 0:
+                raise ValueError
+        except ValueError:
+            unresolved_configs.append("GIT_CONFIG_COUNT is not a non-negative integer")
+            count = 0
+        for index in range(count):
+            key = command_env.get(f"GIT_CONFIG_KEY_{index}")
+            value = command_env.get(f"GIT_CONFIG_VALUE_{index}")
+            if key is None or value is None:
+                unresolved_configs.append(f"GIT_CONFIG_KEY/VALUE_{index} is incomplete")
+            else:
+                configs.append(f"{key}={value}")
+
+    def add_config_env(spec):
+        key, separator, env_name = spec.partition("=")
+        if not separator or not env_name:
+            unresolved_configs.append(f"malformed --config-env {spec!r}")
+            return
+        if env_name in command_env:
+            configs.append(f"{key}={command_env[env_name]}")
+        elif key.strip().lower() in {"grep.patterntype", "grep.extendedregexp"}:
+            unresolved_configs.append(
+                f"--config-env for {key} references unavailable {env_name}"
+            )
+
     options_with_args = {
         "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix",
         "--exec-path", "--config-env", "--attr-source",
@@ -185,7 +222,13 @@ def git_grep_argv(tokens):
                 return None
             if option == "-c":
                 configs.append(words[j + 1])
+            elif option == "--config-env":
+                add_config_env(words[j + 1])
             j += 2
+            continue
+        if option.startswith("--config-env="):
+            add_config_env(option.split("=", 1)[1])
+            j += 1
             continue
         # Attached long-option values and no-argument global switches such as
         # --no-pager, -P, --literal-pathspecs and --no-optional-locks all leave
@@ -193,7 +236,7 @@ def git_grep_argv(tokens):
         j += 1
     if j >= len(words) or words[j] != "grep":
         return None
-    return tokens[k0 + j + 1:], configs
+    return tokens[k0 + j + 1:], configs, unresolved_configs
 
 
 CONFIG_ENGINE = {"extended": "E", "ere": "E", "perl": "P", "pcre": "P",
@@ -206,7 +249,12 @@ def decide(command):
         got = git_grep_argv(tokens)
         if got is None:
             continue
-        argv, configs = got
+        argv, configs, unresolved_configs = got
+        if unresolved_configs:
+            return ("ask",
+                    "git grep has unresolved Git configuration that may select the ERE "
+                    "engine: " + "; ".join(unresolved_configs) + ". This guard cannot "
+                    "prove the pattern engine, so verify the config or use an explicit -P.")
         engine = None
         engine_src = None
         for cfg in configs:
@@ -217,8 +265,8 @@ def decide(command):
                 if val in CONFIG_ENGINE:
                     engine = CONFIG_ENGINE[val]
                     engine_src = "config"
-            elif separator and key == "grep.extendedregexp":
-                if val in {"1", "true", "yes", "on"}:
+            elif key == "grep.extendedregexp":
+                if not separator or val in {"1", "true", "yes", "on"}:
                     engine = "E"
                     engine_src = "config"
         patterns = []
@@ -342,6 +390,23 @@ FIXTURES = [
      """git --git-dir=/repo/.git grep -nE 'harness\\b' -- README.md""", "deny"),
     ("RED  REVIEW: grep.extendedRegexp=true selects ERE",
      """git -c grep.extendedRegexp=true grep -n 'harness\\b' -- README.md""", "deny"),
+    ("RED  REVIEW: grep.extendedRegexp with omitted value means true",
+     """git -c grep.extendedRegexp grep -n 'harness\\b' -- README.md""", "deny"),
+    ("RED  REVIEW: case-insensitive extendedRegexp key with omitted value",
+     """git -c Grep.ExtendedRegexp grep -n 'harness\\b' -- README.md""", "deny"),
+    ("RED  REVIEW: GIT_CONFIG_COUNT selects ERE",
+     "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=grep.patternType "
+     "GIT_CONFIG_VALUE_0=extended git grep -n 'harness\\b' -- README.md", "deny"),
+    ("RED  REVIEW: --config-env resolves an explicit prefix assignment",
+     "PT=extended git --config-env=grep.patternType=PT "
+     "grep -n 'harness\\b' -- README.md", "deny"),
+    ("ASK  REVIEW: unresolved relevant --config-env fails closed",
+     "git --config-env=grep.patternType=ZHARNESS_UNSET_PATTERN_TYPE "
+     "grep -n 'harness\\b' -- README.md", "ask"),
+    ("RED  REVIEW: --namespace consumes its separate argument",
+     """git --namespace ns grep -nE 'harness\\b' -- README.md""", "deny"),
+    ("RED  REVIEW: --attr-source consumes its separate argument",
+     """git --attr-source HEAD grep -nE 'harness\\b' -- README.md""", "deny"),
     ("RED  REVIEW: global switch composes with patternType config",
      """git --no-pager -c grep.patternType=extended grep -n 'harness\\b' -- README.md""",
      "deny"),

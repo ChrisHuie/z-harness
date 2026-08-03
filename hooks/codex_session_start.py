@@ -15,7 +15,8 @@ but not in ordinary agent shell calls.
 If mandatory policy cannot be emitted, SessionStart returns `continue:false` on stdout and stops
 the turn. SubagentStart cannot be stopped by Codex, so it receives an explicit stop-work context.
 
-Exit codes: 0 hook result emitted or nothing applicable; 1 selftest failure; 2 unknown argument.
+Runtime delivery failures emit a fail-closed hook result and exit 0 so Codex consumes it. Exit 1
+is reserved for a completed failing selftest; exit 2 is an invalid command-line invocation.
 """
 import io
 import json
@@ -25,9 +26,10 @@ import shlex
 import sys
 import tempfile
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 SUPPORTED_EVENTS = {"SessionStart", "SubagentStart"}
 MAX_CONTEXT_BYTES = 30_000
+MAX_REASON_CHARS = 4_000
 LOCAL_CONTEXT_RELATIVE = Path("z-harness") / "AGENTS.local.md"
 
 
@@ -171,12 +173,22 @@ def build_context(root, cwd, codex_home=None):
     return joined_context(sections)
 
 
+def bounded_reason(reason):
+    """Keep failure envelopes well below hook-output budgets."""
+    text = str(reason)
+    marker = "... [truncated by z-harness]"
+    if len(text) <= MAX_REASON_CHARS:
+        return text
+    return text[:MAX_REASON_CHARS - len(marker)] + marker
+
+
 def stop_result(reason):
-    print(json.dumps({"continue": False, "stopReason": reason}))
+    print(json.dumps({"continue": False, "stopReason": bounded_reason(reason)}))
     return 0
 
 
 def subagent_failure_result(reason):
+    reason = bounded_reason(reason)
     print(json.dumps({
         "systemMessage": reason,
         "hookSpecificOutput": {
@@ -217,6 +229,21 @@ def hook_mode(raw, root=None):
     if context:
         print(context)
     return 0
+
+
+def read_hook_input(stream):
+    """Return (text, error) without letting a stdin failure bypass the stop envelope."""
+    try:
+        return stream.read(), ""
+    except Exception as exc:
+        return None, f"z-harness SessionStart stdin read failed: {exc!r}"
+
+
+def stream_mode(stream, root=None):
+    raw, error = read_hook_input(stream)
+    if raw is None:
+        return stop_result(error)
+    return hook_mode(raw, root=root)
 
 
 def captured_hook(raw, root=None):
@@ -272,9 +299,18 @@ def selftest():
         check("identical applicable AGENTS.override.md suppresses duplicate policy",
               "# z-harness shared operating policy" not in context)
 
+        (base / "work" / "repo" / "AGENTS.md").write_text(policy, encoding="utf-8")
+        (base / "work" / "repo" / "AGENTS.override.md").write_text(
+            "# different override\n", encoding="utf-8"
+        )
+        context = build_context(plugin, work)
+        check("a non-identical override takes precedence over an identical AGENTS.md",
+              "# z-harness shared operating policy" in context)
+
         global_home = base / "codex-home"
         global_home.mkdir()
         (base / "work" / "repo" / "AGENTS.override.md").unlink()
+        (base / "work" / "repo" / "AGENTS.md").unlink()
         (global_home / "AGENTS.md").write_text(policy, encoding="utf-8")
         context = build_context(plugin, work, codex_home=global_home)
         check("identical global AGENTS.md suppresses duplicate policy",
@@ -348,6 +384,11 @@ def selftest():
         check("oversized mandatory policy stops SessionStart",
               rc == 0 and json.loads(output)["continue"] is False)
 
+        (plugin / "AGENTS.md").write_bytes(b"invalid utf8: \xff\n")
+        rc, output = captured_hook(payload, root=plugin)
+        check("non-UTF-8 mandatory policy stops SessionStart",
+              rc == 0 and json.loads(output)["continue"] is False)
+
         (plugin / "AGENTS.md").write_text(policy, encoding="utf-8")
         original_project_directories = globals()["project_directories"]
         def failed_project_walk(_cwd):
@@ -368,7 +409,38 @@ def selftest():
     rc, output = captured_hook("not-json")
     check("malformed JSON stops rather than failing open",
           rc == 0 and json.loads(output)["continue"] is False)
+    rc, output = captured_hook("[]")
+    check("non-object input stops rather than failing open",
+          rc == 0 and json.loads(output)["continue"] is False)
+    rc, output = captured_hook(json.dumps({"hook_event_name": "SessionStart", "cwd": ""}))
+    check("empty cwd stops rather than using an unknown scope",
+          rc == 0 and json.loads(output)["continue"] is False)
+
+    class BrokenReader:
+        def read(self):
+            raise UnicodeError("planted stdin decode failure")
+
+    buf, old = io.StringIO(), sys.stdout
+    sys.stdout = buf
+    try:
+        rc = stream_mode(BrokenReader())
+    finally:
+        sys.stdout = old
+    check("stdin read failure emits a stop envelope and exits zero",
+          rc == 0 and json.loads(buf.getvalue())["continue"] is False)
+
+    buf, old = io.StringIO(), sys.stdout
+    sys.stdout = buf
+    try:
+        rc = stop_result("x" * (MAX_REASON_CHARS * 2))
+    finally:
+        sys.stdout = old
+    stopped = json.loads(buf.getvalue())
+    check("failure reasons are capped with an explicit truncation marker",
+          rc == 0 and len(stopped["stopReason"]) <= MAX_REASON_CHARS
+          and "truncated by z-harness" in stopped["stopReason"])
     print(f"\n  {checks} checks, {failures} failures")
+    print(f"SELFTEST-SUMMARY checks={checks} failures={failures}")
     return 1 if failures else 0
 
 
@@ -385,7 +457,7 @@ def main(argv):
             return selftest()
         sys.stderr.write(f"unknown argument: {args[0]!r}\n")
         return 2
-    return hook_mode(sys.stdin.read())
+    return stream_mode(sys.stdin)
 
 
 if __name__ == "__main__":

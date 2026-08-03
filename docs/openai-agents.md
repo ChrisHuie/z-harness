@@ -125,17 +125,20 @@ Codex placeholder.
 
 ## Package hygiene and host-local context
 
-The installable package contains shared policy, skills, hooks, tools, and documentation. It does not
-contain `projects/`, `harness-audit-*`, or encoded authoring-host path slugs. Project memory is not
-portable, and the audit tree includes pre-migration backups, drafts, reports, raw evidence, and
-machine-derived paths that belong to the publisher rather than plugin consumers. C9 inventories the
-Git index in a source checkout and the filesystem in an installed package, then rejects every such
-path semantically.
+The current package file surface contains shared policy, skills, hooks, tools, and documentation. It
+does not contain `projects/`, `harness-audit-*`, encoded authoring-host path slugs, or absolute host
+paths in text. Project memory is not portable, and the audit tree includes pre-migration backups,
+drafts, reports, raw evidence, and machine-derived paths that belong to the publisher rather than
+plugin consumers. C9 inventories the Git index in a source checkout and the filesystem in an
+installed package, then rejects those path and content classes semantically.
 
 Ignored Claude project memory can remain on the authoring machine. Codex-specific host facts belong
-in `$CODEX_HOME/z-harness/AGENTS.local.md`, outside Git and the plugin cache. Removing host-bound
-files from the current tree does not remove older Git objects; repository history must be audited
-and scrubbed before changing a private repository to public visibility.
+in `$CODEX_HOME/z-harness/AGENTS.local.md`, outside Git and the plugin cache. C9 is explicitly a
+current-file-surface check: it excludes `.git` while walking an installed package and cannot prove
+that a Git-backed cache omitted old objects. A local-source install has been observed retaining the
+repository history, while remote URL clone depth is not a publisher-controlled guarantee. Removing
+host-bound files from the current tree therefore does not remove older Git objects; repository
+history must be audited and scrubbed before changing a private repository to public visibility.
 
 Untracking an audit tree preserves ignored bytes in the checkout where the change is authored, but
 another clone applying that commit sees tracked deletions. Back up or move audit data that must
@@ -161,11 +164,16 @@ hook response from failing open and allowing the underlying command.
 
 Both PreToolUse adapters validate the top-level object and their matched tool envelope. A malformed
 matched payload or internal predicate failure exits 2 only after writing a non-empty blocking reason
-to stderr; a bare exit 2 is not treated as a block by Codex. C9 allows documented Codex event names,
+to stderr; a bare exit 2 is not treated as a block by Codex. C9 allows runtime-observed Codex event names,
 requires the package's three operational events, accepts runtime entry metadata such as `enabled`
 and `trusted_hash` with validated types, requires command handlers, rejects async handlers, and
 validates timeout types and matcher regexes. C7 pins every required
 `(event, matcher, script, flags)` tuple including `--runtime codex`.
+
+C9's event allowlist follows the generated/runtime schema observed in Codex CLI 0.144.4. That schema
+contains ten events and does not contain `SessionEnd`; 0.144.4 silently drops that registration even
+though the public manual currently lists it. The gate rejects `SessionEnd` until an installed runtime
+accepts and executes it, and this compatibility pin must be rechecked when Codex is upgraded.
 
 Hooks are guardrails, not a complete security boundary: specialized tool paths can opt out, and a
 PostToolUse hook cannot undo completed side effects. Sandbox and approval policy remain the primary
@@ -183,12 +191,14 @@ summing turns overcounts prior work. `tools/codex-cost.py`:
    per-request identity, independently of the turn where a replay appears;
 4. assigns each request its earliest observed timestamp before applying `--since`, so a re-stamped
    fork copy cannot move old usage into a newer window;
-5. separates corpus-wide parse/schema diagnostics from selected-window accounting, reports orphan
-   snapshot count and raw token mass for both scopes, reconciles copies of requests already
-   accounted inside turns, and explicitly reports any remaining unattributed mass as excluded;
+5. separates corpus-wide parse/schema diagnostics from the time window and the post-`--project`
+   selection, reports orphan snapshot count and raw token mass for both scopes, reconciles copies
+   of requests already accounted inside turns, and explicitly reports any remaining unattributed
+   mass as excluded;
 6. classifies persisted subagent sessions separately and uses session cwd as a project-attribution
    fallback when an embedded turn has no `turn_context`; and
-7. discloses snapshots that omit cache-write counters or expose only `total_tokens`, and treats zero
+7. discloses snapshots whose normalized component counters are all zero while `total_tokens` is
+   positive, including how many selected requests and tokens they contribute, and treats zero
    accounted turns as an error.
 
 Cached input is a subset of input and reasoning output is a subset of output. The report does not
@@ -203,6 +213,10 @@ Run the shared mechanical gate and its planted-defect proof:
 python3 hooks/harness_check.py --ci
 python3 hooks/harness_check.py --selftest
 ```
+
+The aggregate gate accepts a selftest only when it exits zero and emits exactly one terminal
+`SELFTEST-SUMMARY checks=<positive> failures=0` line. Missing, duplicate, or failing receipts are
+red even when the child process exits zero.
 
 Run focused Codex adapter selftests:
 

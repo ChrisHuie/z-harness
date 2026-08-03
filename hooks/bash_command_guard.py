@@ -33,7 +33,7 @@ import json
 import sys
 import pathlib
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 RUNTIMES = {"claude", "codex"}
 sys.path.insert(0, str(pathlib.Path(__file__).parent / "guards"))
 
@@ -141,7 +141,10 @@ def selftest():
             raise SystemExit(0)
     GUARDS.append(("planted_exiting_guard", ExitingGuard))
     try:
-        got, reason = decide("echo safe")
+        try:
+            got, reason = decide("echo safe")
+        except BaseException as exc:
+            got, reason = "propagated", repr(exc)
     finally:
         GUARDS.pop()
     ok = got == "deny" and "predicate failed" in reason
@@ -171,10 +174,21 @@ def selftest():
     total += 1
     failures += (not ok)
     print(f"  {'PASS' if ok else 'FAIL'} stdin-closed       decode failure has a reason")
+    import time
+    large_command = "echo " + ("x" * (256 * 1024))
+    started = time.perf_counter()
+    tokenized = grep_guard.split_commands(large_command)
+    elapsed = time.perf_counter() - started
+    ok = (elapsed < 1.5 and len(tokenized) == 1
+          and tokenized[0][1][0] == "x" * (256 * 1024))
+    total += 1
+    failures += (not ok)
+    print(f"  {'PASS' if ok else 'FAIL'} tokenizer-linear   256 KiB in {elapsed:.3f}s (cap 1.5s)")
     print(f"\n  {total} checks, {failures} failures")
     if total == 0:
         print("  ZERO CHECKS RAN — treating as failure")
         return 2
+    print(f"SELFTEST-SUMMARY checks={total} failures={failures}")
     return 1 if failures else 0
 
 

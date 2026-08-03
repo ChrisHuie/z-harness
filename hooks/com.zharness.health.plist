@@ -7,8 +7,9 @@
   <string>com.zharness.health</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/bin/bash</string>
-    <string>/Users/quantum/.claude/hooks/harness_health.sh</string>
+    <string>/bin/sh</string>
+    <string>-lc</string>
+    <string>exec "$HOME/.claude/hooks/harness_health.sh"</string>
   </array>
   <key>StartCalendarInterval</key>
   <dict>
@@ -20,8 +21,8 @@
     <integer>0</integer>
   </dict>
   <key>StandardOutPath</key>
-  <string>/Users/quantum/.claude/state/harness-health-launchd.log</string>
+  <string>/tmp/com.zharness.health.out.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/quantum/.claude/state/harness-health-launchd.log</string>
+  <string>/tmp/com.zharness.health.err.log</string>
 </dict>
 </plist>

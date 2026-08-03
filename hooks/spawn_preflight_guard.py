@@ -104,17 +104,19 @@ def selftest():
     print(f"spawn_preflight_guard {VERSION} --selftest")
     live = data_volume_use_pct()
     print(f"  live data-volume reading: {live}%  (volume: {DATA_VOLUME})")
-    bad = 0
+    bad = checks = 0
     for label, pct, want in FIXTURES:
         got, _ = decide(pct)
         ok = got == want
         bad += (not ok)
+        checks += 1
         print(f"  {'PASS' if ok else 'FAIL'} want={want:<5} got={got:<5} {label}")
     # envelope arm: out-of-scope tool is silent-allow
     payload = {"tool_name": "Bash", "tool_input": {}}
     rc, out = run_payload(payload)
     ok = rc == 0 and out == ""
     bad += (not ok)
+    checks += 1
     print(f"  {'PASS' if ok else 'FAIL'} out-of-scope tool: silent exit 0")
     payload = {"tool_name": "Agent", "tool_input": {"prompt": "x"}}
     os.environ["SPAWN_GUARD_DF_PCT"] = "99"
@@ -122,6 +124,7 @@ def selftest():
     del os.environ["SPAWN_GUARD_DF_PCT"]
     ok = rc == 0 and '"permissionDecision": "deny"' in out
     bad += (not ok)
+    checks += 1
     print(f"  {'PASS' if ok else 'FAIL'} Agent spawn at 99%: deny JSON on stdout")
     payload = {"tool_name": "spawn_agent", "tool_input": {"message": "x"}}
     os.environ["SPAWN_GUARD_DF_PCT"] = "92"
@@ -129,6 +132,7 @@ def selftest():
     del os.environ["SPAWN_GUARD_DF_PCT"]
     ok = rc == 0 and '"permissionDecision": "deny"' in out and "fails closed" in out
     bad += (not ok)
+    checks += 1
     print(f"  {'PASS' if ok else 'FAIL'} Codex spawn at 92%: unsupported ask maps to deny")
     for label, raw in (
         ("empty stdin", ""),
@@ -140,6 +144,7 @@ def selftest():
         rc, _out, err = run_raw(raw, runtime="codex")
         ok = rc == 2 and bool(err.strip())
         bad += (not ok)
+        checks += 1
         print(f"  {'PASS' if ok else 'FAIL'} {label}: rc={rc}, stderr={bool(err.strip())}")
     os.environ["SPAWN_GUARD_DF_PCT"] = "not-an-integer"
     try:
@@ -149,6 +154,7 @@ def selftest():
         del os.environ["SPAWN_GUARD_DF_PCT"]
     ok = rc == 2 and bool(err.strip())
     bad += (not ok)
+    checks += 1
     print(f"  {'PASS' if ok else 'FAIL'} unreadable capacity fails closed with reason")
     class BrokenReader:
         def read(self):
@@ -156,8 +162,10 @@ def selftest():
     raw, read_error = read_hook_input(BrokenReader())
     ok = raw is None and "stdin read failed" in read_error
     bad += (not ok)
+    checks += 1
     print(f"  {'PASS' if ok else 'FAIL'} stdin decode failure has a blocking reason")
     print(f"\n  selftest: {bad} failure(s)")
+    print(f"SELFTEST-SUMMARY checks={checks} failures={bad}")
     return 1 if bad else 0
 
 

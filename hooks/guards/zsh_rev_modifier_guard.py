@@ -89,7 +89,10 @@ def is_rev_path_git(tokens):
     if j >= len(words) or words[j] != "git":
         return False
     j += 1
-    options_with_args = {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}
+    options_with_args = {
+        "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix",
+        "--exec-path", "--config-env", "--attr-source",
+    }
     while j < len(words) and words[j].startswith("-"):
         if words[j] in options_with_args:
             j += 2
@@ -200,6 +203,12 @@ FIXTURES = [
      "echo 'brace it: use $r:tests never bare' && git show HEAD:README.md", "allow"),
     ("GREEN 2026-08-02: git rev:path text inside a single-quoted argument to another tool",
      "python3 guard.py --check 'git show $SHA:src/f.py'", "allow"),
+    ("GREEN REVIEW: a fully single-quoted rev:path token is literal",
+     "git show '$SHA:src/f.py'", "allow"),
+    ("GREEN REVIEW: a single-quoted hazardous segment in a mixed token is literal",
+     "git show '$SHA:src'/f.py", "allow"),
+    ("RED REVIEW: --attr-source consumes its argument before git show",
+     "git --attr-source HEAD show $SHA:src/f.py", "deny"),
 ]
 
 

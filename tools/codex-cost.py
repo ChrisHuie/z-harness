@@ -27,7 +27,7 @@ import sys
 import tempfile
 import time
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 USAGE_FIELDS = (
     "input_tokens",
     "cached_input_tokens",
@@ -92,6 +92,7 @@ def scan(root, cutoff, project_filter=None):
         "records": 0,
         "malformed_records": 0,
         "usage_snapshots": 0,
+        "window_accounted_usage_records": 0,
         "accounted_usage_records": 0,
         "missing_last_usage_snapshots": 0,
         "orphan_usage_snapshots": 0,
@@ -104,10 +105,14 @@ def scan(root, cutoff, project_filter=None):
         "corpus_replayed_usage_snapshots": 0,
         "cache_write_missing_last_snapshots": 0,
         "cache_write_missing_cumulative_snapshots": 0,
-        "total_only_usage_snapshots": 0,
+        "component_zero_usage_snapshots": 0,
+        "component_zero_accounted_requests": 0,
+        "component_zero_accounted_total_tokens": 0,
         "selected_request_keys": 0,
         "turns_without_timestamps": 0,
         "turns": 0,
+        "turns_in_window": 0,
+        "project_filter": project_filter,
     }
     turns = {}
     observed_usage_records = {}
@@ -161,6 +166,8 @@ def scan(root, cutoff, project_filter=None):
                             "session_id": session_id,
                             "last_usage_at": None,
                             "requests": 0,
+                            "component_zero_requests": 0,
+                            "component_zero_total_tokens": 0,
                             "classes_seen": {session_class},
                         })
                         row["classes_seen"].add(session_class)
@@ -186,7 +193,7 @@ def scan(root, cutoff, project_filter=None):
                 if (normalized["total_tokens"] > 0
                         and all(normalized[field] == 0
                                 for field in USAGE_FIELDS if field != "total_tokens")):
-                    scanset["total_only_usage_snapshots"] += 1
+                    scanset["component_zero_usage_snapshots"] += 1
                 normalized_cumulative = normalized_usage(cumulative)
                 cumulative_key = tuple(normalized_cumulative[field] for field in USAGE_FIELDS)
                 usage_key = tuple(normalized[field] for field in USAGE_FIELDS)
@@ -243,6 +250,8 @@ def scan(root, cutoff, project_filter=None):
             "session_id": canonical["session_id"],
             "last_usage_at": None,
             "requests": 0,
+            "component_zero_requests": 0,
+            "component_zero_total_tokens": 0,
             "classes_seen": {canonical["class"]},
         })
         row["classes_seen"].update(item["class"] for item in in_turn)
@@ -251,7 +260,12 @@ def scan(root, cutoff, project_filter=None):
         if first_observed_at is not None:
             row["last_usage_at"] = max(row["last_usage_at"] or 0, first_observed_at)
         row["requests"] += 1
-        scanset["accounted_usage_records"] += 1
+        scanset["window_accounted_usage_records"] += 1
+        if (canonical["usage"]["total_tokens"] > 0
+                and all(canonical["usage"][field] == 0
+                        for field in USAGE_FIELDS if field != "total_tokens")):
+            row["component_zero_requests"] += 1
+            row["component_zero_total_tokens"] += canonical["usage"]["total_tokens"]
         for field in USAGE_FIELDS:
             row["usage"][field] += canonical["usage"][field]
 
@@ -269,12 +283,22 @@ def scan(root, cutoff, project_filter=None):
         row["usage"]["total_tokens"] > 0 and row["last_usage_at"] is None
         for row in turns.values()
     )
+    scanset["turns_in_window"] = sum(
+        row["usage"]["total_tokens"] > 0 for row in turns.values()
+    )
     turns = {
         turn_id: row for turn_id, row in turns.items()
         if row["usage"]["total_tokens"] > 0
         and (not project_filter or project_filter in row["cwd"])
     }
     scanset["turns"] = len(turns)
+    scanset["accounted_usage_records"] = sum(row["requests"] for row in turns.values())
+    scanset["component_zero_accounted_requests"] = sum(
+        row["component_zero_requests"] for row in turns.values()
+    )
+    scanset["component_zero_accounted_total_tokens"] = sum(
+        row["component_zero_total_tokens"] for row in turns.values()
+    )
     return turns, scanset
 
 
@@ -308,15 +332,16 @@ def report(turns, scanset, out=sys.stdout):
         "cache_write_input_tokens"
     )
     write(
-        f"          {scanset['total_only_usage_snapshots']} snapshots contain total_tokens "
-        "but no component counters; "
+        f"          {scanset['component_zero_usage_snapshots']} snapshots have total_tokens > 0 "
+        "while every component counter is zero after normalization; "
         f"{scanset['corpus_orphan_usage_snapshots']} orphan snapshots total "
         f"{scanset['corpus_orphan_usage_raw_total_tokens']:,} raw tokens corpus-wide"
     )
     write(
-        f"  WINDOW  {scanset['files_in_window']} files contain "
+        f"  WINDOW (before --project)  {scanset['files_in_window']} files contain "
         f"{scanset['selected_request_keys']} selected request identities; "
-        f"{scanset['accounted_usage_records']} accounted requests, "
+        f"{scanset['window_accounted_usage_records']} accounted requests across "
+        f"{scanset['turns_in_window']} turns, "
         f"{scanset['replayed_usage_snapshots']} replayed/copy snapshots, "
         f"{scanset['turns_without_timestamps']} timestamp-less turns"
     )
@@ -325,6 +350,14 @@ def report(turns, scanset, out=sys.stdout):
         f"{scanset['orphan_usage_raw_total_tokens']:,} raw tokens; after replay "
         f"reconciliation, {scanset['orphan_excluded_usage_records']} requests / "
         f"{scanset['orphan_excluded_total_tokens']:,} tokens remain unattributed and excluded"
+    )
+    selector = (f"project containing {scanset['project_filter']!r}"
+                if scanset.get("project_filter") else "all projects in window")
+    write(
+        f"  SELECTED ({selector})  {scanset['turns']} turns / "
+        f"{scanset['accounted_usage_records']} accounted requests; "
+        f"{scanset['component_zero_accounted_requests']} component-zero requests contribute "
+        f"{scanset['component_zero_accounted_total_tokens']:,} total tokens"
     )
     if not turns:
         write("\nZERO ACCOUNTED TURNS — that is an error, not a zero-cost verdict.")
@@ -505,11 +538,50 @@ def selftest():
              "info": {"total_token_usage": request_100,
                       "last_token_usage": request_100}}},
         ])
+        write_fixture(os.path.join(window_dir, "old-orphan.jsonl"), [
+            {"timestamp": old_stamp, "type": "session_meta",
+             "payload": {"id": "old-orphan", "cwd": "/repo/w"}},
+            {"timestamp": old_stamp, "type": "event_msg", "payload": {"type": "token_count",
+             "info": {"total_token_usage": request_150,
+                      "last_token_usage": request_150}}},
+        ])
+        write_fixture(os.path.join(window_dir, "recent-valid.jsonl"), [
+            {"timestamp": recent_stamp, "type": "session_meta",
+             "payload": {"id": "recent-session", "cwd": "/repo/w"}},
+            {"timestamp": recent_stamp, "type": "event_msg",
+             "payload": {"type": "task_started", "turn_id": "recent-turn"}},
+            {"timestamp": recent_stamp, "type": "event_msg", "payload": {"type": "token_count",
+             "info": {"total_token_usage": usage_3, "last_token_usage": usage_3}}},
+        ])
+        write_fixture(os.path.join(window_dir, "old-valid.jsonl"), [
+            {"timestamp": old_stamp, "type": "session_meta",
+             "payload": {"id": "old-valid", "cwd": "/repo/w"}},
+            {"timestamp": old_stamp, "type": "event_msg",
+             "payload": {"type": "task_started", "turn_id": "old-valid-turn"}},
+            {"timestamp": old_stamp, "type": "event_msg", "payload": {"type": "token_count",
+             "info": {"total_token_usage": orphan_usage, "last_token_usage": orphan_usage}}},
+        ])
         windowed, window_scan = scan(window_dir, time.time() - 3600)
         check("--since uses a request's earliest stamp regardless of file order",
-              windowed == {}
+              set(windowed) == {"recent-turn"}
               and window_scan["replayed_usage_snapshots"] == 0
               and window_scan["corpus_replayed_usage_snapshots"] == 1)
+        check("corpus and window diagnostics have scope-discriminating values",
+              window_scan["files_found"] == 5
+              and window_scan["files_in_window"] == 1
+              and window_scan["corpus_orphan_usage_snapshots"] == 1
+              and window_scan["orphan_usage_snapshots"] == 0
+              and window_scan["accounted_usage_records"] == 1)
+        import io
+        window_buffer = io.StringIO()
+        rc = report(windowed, window_scan, out=window_buffer)
+        window_text = window_buffer.getvalue()
+        check("report labels pre-project window scope with exact fixture counts",
+              rc == 0
+              and "CORPUS  5 transcript files" in window_text
+              and "WINDOW (before --project)  1 files" in window_text
+              and "SELECTED (all projects in window)  1 turns / 1 accounted requests"
+              in window_text)
 
         replay_dir = os.path.join(tmp, "turn-replay-property")
         os.mkdir(replay_dir)
@@ -539,7 +611,7 @@ def selftest():
 
         schema_dir = os.path.join(tmp, "schema-property")
         os.mkdir(schema_dir)
-        write_fixture(os.path.join(schema_dir, "total-only.jsonl"), [
+        write_fixture(os.path.join(schema_dir, "component-zero.jsonl"), [
             {"timestamp": "2026-01-01T00:00:00Z", "type": "session_meta",
              "payload": {"id": "schema-session", "cwd": "/repo/schema"}},
             {"timestamp": "2026-01-01T00:00:01Z", "type": "event_msg",
@@ -554,14 +626,25 @@ def selftest():
               schema_turns["schema-turn"]["usage"]["total_tokens"] == 42
               and schema_scan["cache_write_missing_last_snapshots"] == 1
               and schema_scan["cache_write_missing_cumulative_snapshots"] == 1)
-        check("total-only snapshots are disclosed",
-              schema_scan["total_only_usage_snapshots"] == 1)
+        check("component-zero snapshots are labeled by normalized values",
+              schema_scan["component_zero_usage_snapshots"] == 1)
 
-        import io
         buffer = io.StringIO()
-        rc = report(replayed, replay_scan, out=buffer)
-        check("report distinguishes corpus diagnostics from the selected window",
-              rc == 0 and "CORPUS" in buffer.getvalue() and "WINDOW" in buffer.getvalue())
+        rc = report(schema_turns, schema_scan, out=buffer)
+        check("report discloses component-zero accounting consequence",
+              rc == 0
+              and "1 component-zero requests contribute 42 total tokens" in buffer.getvalue())
+
+        no_project_turns, no_project_scan = scan(
+            schema_dir, 0, project_filter="/repo/not-present"
+        )
+        buffer = io.StringIO()
+        rc = report(no_project_turns, no_project_scan, out=buffer)
+        check("project-miss report does not relabel the nonempty time window as empty",
+              rc == 2
+              and "WINDOW (before --project)  1 files" in buffer.getvalue()
+              and "SELECTED (project containing '/repo/not-present')  0 turns / "
+                  "0 accounted requests" in buffer.getvalue())
 
         buffer = io.StringIO()
         rc = report({}, {key: 0 for key in scanset} | {"root": tmp}, out=buffer)
@@ -569,6 +652,7 @@ def selftest():
         check("zero accounted turns is stated", "ZERO ACCOUNTED TURNS" in buffer.getvalue())
 
     print(f"\n  {checks} checks, {failures} failures")
+    print(f"SELFTEST-SUMMARY checks={checks} failures={failures}")
     return 1 if failures else 0
 
 

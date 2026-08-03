@@ -13,11 +13,19 @@
 
 # 2. un-ignore the authored surface (dirs must be re-included before their contents)
 !.gitignore
+!AGENTS.md
 !CLAUDE.md
+!README.md
 !settings.json
 !statusline.sh
 !.github/
 !.github/**
+!.codex-plugin/
+!.codex-plugin/**
+!.agents/
+!.agents/**
+!docs/
+!docs/**
 !tools/
 !tools/**
 
@@ -30,18 +38,11 @@
 !commands/
 !commands/**
 
-# 3. the harness record — docs only, not the 51 MB of backups and agent transcripts
-!harness-audit-20260801/
-!harness-audit-20260801/*.md
-!harness-audit-20260801/*.tgz
-!harness-audit-20260801/scripts/
-!harness-audit-20260801/scripts/**
-!harness-audit-20260801/routing/
-!harness-audit-20260801/routing/**
-!harness-audit-20260801/baselines/
-!harness-audit-20260801/baselines/**
-!harness-audit-20260801/retired-skill-references/
-!harness-audit-20260801/retired-skill-references/**
+# 3. publisher-only evidence remains host-local
+#
+# harness-audit-* includes pre-migration snapshots, machine-derived path slugs,
+# reports, and raw evidence. Keep it beside the authoring checkout if useful, but
+# never un-ignore or distribute it as plugin content.
 
 # 4. never, regardless of the above
 .credentials.json
@@ -53,30 +54,3 @@
 
 # guard runtime logs — churn on every selftest, not authored content
 hooks/*events*.jsonl
-
-# 5. the authored memory layer — index + distilled facts, never transcripts.
-# projects/*/ stays ignored except each project's memory/ subtree.
-!projects/
-!projects/*/
-!projects/*/memory/
-!projects/*/memory/**
-
-# --- added after the first push: evidence and pre-git state ---
-# git's first commit is the END state of the 2026-08-01/02 rebuild. The PRE* snapshots
-# are the ONLY record of what the harness looked like before it, and git history cannot
-# reconstruct them. reports/ and drafts/ are the findings and the derivation behind every
-# conclusion in the .md records. experiments/ (43 MB of raw run data) stays out.
-!harness-audit-20260801/reports/
-!harness-audit-20260801/reports/**
-!harness-audit-20260801/drafts/
-!harness-audit-20260801/drafts/**
-!harness-audit-20260801/misfiled-memories/
-!harness-audit-20260801/misfiled-memories/**
-!harness-audit-20260801/PRE-MIGRATION-BACKUP/
-!harness-audit-20260801/PRE-MIGRATION-BACKUP/**
-# PREINSTALL-20260802-085154/ tree tarred 2026-08-02 (reserved-basename collision, row 25);
-# bytes preserved in PREINSTALL-20260802-085154.tgz via the *.tgz line above
-!harness-audit-20260801/PREMEM-20260802-154631/
-!harness-audit-20260801/PREMEM-20260802-154631/**
-!harness-audit-20260801/PREHOOKS-20260802-154226/
-!harness-audit-20260801/PREHOOKS-20260802-154226/**

@@ -37,6 +37,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 
@@ -407,7 +408,10 @@ def run_selftest():
 
     me = os.path.abspath(__file__)
     env = dict(os.environ)
-    env["ASKQ_GUARD_LOG"] = os.path.join(fixdir, "..", "selftest-events.jsonl")
+    event_log = os.path.join(
+        tempfile.gettempdir(), f"z-harness-askq-selftest-{os.getpid()}.jsonl"
+    )
+    env["ASKQ_GUARD_LOG"] = event_log
     env.pop("ASKQ_GUARD_FAIL_OPEN", None)
     env.pop("ASKQ_GUARD_KNOWN_EXTRA_KEYS", None)
 
@@ -483,12 +487,18 @@ def run_selftest():
     if missing:
         print(f"  MISSING fixtures (expectation with no file): {missing}")
         failures.append(("<missing>", str(missing)))
+    try:
+        os.unlink(event_log)
+    except FileNotFoundError:
+        pass
     if failures:
         print(f"\n  {len(failures)} FAILURE(S):")
         for f, why in failures:
             print(f"    - {f}: {why}")
+        print(f"SELFTEST-SUMMARY checks={len(files) + len(missing)} failures={len(failures)}")
         return 1
     print("\n  all fixtures pass, both arms exercised")
+    print(f"SELFTEST-SUMMARY checks={len(files)} failures=0")
     return 0
 
 

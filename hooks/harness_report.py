@@ -244,7 +244,7 @@ def selftest():
     plug = '{"type":"tool_use","name":"Skill","input":{"skill":"myplugin:deploy"}}'
     chk("FIRE matches a plugin-form skill name", FIRE.search(plug).group(1), "myplugin:deploy")
     chk("ATTR matches attributionSkill", ATTR.search('{"attributionSkill":"testing-ci"}').group(1), "testing-ci")
-    read_line = '{"type":"tool_use","name":"Read","input":{"file_path":"/Users/x/.claude/skills/testing-ci/references/deferred.md"}}'
+    read_line = '{"type":"tool_use","name":"Read","input":{"file_path":"/opt/example/.claude/skills/testing-ci/references/deferred.md"}}'
     chk("READ extracts the path", "references/deferred.md" in READ.search(read_line).group(1), True)
     gitcmd = '{"type":"tool_use","name":"Bash","input":{"command":"git status --porcelain"}}'
     chk("TOPIC git matches a git command that RAN", bool(TOPIC["git-workflow"].search(gitcmd)), True)
@@ -265,6 +265,7 @@ def selftest():
     chk("zero contexts exits 2, not 0", rc, 2)
     chk("zero contexts says so out loud", "ZERO CONTEXTS" in buf.getvalue(), True)
     print(f"\n  {checks} checks, {bad} failures")
+    print(f"SELFTEST-SUMMARY checks={checks} failures={bad}")
     return 1 if bad else 0
 
 

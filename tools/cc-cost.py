@@ -146,10 +146,11 @@ def report(totals, scanset, out=sys.stdout):
 
 def selftest():
     import tempfile
-    bad = 0
+    bad = checks = 0
 
     def chk(label, got, want):
-        nonlocal bad
+        nonlocal bad, checks
+        checks += 1
         ok = got == want
         bad += (not ok)
         print(f"  {'PASS' if ok else 'FAIL'} {label:<58} got={got!r}")
@@ -192,6 +193,7 @@ def selftest():
             "ZERO TRANSCRIPTS" in buf.getvalue(), True)
 
     print(f"\n  selftest: {bad} failure(s)")
+    print(f"SELFTEST-SUMMARY checks={checks} failures={bad}")
     return 1 if bad else 0
 
 

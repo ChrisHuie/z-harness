@@ -1,0 +1,21 @@
+{
+  "name": "z-harness",
+  "interface": {
+    "displayName": "z-harness"
+  },
+  "plugins": [
+    {
+      "name": "z-harness",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/ChrisHuie/z-harness.git",
+        "ref": "main"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

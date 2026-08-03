@@ -1,0 +1,14 @@
+{
+  "skills": [
+    "git-workflow",
+    "pr-review-method",
+    "testing-ci"
+  ],
+  "query": "Address the new review feedback on PR #1 and get the PR green.",
+  "files": [],
+  "expected_behavior": [
+    "Treats the PR-directed request as authority to edit, validate, commit, push the current PR branch, and verify the published head and exact-head CI without asking for a separate push confirmation.",
+    "Reports workspace changes, local-only commits, remote branch head, PR head, and exact-head checks as distinct states.",
+    "Does not merge the PR, post review comments, resolve threads, force-push, or create another PR without separate authorization."
+  ]
+}

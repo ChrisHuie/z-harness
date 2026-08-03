@@ -1,4 +1,4 @@
-verified: 2026-07-14 · sources: references/security.md; docs/research/2026-07-14-security.md (OpenAI data-not-commands; Microsoft spotlighting; Anthropic/Google confirm-before-acting)
+verified: 2026-07-14 · sources: security research pass 2026-07-14, primary URLs in review-prompt's references/security.md (OpenAI data-not-commands; Microsoft spotlighting; Anthropic/Google confirm-before-acting)
 
 # Policy block: untrusted-content
 

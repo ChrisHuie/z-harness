@@ -1,4 +1,4 @@
-verified: 2026-07-14 · sources: docs/research/2026-07-14-security.md §1–§6 (primary URLs inline)
+verified: 2026-07-14 · sources: security research pass 2026-07-14 §1–§6 (primary URLs inline)
 
 # Security — injection-resistant authoring
 

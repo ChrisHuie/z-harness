@@ -78,5 +78,5 @@ description: Deciding whether a test, a guard, or a green check proves anything 
   tell**.
 
 **Read `references/deferred.md` before answering if the green turns on the environment,
-the runner's own verdict, a self-clearing detector, an assertion shape, a fixture, or an
-enforcement channel.**
+the runner's own verdict, a self-clearing detector, an assertion shape, a fixture, an
+enforcement channel, or a dead test.**

@@ -29,12 +29,15 @@
 # 3. the harness record — docs only, not the 51 MB of backups and agent transcripts
 !harness-audit-20260801/
 !harness-audit-20260801/*.md
+!harness-audit-20260801/*.tgz
 !harness-audit-20260801/scripts/
 !harness-audit-20260801/scripts/**
 !harness-audit-20260801/routing/
 !harness-audit-20260801/routing/**
 !harness-audit-20260801/baselines/
 !harness-audit-20260801/baselines/**
+!harness-audit-20260801/retired-skill-references/
+!harness-audit-20260801/retired-skill-references/**
 
 # 4. never, regardless of the above
 .credentials.json
@@ -60,8 +63,8 @@ hooks/*events*.jsonl
 !harness-audit-20260801/misfiled-memories/**
 !harness-audit-20260801/PRE-MIGRATION-BACKUP/
 !harness-audit-20260801/PRE-MIGRATION-BACKUP/**
-!harness-audit-20260801/PREINSTALL-20260802-085154/
-!harness-audit-20260801/PREINSTALL-20260802-085154/**
+# PREINSTALL-20260802-085154/ tree tarred 2026-08-02 (reserved-basename collision, row 25);
+# bytes preserved in PREINSTALL-20260802-085154.tgz via the *.tgz line above
 !harness-audit-20260801/PREMEM-20260802-154631/
 !harness-audit-20260801/PREMEM-20260802-154631/**
 !harness-audit-20260801/PREHOOKS-20260802-154226/

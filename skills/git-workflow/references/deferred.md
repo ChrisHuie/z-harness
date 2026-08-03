@@ -7,8 +7,7 @@ runtime. They are out of `SKILL.md` because the body is full, not because they a
 Read this file when a commit is aborting inside a hook you did not write, when a push is
 about to happen, or before running any tool that rewrites source across many files.
 
-The five names cited from the body are marked `[body]`. The body also names this file's sibling,
-`claude-md-lines.md` — the proposed always-on lines, the byte accounting, and the hook spec.
+The five names cited from the body are marked `[body]`.
 
 **Read-only convenience, moved out of the body 2026-08-02** (the body's scope is operations that
 CHANGE a repo and misreport it): read a branch-only corpus with `git show <branch>:<path>` — no
@@ -68,8 +67,8 @@ the always-on banned-words rule this path is the recovery for.
 
 **`zsh` treats a bare `$r:path` as the `:s` history modifier**, so braces are load-bearing inside
 a `git show` loop: brace `${r}:path` and git goes fatal on a bogus argument instead of silently
-reading the wrong object. Registry R287 (rank B) — moved here from the body 2026-08-02 to pay for
-naming this file's sibling `claude-md-lines.md`.
+reading the wrong object. Registry R287 (rank B) — moved here from the body 2026-08-02 to keep
+the body at cap.
 
 ---
 
@@ -108,10 +107,10 @@ channels load on the same request, so the copy is paid twice.
   `gh pr checks` for CI's actual verdict.
 - `:105-109` — never run a bulk auto-rewriter over source without per-site review.
 
-**Not yet always-on, and this body no longer carries it:** the empty-grep rule (*an empty
-result set is a hypothesis about your matcher; POSIX-ERE silently ignores `\b` and returns
-empty rather than erroring — use `-P`*). Registry R001 routes it to `~/.claude/CLAUDE.md`;
-it is **not in the live file yet**. Until that line lands, the rule is delivered by nothing
-— see `claude-md-lines.md` block 1. The installed description still advertises it
-(``git grep -P` vs `-E``), which becomes an R1 anchor failure the moment the narrowed
-description replaces it.
+**Delivered twice as of 2026-08-02, and this body deliberately carries neither copy:** the
+empty-grep rule (*an empty result set is a hypothesis about your matcher; POSIX-ERE silently
+ignores `\b`*) is always-on in `~/.claude/CLAUDE.md` (Verification), and a `git grep -E` with
+a PCRE-only atom is DENIED at command time by `hooks/guards/git_grep_engine_guard.py` via
+`bash_command_guard.py`. The always-on line stays deliberately: the hook fires after the
+command is composed; the line pre-empts the denied-call round trip. Do not re-add the rule
+here — a third copy is the R2 defect.

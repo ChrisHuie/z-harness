@@ -81,4 +81,4 @@ breaks CI.
 
 **Read `references/deferred.md` first if formatters may be fighting, a push needs per-push
 confirmation, or you are sweeping a bulk rewrite** — also the pre-commit stash cache path
-and the zsh `:s` brace trap. `references/claude-md-lines.md`: proposed always-on lines.
+and the zsh `:s` brace trap.

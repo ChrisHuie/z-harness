@@ -6,8 +6,8 @@ description: Design-time rules for systems where trust boundaries, irreversible 
 # System design
 
 **If the design turns on typed boundaries and errors, config as policy, or any topic below
-that this body does not already answer — Read `references/deferred.md` first.** It holds 72
-further rank-A rules; this body holds 23.
+that this body does not already answer — Read `references/deferred.md` first.** It holds 74
+further rules (38 rank-A, 36 rank-B); this body holds 23.
 
 ## What you may own
 

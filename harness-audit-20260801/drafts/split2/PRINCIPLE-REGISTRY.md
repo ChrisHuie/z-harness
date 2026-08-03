@@ -1,5 +1,13 @@
 # MASTER PRINCIPLE REGISTRY
 
+> **CORRECTIONS 2026-08-02 (post-ship audit).** (1) R229's Ran/Not-run footer shipped in
+> `outbound-drafts`, not `pr-review-method` — the note's "keep one copy there" resolved the
+> other way. (2) R273/R274 shipped IN `prebid-adcp` (headroom existed) despite OUT here.
+> (3) §16.7's sanctioned R029/R073 duplicate was later cut on its own test
+> (`drafts/AUDIT-FIXES.md` F22). (4) §16.4's homeless block (R288–R301) landed when
+> `system-design` was built after this registry froze. Counts and byte figures are
+> point-in-time.
+
 Every distinct principle from all four extraction passes, exactly once, with exactly one
 destination. Deduplicated on **mechanism**, not wording.
 

@@ -2,8 +2,9 @@
 
 Repo-agnostic. Derived from 6 agents in wave 11 (`reports/report-{router,skillaudit,planaudit,
 trigger,structure,diet}.md`). **Nothing has been executed.** Backup taken:
-`PRE-MIGRATION-BACKUP/` (257 files) — `~/.claude` is NOT a git repo, so deletions are
-otherwise unrecoverable.
+`PRE-MIGRATION-BACKUP/` (257 files) — `~/.claude` is NOT a git repo *(true at planning
+time; a clone of `ChrisHuie/z-harness` since 2026-08-02)*, so deletions were otherwise
+unrecoverable.
 
 ---
 

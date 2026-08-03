@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 r"""H4 - PreToolUse(Bash) guard: unbraced `$VAR:<zsh modifier>` in a git rev:path.
 
-NOT INSTALLED. Reference implementation + spec. Registration (NOT applied):
+LIVE on every Bash call via bash_command_guard.py (settings.json -> PreToolUse) — do NOT
+register this file separately; a second registration double-spawns on every Bash call.
+Standalone registration, only if bash_command_guard.py is ever removed:
 
   "PreToolUse": [{ "matcher": "Bash",
     "hooks": [{ "type": "command",

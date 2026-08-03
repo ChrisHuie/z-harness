@@ -1,5 +1,8 @@
 # Cross-skill audit — fix pass, 2026-08-02
 
+> **CORRECTION 2026-08-02 (post-ship audit):** F30's "7/7 resolve" shipped as 6/7 — the
+> body pointer omitted the `Existing tests` topic. Fixed in the post-ship truth sweep.
+
 Applied against `drafts/final/`. Nothing outside `drafts/` was touched; `~/.claude/CLAUDE.md`
 and `~/.claude/skills/` are unchanged. Findings are `CROSS-SKILL-AUDIT.md` F-numbers.
 

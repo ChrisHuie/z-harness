@@ -17,12 +17,12 @@ verified: 2026-07-14 · sources: prompt-craft §4; example-corpus §2/§3/§10; 
 - [ ] Copy-able checklists for multi-step flows; task→outcome table where the skill covers many operations.
 - [ ] Degrees-of-freedom split: judgment → prose; deterministic/fragile → exact scripts ("Run exactly…, do not modify"); scripts solve-don't-punt, no voodoo constants, `--help`-first.
 - [ ] References: one level deep; ToC for any reference >100 lines; domain-partitioned so only the relevant one loads; no time-sensitive phrasing.
-- [ ] Frontmatter: portable core only in canonical source (name, description, license, compatibility, metadata.version); harness extras (allowed-tools, argument-hint) via per-target overlay — now real: `skills/<name>/overlays/<target>.yaml`, merged by @prompt-harness/emitters (plan 2026-07-14-phase-2 DoD-5).
+- [ ] Frontmatter: portable core only in canonical source (name, description, license, compatibility, metadata.version); harness extras (allowed-tools, argument-hint) via per-target overlay (`skills/<name>/overlays/<target>.yaml`); in a live harness directory, harness keys are written inline instead (craft-skill Step 6).
 
 ## Quality gates
 
 - [ ] Eval scenarios existed BEFORE this body (evals-first); baseline captured.
-- [ ] Sweep against references/anti-patterns.md (all 24 rows).
+- [ ] Sweep against references/anti-patterns.md (every row of the current catalog).
 - [ ] Fresh-session exercise (Claude A/B): author never grades their own trigger behavior.
 - [ ] Budgets: description within listing caps; body within compaction re-attach budgets.
 - [ ] Security: ingests external content? → untrusted-content block present. Destructive tools? → approval gate. Narrowest tool/dir scope declared.

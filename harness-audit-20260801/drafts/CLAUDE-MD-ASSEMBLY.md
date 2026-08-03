@@ -1,5 +1,9 @@
 # `~/.claude/CLAUDE.md` — the assembly. NOT APPLIED.
 
+> **APPLIED 2026-08-02.** The live file carries §A, every §B row, §C's absentees, and §D's
+> surviving cuts; §E's diet remainder stayed open (file shipped at 219 lines). The header
+> above is historical.
+
 Live file: 10,368 B, mtime Aug 1 21:35. Untouched.
 Revert point: `PREINSTALL-20260802-085154/CLAUDE.md`.
 

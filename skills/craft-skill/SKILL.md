@@ -43,7 +43,7 @@ Each `expected_behavior` entry is an observable check a judge can grade from a t
 
 ## Step 5 — Split references and scripts by degrees of freedom
 
-Judgment work stays prose (references the body routes to); deterministic or fragile work becomes exact scripts ("Run exactly …, do not modify"), solve-don't-punt, no voodoo constants, `--help` first. References one level deep, domain-partitioned so only the relevant one loads, with a ToC past 100 lines. A small skill needs neither directory — an empty split is a correct output, not a gap. In a repo with a shared references corpus and manifest convention (like this one), write `references.manifest` lines pointing at canonical paths instead of copying files.
+Judgment work stays prose (references the body routes to); deterministic or fragile work becomes exact scripts ("Run exactly …, do not modify"), solve-don't-punt, no voodoo constants, `--help` first. References one level deep, domain-partitioned so only the relevant one loads, with a ToC past 100 lines. A small skill needs neither directory — an empty split is a correct output, not a gap. In a repo with a shared references corpus and a manifest convention, write `references.manifest` lines pointing at canonical paths instead of copying files; in this harness, references are copied per skill and copies must stay byte-identical.
 
 ## Step 6 — Frontmatter portable core + harness overlay
 

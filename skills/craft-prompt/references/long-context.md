@@ -1,4 +1,4 @@
-verified: 2026-07-14 · sources: docs/research/2026-07-13-example-corpus.md §1.6 (Anthropic wrapper + quote-grounding verbatim; OpenAI 5.2 re-grounding; Google anchor)
+verified: 2026-07-14 · sources: example-corpus research pass 2026-07-13 §1.6 (Anthropic wrapper + quote-grounding verbatim; OpenAI 5.2 re-grounding; Google anchor)
 conformance: craft-prompt evals 016–018
 
 # Policy block: long-context

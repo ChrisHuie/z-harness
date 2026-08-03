@@ -1,6 +1,6 @@
 # Displaced from the `agent-dispatch` body
 
-The body measures 4,984 B against a 5,000 B cap. Twenty-one of the registry's 26 IN rows
+The body sits at the 5,000 B cap. Twenty-one of the registry's 26 IN rows
 fit; five did not, and six MACHINE rows were judged non-dispatch or duplicative. Nothing
 here is retracted — each row is rank-tagged and carries its mechanism, so promoting one into
 the body is a straight swap, not a rewrite.

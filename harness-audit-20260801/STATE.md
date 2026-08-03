@@ -58,7 +58,11 @@ descriptions in `msg[1]`**. The harness loads at user level regardless of direct
 
 ## Revert
 
-Nothing was destroyed. `~/.claude` is not a git repo; these are the only nets:
+> **Amended 2026-08-02 (post-git):** `~/.claude` is now a clone of `ChrisHuie/z-harness` —
+> git history is the primary revert net (baseline tag `pre-remediation-20260802`). The
+> tables below are the pre-git nets.
+
+Nothing was destroyed. These are the pre-git nets:
 
 | backup | covers |
 |---|---|

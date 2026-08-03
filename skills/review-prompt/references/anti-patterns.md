@@ -23,7 +23,7 @@ The consolidated authoring catalog. `review-prompt`'s checklist derives from THI
 | 13 | Volatile tokens in stable blocks | timestamps/run-values kill prefix caching | ✅ regex |
 | 14 | Time-sensitive phrasing | "before August 2025…" rots; use collapsed old-patterns sections | ✅ regex |
 | 15 | Mixed markup registers | XML and MD interleaved inconsistently → boundary ambiguity | ✅ structure |
-| 16 | Spec violations | name≠dir, description >1024, reserved words, body >500 lines | ✅ skills-ref+checks |
+| 16 | Spec violations | name≠dir, description >400-char house cap (spec ceiling 1024), reserved words, body >500 lines | ✅ skills-ref+checks |
 
 ## Injection wing (17–19) — all ▲
 

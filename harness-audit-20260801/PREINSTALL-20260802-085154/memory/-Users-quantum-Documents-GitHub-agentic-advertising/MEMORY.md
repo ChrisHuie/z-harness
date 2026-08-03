@@ -1,5 +1,0 @@
-- [Iterative planning preference](feedback_iterative_planning.md) — user wants multiple planning passes + concrete previews before approving major work; rejects hasty ExitPlanMode
-- [Opus subagent verification](feedback_opus_verification.md) — for comprehensive plans, user directs Opus subagents with max thinking; caught 35+ findings single-pass missed
-- [Project: v1/v2 documentation framework](project_agentic_advertising.md) — agentic-advertising is markdown+YAML+JSONSchema (v1) plus future React viewer (v2); not a runnable system
-- [Storyboard run methodology + Q-006 patch](project_storyboard_run_methodology.md) — reproducible recipe in findings/2026-05-10.../README.md; Q-006 local-only patch verbatim in questions/Q-006-...md (do NOT propose upstream); framework's reactive pattern documented
-- [Issue drafts must be neutral](feedback_issue_draft_neutrality.md) — no "Recommended" sections in issue bodies / RFC docs / briefings for group decisions; present options + tradeoffs only

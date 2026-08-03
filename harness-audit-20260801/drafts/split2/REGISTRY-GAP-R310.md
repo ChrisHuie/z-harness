@@ -3,6 +3,10 @@
 Continues `PRINCIPLE-REGISTRY.md`'s ID space and format. Nothing in that file, in any skill,
 or in `~/.claude/CLAUDE.md` was edited by this pass.
 
+> **Update 2026-08-02 (post-ship audit):** of the 7 IN rows below, the two CLAUDE.md rows
+> (R317, R319) were applied by the final assembly; the five skill-destined rows (R321,
+> R329, R330, R334, R335) were applied nowhere as of this note.
+
 ## Headline
 
 | | count |

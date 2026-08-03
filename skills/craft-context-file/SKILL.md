@@ -45,7 +45,7 @@ Sweep the emitted file against `references/anti-patterns.md` — minimum rows 11
 
 1. `## Files` — each file written or updated: path, class, measured `N lines, M bytes` against its cap; or the single `no edit needed — <evidence>` line.
 2. `## Routing report` — the per-item lines from Step 5, ending with the budget arithmetic per emitted file.
-3. `## Validation` — checklist self-check and sweep results (rows named); then the gates you name but do not claim: `ph-lint <file>` (this repo's mechanical linter), a review-prompt critique, and a fresh-session behavior check — a session loading only the new file, exercised on a task the rules govern, because the author's session is blind to its own gaps.
+3. `## Validation` — checklist self-check and sweep results (rows named); then the gates you name but do not claim: `python3 hooks/harness_check.py` (this harness's mechanical gate), a review-prompt critique, and a fresh-session behavior check — a session loading only the new file, exercised on a task the rules govern, because the author's session is blind to its own gaps.
 
 ## Cross-file defects the per-file pass cannot see
 

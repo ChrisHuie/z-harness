@@ -22,7 +22,7 @@
     ],
     "defaultMode": "auto"
   },
-  "model": "opus",
+  "model": "fable",
   "hooks": {
     "PostToolUse": [
       {
@@ -30,7 +30,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.claude/hooks/askq_timeout_guard.py"
+            "command": "python3 ~/.claude/hooks/askq_timeout_guard.py",
+            "timeout": 5
           }
         ]
       }
@@ -40,7 +41,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ~/.claude/hooks/stop_hook.sh"
+            "command": "bash ~/.claude/hooks/stop_hook.sh",
+            "timeout": 5
           }
         ]
       }
@@ -51,7 +53,18 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.claude/hooks/bash_command_guard.py"
+            "command": "python3 ~/.claude/hooks/bash_command_guard.py",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/hooks/spawn_preflight_guard.py",
+            "timeout": 5
           }
         ]
       }

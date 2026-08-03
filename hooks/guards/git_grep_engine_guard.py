@@ -20,6 +20,12 @@ MEASURED FACT the guard encodes (git 2.46.1, macOS, this host):
     git grep    'x = \\d'     -> rc=0, correct     (BRE/no flag is FINE - do not flag it)
     git grep -P 'x = \\d'     -> rc=0, correct
 
+Also modeled (2026-08-02, both verified breaking on this host):
+    git -c grep.patternType=extended grep 'x\\b'  -> ERE with no -E flag: DENY on a
+                                                    visible PCRE atom, same mechanism
+    git grep -E -f <file>                        -> pattern invisible to argv: ASK,
+                                                    naming the form as out of scope
+
 Exit codes:  0 = decision emitted on stdout (allow/deny/ask)
              2 = usage error / unknown flag / zero inputs in --selftest
 """
@@ -93,6 +99,21 @@ def split_commands(cmd):
             tok += cmd[i + 1]
             i += 2
             continue
+        if c == "{" and tok.endswith("$"):
+            # ${...} parameter expansion stays inside its token — the zsh guard
+            # scans for braced modifiers; a shredded ${r:t} would be invisible
+            depth = 1
+            tok += c
+            i += 1
+            while i < n and depth:
+                ch = cmd[i]
+                tok += ch
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                i += 1
+            continue
         if cmd.startswith("&&", i) or cmd.startswith("||", i):
             flush_cmd()
             i += 2
@@ -111,9 +132,26 @@ def split_commands(cmd):
     return out
 
 
+SHELL_KEYWORDS = {"do", "then", "else", "elif", "if", "while", "until", "time",
+                  "exec", "command", "builtin", "nocorrect", "noglob"}
+
+
+def strip_shell_keywords(words):
+    """Drop leading shell keywords so `do git ...` still gates on git."""
+    k = 0
+    while k < len(words) and words[k] in SHELL_KEYWORDS:
+        k += 1
+    return words[k:]
+
+
 def git_grep_argv(tokens):
-    """Return the argv slice after `git [-C path] grep`, or None."""
+    """-> (argv slice after `git [-C path|-c cfg] grep`, list of -c config values),
+    or None when this subcommand is not a git grep."""
     words = [t for t, _ in tokens]
+    k0 = 0
+    while k0 < len(words) and words[k0] in SHELL_KEYWORDS:
+        k0 += 1
+    words = words[k0:]
     if not words:
         return None
     j = 0
@@ -123,22 +161,38 @@ def git_grep_argv(tokens):
     if j >= len(words) or words[j] != "git":
         return None
     j += 1
+    configs = []
     while j < len(words) and words[j] in ("-C", "-c", "--git-dir", "--work-tree"):
+        if words[j] == "-c" and j + 1 < len(words):
+            configs.append(words[j + 1])
         j += 2
     if j >= len(words) or words[j] != "grep":
         return None
-    return tokens[j + 1:]
+    return tokens[k0 + j + 1:], configs
+
+
+CONFIG_ENGINE = {"extended": "E", "ere": "E", "perl": "P", "pcre": "P",
+                 "fixed": "F", "basic": "B"}
 
 
 def decide(command):
     """-> (decision, reason). decision in {allow, deny, ask}."""
     for tokens in split_commands(command):
-        argv = git_grep_argv(tokens)
-        if argv is None:
+        got = git_grep_argv(tokens)
+        if got is None:
             continue
+        argv, configs = got
         engine = None
+        engine_src = None
+        for cfg in configs:
+            if cfg.startswith("grep.patternType="):
+                val = cfg.split("=", 1)[1].strip().lower()
+                if val in CONFIG_ENGINE:
+                    engine = CONFIG_ENGINE[val]
+                    engine_src = "config"
         pattern = None
         pattern_q = ""
+        pattern_from_file = False
         k = 0
         while k < len(argv):
             text, quoting = argv[k]
@@ -148,11 +202,16 @@ def decide(command):
                 break
             if ENGINE_P.match(text):
                 engine = "P"
+                engine_src = "flag"
             elif ENGINE_F.match(text):
                 engine = "F"
+                engine_src = "flag"
             elif text in ("--extended-regexp",) or re.match(r"^-[a-zA-Z]*E[a-zA-Z]*$", text):
                 engine = "E"
+                engine_src = "flag"
             elif text in ("-e", "-f"):
+                if text == "-f":
+                    pattern_from_file = True
                 if k + 1 < len(argv):
                     if text == "-e" and pattern is None:
                         pattern, pattern_q = argv[k + 1]
@@ -166,7 +225,17 @@ def decide(command):
                 pattern, pattern_q = text, quoting
             k += 1
 
-        if engine != "E" or pattern is None:
+        if engine != "E":
+            continue
+        engine_desc = "-E" if engine_src == "flag" else "the grep.patternType config"
+        if pattern is None:
+            if pattern_from_file:
+                return ("ask",
+                        "git grep with the ERE engine (%s) and a -f PATTERN FILE: this "
+                        "guard reads argv only and CANNOT see the file's patterns, so a "
+                        "PCRE atom (\\b \\d \\s \\w) in it silently mismatches under ERE. "
+                        "Out of scope for this guard - verify the file's patterns by hand "
+                        "or use -P." % engine_desc)
             continue
         if UNRESOLVED.search(pattern):
             return ("ask",
@@ -177,7 +246,8 @@ def decide(command):
         if PCRE_ONLY.search(pattern):
             atoms = sorted(set(PCRE_ONLY.findall(pattern)))
             return ("deny",
-                    "git grep -E cannot interpret %s. Verified on this host (git 2.46.1): "
+                    "git grep with the ERE engine (selected by " + engine_desc + ") "
+                    "cannot interpret %s. Verified on this host (git 2.46.1): "
                     "`git grep -E 'x = \\d'` returns ZERO hits and exit 1; `git grep -E 'foo\\b'` "
                     "matches literal 'foob' - the WRONG line. An empty result here is evidence "
                     "about the instrument, not about the repo. Re-run with -P "
@@ -218,6 +288,16 @@ FIXTURES = [
      """grep -rnE 'foo\\s+bar' src/""", "allow"),
     ("GREEN -E pattern where the atom is in the PATHSPEC not the pattern",
      """git grep -nE 'TODO' -- 'src/**'""", "allow"),
+    ("RED  UNMODELLED 2026-08-02: ERE selected via -c grep.patternType=extended, no -E flag",
+     """git -c grep.patternType=extended grep -n 'harness\\b' -- README.md""", "deny"),
+    ("ASK  UNMODELLED 2026-08-02: -E with a -f pattern file - guard cannot see the patterns",
+     """git grep -nE -f pats.txt -- src/""", "ask"),
+    ("GREEN patternType=perl via config - the intended engine",
+     """git -c grep.patternType=perl grep 'x\\b' -- src/""", "allow"),
+    ("GREEN -P with a -f pattern file",
+     """git grep -P -f pats.txt -- src/""", "allow"),
+    ("GREEN inside a for/do loop with the BRE engine",
+     """for d in a b; do git grep -n 'x\\b' -- $d; done""", "allow"),
 ]
 
 

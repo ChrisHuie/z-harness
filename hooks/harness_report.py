@@ -75,7 +75,7 @@ TOPIC = {
     "craft-prompt":     None,
     "review-prompt":    None,
 }
-FIRE = re.compile(r'"name":"Skill".{0,300}?"skill":"([a-z0-9-]+)"')
+FIRE = re.compile(r'"name":"Skill".{0,300}?"skill":"([a-z0-9:-]+)"')  # colon: plugin skills
 ATTR = re.compile(r'"attributionSkill":"([a-z0-9-]+)"')
 READ = re.compile(r'"name":"Read".{0,300}?"file_path":"([^"]+)"')
 
@@ -241,6 +241,8 @@ def selftest():
     chk("FIRE matches a real Skill tool_use", FIRE.search(fire_line).group(1), "git-workflow")
     chk("FIRE does NOT match a mention of the word skill",
         FIRE.search('{"text":"I should use the git-workflow skill"}'), None)
+    plug = '{"type":"tool_use","name":"Skill","input":{"skill":"myplugin:deploy"}}'
+    chk("FIRE matches a plugin-form skill name", FIRE.search(plug).group(1), "myplugin:deploy")
     chk("ATTR matches attributionSkill", ATTR.search('{"attributionSkill":"testing-ci"}').group(1), "testing-ci")
     read_line = '{"type":"tool_use","name":"Read","input":{"file_path":"/Users/x/.claude/skills/testing-ci/references/deferred.md"}}'
     chk("READ extracts the path", "references/deferred.md" in READ.search(read_line).group(1), True)

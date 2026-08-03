@@ -55,7 +55,7 @@ Sweep the scaffolded SKILL.md against `references/anti-patterns.md` — every ro
 
 1. `## Evals` — one line per scenario file: filename — the behavior it pins.
 2. `## Files` — every path written, one line each with its role.
-3. `## Validation` — the description quoted verbatim with its character count; the body line count; checklist and sweep results; then the gates you name but do not claim: `ph-lint <dir>/SKILL.md` (this repo) or `skills-ref validate` (where installed), a review-prompt critique, and a fresh-session trigger exercise — the author's session is blind to its own triggering gaps.
+3. `## Validation` — the description quoted verbatim with its character count; the body line count; checklist and sweep results; then the gates you name but do not claim: `python3 hooks/harness_check.py` (this harness's mechanical gate) or `skills-ref validate` (where installed), a review-prompt critique, and a fresh-session trigger exercise — the author's session is blind to its own triggering gaps.
 
 ## Which copy is the doctrine
 

@@ -16,6 +16,10 @@
 !CLAUDE.md
 !settings.json
 !statusline.sh
+!.github/
+!.github/**
+!tools/
+!tools/**
 
 !skills/
 !skills/**

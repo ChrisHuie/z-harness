@@ -171,6 +171,13 @@ EXEC_WRAPPERS = {
         "cfw",
         0,
     ),
+    "caffeinate": (
+        {"-d", "-i", "-s", "-u"},
+        {"-t", "-w"},
+        ("-t", "-w"),
+        "disu",
+        0,
+    ),
 }
 WRAPPER_TERMINAL_OPTIONS = {"--help", "--version"}
 
@@ -676,6 +683,14 @@ FIXTURES = [
      """stdbuf --output L git grep -nE 'harness\\b' -- README.md""", "deny"),
     ("RED  ROUND 10: setsid bundled flags precede the command",
      """setsid -fw git grep -nE 'harness\\b' -- README.md""", "deny"),
+    ("RED  ROUND 11: caffeinate cannot displace git from argv zero",
+     """caffeinate git -c grep.patternType=extended grep -n 'harness\\b' -- README.md""", "deny"),
+    ("RED  ROUND 11: caffeinate bundled flags precede the command",
+     """caffeinate -disu git grep -nE 'harness\\b' -- README.md""", "deny"),
+    ("RED  ROUND 11: caffeinate option argument is not mistaken for the command",
+     """caffeinate -t 30 git grep -nE 'harness\\b' -- README.md""", "deny"),
+    ("GREEN ROUND 11: caffeinate wrapping a non-git command",
+     """caffeinate -i ls -la""", "allow"),
     ("RED  ROUND 10: exec wrappers compose rather than masking one another",
      "env FOO=1 nohup nice git -c grep.patternType=extended "
      "grep -n 'harness\\b' -- README.md", "deny"),

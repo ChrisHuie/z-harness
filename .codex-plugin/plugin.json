@@ -1,0 +1,37 @@
+{
+  "name": "z-harness",
+  "version": "0.1.0",
+  "description": "Portable operating policy, skills, guards, and evidence tools for coding agents.",
+  "author": {
+    "name": "Chris Huie",
+    "url": "https://github.com/ChrisHuie"
+  },
+  "homepage": "https://github.com/ChrisHuie/z-harness",
+  "repository": "https://github.com/ChrisHuie/z-harness",
+  "keywords": [
+    "agents",
+    "codex",
+    "claude-code",
+    "skills",
+    "hooks"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "z-harness",
+    "shortDescription": "A portable operating harness for coding agents",
+    "longDescription": "Share operating policy, reusable skills, safety guards, project memory, and evidence tooling across Codex and Claude Code.",
+    "developerName": "Chris Huie",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/ChrisHuie/z-harness",
+    "defaultPrompt": [
+      "Use z-harness to plan and implement this change.",
+      "Use z-harness to review this pull request.",
+      "Use z-harness to prove the relevant checks catch regressions."
+    ],
+    "brandColor": "#10A37F"
+  }
+}

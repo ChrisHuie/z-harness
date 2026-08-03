@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""spawn_preflight_guard — PreToolUse gate on the agent-spawn tools (Agent|Task).
+"""spawn_preflight_guard — PreToolUse gate on Claude and Codex agent-spawn tools.
 
-The rule this mechanizes (previously prose-only in CLAUDE.md): preflight EVERY
+The shared AGENTS.md rule this mechanizes: preflight EVERY
 dispatch. At 100% disk every command fails ENOSPC on unrelated paths and
 mutation agents emit false findings — infra failure is neither pass nor fail.
 `agent-dispatch`'s own body: "a preflight written as prose is a reminder, not a
@@ -14,16 +14,21 @@ the sealed system volume, not where files land; elsewhere `/`).
   else                           -> allow, silent
 
 Docker is deliberately NOT probed here: the hook cannot know whether the agent
-needs a DB, and `docker info` adds latency to every spawn. The CLAUDE.md
+needs a DB, and `docker info` adds latency to every spawn. The shared AGENTS.md
 preflight line keeps `docker info` for DB-needing dispatches.
 
 Env overrides (selftest + tuning):
   SPAWN_GUARD_DF_PCT   integer 0-100, replaces the live df reading
   SPAWN_GUARD_DENY_PCT / SPAWN_GUARD_WARN_PCT
 
-Contract (same as bash_command_guard, verified in-binary 2.1.220): stdout JSON
+Claude contract (verified in-binary 2.1.220): stdout JSON
 {"hookSpecificOutput": {"hookEventName": "PreToolUse",
  "permissionDecision": "deny|ask|allow", "permissionDecisionReason": "..."}}
+
+Codex does not support `permissionDecision: "ask"` in PreToolUse. With
+`--runtime codex`, both the warn and deny bands therefore emit `deny`; the user can
+inspect capacity and retry. Silently proceeding would turn an unreadable safety check
+into a pass.
 
 Exit codes: 0 decision emitted or out of scope · 1 selftest failure ·
 2 usage error / unreadable df.
@@ -34,8 +39,9 @@ import re
 import subprocess
 import sys
 
-VERSION = "1.0.0"
-SPAWN_TOOLS = {"Agent", "Task"}
+VERSION = "1.1.0"
+SPAWN_TOOLS = {"Agent", "Task", "spawn_agent"}
+RUNTIMES = {"claude", "codex"}
 DATA_VOLUME = "/System/Volumes/Data" if sys.platform == "darwin" else "/"
 
 
@@ -108,29 +114,36 @@ def selftest():
     print(f"  {'PASS' if ok else 'FAIL'} out-of-scope tool: silent exit 0")
     payload = {"tool_name": "Agent", "tool_input": {"prompt": "x"}}
     os.environ["SPAWN_GUARD_DF_PCT"] = "99"
-    rc, out = run_payload(payload)
+    rc, out = run_payload(payload, runtime="claude")
     del os.environ["SPAWN_GUARD_DF_PCT"]
     ok = rc == 0 and '"permissionDecision": "deny"' in out
     bad += (not ok)
     print(f"  {'PASS' if ok else 'FAIL'} Agent spawn at 99%: deny JSON on stdout")
+    payload = {"tool_name": "spawn_agent", "tool_input": {"message": "x"}}
+    os.environ["SPAWN_GUARD_DF_PCT"] = "92"
+    rc, out = run_payload(payload, runtime="codex")
+    del os.environ["SPAWN_GUARD_DF_PCT"]
+    ok = rc == 0 and '"permissionDecision": "deny"' in out and "fails closed" in out
+    bad += (not ok)
+    print(f"  {'PASS' if ok else 'FAIL'} Codex spawn at 92%: unsupported ask maps to deny")
     print(f"\n  selftest: {bad} failure(s)")
     return 1 if bad else 0
 
 
-def run_payload(payload):
+def run_payload(payload, runtime="claude"):
     """In-process hook-mode run -> (exit_code, stdout_text)."""
     import io
     buf = io.StringIO()
     old = sys.stdout
     sys.stdout = buf
     try:
-        rc = hook_mode(json.dumps(payload))
+        rc = hook_mode(json.dumps(payload), runtime=runtime)
     finally:
         sys.stdout = old
     return rc, buf.getvalue()
 
 
-def hook_mode(raw):
+def hook_mode(raw, runtime="claude"):
     if not raw.strip():
         sys.stderr.write("spawn_preflight_guard: empty stdin\n")
         return 2
@@ -144,6 +157,10 @@ def hook_mode(raw):
     decision, reason = decide(data_volume_use_pct())
     if decision == "allow":
         return 0
+    if runtime == "codex" and decision == "ask":
+        decision = "deny"
+        reason += (" Codex PreToolUse cannot request confirmation, so z-harness "
+                   "fails closed; inspect capacity and retry the spawn.")
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
         "permissionDecision": decision,
@@ -153,6 +170,13 @@ def hook_mode(raw):
 
 def main(argv):
     args = argv[1:]
+    runtime = "claude"
+    if len(args) >= 2 and args[0] == "--runtime":
+        runtime = args[1]
+        args = args[2:]
+        if runtime not in RUNTIMES:
+            sys.stderr.write(f"unknown runtime: {runtime!r}; choose claude or codex\n")
+            return 2
     if args:
         if args[0] in ("-h", "--help"):
             print(__doc__)
@@ -164,7 +188,7 @@ def main(argv):
             return selftest()
         sys.stderr.write(f"unknown argument: {args[0]!r}\nrun --help\n")
         return 2
-    return hook_mode(sys.stdin.read())
+    return hook_mode(sys.stdin.read(), runtime=runtime)
 
 
 if __name__ == "__main__":

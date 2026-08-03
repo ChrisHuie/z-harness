@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""bash_command_guard — one PreToolUse spawn, two proven predicates.
+"""bash_command_guard — one Claude/Codex PreToolUse spawn, two proven predicates.
 
 Merged because each guard costs ~23 ms of cold Python spawn on EVERY Bash call;
 two scripts is ~46 ms for no benefit. The predicates are independent and both work
@@ -19,7 +19,9 @@ Guards, each with its own fixtures and red-proof in guards/:
 Precedence: deny > ask > allow. Reasons from every guard that fired are concatenated,
 so a command tripping both is told about both.
 
-Contract (verified in-binary, 2.1.220): PreToolUse reads stdin JSON and emits
+Both runtimes use the same PreToolUse fields and deny shape. The Claude envelope was
+verified in-binary at 2.1.220; the Codex envelope is covered by its hook contract and
+the selftest below. PreToolUse reads stdin JSON and emits
   {"hookSpecificOutput":{"hookEventName":"PreToolUse",
                          "permissionDecision":"deny|ask|allow",
                          "permissionDecisionReason":"..."}}
@@ -29,7 +31,7 @@ import json
 import sys
 import pathlib
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 sys.path.insert(0, str(pathlib.Path(__file__).parent / "guards"))
 
 import zsh_rev_modifier_guard as zsh_guard      # noqa: E402
@@ -81,6 +83,14 @@ def selftest():
     failures += (not ok)
     print(f"  {'PASS' if ok else 'FAIL'} merge              want=deny  got={got:<5} "
           f"both predicates fire, both reasons returned")
+    payload = {"hook_event_name": "PreToolUse", "model": "gpt-test",
+               "tool_name": "Bash", "tool_input": {"command": "git show $sha:tests/x"}}
+    output = evaluate_payload(payload)
+    ok = (output is not None and
+          output["hookSpecificOutput"]["permissionDecision"] == "deny")
+    total += 1
+    failures += (not ok)
+    print(f"  {'PASS' if ok else 'FAIL'} codex-envelope     Bash payload emits deny shape")
     print(f"\n  {total} checks, {failures} failures")
     if total == 0:
         print("  ZERO CHECKS RAN — treating as failure")
@@ -114,20 +124,26 @@ def main():
               file=sys.stderr)
         return 2
 
+    output = evaluate_payload(payload)
+    if output is not None:
+        print(json.dumps(output))
+    return 0
+
+
+def evaluate_payload(payload):
+    """Return a hook output object for a blocked Bash call, otherwise None."""
     if payload.get("tool_name") != "Bash":
-        return 0
+        return None
     command = (payload.get("tool_input") or {}).get("command", "")
     if not isinstance(command, str) or not command:
-        return 0
-
+        return None
     decision, reason = decide(command)
     if decision == "allow":
-        return 0
-    print(json.dumps({"hookSpecificOutput": {
+        return None
+    return {"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
         "permissionDecision": decision,
-        "permissionDecisionReason": reason}}))
-    return 0
+        "permissionDecisionReason": reason}}
 
 
 if __name__ == "__main__":

@@ -13,11 +13,19 @@
 
 # 2. un-ignore the authored surface (dirs must be re-included before their contents)
 !.gitignore
+!AGENTS.md
 !CLAUDE.md
+!README.md
 !settings.json
 !statusline.sh
 !.github/
 !.github/**
+!.codex-plugin/
+!.codex-plugin/**
+!.agents/
+!.agents/**
+!docs/
+!docs/**
 !tools/
 !tools/**
 

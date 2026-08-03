@@ -3,7 +3,7 @@
 
 Runs from either clone (repo root auto-detected from this file's location). Checks:
 
-  C1  guard/report selftests all exit 0
+  C1  guard/report/accounting selftests all exit 0
   C2  shared-corpus reference copies are byte-identical across skills, and any
       basename appearing in >=2 skills is either SHARED or explicitly PER_SKILL —
       an unknown multi-skill basename fails loud
@@ -14,12 +14,14 @@ Runs from either clone (repo root auto-detected from this file's location). Chec
   C5  method-skill bodies <= 5,000 chars after frontmatter; authoring-skill
       bodies <= 500 lines
   C6  stale-claim tripwires: patterns that once shipped false stay at zero in
-      live channels (skills/, hooks/, CLAUDE.md)
-  C7  anchors: routing-table skills exist; settings.json hook commands resolve;
-      [local] cited record paths exist, `timeout` still absent, askq binary
+      live channels (skills/, hooks/, tools/, AGENTS.md, CLAUDE.md)
+  C7  anchors: routing-table skills exist; Claude and Codex hook commands resolve;
+      [local] original audit paths exist, `timeout` still absent, askq binary
       anchors hold
   C8  reserved context basenames (CLAUDE.md/AGENTS.md/GEMINI.md) exist nowhere
       but the repo root
+  C9  Codex package contract: manifest, marketplace, hook config, context bridges,
+      and their size budgets are internally consistent
 
 Exit codes: 0 all checks pass · 1 one or more checks failed · 2 usage error or
 zero inputs (an empty scan set is an error, never a clean verdict).
@@ -37,7 +39,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "1.0.0"
+VERSION = "2.0.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 METHOD_SKILLS = ["git-workflow", "pr-review-method", "testing-ci", "agent-dispatch",
@@ -111,6 +113,8 @@ class Run:
                   ("askq_timeout_guard", ["hooks/askq_timeout_guard.py", "--selftest"]),
                   ("harness_report", ["hooks/harness_report.py", "--selftest"]),
                   ("cc-cost", ["tools/cc-cost.py", "--selftest"]),
+                  ("codex-cost", ["tools/codex-cost.py", "--selftest"]),
+                  ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"]),
                   ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"])]
         for name, cmd in suites:
             p = subprocess.run([sys.executable, os.path.join(self.root, cmd[0])] + cmd[1:],
@@ -194,13 +198,14 @@ class Run:
     def c6_stale_patterns(self):
         me = os.path.abspath(__file__)
         targets = []
-        for rel in ("skills", "hooks"):
+        for rel in ("skills", "hooks", "tools"):
             for dirpath, _dirs, files in os.walk(os.path.join(self.root, rel)):
                 if "__pycache__" in dirpath:
                     continue
                 targets += [os.path.join(dirpath, f) for f in files
                             if not f.endswith((".pyc", ".jsonl"))]
-        targets.append(os.path.join(self.root, "CLAUDE.md"))
+        targets += [os.path.join(self.root, name) for name in ("AGENTS.md", "CLAUDE.md")
+                    if os.path.isfile(os.path.join(self.root, name))]
         targets = [t for t in targets if os.path.abspath(t) != me]
         if not targets:
             print("  FATAL C6: zero files in scan set")
@@ -231,12 +236,37 @@ class Run:
                     self.result("C7", os.path.isfile(p), f"settings {event} -> {rel}")
                     self.result("C7", "timeout" in h,
                                 f"settings {event} {rel}: timeout set")
+        codex_hooks_path = os.path.join(self.root, "hooks", "hooks.json")
+        try:
+            codex_hooks = json.load(open(codex_hooks_path))
+        except Exception as exc:
+            self.result("C7", False, f"Codex hooks config parses: {exc}")
+            codex_hooks = {}
+        codex_commands = 0
+        for event, entries in codex_hooks.get("hooks", {}).items():
+            for entry in entries:
+                for hook in entry.get("hooks", []):
+                    command = hook.get("command", "")
+                    match = re.search(r"\$\{PLUGIN_ROOT\}/([\w./\-]+\.(?:py|sh))", command)
+                    if not match:
+                        self.result("C7", False,
+                                    f"Codex {event}: command has no PLUGIN_ROOT script anchor")
+                        continue
+                    codex_commands += 1
+                    rel = match.group(1)
+                    self.result("C7", os.path.isfile(os.path.join(self.root, rel)),
+                                f"Codex {event} -> {rel}")
+                    self.result("C7", "timeout" in hook,
+                                f"Codex {event} {rel}: timeout set")
+        self.result("C7", codex_commands > 0,
+                    f"Codex hook commands discovered: {codex_commands}")
         if not self.ci:
             fp = os.path.expanduser("~/.claude/harness-audit-20260801/FINDINGS.md")
-            self.result("C7", os.path.isfile(fp), "[local] CLAUDE.md-cited FINDINGS.md exists")
+            self.result("C7", os.path.isfile(fp),
+                        "[local] original harness-audit FINDINGS.md exists")
             w = subprocess.run(["which", "timeout"], capture_output=True)
             self.result("C7", w.returncode != 0,
-                        "[local] `timeout` still absent (CLAUDE.md claims it is)")
+                        "[local] `timeout` still absent (AGENTS.md claims it is)")
             v = subprocess.run([sys.executable,
                                 os.path.join(self.root, "hooks/askq_timeout_guard.py"),
                                 "--verify-harness"], capture_output=True)
@@ -252,9 +282,66 @@ class Run:
             for f in files:
                 if f.lower() in RESERVED_BASENAMES:
                     p = os.path.join(dirpath, f)
-                    if os.path.abspath(p) != os.path.join(self.root, "CLAUDE.md"):
+                    if os.path.dirname(os.path.abspath(p)) != os.path.abspath(self.root):
                         hits.append(os.path.relpath(p, self.root))
         self.result("C8", not hits, f"reserved basenames outside root: {hits or 'none'}")
+
+    # ---- C9 ----------------------------------------------------------------
+    def c9_codex_package(self):
+        manifest_path = os.path.join(self.root, ".codex-plugin", "plugin.json")
+        marketplace_path = os.path.join(self.root, ".agents", "plugins", "marketplace.json")
+        try:
+            manifest = json.load(open(manifest_path))
+        except Exception as exc:
+            self.result("C9", False, f"plugin manifest parses: {exc}")
+            manifest = {}
+        plugin_name = manifest.get("name")
+        self.result("C9", bool(re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*",
+                                           str(plugin_name or ""))),
+                    f"manifest name is kebab-case: {plugin_name!r}")
+        self.result("C9", bool(re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?",
+                                           str(manifest.get("version", "")))),
+                    f"manifest version is semver: {manifest.get('version')!r}")
+        self.result("C9", manifest.get("skills") == "./skills/",
+                    "manifest skills path is ./skills/")
+        self.result("C9", os.path.isfile(os.path.join(self.root, "hooks", "hooks.json")),
+                    "default plugin hook config exists")
+
+        try:
+            marketplace = json.load(open(marketplace_path))
+        except Exception as exc:
+            self.result("C9", False, f"marketplace parses: {exc}")
+            marketplace = {}
+        entries = [entry for entry in marketplace.get("plugins", [])
+                   if entry.get("name") == plugin_name]
+        self.result("C9", len(entries) == 1,
+                    f"marketplace has one {plugin_name!r} entry: {len(entries)}")
+        if entries:
+            source = entries[0].get("source") or {}
+            url = source.get("url", "")
+            self.result("C9", source.get("source") == "url" and
+                        url.startswith("https://github.com/") and "@" not in url.split("//", 1)[-1],
+                        "marketplace uses a credential-free GitHub URL source")
+            policy = entries[0].get("policy") or {}
+            self.result("C9", policy.get("installation") == "AVAILABLE" and
+                        policy.get("authentication") == "ON_INSTALL",
+                        "marketplace install/auth policy is explicit")
+
+        agents_path = os.path.join(self.root, "AGENTS.md")
+        claude_path = os.path.join(self.root, "CLAUDE.md")
+        try:
+            agents_bytes = open(agents_path, "rb").read()
+        except OSError:
+            agents_bytes = b""
+        try:
+            claude_text = open(claude_path, encoding="utf-8").read()
+        except OSError:
+            claude_text = ""
+        self.result("C9", 0 < len(agents_bytes) < 32 * 1024,
+                    f"AGENTS.md {len(agents_bytes)} bytes (cap <32768)")
+        self.result("C9", claude_text.startswith("@AGENTS.md\n") and
+                    len(claude_text.splitlines()) < 200,
+                    f"CLAUDE.md bridges AGENTS.md in {len(claude_text.splitlines())} lines")
 
     def run(self):
         print(f"harness_check {VERSION}  root={self.root}  mode={'ci' if self.ci else 'local'}")
@@ -266,6 +353,7 @@ class Run:
         self.c6_stale_patterns()
         self.c7_anchors()
         self.c8_reserved_basenames()
+        self.c9_codex_package()
         print(f"\n  {self.checks} checks, {len(self.failures)} failure(s)")
         if self.checks == 0:
             print("  ZERO CHECKS RAN — error, not a clean verdict")
@@ -313,6 +401,7 @@ def selftest():
         # C8 red: nested reserved basename
         os.makedirs(os.path.join(td, "sub"))
         open(os.path.join(td, "CLAUDE.md"), "w").write("root")
+        open(os.path.join(td, "AGENTS.md"), "w").write("root")
         open(os.path.join(td, "sub", "claude.md"), "w").write("collision")
         open(os.path.join(td, "settings.json"), "w").write("{}")
 
@@ -344,6 +433,10 @@ def selftest():
         r4.c8_reserved_basenames()
         expect_red("C8 goes red on nested claude.md",
                    lambda: any(c == "C8" for c, d in r4.failures))
+        r5 = Run(td, ci=True)
+        r5.c9_codex_package()
+        expect_red("C9 goes red on absent plugin package",
+                   lambda: any(c == "C9" for c, d in r5.failures))
 
     print(f"\n  selftest: {bad} failure(s)")
     return 1 if bad else 0

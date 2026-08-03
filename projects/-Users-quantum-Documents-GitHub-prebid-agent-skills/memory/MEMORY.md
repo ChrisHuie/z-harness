@@ -1,0 +1,11 @@
+- [Subagent model & effort preference](feedback_subagent_model.md) — this project wants max-effort subagents; the session model is already opus, so omit `model` and inherit it per always-on, rather than pinning
+- [Multi-phase execution workflow](feedback_multi_phase_workflow.md) — recommend /compact + create branch before starting execution; user manually approves edits
+- [Push policy](feedback_push_policy.md) — never push (regular or force) without explicit per-action authorization; user controls all pushes to origin
+- [Review rigor](feedback_review_rigor.md) — steelman implementor first; verify each finding against full context before asserting as fact
+- [No blockquote for pasteable text](feedback_no_blockquote_for_pasteable_text.md) — pasteable drafts (PR comments/issues/replies) go in fenced code blocks, never blockquotes
+- [No internal dialogue in public artifacts](feedback_no_internal_dialogue_in_public_artifacts.md) — GitHub-bound text = strict technical detail only; no strategy/framing/editorializing
+- [No PR specifics in memory](feedback_no_pr_specifics_in_memory.md) — per-PR status/file-lists/line-numbers go in PR comments, not memory
+- [No Claude co-author trailer](feedback_no_claude_coauthor_trailer.md) — omit the Co-Authored-By: Claude line on commits (their OSS contributions under their name)
+- [Teal PR #4765 remediation](project_teal_pr_remediation.md) — Java→Go Teal port: Workstream A (fix PR) done, B (harden skills) pending; lesson in port-fidelity
+- [Port-skills hardening program](project_port_skills_hardening.md) — lean-conformance+ADR program; BOTH port skills now v1.0.0 (F6 rtbstack canary validated go2java + minted Rules 47-49); remainder: 1.3/1.5/Phase-2 archetypes/final Teal re-run
+- [Port fidelity vs target norms](reference_port_fidelity_vs_target_norms.md) — target-repo review norms beat literal source fidelity; what a lean Prebid Go adapter PR contains

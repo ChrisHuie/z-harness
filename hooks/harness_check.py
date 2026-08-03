@@ -39,7 +39,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 METHOD_SKILLS = ["git-workflow", "pr-review-method", "testing-ci", "agent-dispatch",
@@ -83,6 +83,10 @@ ROUTING_SKILLS = ["git-workflow", "pr-review-method", "testing-ci", "agent-dispa
                   "craft-prompt", "craft-skill", "craft-context-file", "review-prompt"]
 
 RESERVED_BASENAMES = {"claude.md", "agents.md", "gemini.md"}
+CODEX_HOOK_ENTRY_KEYS = {"matcher", "hooks"}
+CODEX_HOOK_HANDLER_KEYS = {
+    "type", "command", "commandWindows", "timeout", "async", "statusMessage"
+}
 
 
 def body_chars(path):
@@ -266,7 +270,7 @@ class Run:
                         "[local] original harness-audit FINDINGS.md exists")
             w = subprocess.run(["which", "timeout"], capture_output=True)
             self.result("C7", w.returncode != 0,
-                        "[local] `timeout` still absent (AGENTS.md claims it is)")
+                        "[local] `timeout` still absent (CLAUDE.md authoring host claims it is)")
             v = subprocess.run([sys.executable,
                                 os.path.join(self.root, "hooks/askq_timeout_guard.py"),
                                 "--verify-harness"], capture_output=True)
@@ -306,6 +310,47 @@ class Run:
                     "manifest skills path is ./skills/")
         self.result("C9", os.path.isfile(os.path.join(self.root, "hooks", "hooks.json")),
                     "default plugin hook config exists")
+
+        hook_config_path = os.path.join(self.root, "hooks", "hooks.json")
+        try:
+            hook_config = json.load(open(hook_config_path))
+        except Exception as exc:
+            self.result("C9", False, f"hook config parses: {exc}")
+            hook_config = {}
+        unknown_hook_keys = []
+        handler_count = 0
+        hook_events = hook_config.get("hooks", {}) if isinstance(hook_config, dict) else {}
+        if not isinstance(hook_events, dict):
+            unknown_hook_keys.append("hooks: expected object")
+            hook_events = {}
+        for event, entries_for_event in hook_events.items():
+            if not isinstance(entries_for_event, list):
+                unknown_hook_keys.append(f"{event}: expected list")
+                continue
+            for entry_index, entry in enumerate(entries_for_event):
+                if not isinstance(entry, dict):
+                    unknown_hook_keys.append(f"{event}[{entry_index}]: expected object")
+                    continue
+                for key in sorted(set(entry) - CODEX_HOOK_ENTRY_KEYS):
+                    unknown_hook_keys.append(f"{event}[{entry_index}].{key}")
+                handlers = entry.get("hooks", [])
+                if not isinstance(handlers, list):
+                    unknown_hook_keys.append(f"{event}[{entry_index}].hooks: expected list")
+                    continue
+                for handler_index, handler in enumerate(handlers):
+                    if not isinstance(handler, dict):
+                        unknown_hook_keys.append(
+                            f"{event}[{entry_index}].hooks[{handler_index}]: expected object"
+                        )
+                        continue
+                    handler_count += 1
+                    for key in sorted(set(handler) - CODEX_HOOK_HANDLER_KEYS):
+                        unknown_hook_keys.append(
+                            f"{event}[{entry_index}].hooks[{handler_index}].{key}"
+                        )
+        self.result("C9", handler_count > 0 and not unknown_hook_keys,
+                    f"Codex hook keys use installed parser subset across {handler_count} "
+                    f"handler(s): {unknown_hook_keys or 'no unknown keys'}")
 
         try:
             marketplace = json.load(open(marketplace_path))
@@ -437,6 +482,16 @@ def selftest():
         r5.c9_codex_package()
         expect_red("C9 goes red on absent plugin package",
                    lambda: any(c == "C9" for c, d in r5.failures))
+
+        open(os.path.join(td, "hooks", "hooks.json"), "w").write(json.dumps({
+            "hooks": {"SessionStart": [{"hooks": [{
+                "type": "command", "command": "true", "inventedLimit": 1
+            }]}]}
+        }))
+        r6 = Run(td, ci=True)
+        r6.c9_codex_package()
+        expect_red("C9 goes red on unknown Codex hook handler key",
+                   lambda: any(c == "C9" and "inventedLimit" in d for c, d in r6.failures))
 
     print(f"\n  selftest: {bad} failure(s)")
     return 1 if bad else 0

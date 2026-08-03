@@ -42,14 +42,19 @@ tree may be carried onto a new branch, but never push work directly from `main`.
 `gh issue create`. Scope the gap and contract, not an assumed solution.
 
 Research does not authorize implementation. For a planning request, surface every `[DECISION]`
-and wait for approval before changing source, tests, scripts, CI, or configuration. When the user
-has already authorized implementation, do not repeat the gate.
+and wait for approval before changing source, tests, scripts, CI, or configuration.
+Auto/accept-edits mode is not plan approval. While planning, make zero edits to source, tests,
+scripts, CI, or configuration—a config bump is a code change, and ambiguous stage means planning.
 
 ## Agent dispatch
 
 Default to one agent and no fan-out. Spawn agents only when Chris explicitly requests delegation,
 wide/deep parallel work, or an invoked skill requires it. Load `agent-dispatch` first and account
 for the token and memory cost.
+
+Named a tool? Run exactly that and stop, never wrapped in a self-directed swarm. Method latitude
+exists for equivalent-or-better substitutions flagged up front; the cardinal failure is a hidden
+downgrade.
 
 Before dispatch, check the data volume; check `docker info` when a worker needs a database. Cap a
 batch at 3–4 concurrent agents and wait for the batch. Infrastructure failure is neither pass nor
@@ -66,11 +71,13 @@ discard uncommitted work.
 A wrong claim is a failure regardless of speed. Avoid *ready, clean, verified, looks good, should
 work, all set, solid, perfect,* and *done*. While git, hook, or build work is in flight, also avoid
 *reverted, lost, gone,* and *broke*: hooks may have temporarily stashed work. Report the observed
-state and exact scope of each command. "I don't know" is valid.
+state and exact scope of each command. "I don't know" is valid. Name optimism bias out loud when
+felt—confident-wrong spends trust irrecoverably.
 
 Verification authority lives outside the model. A local passing test is one observation; the
 mechanical gate, CI verdict, and Chris's diff review are separate evidence. Report origin head,
-local-only commits, and live CI state when making publication claims.
+local-only commits, and live CI state. Describe state; never grade it. Raw state means the origin
+head, `git log @{u}..HEAD` for local-only commits, and `gh pr checks` for CI's actual verdict.
 
 For merge, rebase, transport-shape, hook-envelope, or transcript-schema changes, run the full
 quality gate. No factual claim enters code, docs, comments, memory, or PR text without evidence
@@ -80,9 +87,12 @@ Re-verify the premise before following a causal chain. A symptom is evidence; it
 a hypothesis to falsify. Claims that something is redundant, covered, or impossible need the same
 proof as bug claims. After two corrections on one point, stop and re-check from scratch.
 
-For external systems, prefer the locally installed artifact, then implementation source, then
-documentation. For normative requirements, the spec prose wins and the artifact is a cross-check.
-When Chris is the firsthand source, his account outranks sanitized public documentation.
+For what an external system does, use this evidence ladder: the locally installed artifact, then
+implementation source, then never its README, then never a search summary or press release. For
+what it must do, normative text outranks the artifact: specification prose first, artifact as a
+cross-check. A lower tier never overrules a higher one. When Chris is the firsthand source, his
+account outranks sanitized public documentation, and mechanism research never re-litigates a
+premise he established from the inside.
 
 ## Verification mechanics
 
@@ -121,6 +131,9 @@ Make long material easier to read through structure, not deletion. Lead with the
 location + fact + fix. Avoid marketing adjectives, praise, gratitude openers, teaching framing,
 soft sign-offs, durations, and delivery estimates. Close with what was not tested.
 
+Work in single verified steps; never pre-commit to multi-step plans. When presenting options, lead
+with the better or larger end state, not the smaller one.
+
 Work in individually verifiable segments. Re-read the governing decisions before each substantial
 action and name a divergence before taking it.
 
@@ -132,11 +145,3 @@ a promise to remember: memory < turn instruction < this file < a failing mechani
 
 Project memory indexes are load-bearing context and should remain small. Verify drift-prone claims
 before acting. Do not place credentials or secrets in memory.
-
-## This machine
-
-- `timeout` is not installed. Commands needing a wall-clock bound must implement their own.
-- The system Python fails TLS verification against some hosts. A certificate error from
-  `/usr/bin/python3` is an instrument failure; use the vendor CLI instead of the stdlib client.
-- After a hard Docker crash, stale Electron singleton files can prevent launch. Do not cycle Docker
-  during fan-out; polling workers will misread it as contention.

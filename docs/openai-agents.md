@@ -33,6 +33,12 @@ codex plugin marketplace add ChrisHuie/z-harness --ref main
 codex plugin add z-harness@z-harness
 ```
 
+The repository is private, so the marketplace fetch requires existing Git HTTPS credentials with
+read access to `ChrisHuie/z-harness`. Authentication remains a user-controlled prerequisite; one
+option is to run `gh auth setup-git` after the user completes `gh auth login`. The C9
+"credential-free URL" gate checks that the marketplace metadata contains no embedded secret. It does
+not make a private repository anonymously readable.
+
 Open a new Codex task after installation. Use `/hooks` in Codex CLI to review and trust each
 z-harness command hook. Non-managed hooks are keyed to their exact definition; after a hook changes,
 Codex marks the new hash for review and skips it until the user trusts it.
@@ -75,12 +81,12 @@ Claude Code live tree.
 | always-on policy | user `CLAUDE.md` imports `AGENTS.md` | native repo `AGENTS.md`; plugin SessionStart elsewhere | same shared policy bytes, runtime addenda separate |
 | skill discovery | `~/.claude/skills/` | plugin `skills` entry | same directories and `SKILL.md` bodies |
 | skill invocation | `Skill` tool / slash command / implicit routing | explicit `$skill-name` or implicit metadata match | equivalent workflow selection, different invocation surface |
-| shell guard | `PreToolUse` matcher `Bash` | `PreToolUse` matcher `Bash` | same input fields and deny output shape |
+| shell guard | `PreToolUse` matcher `Bash`; uncertain patterns may `ask` | `PreToolUse` matcher `Bash`; `ask` maps to `deny` | same predicates, runtime-specific confirmation handling |
 | spawn guard | `Agent|Task`; `ask` or `deny` | `Agent` alias over `spawn_agent`; Codex lacks PreToolUse `ask` | warn/unknown maps to deny in Codex |
 | question timeout | AskUserQuestion exposes `afkTimeoutMs` | no equivalent contract used here | Claude-only; no parity claim |
 | project memory | Claude injects project `MEMORY.md` | SessionStart chooses nearest tracked project index | same authored index, labelled soft/stale in Codex |
 | subagents | Agent/Task and Claude worktree mechanics | native Codex subagents and SubagentStart hook | shared opt-in policy and capacity gate; runtime orchestration differs |
-| cost accounting | requestId/UUID dedupe, max provisional usage | max cumulative snapshot per turn id, replay dedupe | tokens only; no cross-provider price inference |
+| cost accounting | requestId/UUID dedupe, max provisional usage | sums per-request `last_token_usage` once, replay dedupe | tokens only; no cross-provider price inference |
 | skill telemetry | transcript `Skill`/`attributionSkill` evidence | no persisted equivalent asserted | Claude report remains Claude-only |
 | status line | `statusLine` in `settings.json` | product UI/CLI status | no emulation |
 | permissions/model | `settings.json` | user Codex config and active permission mode | deliberately user-controlled and not translated |
@@ -92,11 +98,16 @@ plugin's root `AGENTS.md` is not automatically a global context file, so `hooks/
 adds it as SessionStart developer context.
 
 The adapter checks Codex's active global file and the working directory's applicable `AGENTS.md`
-chain first. If Codex already sees byte-identical policy, the hook omits the copy. This prevents
-the harness source tree or a linked global install from receiving the same policy twice.
+chain first. If Codex already sees byte-identical policy, the hook omits the copy. It also omits
+plugin policy whenever the active Git checkout has `.codex-plugin/plugin.json` with the same plugin
+name. In that checkout the native `AGENTS.md` is authoritative even when its working bytes differ
+from the installed plugin version, preventing simultaneous version-skewed policies.
 
 The adapter also runs for SubagentStart so a spawned context does not depend on an implicit parent
-copy. It never selects a subagent model or widens the parent's sandbox/approval boundary.
+copy. Its matcherless registration covers every subagent type, including internal reviewer threads,
+and constructs the full policy context on every start: `wc -c AGENTS.md` is 8,676 bytes in this
+revision, before the section heading and any project memory. C9 prints the current policy byte
+count. The adapter never selects a subagent model or widens the parent's sandbox/approval boundary.
 
 ## Project-memory projection
 
@@ -122,9 +133,10 @@ Configured events:
 - `PreToolUse` on the `Agent` alias calls `spawn_preflight_guard.py --runtime codex`.
 
 Codex and Claude accept the same `hookSpecificOutput.permissionDecision: "deny"` shape for a Bash
-PreToolUse block. Codex does not currently support `permissionDecision: "ask"` at this event. The
-spawn adapter therefore changes a Claude warning/unknown decision into a Codex deny, with a reason
-that tells the user to inspect capacity and retry.
+PreToolUse block. Codex does not currently support `permissionDecision: "ask"` at this event. Both
+the Bash guard and spawn adapter therefore change a Claude confirmation decision into a Codex deny,
+with a reason that tells the user what to inspect before retrying. This mapping prevents an invalid
+hook response from failing open and allowing the underlying command.
 
 Hooks are guardrails, not a complete security boundary: specialized tool paths can opt out, and a
 PostToolUse hook cannot undo completed side effects. Sandbox and approval policy remain the primary
@@ -132,13 +144,15 @@ Codex authority boundary.
 
 ## Codex token accounting
 
-Codex session JSONL emits cumulative `total_token_usage` snapshots during a turn. Adding all of
-those snapshots overcounts. `tools/codex-cost.py`:
+Codex session JSONL emits cumulative `total_token_usage` across turns and a per-request
+`last_token_usage` alongside each token-count record. Taking a cumulative maximum per turn and then
+summing turns overcounts prior work. `tools/codex-cost.py`:
 
 1. walks every JSONL below `$CODEX_HOME/sessions`;
-2. keys observations by persisted turn id across files;
-3. takes the maximum value of each cumulative usage field per turn;
-4. deduplicates copied/replayed turns;
+2. sums each valid `last_token_usage` record once;
+3. uses persisted turn ids plus cumulative and per-request fields to deduplicate copied/replayed
+   records across files;
+4. filters individual usage records by their persisted timestamp for `--since`;
 5. classifies persisted subagent sessions separately; and
 6. treats zero accounted turns as an error.
 
@@ -188,6 +202,12 @@ and one project with a tracked memory index.
 2. Confirm the plugin remains enabled.
 3. Run the hook's `--selftest` directly from the source checkout.
 4. Do not use `--dangerously-bypass-hook-trust` for ordinary interactive setup.
+
+**Policy appears twice or disagrees with the checkout**
+
+1. Confirm the active Git root has `.codex-plugin/plugin.json` with name `z-harness`.
+2. Run `codex_session_start.py --selftest` to exercise byte-skew suppression.
+3. Start a new task after changing an installed plugin; existing task context cannot be retracted.
 
 **Project memory does not load**
 

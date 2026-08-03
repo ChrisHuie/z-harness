@@ -14,6 +14,11 @@ codex plugin marketplace add ChrisHuie/z-harness --ref main
 codex plugin add z-harness@z-harness
 ```
 
+This repository is private. The marketplace command therefore requires existing Git HTTPS
+credentials that can read `ChrisHuie/z-harness` (for example, a credential helper configured after
+the user completes `gh auth login`, followed by `gh auth setup-git`). The credential-free URL check
+in C9 prevents secrets from being embedded in package metadata; it does not grant repository access.
+
 Start a new Codex task, open `/hooks`, review the z-harness hook definitions, and trust them. Codex
 requires explicit trust for new or changed non-managed hooks; installing the plugin does not bypass
 that boundary.
@@ -52,14 +57,14 @@ same shared policy at both user and project scope.
 | `.agents/plugins/marketplace.json` | Codex | Git-backed marketplace entry for CLI/app installation |
 | `hooks/hooks.json` | Codex | SessionStart/SubagentStart policy injection and PreToolUse guard wiring |
 | `settings.json` | Claude | Claude hooks, permissions, model, status line, and UI settings |
-| `hooks/bash_command_guard.py` | shared | identical deny predicates over the shared PreToolUse Bash envelope |
+| `hooks/bash_command_guard.py` | shared adapter | shared predicates; Codex maps unsupported `ask` results to fail-closed `deny` |
 | `hooks/spawn_preflight_guard.py` | shared adapter | disk-capacity gate; maps unsupported Codex `ask` decisions to fail-closed `deny` |
 | `hooks/askq_timeout_guard.py` | Claude | AskUserQuestion AFK guard; no claimed Codex equivalent |
 | `hooks/codex_session_start.py` | Codex | injects shared policy and nearest tracked project memory without duplicate policy |
 | `hooks/harness_check.py` | shared | mechanical gate over skills, hooks, context files, and plugin packaging |
 | `hooks/harness_report.py` | Claude | transcript evidence for Claude skill firing/reference reads |
 | `tools/cc-cost.py` | Claude | Claude request-deduplicated token accounting |
-| `tools/codex-cost.py` | Codex | Codex turn-deduplicated cumulative token accounting |
+| `tools/codex-cost.py` | Codex | per-request token accounting with copied/replayed record dedupe |
 | `projects/*/memory/` | shared data | authored Claude memory indexes; Codex receives the nearest index as soft context |
 | `harness-audit-20260801/` | record | measurements and decisions behind the original Claude rebuild |
 

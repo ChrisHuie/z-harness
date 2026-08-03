@@ -4,7 +4,8 @@
 Codex loads a repository's AGENTS.md itself. An installed plugin does not make the plugin's
 root AGENTS.md global, so this SessionStart/SubagentStart adapter supplies the same bytes as
 developer context. It suppresses the copy when an applicable AGENTS.md already has identical
-bytes, preventing duplicate policy while working in the harness source tree.
+bytes, or when the active checkout has the same plugin identity and therefore owns its native
+AGENTS.md. That prevents duplicate or version-skewed policy in the harness source tree.
 
 The nearest tracked Claude-style project memory index is added as soft context. Memory is data,
 not authority: the injected header tells the agent to verify drift-prone claims before use.
@@ -15,18 +16,19 @@ missing policy, oversized context, or an unknown argument.
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 SUPPORTED_EVENTS = {"SessionStart", "SubagentStart"}
 MAX_CONTEXT_BYTES = 30_000
 
 
 def project_slug(path):
     """Return the directory spelling used by Claude Code's projects/ store."""
-    return str(Path(path).resolve()).replace("\\", "-").replace("/", "-").replace(":", "-")
+    return re.sub(r"[^A-Za-z0-9]", "-", str(Path(path).resolve()))
 
 
 def ancestors_from(path):
@@ -61,6 +63,33 @@ def applicable_agents_matches(cwd, policy_bytes, codex_home=None):
             if content == policy_bytes:
                 return True
             break
+        if (directory / ".git").exists():
+            break
+    return False
+
+
+def package_name(root):
+    """Return this package's manifest name, or None when no valid identity is available."""
+    try:
+        manifest = json.loads((root / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    name = manifest.get("name") if isinstance(manifest, dict) else None
+    return name if isinstance(name, str) and name else None
+
+
+def matching_plugin_checkout(cwd, expected_name):
+    """True when cwd is inside a Git checkout whose plugin manifest has expected_name."""
+    if not expected_name:
+        return False
+    for directory in ancestors_from(cwd):
+        manifest_path = directory / ".codex-plugin" / "plugin.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            manifest = {}
+        if isinstance(manifest, dict) and manifest.get("name") == expected_name:
+            return True
         if (directory / ".git").exists():
             break
     return False
@@ -108,7 +137,9 @@ def build_context(root, cwd, codex_home=None):
         raise ValueError(f"cannot read shared policy {policy}: {exc}") from exc
 
     sections = []
-    if not applicable_agents_matches(cwd, policy_bytes, codex_home=codex_home):
+    native_checkout = matching_plugin_checkout(cwd, package_name(root))
+    if not native_checkout and not applicable_agents_matches(
+            cwd, policy_bytes, codex_home=codex_home):
         sections.append("# z-harness shared operating policy\n\n" + policy_bytes.decode("utf-8"))
 
     memory = nearest_memory(root, cwd)
@@ -178,7 +209,15 @@ def selftest():
         work.mkdir(parents=True)
         policy = "# policy\n\nrun the exact gate\n"
         (plugin / "AGENTS.md").write_text(policy, encoding="utf-8")
+        (plugin / ".codex-plugin").mkdir()
+        (plugin / ".codex-plugin" / "plugin.json").write_text(
+            json.dumps({"name": "z-harness"}), encoding="utf-8"
+        )
         (base / "work" / "repo" / ".git").mkdir()
+
+        slug_probe = base / ".dot_test" / "dir"
+        check("project slug replaces dots and underscores", project_slug(slug_probe).endswith(
+            "-dot-test-dir"))
 
         context = build_context(plugin, work)
         check("shared policy is emitted outside an identical AGENTS tree", policy.strip() in context)
@@ -198,6 +237,25 @@ def selftest():
         (global_home / "AGENTS.md").write_text(policy, encoding="utf-8")
         context = build_context(plugin, work, codex_home=global_home)
         check("identical global AGENTS.md suppresses duplicate policy", context == "")
+
+        native = base / "native" / "subdir"
+        native.mkdir(parents=True)
+        (base / "native" / ".git").mkdir()
+        (base / "native" / ".codex-plugin").mkdir()
+        (base / "native" / ".codex-plugin" / "plugin.json").write_text(
+            json.dumps({"name": "z-harness"}), encoding="utf-8"
+        )
+        (base / "native" / "AGENTS.md").write_text(
+            "# locally modified policy\n", encoding="utf-8"
+        )
+        context = build_context(plugin, native, codex_home=base / "empty-codex-home")
+        check("matching plugin checkout owns policy despite byte skew", context == "")
+
+        (base / "native" / ".codex-plugin" / "plugin.json").write_text(
+            json.dumps({"name": "different-plugin"}), encoding="utf-8"
+        )
+        context = build_context(plugin, native, codex_home=base / "empty-codex-home")
+        check("different plugin checkout still receives shared policy", policy.strip() in context)
 
         memory = plugin / "projects" / project_slug(base / "work" / "repo") / "memory"
         memory.mkdir(parents=True)

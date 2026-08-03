@@ -20,8 +20,10 @@ Precedence: deny > ask > allow. Reasons from every guard that fired are concaten
 so a command tripping both is told about both.
 
 Both runtimes use the same PreToolUse fields and deny shape. The Claude envelope was
-verified in-binary at 2.1.220; the Codex envelope is covered by its hook contract and
-the selftest below. PreToolUse reads stdin JSON and emits
+verified in-binary at 2.1.220. Codex's installed hook contract accepts only `allow` or
+`deny` for PreToolUse; an unsupported decision fails the hook while allowing the command.
+With `--runtime codex`, an `ask` result therefore maps to `deny`. PreToolUse reads stdin
+JSON and emits
   {"hookSpecificOutput":{"hookEventName":"PreToolUse",
                          "permissionDecision":"deny|ask|allow",
                          "permissionDecisionReason":"..."}}
@@ -31,7 +33,8 @@ import json
 import sys
 import pathlib
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
+RUNTIMES = {"claude", "codex"}
 sys.path.insert(0, str(pathlib.Path(__file__).parent / "guards"))
 
 import zsh_rev_modifier_guard as zsh_guard      # noqa: E402
@@ -91,6 +94,19 @@ def selftest():
     total += 1
     failures += (not ok)
     print(f"  {'PASS' if ok else 'FAIL'} codex-envelope     Bash payload emits deny shape")
+    ask_payload = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "git grep -nE -f patterns.txt -- src/"},
+    }
+    output = evaluate_payload(ask_payload, runtime="codex")
+    decision = (output or {}).get("hookSpecificOutput", {}).get("permissionDecision")
+    reason = (output or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+    ok = decision == "deny" and "fails closed" in reason
+    total += 1
+    failures += (not ok)
+    print(f"  {'PASS' if ok else 'FAIL'} codex-ask-closed   want=deny  got={decision!s:<5} "
+          "unsupported confirmation maps to deny")
     print(f"\n  {total} checks, {failures} failures")
     if total == 0:
         print("  ZERO CHECKS RAN — treating as failure")
@@ -100,6 +116,13 @@ def selftest():
 
 def main():
     args = sys.argv[1:]
+    runtime = "claude"
+    if len(args) >= 2 and args[0] == "--runtime":
+        runtime = args[1]
+        args = args[2:]
+        if runtime not in RUNTIMES:
+            print(f"unknown runtime: {runtime!r}; choose claude or codex", file=sys.stderr)
+            return 2
     if args:
         if args[0] in ("-h", "--help"):
             print(__doc__)
@@ -124,13 +147,13 @@ def main():
               file=sys.stderr)
         return 2
 
-    output = evaluate_payload(payload)
+    output = evaluate_payload(payload, runtime=runtime)
     if output is not None:
         print(json.dumps(output))
     return 0
 
 
-def evaluate_payload(payload):
+def evaluate_payload(payload, runtime="claude"):
     """Return a hook output object for a blocked Bash call, otherwise None."""
     if payload.get("tool_name") != "Bash":
         return None
@@ -140,6 +163,10 @@ def evaluate_payload(payload):
     decision, reason = decide(command)
     if decision == "allow":
         return None
+    if runtime == "codex" and decision == "ask":
+        decision = "deny"
+        reason += (" Codex PreToolUse cannot request confirmation, so z-harness fails closed; "
+                   "inspect the pattern source and retry with an explicit safe command.")
     return {"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
         "permissionDecision": decision,

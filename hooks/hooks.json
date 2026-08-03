@@ -9,8 +9,7 @@
             "type": "command",
             "command": "python3 \"${PLUGIN_ROOT}/hooks/codex_session_start.py\"",
             "timeout": 5,
-            "statusMessage": "Loading z-harness policy and project memory",
-            "additionalContextLimit": 30000
+            "statusMessage": "Loading z-harness policy and project memory"
           }
         ]
       }
@@ -22,8 +21,7 @@
             "type": "command",
             "command": "python3 \"${PLUGIN_ROOT}/hooks/codex_session_start.py\"",
             "timeout": 5,
-            "statusMessage": "Loading z-harness policy for subagent",
-            "additionalContextLimit": 30000
+            "statusMessage": "Loading z-harness policy for subagent"
           }
         ]
       }
@@ -34,7 +32,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${PLUGIN_ROOT}/hooks/bash_command_guard.py\"",
+            "command": "python3 \"${PLUGIN_ROOT}/hooks/bash_command_guard.py\" --runtime codex",
             "timeout": 5,
             "statusMessage": "Checking shell command"
           }

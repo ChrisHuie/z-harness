@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """codex-cost — token accounting over local Codex session JSONL.
 
-Codex writes cumulative `total_token_usage` snapshots during each turn. Summing every snapshot
-overcounts the same turn repeatedly. This tool takes the per-field maximum for each turn id,
-deduplicates copied/replayed turns across transcript files, and walks every session file so
-subagent sessions remain in the scan set.
+Codex writes cumulative `total_token_usage` alongside per-request `last_token_usage`. The
+cumulative value spans turns, so taking one maximum per turn and then summing turns overcounts the
+session. This tool sums each valid `last_token_usage` record once, deduplicates copied/replayed
+records across transcript files, and walks every session file so subagent sessions remain in the
+scan set.
 
 The output is token accounting, not dollars. Cached input and reasoning output are reported as
 subsets of input/output and are not added to `total_tokens` again.
@@ -12,7 +13,7 @@ subsets of input/output and are not added to `total_tokens` again.
   codex-cost.py                       last 7 days
   codex-cost.py --since 30d|24h|all   window
   codex-cost.py --project <substr>    restrict to turn cwd containing substring
-  codex-cost.py --selftest            prove cumulative and replay traps close
+  codex-cost.py --selftest            prove cross-turn cumulative and replay traps close
 
 Exit codes: 0 report printed; 1 selftest failure; 2 usage error or zero accounted turns.
 """
@@ -26,7 +27,7 @@ import sys
 import tempfile
 import time
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 USAGE_FIELDS = (
     "input_tokens",
     "cached_input_tokens",
@@ -82,13 +83,15 @@ def scan(root, cutoff, project_filter=None):
         "records": 0,
         "malformed_records": 0,
         "usage_snapshots": 0,
+        "accounted_usage_records": 0,
+        "missing_last_usage_snapshots": 0,
         "orphan_usage_snapshots": 0,
-        "replayed_turn_snapshots": 0,
+        "replayed_usage_snapshots": 0,
         "turns_without_timestamps": 0,
         "turns": 0,
     }
     turns = {}
-    seen_turn_files = {}
+    seen_usage_records = set()
 
     for path in files:
         try:
@@ -116,8 +119,13 @@ def scan(root, cutoff, project_filter=None):
                 payload = record.get("payload") or {}
                 observed_at = record_time(record.get("timestamp"))
                 if kind == "session_meta":
-                    session_id = payload.get("id") or session_id
-                    session_class = source_class(payload.get("source"), payload.get("originator"))
+                    # Fork transcripts embed the parent transcript, including its session_meta.
+                    # The first session_meta describes this file; later ones are copied history.
+                    if session_id is None:
+                        session_id = payload.get("session_id") or payload.get("id")
+                        session_class = source_class(
+                            payload.get("source"), payload.get("originator")
+                        )
                     continue
                 if kind == "event_msg" and payload.get("type") == "task_started":
                     current_turn = payload.get("turn_id")
@@ -132,20 +140,28 @@ def scan(root, cutoff, project_filter=None):
                             "cwd": payload.get("cwd") or "",
                             "session_id": session_id,
                             "last_usage_at": None,
+                            "requests": 0,
+                            "classes_seen": {session_class},
                         })
-                        if session_class == "subagent":
-                            row["class"] = "subagent"
+                        row["classes_seen"].add(session_class)
                         row["model"] = payload.get("model") or row["model"]
                         row["cwd"] = payload.get("cwd") or row["cwd"]
                     continue
                 if kind != "event_msg" or payload.get("type") != "token_count":
                     continue
-                usage = ((payload.get("info") or {}).get("total_token_usage"))
-                if not isinstance(usage, dict):
+                info = payload.get("info") or {}
+                cumulative = info.get("total_token_usage")
+                if not isinstance(cumulative, dict):
                     continue
                 scanset["usage_snapshots"] += 1
                 if not current_turn:
                     scanset["orphan_usage_snapshots"] += 1
+                    continue
+                usage = info.get("last_token_usage")
+                if not isinstance(usage, dict):
+                    scanset["missing_last_usage_snapshots"] += 1
+                    continue
+                if cutoff and (observed_at is None or observed_at < cutoff):
                     continue
                 row = turns.setdefault(current_turn, {
                     "usage": empty_usage(),
@@ -154,20 +170,29 @@ def scan(root, cutoff, project_filter=None):
                     "cwd": "",
                     "session_id": session_id,
                     "last_usage_at": None,
+                    "requests": 0,
+                    "classes_seen": {session_class},
                 })
-                if session_class == "subagent":
-                    row["class"] = "subagent"
-                prior_file = seen_turn_files.get(current_turn)
-                if prior_file is not None and prior_file != path:
-                    scanset["replayed_turn_snapshots"] += 1
-                seen_turn_files.setdefault(current_turn, path)
+                row["classes_seen"].add(session_class)
+                cumulative_key = tuple(cumulative.get(field) for field in USAGE_FIELDS)
+                usage_key = tuple(usage.get(field) for field in USAGE_FIELDS)
+                fingerprint = (current_turn, cumulative_key, usage_key)
+                if fingerprint in seen_usage_records:
+                    scanset["replayed_usage_snapshots"] += 1
+                    continue
+                seen_usage_records.add(fingerprint)
                 if observed_at is not None:
                     row["last_usage_at"] = max(row["last_usage_at"] or 0, observed_at)
+                row["requests"] += 1
+                scanset["accounted_usage_records"] += 1
                 for field in USAGE_FIELDS:
                     value = usage.get(field, 0)
                     if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-                        row["usage"][field] = max(row["usage"][field], value)
+                        row["usage"][field] += value
 
+    for row in turns.values():
+        # A parent turn copied into a fork is still a main turn when its source transcript exists.
+        row["class"] = "main" if "main" in row["classes_seen"] else "subagent"
     scanset["turns_without_timestamps"] = sum(
         row["usage"]["total_tokens"] > 0 and row["last_usage_at"] is None
         for row in turns.values()
@@ -175,7 +200,6 @@ def scan(root, cutoff, project_filter=None):
     turns = {
         turn_id: row for turn_id, row in turns.items()
         if row["usage"]["total_tokens"] > 0
-        and (cutoff == 0 or (row["last_usage_at"] is not None and row["last_usage_at"] >= cutoff))
         and (not project_filter or project_filter in row["cwd"])
     }
     scanset["turns"] = len(turns)
@@ -183,10 +207,14 @@ def scan(root, cutoff, project_filter=None):
 
 
 def totals_by_class(turns):
-    totals = {name: {"turns": 0, **empty_usage()} for name in ("main", "subagent")}
+    totals = {
+        name: {"turns": 0, "requests": 0, **empty_usage()}
+        for name in ("main", "subagent")
+    }
     for row in turns.values():
         bucket = totals[row["class"]]
         bucket["turns"] += 1
+        bucket["requests"] += row["requests"]
         for field in USAGE_FIELDS:
             bucket[field] += row["usage"][field]
     return totals
@@ -198,12 +226,14 @@ def report(turns, scanset, out=sys.stdout):
     write(
         f"          {scanset['files_found']} transcript files found, "
         f"{scanset['files_in_window']} in window, {scanset['records']} records, "
-        f"{scanset['usage_snapshots']} usage snapshots"
+        f"{scanset['usage_snapshots']} usage snapshots, "
+        f"{scanset['accounted_usage_records']} accounted requests"
     )
     write(
         f"          {scanset['malformed_records']} malformed, "
+        f"{scanset['missing_last_usage_snapshots']} missing per-request usage, "
         f"{scanset['orphan_usage_snapshots']} orphan usage snapshots, "
-        f"{scanset['replayed_turn_snapshots']} replayed/copy snapshots, "
+        f"{scanset['replayed_usage_snapshots']} replayed/copy snapshots, "
         f"{scanset['turns_without_timestamps']} timestamp-less turns"
     )
     if not turns:
@@ -211,22 +241,23 @@ def report(turns, scanset, out=sys.stdout):
         return 2
 
     totals = totals_by_class(turns)
-    write("\nTOKEN ACCOUNTING  cumulative snapshots collapsed to one maximum per turn")
+    write("\nTOKEN ACCOUNTING  per-request last usage records summed once")
     write(
-        f"  {'class':<10}{'turns':>8}{'input':>14}{'cached':>14}{'cache write':>14}"
+        f"  {'class':<10}{'turns':>8}{'requests':>10}{'input':>14}{'cached':>14}{'cache write':>14}"
         f"{'output':>12}{'reasoning':>12}{'total':>14}"
     )
     for name in ("main", "subagent"):
         row = totals[name]
         write(
-            f"  {name:<10}{row['turns']:>8,}{row['input_tokens']:>14,}"
+            f"  {name:<10}{row['turns']:>8,}{row['requests']:>10,}{row['input_tokens']:>14,}"
             f"{row['cached_input_tokens']:>14,}{row['cache_write_input_tokens']:>14,}"
             f"{row['output_tokens']:>12,}{row['reasoning_output_tokens']:>12,}"
             f"{row['total_tokens']:>14,}"
         )
     combined = {field: sum(totals[name][field] for name in totals) for field in USAGE_FIELDS}
     write(
-        f"  {'TOTAL':<10}{len(turns):>8,}{combined['input_tokens']:>14,}"
+        f"  {'TOTAL':<10}{len(turns):>8,}{sum(row['requests'] for row in totals.values()):>10,}"
+        f"{combined['input_tokens']:>14,}"
         f"{combined['cached_input_tokens']:>14,}{combined['cache_write_input_tokens']:>14,}"
         f"{combined['output_tokens']:>12,}{combined['reasoning_output_tokens']:>12,}"
         f"{combined['total_tokens']:>14,}"
@@ -253,8 +284,14 @@ def selftest():
         failures += not condition
         print(f"  {'PASS' if condition else 'FAIL'} {label}")
 
-    usage_1 = {field: value for field, value in zip(USAGE_FIELDS, (100, 60, 0, 10, 4, 110))}
-    usage_2 = {field: value for field, value in zip(USAGE_FIELDS, (180, 120, 0, 20, 8, 200))}
+    cumulative_1 = {
+        field: value for field, value in zip(USAGE_FIELDS, (100, 60, 0, 10, 4, 110))
+    }
+    cumulative_2 = {
+        field: value for field, value in zip(USAGE_FIELDS, (180, 120, 0, 20, 8, 200))
+    }
+    request_1 = cumulative_1.copy()
+    request_2 = {field: value for field, value in zip(USAGE_FIELDS, (80, 60, 0, 10, 4, 90))}
     usage_3 = {field: value for field, value in zip(USAGE_FIELDS, (50, 0, 0, 5, 2, 55))}
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -266,32 +303,40 @@ def selftest():
             {"timestamp": now, "type": "session_meta", "payload": {"id": "s1", "source": "vscode"}},
             {"timestamp": now, "type": "event_msg", "payload": {"type": "task_started", "turn_id": "t1"}},
             {"timestamp": now, "type": "turn_context", "payload": {"turn_id": "t1", "cwd": "/repo/a", "model": "gpt-test"}},
-            {"timestamp": now, "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": usage_1}}},
-            {"timestamp": now, "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": usage_2}}},
+            {"timestamp": now, "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": cumulative_1, "last_token_usage": request_1}}},
+            {"timestamp": now, "type": "event_msg", "payload": {"type": "task_started", "turn_id": "t2"}},
+            {"timestamp": now, "type": "turn_context", "payload": {"turn_id": "t2", "cwd": "/repo/a", "model": "gpt-test"}},
+            {"timestamp": now, "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": cumulative_2, "last_token_usage": request_2}}},
+            {"timestamp": now, "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"total_tokens": 999}}}},
             "not-json",
         ])
         write_fixture(copy_path, [
-            {"timestamp": now, "type": "session_meta", "payload": {"id": "copy", "source": "vscode"}},
+            {"timestamp": now, "type": "session_meta", "payload": {"id": "copy", "session_id": "s1", "forked_from_id": "s1", "source": "vscode"}},
             {"timestamp": now, "type": "event_msg", "payload": {"type": "task_started", "turn_id": "t1"}},
-            {"timestamp": now, "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": usage_1}}},
+            {"timestamp": now, "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": cumulative_1, "last_token_usage": request_1}}},
         ])
         write_fixture(sub_path, [
             {"timestamp": now, "type": "session_meta", "payload": {"id": "s2", "source": {"subagent": {"thread_id": "x"}}}},
-            {"timestamp": now, "type": "event_msg", "payload": {"type": "task_started", "turn_id": "t2"}},
-            {"timestamp": now, "type": "turn_context", "payload": {"turn_id": "t2", "cwd": "/repo/b", "model": "gpt-test"}},
-            {"timestamp": now, "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": usage_3}}},
+            {"timestamp": now, "type": "event_msg", "payload": {"type": "task_started", "turn_id": "t3"}},
+            {"timestamp": now, "type": "turn_context", "payload": {"turn_id": "t3", "cwd": "/repo/b", "model": "gpt-test"}},
+            {"timestamp": now, "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": usage_3, "last_token_usage": usage_3}}},
         ])
 
         turns, scanset = scan(tmp, 0)
-        check("cumulative snapshots collapse to maximum, not sum", turns["t1"]["usage"]["total_tokens"] == 200)
-        check("copied turn id is deduplicated across files", len(turns) == 2)
-        check("copy/replay is observed in the scan report", scanset["replayed_turn_snapshots"] >= 1)
-        check("subagent source is classified separately", turns["t2"]["class"] == "subagent")
+        check("two cumulative turns sum request deltas, not cumulative maxima",
+              turns["t1"]["usage"]["total_tokens"] + turns["t2"]["usage"]["total_tokens"] == 200)
+        check("copied request is deduplicated across files", len(turns) == 3)
+        check("copy/replay is observed in the scan report", scanset["replayed_usage_snapshots"] == 1)
+        check("subagent source is classified separately", turns["t3"]["class"] == "subagent")
         check("malformed record is counted", scanset["malformed_records"] == 1)
+        check("snapshot missing last_token_usage is counted and skipped",
+              scanset["missing_last_usage_snapshots"] == 1)
         filtered, _ = scan(tmp, 0, project_filter="/repo/b")
-        check("project filter uses persisted turn cwd", set(filtered) == {"t2"})
+        check("project filter uses persisted turn cwd", set(filtered) == {"t3"})
         totals = totals_by_class(turns)
-        check("main total is the final t1 cumulative total", totals["main"]["total_tokens"] == 200)
+        check("main total sums last usage once across two turns", totals["main"]["total_tokens"] == 200)
+        check("main request count excludes replay and missing-last records",
+              totals["main"]["requests"] == 2)
         check("subagent total is independently retained", totals["subagent"]["total_tokens"] == 55)
 
         old_path = os.path.join(tmp, "recently-copied-old-turn.jsonl")
@@ -301,11 +346,12 @@ def selftest():
             {"timestamp": "2020-01-01T00:00:01Z", "type": "event_msg",
              "payload": {"type": "task_started", "turn_id": "old-turn"}},
             {"timestamp": "2020-01-01T00:00:02Z", "type": "event_msg",
-             "payload": {"type": "token_count", "info": {"total_token_usage": usage_3}}},
+             "payload": {"type": "token_count", "info": {
+                 "total_token_usage": usage_3, "last_token_usage": usage_3}}},
         ])
         recent, _ = scan(tmp, time.time() - 3600)
         check("--since filters by record timestamp, not copied-file mtime",
-              "old-turn" not in recent and set(recent) == {"t1", "t2"})
+              "old-turn" not in recent and set(recent) == {"t1", "t2", "t3"})
 
         import io
         buffer = io.StringIO()

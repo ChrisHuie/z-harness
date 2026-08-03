@@ -691,7 +691,7 @@ FIXTURES = [
      """caffeinate -m git grep -nE 'harness\\b' -- README.md""", "deny"),
     ("RED  ROUND 11: caffeinate -m is modelled when bundled",
      """caffeinate -dm git grep -nE 'harness\\b' -- README.md""", "deny"),
-    ("GREEN ROUND 11: an unmodelled caffeinate flag must not escalate a safe -P form",
+    ("GREEN ROUND 11: a modelled caffeinate flag preserves an explicit -P engine",
      """caffeinate -m git grep -nP 'harness\\b' -- README.md""", "allow"),
     ("RED  ROUND 11: caffeinate option argument is not mistaken for the command",
      """caffeinate -t 30 git grep -nE 'harness\\b' -- README.md""", "deny"),

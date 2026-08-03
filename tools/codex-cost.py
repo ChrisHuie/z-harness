@@ -27,7 +27,7 @@ import sys
 import tempfile
 import time
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 USAGE_FIELDS = (
     "input_tokens",
     "cached_input_tokens",
@@ -96,9 +96,16 @@ def scan(root, cutoff, project_filter=None):
         "missing_last_usage_snapshots": 0,
         "orphan_usage_snapshots": 0,
         "orphan_usage_raw_total_tokens": 0,
+        "corpus_orphan_usage_snapshots": 0,
+        "corpus_orphan_usage_raw_total_tokens": 0,
         "orphan_excluded_usage_records": 0,
         "orphan_excluded_total_tokens": 0,
         "replayed_usage_snapshots": 0,
+        "corpus_replayed_usage_snapshots": 0,
+        "cache_write_missing_last_snapshots": 0,
+        "cache_write_missing_cumulative_snapshots": 0,
+        "total_only_usage_snapshots": 0,
+        "selected_request_keys": 0,
         "turns_without_timestamps": 0,
         "turns": 0,
     }
@@ -171,7 +178,15 @@ def scan(root, cutoff, project_filter=None):
                 if not isinstance(usage, dict):
                     scanset["missing_last_usage_snapshots"] += 1
                     continue
+                if "cache_write_input_tokens" not in usage:
+                    scanset["cache_write_missing_last_snapshots"] += 1
+                if "cache_write_input_tokens" not in cumulative:
+                    scanset["cache_write_missing_cumulative_snapshots"] += 1
                 normalized = normalized_usage(usage)
+                if (normalized["total_tokens"] > 0
+                        and all(normalized[field] == 0
+                                for field in USAGE_FIELDS if field != "total_tokens")):
+                    scanset["total_only_usage_snapshots"] += 1
                 normalized_cumulative = normalized_usage(cumulative)
                 cumulative_key = tuple(normalized_cumulative[field] for field in USAGE_FIELDS)
                 usage_key = tuple(normalized[field] for field in USAGE_FIELDS)
@@ -187,18 +202,26 @@ def scan(root, cutoff, project_filter=None):
                     "usage": normalized,
                 })
                 if not current_turn:
-                    scanset["orphan_usage_snapshots"] += 1
-                    scanset["orphan_usage_raw_total_tokens"] += normalized["total_tokens"]
+                    scanset["corpus_orphan_usage_snapshots"] += 1
+                    scanset["corpus_orphan_usage_raw_total_tokens"] += normalized["total_tokens"]
                     orphan_request_keys.add(request_key)
 
     for request_key, occurrences in usage_occurrences.items():
-        scanset["replayed_usage_snapshots"] += max(0, len(occurrences) - 1)
+        replays = max(0, len(occurrences) - 1)
+        scanset["corpus_replayed_usage_snapshots"] += replays
         timestamps = [item["observed_at"] for item in occurrences
                       if item["observed_at"] is not None]
         first_observed_at = min(timestamps) if timestamps else None
         if cutoff and (first_observed_at is None or first_observed_at < cutoff):
             continue
         window_request_keys.add(request_key)
+        scanset["replayed_usage_snapshots"] += replays
+        files_in_window.update(item["path"] for item in occurrences)
+        orphan_occurrences = [item for item in occurrences if not item["turn_id"]]
+        scanset["orphan_usage_snapshots"] += len(orphan_occurrences)
+        scanset["orphan_usage_raw_total_tokens"] += sum(
+            item["usage"]["total_tokens"] for item in orphan_occurrences
+        )
         in_turn = [item for item in occurrences if item["turn_id"]]
         if not in_turn:
             continue
@@ -211,7 +234,6 @@ def scan(root, cutoff, project_filter=None):
             ),
         )
         accounted_request_keys.add(request_key)
-        files_in_window.update(item["path"] for item in occurrences)
         current_turn = canonical["turn_id"]
         row = turns.setdefault(current_turn, {
             "usage": empty_usage(),
@@ -235,6 +257,7 @@ def scan(root, cutoff, project_filter=None):
 
     excluded_orphan_keys = (orphan_request_keys - accounted_request_keys) & window_request_keys
     scanset["files_in_window"] = len(files_in_window)
+    scanset["selected_request_keys"] = len(window_request_keys)
     scanset["orphan_excluded_usage_records"] = len(excluded_orphan_keys)
     scanset["orphan_excluded_total_tokens"] = sum(
         observed_usage_records[key]["total_tokens"] for key in excluded_orphan_keys
@@ -273,19 +296,32 @@ def report(turns, scanset, out=sys.stdout):
     write = lambda *args: print(*args, file=out)
     write(f"\nSCAN SET  root={scanset['root']}")
     write(
-        f"          {scanset['files_found']} transcript files found, "
-        f"{scanset['files_in_window']} in window, {scanset['records']} records, "
+        f"  CORPUS  {scanset['files_found']} transcript files, {scanset['records']} records, "
         f"{scanset['usage_snapshots']} usage snapshots, "
-        f"{scanset['accounted_usage_records']} accounted requests"
+        f"{scanset['corpus_replayed_usage_snapshots']} replayed/copy snapshots"
     )
     write(
         f"          {scanset['malformed_records']} malformed, "
         f"{scanset['missing_last_usage_snapshots']} missing per-request usage, "
+        f"{scanset['cache_write_missing_last_snapshots']} last / "
+        f"{scanset['cache_write_missing_cumulative_snapshots']} cumulative snapshots omit "
+        "cache_write_input_tokens"
+    )
+    write(
+        f"          {scanset['total_only_usage_snapshots']} snapshots contain total_tokens "
+        "but no component counters; "
+        f"{scanset['corpus_orphan_usage_snapshots']} orphan snapshots total "
+        f"{scanset['corpus_orphan_usage_raw_total_tokens']:,} raw tokens corpus-wide"
+    )
+    write(
+        f"  WINDOW  {scanset['files_in_window']} files contain "
+        f"{scanset['selected_request_keys']} selected request identities; "
+        f"{scanset['accounted_usage_records']} accounted requests, "
         f"{scanset['replayed_usage_snapshots']} replayed/copy snapshots, "
         f"{scanset['turns_without_timestamps']} timestamp-less turns"
     )
     write(
-        f"          {scanset['orphan_usage_snapshots']} orphan usage snapshots total "
+        f"          {scanset['orphan_usage_snapshots']} selected orphan snapshots total "
         f"{scanset['orphan_usage_raw_total_tokens']:,} raw tokens; after replay "
         f"reconciliation, {scanset['orphan_excluded_usage_records']} requests / "
         f"{scanset['orphan_excluded_total_tokens']:,} tokens remain unattributed and excluded"
@@ -471,7 +507,9 @@ def selftest():
         ])
         windowed, window_scan = scan(window_dir, time.time() - 3600)
         check("--since uses a request's earliest stamp regardless of file order",
-              windowed == {} and window_scan["replayed_usage_snapshots"] == 1)
+              windowed == {}
+              and window_scan["replayed_usage_snapshots"] == 0
+              and window_scan["corpus_replayed_usage_snapshots"] == 1)
 
         replay_dir = os.path.join(tmp, "turn-replay-property")
         os.mkdir(replay_dir)
@@ -480,14 +518,14 @@ def selftest():
         write_fixture(os.path.join(replay_dir, "turn-replay.jsonl"), [
             {"timestamp": now, "type": "session_meta",
              "payload": {"id": "replay-session", "cwd": "/repo/replay"}},
-            {"timestamp": now, "type": "event_msg",
+            {"timestamp": "2026-01-01T00:00:01Z", "type": "event_msg",
              "payload": {"type": "task_started", "turn_id": "first-turn"}},
-            {"timestamp": now, "type": "event_msg", "payload": {"type": "token_count",
+            {"timestamp": "2026-01-01T00:00:02Z", "type": "event_msg", "payload": {"type": "token_count",
              "info": {"total_token_usage": cumulative_without_cache_write,
                       "last_token_usage": request_100}}},
-            {"timestamp": now, "type": "event_msg",
+            {"timestamp": "2026-01-01T00:00:03Z", "type": "event_msg",
              "payload": {"type": "task_started", "turn_id": "second-turn"}},
-            {"timestamp": now, "type": "event_msg", "payload": {"type": "token_count",
+            {"timestamp": "2026-01-01T00:00:04Z", "type": "event_msg", "payload": {"type": "token_count",
              "info": {"total_token_usage": request_100,
                       "last_token_usage": request_100}}},
         ])
@@ -499,7 +537,32 @@ def selftest():
         check("session cwd supplies project attribution when turn_context is absent",
               replayed["first-turn"]["cwd"] == "/repo/replay")
 
+        schema_dir = os.path.join(tmp, "schema-property")
+        os.mkdir(schema_dir)
+        write_fixture(os.path.join(schema_dir, "total-only.jsonl"), [
+            {"timestamp": "2026-01-01T00:00:00Z", "type": "session_meta",
+             "payload": {"id": "schema-session", "cwd": "/repo/schema"}},
+            {"timestamp": "2026-01-01T00:00:01Z", "type": "event_msg",
+             "payload": {"type": "task_started", "turn_id": "schema-turn"}},
+            {"timestamp": "2026-01-01T00:00:02Z", "type": "event_msg",
+             "payload": {"type": "token_count", "info": {
+                 "total_token_usage": {"total_tokens": 42},
+                 "last_token_usage": {"total_tokens": 42}}}},
+        ])
+        schema_turns, schema_scan = scan(schema_dir, 0)
+        check("missing cache-write fields are disclosed without dropping totals",
+              schema_turns["schema-turn"]["usage"]["total_tokens"] == 42
+              and schema_scan["cache_write_missing_last_snapshots"] == 1
+              and schema_scan["cache_write_missing_cumulative_snapshots"] == 1)
+        check("total-only snapshots are disclosed",
+              schema_scan["total_only_usage_snapshots"] == 1)
+
         import io
+        buffer = io.StringIO()
+        rc = report(replayed, replay_scan, out=buffer)
+        check("report distinguishes corpus diagnostics from the selected window",
+              rc == 0 and "CORPUS" in buffer.getvalue() and "WINDOW" in buffer.getvalue())
+
         buffer = io.StringIO()
         rc = report({}, {key: 0 for key in scanset} | {"root": tmp}, out=buffer)
         check("zero accounted turns exits two", rc == 2)

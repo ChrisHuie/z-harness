@@ -39,7 +39,7 @@ import re
 import subprocess
 import sys
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 SPAWN_TOOLS = {"Agent", "Task", "spawn_agent"}
 RUNTIMES = {"claude", "codex"}
 DATA_VOLUME = "/System/Volumes/Data" if sys.platform == "darwin" else "/"
@@ -131,8 +131,11 @@ def selftest():
     bad += (not ok)
     print(f"  {'PASS' if ok else 'FAIL'} Codex spawn at 92%: unsupported ask maps to deny")
     for label, raw in (
+        ("empty stdin", ""),
+        ("malformed JSON", "{"),
         ("non-object payload", "false"),
         ("missing tool_name", json.dumps({"tool_input": {"prompt": "x"}})),
+        ("non-string tool_name", json.dumps({"tool_name": 7, "tool_input": {}})),
     ):
         rc, _out, err = run_raw(raw, runtime="codex")
         ok = rc == 2 and bool(err.strip())
@@ -147,6 +150,13 @@ def selftest():
     ok = rc == 2 and bool(err.strip())
     bad += (not ok)
     print(f"  {'PASS' if ok else 'FAIL'} unreadable capacity fails closed with reason")
+    class BrokenReader:
+        def read(self):
+            raise UnicodeError("planted stdin decode failure")
+    raw, read_error = read_hook_input(BrokenReader())
+    ok = raw is None and "stdin read failed" in read_error
+    bad += (not ok)
+    print(f"  {'PASS' if ok else 'FAIL'} stdin decode failure has a blocking reason")
     print(f"\n  selftest: {bad} failure(s)")
     return 1 if bad else 0
 
@@ -215,6 +225,14 @@ def hook_mode(raw, runtime="claude"):
     return 0
 
 
+def read_hook_input(stream):
+    """Return (text, error); stdin failures must never become a silent allow."""
+    try:
+        return stream.read(), ""
+    except Exception as exc:
+        return None, f"spawn_preflight_guard: stdin read failed ({exc!r}); refusing to spawn blind"
+
+
 def main(argv):
     args = argv[1:]
     runtime = "claude"
@@ -235,7 +253,11 @@ def main(argv):
             return selftest()
         sys.stderr.write(f"unknown argument: {args[0]!r}\nrun --help\n")
         return 2
-    return hook_mode(sys.stdin.read(), runtime=runtime)
+    raw, error = read_hook_input(sys.stdin)
+    if raw is None:
+        print(error, file=sys.stderr)
+        return 2
+    return hook_mode(raw, runtime=runtime)
 
 
 if __name__ == "__main__":

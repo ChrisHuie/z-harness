@@ -68,7 +68,7 @@ same shared policy at both user and project scope.
 | `tools/codex-cost.py` | Codex | per-request token accounting with copied/replayed record dedupe |
 | `tools/pr-delivery-state.py` | shared | proves workspace, local HEAD, PR head, and exact-head CI agree before publication claims |
 | ignored `projects/*/memory/` | Claude-local data | host-bound Claude memory remains on the authoring machine and is not packaged for Codex |
-| `harness-audit-20260801/` | record | measurements and decisions behind the original Claude rebuild |
+| ignored `harness-audit-*/` | publisher-local record | pre-migration snapshots and machine-derived evidence stay beside the authoring checkout, never in the plugin package |
 
 ## Health
 
@@ -112,5 +112,9 @@ headless model scenarios and spends API budget, so it remains manual.
   them. Never use `-x` there.
 - `.gitignore` is an allowlist. New authored surfaces must be explicitly included or git cannot see
   them.
-- Host-bound `projects/` content must stay untracked. Deleting it from the current tree does not
-  erase older Git objects; audit and scrub repository history before changing repository visibility.
+- Host-bound `projects/`, `harness-audit-*`, and encoded absolute-path slugs must stay untracked.
+  Deleting them from the current tree does not erase older Git objects; audit and scrub repository
+  history before changing repository visibility.
+- Before fast-forwarding another clone across the commit that first untracks publisher-local audit
+  files, copy or move any audit data that clone must retain. Git applies the tracked deletions during
+  that first update; the new ignore rule protects the files only after they are untracked.

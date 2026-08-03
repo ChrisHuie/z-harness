@@ -49,7 +49,8 @@ def split_commands(cmd):
     Tokens are (text, quoting) where quoting is one of '', "'", '"'.
     Heredoc bodies are dropped: a `<<'EOF' ... EOF` payload is not argv.
     """
-    out, cur, tok_parts, tok_modes, q, i = [], [], [], set(), "", 0
+    out, cur = [], []
+    tok_parts, tok_mode_parts, tok_modes, q, i = [], [], set(), "", 0
     # strip heredoc bodies so python/EOF payloads never reach the tokenizer
     cmd = re.sub(r"<<-?\s*'?\"?([A-Za-z_][A-Za-z0-9_]*)'?\"?\n.*?\n\1\b",
                  " __HEREDOC__ ", cmd, flags=re.S)
@@ -58,14 +59,17 @@ def split_commands(cmd):
     def append_tok(text, mode=""):
         if text:
             tok_parts.append(text)
+            tok_mode_parts.append({"": "U", "'": "S", '"': "D", "escaped": "E"}[mode]
+                                  * len(text))
             tok_modes.add(mode)
 
     def flush_tok():
-        nonlocal tok_parts, tok_modes
+        nonlocal tok_parts, tok_mode_parts, tok_modes
         if tok_parts or tok_modes:
-            quoting = next(iter(tok_modes)) if len(tok_modes) == 1 else "mixed"
+            quoting = (next(iter(tok_modes)) if len(tok_modes) == 1
+                       else "mixed:" + "".join(tok_mode_parts))
             cur.append(("".join(tok_parts), quoting))
-        tok_parts, tok_modes = [], set()
+        tok_parts, tok_mode_parts, tok_modes = [], [], set()
 
     def flush_cmd():
         nonlocal cur
@@ -101,7 +105,7 @@ def split_commands(cmd):
             continue
         if c == "\\" and i + 1 < n:
             if cmd[i + 1] != "\n":
-                append_tok(cmd[i + 1])
+                append_tok(cmd[i + 1], "escaped")
             i += 2
             continue
         if c == "{" and tok_parts and tok_parts[-1].endswith("$"):
@@ -167,10 +171,26 @@ def git_grep_argv(tokens):
         return None
     j += 1
     configs = []
-    while j < len(words) and words[j] in ("-C", "-c", "--git-dir", "--work-tree"):
-        if words[j] == "-c" and j + 1 < len(words):
-            configs.append(words[j + 1])
-        j += 2
+    options_with_args = {
+        "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix",
+        "--exec-path", "--config-env", "--attr-source",
+    }
+    while j < len(words) and words[j].startswith("-"):
+        option = words[j]
+        if option == "--":
+            j += 1
+            break
+        if option in options_with_args:
+            if j + 1 >= len(words):
+                return None
+            if option == "-c":
+                configs.append(words[j + 1])
+            j += 2
+            continue
+        # Attached long-option values and no-argument global switches such as
+        # --no-pager, -P, --literal-pathspecs and --no-optional-locks all leave
+        # the following git subcommand in the next argv slot.
+        j += 1
     if j >= len(words) or words[j] != "grep":
         return None
     return tokens[k0 + j + 1:], configs
@@ -191,10 +211,15 @@ def decide(command):
         engine_src = None
         for cfg in configs:
             key, separator, value = cfg.partition("=")
-            if separator and key.lower() == "grep.patterntype":
-                val = value.strip().lower()
+            key = key.strip().lower()
+            val = value.strip().lower()
+            if separator and key == "grep.patterntype":
                 if val in CONFIG_ENGINE:
                     engine = CONFIG_ENGINE[val]
+                    engine_src = "config"
+            elif separator and key == "grep.extendedregexp":
+                if val in {"1", "true", "yes", "on"}:
+                    engine = "E"
                     engine_src = "config"
         patterns = []
         pattern_from_file = False
@@ -305,6 +330,21 @@ FIXTURES = [
      """git -c grep.patternType=extended grep -n 'harness\\b' -- README.md""", "deny"),
     ("RED  REVIEW: git config keys are case-insensitive",
      """git -c Grep.PatternType=EXTENDED grep -n 'harness\\b' -- README.md""", "deny"),
+    ("RED  REVIEW: --no-pager does not hide git grep",
+     """git --no-pager grep -nE 'harness\\b' -- README.md""", "deny"),
+    ("RED  REVIEW: -P as a git global option does not hide git grep",
+     """git -P grep -nE 'harness\\b' -- README.md""", "deny"),
+    ("RED  REVIEW: pathspec global switch does not hide git grep",
+     """git --literal-pathspecs grep -nE 'harness\\b' -- README.md""", "deny"),
+    ("RED  REVIEW: no-optional-locks does not hide git grep",
+     """git --no-optional-locks grep -nE 'harness\\b' -- README.md""", "deny"),
+    ("RED  REVIEW: attached git-dir option does not hide git grep",
+     """git --git-dir=/repo/.git grep -nE 'harness\\b' -- README.md""", "deny"),
+    ("RED  REVIEW: grep.extendedRegexp=true selects ERE",
+     """git -c grep.extendedRegexp=true grep -n 'harness\\b' -- README.md""", "deny"),
+    ("RED  REVIEW: global switch composes with patternType config",
+     """git --no-pager -c grep.patternType=extended grep -n 'harness\\b' -- README.md""",
+     "deny"),
     ("ASK  UNMODELLED 2026-08-02: -E with a -f pattern file - guard cannot see the patterns",
      """git grep -nE -f pats.txt -- src/""", "ask"),
     ("GREEN patternType=perl via config - the intended engine",

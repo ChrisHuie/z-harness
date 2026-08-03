@@ -1,7 +1,0 @@
-/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/feedback_ground_protocol_work_in_spec_not_assumptions.md
-/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/feedback_primary_sources_over_press_coverage.md
-/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/feedback_recovery_audit_coherence_blind_to_condition.md
-/Users/quantum/.claude/projects/-Users-quantum-Documents-GitHub-agentic-prebid/memory/reference-aamp-maturity-mid2026.md
-/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/reference_adcp_sdk_spec_mapping.md
-/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/reference_adcp_spec_grounding.md
-/Users/quantum/.claude/projects/-Users-quantum-Documents-ComputedChaos-salesagent/memory/reference_sdk_bump_delta_verification.md

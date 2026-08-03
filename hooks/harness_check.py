@@ -42,7 +42,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "2.3.0"
+VERSION = "2.4.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 METHOD_SKILLS = ["git-workflow", "pr-review-method", "testing-ci", "agent-dispatch",
@@ -89,8 +89,13 @@ ROUTING_SKILLS = ["git-workflow", "pr-review-method", "testing-ci", "agent-dispa
 
 RESERVED_BASENAMES = {"claude.md", "agents.md", "gemini.md"}
 CODEX_HOOK_TOP_LEVEL_KEYS = {"description", "hooks"}
-CODEX_PACKAGE_EVENTS = {"SessionStart", "SubagentStart", "PreToolUse"}
-CODEX_HOOK_ENTRY_KEYS = {"matcher", "hooks"}
+CODEX_VALID_HOOK_EVENTS = {
+    "PreToolUse", "PermissionRequest", "PostToolUse", "PreCompact", "PostCompact",
+    "SessionStart", "SessionEnd", "SubagentStart", "SubagentStop",
+    "UserPromptSubmit", "Stop",
+}
+CODEX_REQUIRED_PACKAGE_EVENTS = {"SessionStart", "SubagentStart", "PreToolUse"}
+CODEX_HOOK_ENTRY_KEYS = {"matcher", "hooks", "enabled", "trusted_hash"}
 CODEX_HOOK_HANDLER_KEYS = {
     "type", "command", "commandWindows", "timeout", "async", "statusMessage",
     "additionalContextLimit",
@@ -133,6 +138,113 @@ def description_of(path):
     return m.group(1) if m else ""
 
 
+def validate_codex_hook_config(hook_config):
+    """Return (handler_count, errors) for the Codex hook runtime schema."""
+    errors = []
+    handler_count = 0
+    if not isinstance(hook_config, dict):
+        return 0, ["top-level: expected object"]
+    for key in sorted(set(hook_config) - CODEX_HOOK_TOP_LEVEL_KEYS):
+        errors.append(f"top-level.{key}: unknown")
+    if "description" in hook_config and not isinstance(hook_config["description"], str):
+        errors.append("description: expected string")
+    hook_events = hook_config.get("hooks", {})
+    if not isinstance(hook_events, dict):
+        return 0, errors + ["hooks: expected object"]
+    event_names = set(hook_events)
+    for event in sorted(event_names - CODEX_VALID_HOOK_EVENTS):
+        errors.append(f"{event}: unsupported event name")
+    missing_events = CODEX_REQUIRED_PACKAGE_EVENTS - event_names
+    if missing_events:
+        errors.append(f"required events missing: {sorted(missing_events)!r}")
+    for event, entries_for_event in hook_events.items():
+        if not isinstance(entries_for_event, list):
+            errors.append(f"{event}: expected list")
+            continue
+        for entry_index, entry in enumerate(entries_for_event):
+            if not isinstance(entry, dict):
+                errors.append(f"{event}[{entry_index}]: expected object")
+                continue
+            prefix = f"{event}[{entry_index}]"
+            for key in sorted(set(entry) - CODEX_HOOK_ENTRY_KEYS):
+                errors.append(f"{prefix}.{key}: unknown")
+            matcher = entry.get("matcher")
+            if matcher is not None:
+                if not isinstance(matcher, str):
+                    errors.append(f"{prefix}.matcher: expected string")
+                else:
+                    try:
+                        re.compile(matcher)
+                    except re.error as exc:
+                        errors.append(f"{prefix}.matcher: invalid regex ({exc})")
+            if "enabled" in entry and not isinstance(entry["enabled"], bool):
+                errors.append(f"{prefix}.enabled: expected boolean")
+            if "trusted_hash" in entry and (
+                    not isinstance(entry["trusted_hash"], str)
+                    or not entry["trusted_hash"].strip()):
+                errors.append(f"{prefix}.trusted_hash: expected non-empty string")
+            handlers = entry.get("hooks", [])
+            if not isinstance(handlers, list):
+                errors.append(f"{prefix}.hooks: expected list")
+                continue
+            if not handlers:
+                errors.append(f"{prefix}.hooks: empty")
+            for handler_index, handler in enumerate(handlers):
+                handler_prefix = f"{prefix}.hooks[{handler_index}]"
+                if not isinstance(handler, dict):
+                    errors.append(f"{handler_prefix}: expected object")
+                    continue
+                handler_count += 1
+                for key in sorted(set(handler) - CODEX_HOOK_HANDLER_KEYS):
+                    errors.append(f"{handler_prefix}.{key}: unknown")
+                if handler.get("type") != "command":
+                    errors.append(f"{handler_prefix}.type: only command handlers execute")
+                if not isinstance(handler.get("command"), str) or not handler["command"].strip():
+                    errors.append(f"{handler_prefix}.command: expected non-empty string")
+                timeout = handler.get("timeout")
+                if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
+                    errors.append(f"{handler_prefix}.timeout: expected positive integer")
+                if handler.get("async", False) is not False:
+                    errors.append(f"{handler_prefix}.async: must be absent or false")
+                limit = handler.get("additionalContextLimit")
+                if limit is not None and (
+                        not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0):
+                    errors.append(
+                        f"{handler_prefix}.additionalContextLimit: expected positive integer"
+                    )
+    return handler_count, errors
+
+
+def package_paths(root):
+    """Return (surface, paths, error) for source or installed package contents."""
+    if os.path.exists(os.path.join(root, ".git")):
+        tracked = subprocess.run(
+            ["git", "-C", root, "ls-files"], capture_output=True, text=True,
+        )
+        if tracked.returncode != 0:
+            return "source", [], tracked.stderr.strip() or "git ls-files failed"
+        return "source", [line for line in tracked.stdout.splitlines() if line], None
+    paths = []
+    for dirpath, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d != ".git"]
+        for filename in files:
+            paths.append(os.path.relpath(os.path.join(dirpath, filename), root))
+    return "installed", paths, None
+
+
+def forbidden_package_paths(root):
+    """Find publisher-only or host-derived paths that must never ship."""
+    surface, paths, error = package_paths(root)
+    forbidden = []
+    for path in paths:
+        parts = path.replace(os.sep, "/").split("/")
+        top = parts[0]
+        if (top == "projects" or top.startswith("harness-audit-")
+                or any(re.match(r"^-(?:Users|home)-", part) for part in parts)):
+            forbidden.append(path)
+    return surface, forbidden, error
+
+
 class Run:
     def __init__(self, root, ci):
         self.root, self.ci, self.failures, self.checks = root, ci, [], 0
@@ -144,15 +256,16 @@ class Run:
             self.failures.append((check, detail))
 
     # ---- C1 ----------------------------------------------------------------
-    def c1_selftests(self):
-        suites = [("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"]),
-                  ("askq_timeout_guard", ["hooks/askq_timeout_guard.py", "--selftest"]),
-                  ("harness_report", ["hooks/harness_report.py", "--selftest"]),
-                  ("cc-cost", ["tools/cc-cost.py", "--selftest"]),
-                  ("codex-cost", ["tools/codex-cost.py", "--selftest"]),
-                  ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"]),
-                  ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"]),
-                  ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"])]
+    def c1_selftests(self, suites=None):
+        if suites is None:
+            suites = [("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"]),
+                      ("askq_timeout_guard", ["hooks/askq_timeout_guard.py", "--selftest"]),
+                      ("harness_report", ["hooks/harness_report.py", "--selftest"]),
+                      ("cc-cost", ["tools/cc-cost.py", "--selftest"]),
+                      ("codex-cost", ["tools/codex-cost.py", "--selftest"]),
+                      ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"]),
+                      ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"]),
+                      ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"])]
         for name, cmd in suites:
             p = subprocess.run([sys.executable, os.path.join(self.root, cmd[0])] + cmd[1:],
                                capture_output=True, cwd=self.root)
@@ -191,6 +304,7 @@ class Run:
     # ---- C3 ----------------------------------------------------------------
     def c3_reference_resolution(self):
         skills_dir = os.path.join(self.root, "skills")
+        resolved = 0
         for skill in sorted(os.listdir(skills_dir)):
             body_path = os.path.join(skills_dir, skill, "SKILL.md")
             if not os.path.isfile(body_path):
@@ -204,6 +318,7 @@ class Run:
             # direction 1: cited -> exists
             for c in sorted(literal):
                 p = os.path.join(refdir, c)
+                resolved += 1
                 self.result("C3", os.path.isfile(p), f"{skill}: cites references/{c}")
             # direction 2: exists -> cited (literal or template family)
             if os.path.isdir(refdir):
@@ -211,8 +326,11 @@ class Run:
                     if not os.path.isfile(os.path.join(refdir, f)):
                         continue
                     ok = f in literal or any(t.match(f) for t in template_res)
+                    resolved += 1
                     self.result("C3", ok, f"{skill}: references/{f} "
                                           f"{'reachable' if ok else 'NAMED NOWHERE in SKILL.md'}")
+        if resolved == 0:
+            self.result("C3", False, "zero authored reference relationships")
 
     # ---- C4 / C5 -----------------------------------------------------------
     def c4_descriptions(self):
@@ -395,76 +513,7 @@ class Run:
         except Exception as exc:
             self.result("C9", False, f"hook config parses: {exc}")
             hook_config = {}
-        hook_errors = []
-        handler_count = 0
-        if isinstance(hook_config, dict):
-            for key in sorted(set(hook_config) - CODEX_HOOK_TOP_LEVEL_KEYS):
-                hook_errors.append(f"top-level.{key}: unknown")
-            if "description" in hook_config and not isinstance(hook_config["description"], str):
-                hook_errors.append("description: expected string")
-        hook_events = hook_config.get("hooks", {}) if isinstance(hook_config, dict) else {}
-        if not isinstance(hook_events, dict):
-            hook_errors.append("hooks: expected object")
-            hook_events = {}
-        event_names = set(hook_events)
-        if event_names != CODEX_PACKAGE_EVENTS:
-            hook_errors.append(
-                f"event set {sorted(event_names)!r}; expected {sorted(CODEX_PACKAGE_EVENTS)!r}"
-            )
-        for event, entries_for_event in hook_events.items():
-            if not isinstance(entries_for_event, list):
-                hook_errors.append(f"{event}: expected list")
-                continue
-            for entry_index, entry in enumerate(entries_for_event):
-                if not isinstance(entry, dict):
-                    hook_errors.append(f"{event}[{entry_index}]: expected object")
-                    continue
-                for key in sorted(set(entry) - CODEX_HOOK_ENTRY_KEYS):
-                    hook_errors.append(f"{event}[{entry_index}].{key}: unknown")
-                matcher = entry.get("matcher")
-                if matcher is not None:
-                    if not isinstance(matcher, str):
-                        hook_errors.append(f"{event}[{entry_index}].matcher: expected string")
-                    else:
-                        try:
-                            re.compile(matcher)
-                        except re.error as exc:
-                            hook_errors.append(
-                                f"{event}[{entry_index}].matcher: invalid regex ({exc})"
-                            )
-                handlers = entry.get("hooks", [])
-                if not isinstance(handlers, list):
-                    hook_errors.append(f"{event}[{entry_index}].hooks: expected list")
-                    continue
-                if not handlers:
-                    hook_errors.append(f"{event}[{entry_index}].hooks: empty")
-                for handler_index, handler in enumerate(handlers):
-                    if not isinstance(handler, dict):
-                        hook_errors.append(
-                            f"{event}[{entry_index}].hooks[{handler_index}]: expected object"
-                        )
-                        continue
-                    handler_count += 1
-                    for key in sorted(set(handler) - CODEX_HOOK_HANDLER_KEYS):
-                        hook_errors.append(
-                            f"{event}[{entry_index}].hooks[{handler_index}].{key}: unknown"
-                        )
-                    prefix = f"{event}[{entry_index}].hooks[{handler_index}]"
-                    if handler.get("type") != "command":
-                        hook_errors.append(f"{prefix}.type: only command handlers execute")
-                    if not isinstance(handler.get("command"), str) or not handler["command"].strip():
-                        hook_errors.append(f"{prefix}.command: expected non-empty string")
-                    timeout = handler.get("timeout")
-                    if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
-                        hook_errors.append(f"{prefix}.timeout: expected positive integer")
-                    if handler.get("async", False) is not False:
-                        hook_errors.append(f"{prefix}.async: must be absent or false")
-                    limit = handler.get("additionalContextLimit")
-                    if limit is not None and (
-                            not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0):
-                        hook_errors.append(
-                            f"{prefix}.additionalContextLimit: expected positive integer"
-                        )
+        handler_count, hook_errors = validate_codex_hook_config(hook_config)
         self.result("C9", handler_count > 0 and not hook_errors,
                     f"Codex hook runtime contract across {handler_count} handler(s): "
                     f"{hook_errors or 'valid'}")
@@ -499,25 +548,12 @@ class Run:
                         policy.get("authentication") == "ON_INSTALL",
                         "marketplace install/auth policy is explicit")
 
-        git_marker = os.path.join(self.root, ".git")
-        projects_dir = os.path.join(self.root, "projects")
-        if os.path.exists(git_marker):
-            tracked = subprocess.run(
-                ["git", "-C", self.root, "ls-files", "--", "projects"],
-                capture_output=True, text=True,
-            )
-            tracked_projects = [line for line in tracked.stdout.splitlines() if line]
-            self.result("C9", tracked.returncode == 0 and not tracked_projects,
-                        f"Codex package excludes host-bound projects/: "
-                        f"{len(tracked_projects)} tracked file(s)")
-        else:
-            packaged_projects = []
-            if os.path.isdir(projects_dir):
-                packaged_projects = [os.path.join(dp, f)
-                                     for dp, _dirs, files in os.walk(projects_dir)
-                                     for f in files]
-            self.result("C9", not packaged_projects,
-                        f"installed package excludes projects/: {len(packaged_projects)} file(s)")
+        surface, forbidden_paths, package_error = forbidden_package_paths(self.root)
+        sample = f" e.g. {forbidden_paths[:3]!r}" if forbidden_paths else ""
+        self.result("C9", package_error is None and not forbidden_paths,
+                    f"{surface} package excludes host-bound paths: "
+                    f"{len(forbidden_paths)} file(s){sample}"
+                    + (f"; inventory error: {package_error}" if package_error else ""))
 
         agents_path = os.path.join(self.root, "AGENTS.md")
         claude_path = os.path.join(self.root, "CLAUDE.md")
@@ -614,6 +650,14 @@ def selftest():
         open(os.path.join(td, "sub", "claude.md"), "w").write("collision")
         open(os.path.join(td, "settings.json"), "w").write("{}")
 
+        failing_suite = os.path.join(td, "failing-selftest.py")
+        open(failing_suite, "w").write("raise SystemExit(1)\n")
+        c1_run = Run(td, ci=True)
+        c1_run.c1_selftests([("planted-failure", [failing_suite])])
+        expect_red("C1 goes red when an aggregated selftest fails",
+                   lambda: any(c == "C1" and "exit 1" in d
+                               for c, d in c1_run.failures))
+
         r = Run(td, ci=True)
         r.c2_shared_identity()
         expect_red("C2 goes red on diverged copies",
@@ -623,6 +667,13 @@ def selftest():
                    lambda: any(c == "C3" and "alpha" in d for c, d in r.failures))
         expect_red("C3 goes red on orphan file",
                    lambda: any(c == "C3" and "orphan.md" in d for c, d in r.failures))
+        empty_c3 = os.path.join(td, "empty-c3")
+        os.makedirs(os.path.join(empty_c3, "skills"))
+        c3_empty_run = Run(empty_c3, ci=True)
+        c3_empty_run.c3_reference_resolution()
+        expect_red("C3 goes red on a zero-reference scan",
+                   lambda: any(c == "C3" and "zero authored" in d
+                               for c, d in c3_empty_run.failures))
         r2 = Run(td, ci=True)
         r2.checks = 0
         for s in ["alpha"]:
@@ -645,6 +696,13 @@ def selftest():
         expect_red("C6 scans docs and goes red on a relocated stale claim",
                    lambda: any(c == "C6" and "committed to the PR" in d
                                for c, d in r3_docs.failures))
+        empty_c6 = os.path.join(td, "empty-c6")
+        os.makedirs(empty_c6)
+        c6_empty_run = Run(empty_c6, ci=True)
+        c6_empty_run.c6_stale_patterns()
+        expect_red("C6 goes red on a zero-file scan",
+                   lambda: any(c == "C6" and d == "zero files"
+                               for c, d in c6_empty_run.failures))
         r4 = Run(td, ci=True)
         r4.c8_reserved_basenames()
         expect_red("C8 goes red on nested claude.md",
@@ -694,7 +752,11 @@ def selftest():
         hook_fixture = {
             "description": "fixture",
             "hooks": {
-                "SessionStart": [{"matcher": "startup|resume|clear|compact", "hooks": [{
+                "SessionStart": [{
+                    "matcher": "startup|resume|clear|compact",
+                    "enabled": True,
+                    "trusted_hash": "sha256:fixture",
+                    "hooks": [{
                     "type": "command",
                     "command": "python3 \"${PLUGIN_ROOT}/hooks/codex_session_start.py\"",
                     "timeout": 5,
@@ -716,6 +778,9 @@ def selftest():
                         "timeout": 5,
                     }]},
                 ],
+                "Stop": [{"hooks": [{
+                    "type": "command", "command": "true", "timeout": 5,
+                }]}],
             },
         }
 
@@ -743,7 +808,23 @@ def selftest():
         bad_event["hooks"]["SessionStrt"] = bad_event["hooks"].pop("SessionStart")
         run = c9_after(mutated_hooks=bad_event)
         expect_red("C9 rejects misspelled case-sensitive event names",
-                   lambda: any("event set" in d for _c, d in run.failures))
+                   lambda: any("unsupported event name" in d for _c, d in run.failures))
+
+        expect_red("C9 accepts additional documented hook events",
+                   lambda: not c9_after().failures)
+        expect_red("C9 accepts runtime-valid enabled and trusted_hash entry keys",
+                   lambda: not c9_after().failures)
+
+        for label, key, value, marker in (
+            ("non-boolean enabled", "enabled", "yes", ".enabled: expected boolean"),
+            ("empty trusted_hash", "trusted_hash", "", ".trusted_hash: expected non-empty"),
+        ):
+            mutated = json.loads(json.dumps(hook_fixture))
+            mutated["hooks"]["SessionStart"][0][key] = value
+            run = c9_after(mutated_hooks=mutated)
+            expect_red(f"C9 rejects {label}",
+                       lambda run=run, marker=marker: any(marker in d
+                                                          for _c, d in run.failures))
 
         bad_matcher = json.loads(json.dumps(hook_fixture))
         bad_matcher["hooks"]["PreToolUse"][0]["matcher"] = "^Bash(["
@@ -793,7 +874,31 @@ def selftest():
         run = Run(valid, ci=True)
         run.c9_codex_package()
         expect_red("C9 rejects projects/ content in an installed package",
-                   lambda: any("installed package excludes projects" in d
+                   lambda: any("installed package excludes host-bound paths" in d
+                               for _c, d in run.failures))
+
+        audit_file = os.path.join(
+            valid, "harness-audit-20260801", "-Users-quantum-project", "record.md"
+        )
+        os.makedirs(os.path.dirname(audit_file))
+        open(audit_file, "w").write("publisher-only")
+        run = Run(valid, ci=True)
+        run.c9_codex_package()
+        expect_red("C9 rejects audit and host-slug content in an installed package",
+                   lambda: any("harness-audit-20260801" in d
+                               for _c, d in run.failures))
+
+        subprocess.run(["git", "init", "--quiet", valid], check=True)
+        subprocess.run(
+            ["git", "-C", valid, "add", "--",
+             "harness-audit-20260801/-Users-quantum-project/record.md"],
+            check=True,
+        )
+        run = Run(valid, ci=True)
+        run.c9_codex_package()
+        expect_red("C9 source-tree arm rejects tracked audit content",
+                   lambda: any("source package excludes host-bound paths" in d
+                               and "harness-audit-20260801" in d
                                for _c, d in run.failures))
 
         r7 = Run(td, ci=True)

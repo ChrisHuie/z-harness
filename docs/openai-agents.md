@@ -126,14 +126,20 @@ Codex placeholder.
 ## Package hygiene and host-local context
 
 The installable package contains shared policy, skills, hooks, tools, and documentation. It does not
-contain `projects/`: those directory names encode absolute authoring-host paths, and their working
-notes are neither portable nor suitable for distribution. C9 asserts that a source checkout tracks
-zero files under `projects/` and that an installed package contains none.
+contain `projects/`, `harness-audit-*`, or encoded authoring-host path slugs. Project memory is not
+portable, and the audit tree includes pre-migration backups, drafts, reports, raw evidence, and
+machine-derived paths that belong to the publisher rather than plugin consumers. C9 inventories the
+Git index in a source checkout and the filesystem in an installed package, then rejects every such
+path semantically.
 
 Ignored Claude project memory can remain on the authoring machine. Codex-specific host facts belong
 in `$CODEX_HOME/z-harness/AGENTS.local.md`, outside Git and the plugin cache. Removing host-bound
 files from the current tree does not remove older Git objects; repository history must be audited
 and scrubbed before changing a private repository to public visibility.
+
+Untracking an audit tree preserves ignored bytes in the checkout where the change is authored, but
+another clone applying that commit sees tracked deletions. Back up or move audit data that must
+survive before fast-forwarding that clone across the untracking commit.
 
 ## Hook semantics
 
@@ -155,9 +161,11 @@ hook response from failing open and allowing the underlying command.
 
 Both PreToolUse adapters validate the top-level object and their matched tool envelope. A malformed
 matched payload or internal predicate failure exits 2 only after writing a non-empty blocking reason
-to stderr; a bare exit 2 is not treated as a block by Codex. C9 pins the exact package event set,
-requires command handlers, rejects async handlers, validates timeout types and matcher regexes, and
-C7 pins every required `(event, matcher, script, flags)` tuple including `--runtime codex`.
+to stderr; a bare exit 2 is not treated as a block by Codex. C9 allows documented Codex event names,
+requires the package's three operational events, accepts runtime entry metadata such as `enabled`
+and `trusted_hash` with validated types, requires command handlers, rejects async handlers, and
+validates timeout types and matcher regexes. C7 pins every required
+`(event, matcher, script, flags)` tuple including `--runtime codex`.
 
 Hooks are guardrails, not a complete security boundary: specialized tool paths can opt out, and a
 PostToolUse hook cannot undo completed side effects. Sandbox and approval policy remain the primary
@@ -175,11 +183,13 @@ summing turns overcounts prior work. `tools/codex-cost.py`:
    per-request identity, independently of the turn where a replay appears;
 4. assigns each request its earliest observed timestamp before applying `--since`, so a re-stamped
    fork copy cannot move old usage into a newer window;
-5. reports orphan snapshot count and raw token mass, reconciles copies of requests already accounted
-   inside turns, and explicitly reports any remaining unattributed mass as excluded;
+5. separates corpus-wide parse/schema diagnostics from selected-window accounting, reports orphan
+   snapshot count and raw token mass for both scopes, reconciles copies of requests already
+   accounted inside turns, and explicitly reports any remaining unattributed mass as excluded;
 6. classifies persisted subagent sessions separately and uses session cwd as a project-attribution
    fallback when an embedded turn has no `turn_context`; and
-7. treats zero accounted turns as an error.
+7. discloses snapshots that omit cache-write counters or expose only `total_tokens`, and treats zero
+   accounted turns as an error.
 
 Cached input is a subset of input and reasoning output is a subset of output. The report does not
 sum those subsets into total tokens again and does not infer dollar cost from a hard-coded price

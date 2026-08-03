@@ -33,7 +33,7 @@ import json
 import sys
 import pathlib
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 RUNTIMES = {"claude", "codex"}
 sys.path.insert(0, str(pathlib.Path(__file__).parent / "guards"))
 
@@ -64,7 +64,7 @@ def decide(command):
                 raise ValueError(f"unknown decision {decision!r}")
             if not isinstance(reason, str):
                 raise TypeError(f"reason is not a string: {reason!r}")
-        except Exception as exc:                       # predicate failure is not an allow
+        except BaseException as exc:                   # predicate failure is not an allow
             decision = "deny"
             reason = (
                 f"{name}: predicate failed ({exc!r}); z-harness cannot prove this Bash "
@@ -135,8 +135,26 @@ def selftest():
     failures += (not ok)
     print(f"  {'PASS' if ok else 'FAIL'} predicate-fault    want=deny  got={got:<5} "
           "a broken sub-guard cannot become allow")
+    class ExitingGuard:
+        @staticmethod
+        def decide(_command):
+            raise SystemExit(0)
+    GUARDS.append(("planted_exiting_guard", ExitingGuard))
+    try:
+        got, reason = decide("echo safe")
+    finally:
+        GUARDS.pop()
+    ok = got == "deny" and "predicate failed" in reason
+    total += 1
+    failures += (not ok)
+    print(f"  {'PASS' if ok else 'FAIL'} predicate-exit     want=deny  got={got:<5} "
+          "a sub-guard SystemExit cannot become allow")
     for label, raw in (
+        ("empty stdin", ""),
+        ("malformed JSON", "{"),
         ("non-object payload", "[1, 2, 3]"),
+        ("missing tool_name", json.dumps({"tool_input": {"command": "echo x"}})),
+        ("non-string tool_name", json.dumps({"tool_name": 7, "tool_input": {}})),
         ("non-object tool_input", json.dumps({"tool_name": "Bash", "tool_input": "x"})),
         ("missing command", json.dumps({"tool_name": "Bash", "tool_input": {}})),
     ):
@@ -145,6 +163,14 @@ def selftest():
         total += 1
         failures += (not ok)
         print(f"  {'PASS' if ok else 'FAIL'} envelope-closed    {label}: rc={rc}, stderr={bool(err.strip())}")
+    class BrokenReader:
+        def read(self):
+            raise UnicodeError("planted stdin decode failure")
+    raw, read_error = read_hook_input(BrokenReader())
+    ok = raw is None and "stdin read failed" in read_error
+    total += 1
+    failures += (not ok)
+    print(f"  {'PASS' if ok else 'FAIL'} stdin-closed       decode failure has a reason")
     print(f"\n  {total} checks, {failures} failures")
     if total == 0:
         print("  ZERO CHECKS RAN — treating as failure")
@@ -184,6 +210,14 @@ def hook_mode(raw, runtime="claude"):
     return 0
 
 
+def read_hook_input(stream):
+    """Return (text, error); stdin failures must never become a silent allow."""
+    try:
+        return stream.read(), ""
+    except Exception as exc:
+        return None, f"bash_command_guard: stdin read failed ({exc!r}); refusing to run blind"
+
+
 def main():
     args = sys.argv[1:]
     runtime = "claude"
@@ -205,7 +239,11 @@ def main():
         print(f"unknown flag: {args[0]}", file=sys.stderr)
         return 2
 
-    return hook_mode(sys.stdin.read(), runtime=runtime)
+    raw, error = read_hook_input(sys.stdin)
+    if raw is None:
+        print(error, file=sys.stderr)
+        return 2
+    return hook_mode(raw, runtime=runtime)
 
 
 def evaluate_payload(payload, runtime="claude"):

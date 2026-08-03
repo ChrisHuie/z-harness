@@ -25,7 +25,7 @@ import shlex
 import sys
 import tempfile
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 SUPPORTED_EVENTS = {"SessionStart", "SubagentStart"}
 MAX_CONTEXT_BYTES = 30_000
 LOCAL_CONTEXT_RELATIVE = Path("z-harness") / "AGENTS.local.md"
@@ -35,14 +35,24 @@ class PolicyDeliveryError(ValueError):
     """Mandatory policy could not be read, decoded, or kept inside its hard budget."""
 
 
-def ancestors_from(path):
+def project_directories(path):
+    """Return the directories Codex checks for project AGENTS files.
+
+    Codex walks from a discovered project root down to cwd. With the default
+    project-root contract, a `.git` ancestor is that root; without one Codex
+    checks cwd only. Walking all the way to the filesystem root would suppress
+    plugin policy for files Codex never discovers.
+    """
     current = Path(path).resolve()
-    yield current
-    yield from current.parents
+    upward = [current, *current.parents]
+    for index, directory in enumerate(upward):
+        if (directory / ".git").exists():
+            return list(reversed(upward[:index + 1]))
+    return [current]
 
 
-def applicable_agents_matches(cwd, policy_bytes, codex_home=None):
-    """True when Codex already discovers an identical global or project AGENTS.md."""
+def applicable_agents_match(cwd, policy_bytes, codex_home=None):
+    """Return the identical global/project policy Codex already discovers, if any."""
     home = Path(codex_home or os.environ.get("CODEX_HOME") or Path.home() / ".codex")
     for name in ("AGENTS.override.md", "AGENTS.md"):
         candidate = home / name
@@ -53,9 +63,9 @@ def applicable_agents_matches(cwd, policy_bytes, codex_home=None):
         if not content.strip():
             continue
         if content == policy_bytes:
-            return True
+            return candidate
         break
-    for directory in ancestors_from(cwd):
+    for directory in project_directories(cwd):
         for name in ("AGENTS.override.md", "AGENTS.md"):
             candidate = directory / name
             try:
@@ -65,11 +75,9 @@ def applicable_agents_matches(cwd, policy_bytes, codex_home=None):
             if not content.strip():
                 continue
             if content == policy_bytes:
-                return True
+                return candidate
             break
-        if (directory / ".git").exists():
-            break
-    return False
+    return None
 
 
 def machine_local_context(codex_home=None):
@@ -93,10 +101,10 @@ def context_bytes(sections):
     return len(joined_context(sections).encode("utf-8"))
 
 
-def adapter_context(root):
+def adapter_context(root, native_policy=None):
     cost_tool = shlex.quote(str(root / "tools" / "codex-cost.py"))
     delivery_tool = shlex.quote(str(root / "tools" / "pr-delivery-state.py"))
-    return (
+    context = (
         "# z-harness Codex adapter\n\n"
         "For Codex token accounting, run this resolved installed-package command: "
         f"`python3 {cost_tool}`. For PR publication proof, run: "
@@ -104,6 +112,12 @@ def adapter_context(root):
         "`${PLUGIN_ROOT}`; that variable exists in hook children but is empty in ordinary "
         "agent shell calls."
     )
+    if native_policy is not None:
+        context += (
+            "\n\nPolicy routing: shared policy injection was omitted because Codex "
+            f"discovers byte-identical policy at `{native_policy}`."
+        )
+    return context
 
 
 def build_context(root, cwd, codex_home=None):
@@ -117,8 +131,9 @@ def build_context(root, cwd, codex_home=None):
     except UnicodeError as exc:
         raise PolicyDeliveryError(f"shared policy is not UTF-8: {policy}") from exc
 
-    mandatory = [adapter_context(root)]
-    if not applicable_agents_matches(cwd, policy_bytes, codex_home=codex_home):
+    native_policy = applicable_agents_match(cwd, policy_bytes, codex_home=codex_home)
+    mandatory = [adapter_context(root, native_policy=native_policy)]
+    if native_policy is None:
         mandatory.insert(0, "# z-harness shared operating policy\n\n" + policy_text)
     if context_bytes(mandatory) > MAX_CONTEXT_BYTES:
         raise PolicyDeliveryError(
@@ -196,7 +211,7 @@ def hook_mode(raw, root=None):
     plugin_root = Path(root or os.environ.get("PLUGIN_ROOT") or Path(__file__).parent.parent)
     try:
         context = build_context(plugin_root.resolve(), cwd)
-    except PolicyDeliveryError as exc:
+    except Exception as exc:
         reason = f"z-harness mandatory policy unavailable: {exc}"
         return subagent_failure_result(reason) if event == "SubagentStart" else stop_result(reason)
     if context:
@@ -245,6 +260,9 @@ def selftest():
         context = build_context(plugin, work)
         check("identical applicable AGENTS.md suppresses duplicate policy",
               "# z-harness shared operating policy" not in context)
+        check("policy suppression names the byte-identical native source",
+              "Policy routing: shared policy injection was omitted" in context
+              and str(base / "work" / "repo" / "AGENTS.md") in context)
         check("adapter context remains when policy is already native",
               "# z-harness Codex adapter" in context)
 
@@ -281,9 +299,24 @@ def selftest():
         context = build_context(plugin, planted, codex_home=base / "empty-codex-home")
         check("same-name manifest cannot suppress installed policy", policy.strip() in context)
 
-        local_context.write_bytes(b"bad utf8: \xff\n")
-        context = build_context(plugin, work, codex_home=global_home)
-        check("unreadable optional context preserves adapter", "# z-harness Codex adapter" in context)
+        unrooted = base / "unrooted" / "parent" / "child"
+        unrooted.mkdir(parents=True)
+        (base / "unrooted" / "parent" / "AGENTS.md").write_text(policy, encoding="utf-8")
+        context = build_context(plugin, unrooted, codex_home=base / "empty-codex-home")
+        check("an ancestor above a cwd with no project root cannot suppress policy",
+              "# z-harness shared operating policy" in context)
+        (unrooted / "AGENTS.md").write_text(policy, encoding="utf-8")
+        context = build_context(plugin, unrooted, codex_home=base / "empty-codex-home")
+        check("cwd policy suppresses duplication when no project root exists",
+              "# z-harness shared operating policy" not in context)
+
+        isolated_home = base / "isolated-codex-home"
+        isolated_local = isolated_home / LOCAL_CONTEXT_RELATIVE
+        isolated_local.parent.mkdir(parents=True)
+        isolated_local.write_bytes(b"bad utf8: \xff\n")
+        context = build_context(plugin, work, codex_home=isolated_home)
+        check("unreadable optional context preserves mandatory policy",
+              policy.strip() in context and "# z-harness Codex adapter" in context)
         check("unreadable optional context is diagnosed", "Optional context was omitted" in context)
 
         local_context.write_text("x" * MAX_CONTEXT_BYTES, encoding="utf-8")
@@ -314,6 +347,23 @@ def selftest():
         rc, output = captured_hook(payload, root=plugin)
         check("oversized mandatory policy stops SessionStart",
               rc == 0 and json.loads(output)["continue"] is False)
+
+        (plugin / "AGENTS.md").write_text(policy, encoding="utf-8")
+        original_project_directories = globals()["project_directories"]
+        def failed_project_walk(_cwd):
+            raise OSError("planted ancestor walk failure")
+        globals()["project_directories"] = failed_project_walk
+        try:
+            rc, output = captured_hook(payload, root=plugin)
+            sub_rc, sub_output = captured_hook(subagent, root=plugin)
+        finally:
+            globals()["project_directories"] = original_project_directories
+        check("ancestor-walk runtime errors stop SessionStart without traceback",
+              rc == 0 and json.loads(output)["continue"] is False
+              and "planted ancestor walk failure" in output)
+        check("ancestor-walk runtime errors tell SubagentStart to stop",
+              sub_rc == 0
+              and "Stop work" in json.loads(sub_output)["hookSpecificOutput"]["additionalContext"])
 
     rc, output = captured_hook("not-json")
     check("malformed JSON stops rather than failing open",

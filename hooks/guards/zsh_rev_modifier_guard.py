@@ -109,9 +109,21 @@ def decide(command):
         for text, quoting in tokens:
             if quoting == "'":          # single-quoted: the outer shell never expands it
                 continue
+            if quoting.startswith("mixed:"):
+                modes = quoting.split(":", 1)[1]
+            else:
+                code = {"": "U", "'": "S", '"': "D"}.get(quoting, "U")
+                modes = code * len(text)
             for rx in (EXPANSION, EXPANSION_BRACED):
                 for m in rx.finditer(text):
-                    hits.append((m.group(0), text, m.group(1)))
+                    # zsh sees a modifier only when the parameter, colon and
+                    # modifier letter occupy one shell-quoting segment. A quote
+                    # beginning immediately after the colon, a quote ending
+                    # before it, or an escaped colon makes the rev:path form safe.
+                    matched_modes = modes[m.start():m.end(1)]
+                    if (matched_modes and len(set(matched_modes)) == 1
+                            and matched_modes[0] != "S"):
+                        hits.append((m.group(0), text, m.group(1)))
     if not hits:
         return ("allow", "")
     tok, arg, mod = hits[0]
@@ -165,6 +177,12 @@ FIXTURES = [
      "git show $SHA:s'rc/x.py'", "deny"),
     ("GREEN braced name, colon outside - the correct form",
      'git show ${MB}:tests/bdd/steps/domain/uc004_delivery.py', "allow"),
+    ("GREEN quote begins immediately after colon",
+     "git show $SHA:'tests/x.py'", "allow"),
+    ("GREEN double quote ends before colon",
+     'git show "$SHA":tests/x.py', "allow"),
+    ("GREEN escaped colon reaches git literally",
+     'git show $SHA\\:tests/x.py', "allow"),
     ("GREEN POSIX default form ${name:-x} is not a modifier",
      'git show ${SHA:-HEAD}:src/app.py', "allow"),
     ("GREEN command substitution is not a parameter expansion",

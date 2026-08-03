@@ -126,8 +126,8 @@ Codex placeholder.
 ## Package hygiene and host-local context
 
 The current package file surface contains shared policy, skills, hooks, tools, and documentation. It
-does not contain `projects/`, `harness-audit-*`, encoded authoring-host path slugs, or absolute host
-paths in text. Project memory is not portable, and the audit tree includes pre-migration backups,
+does not contain `projects/`, `harness-audit-*` (including underscore-equivalent spellings), encoded
+authoring-host path slugs, or absolute host paths in text. Project memory is not portable, and the audit tree includes pre-migration backups,
 drafts, reports, raw evidence, and machine-derived paths that belong to the publisher rather than
 plugin consumers. C9 inventories the Git index in a source checkout and the filesystem in an
 installed package, then rejects those path and content classes semantically.
@@ -170,6 +170,14 @@ and `trusted_hash` with validated types, requires command handlers, rejects asyn
 validates timeout types and matcher regexes. C7 pins every required
 `(event, matcher, script, flags)` tuple including `--runtime codex`.
 
+The Git-grep predicate unwraps ordinary `env`, `nice`, absolute executable paths, and nested
+`sh -c` launch shapes, and models command-scoped `-c`, `--config-env`, and `GIT_CONFIG_COUNT`
+configuration. It deliberately does not spawn `git config` from a PreToolUse hook. Repository,
+worktree, system, and global Git configuration that is not materialized in the command line is
+therefore outside its argv-only proof boundary, especially when a command relies on an implicit
+grep engine. The shared policy requires explicit `git grep -P` for PCRE atoms; sandbox and approval
+policy remain the authority boundary if hidden configuration changes that engine.
+
 C9's event allowlist follows the generated/runtime schema observed in Codex CLI 0.144.4. That schema
 contains ten events and does not contain `SessionEnd`; 0.144.4 silently drops that registration even
 though the public manual currently lists it. The gate rejects `SessionEnd` until an installed runtime
@@ -198,8 +206,9 @@ summing turns overcounts prior work. `tools/codex-cost.py`:
 6. classifies persisted subagent sessions separately and uses session cwd as a project-attribution
    fallback when an embedded turn has no `turn_context`; and
 7. discloses snapshots whose normalized component counters are all zero while `total_tokens` is
-   positive, including how many selected requests and tokens they contribute, and treats zero
-   accounted turns as an error.
+   positive, including how many selected requests and tokens they contribute; reports whether any
+   per-request snapshot has a positive `cache_write_input_tokens` value; and treats zero accounted
+   turns as an error.
 
 Cached input is a subset of input and reasoning output is a subset of output. The report does not
 sum those subsets into total tokens again and does not infer dollar cost from a hard-coded price

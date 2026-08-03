@@ -259,7 +259,7 @@ def forbidden_package_path(path):
     for part in parts:
         lower = part.lower()
         slug = lower.replace("_", "-")
-        if lower == "projects" or lower.startswith("harness-audit-"):
+        if lower == "projects" or slug.startswith("harness-audit-"):
             return True
         if (slug.startswith(("-users-", "-home-", "-volumes-", "-private-"))
                 or "-users-" in slug or "-home-" in slug or "-volumes-" in slug):
@@ -973,6 +973,7 @@ def selftest():
 
         for label, path in (
             ("nested audit directory", "nested/HARNESS-AUDIT-20260801/record.md"),
+            ("underscore audit directory", "nested/harness_audit-20260801/record.md"),
             ("prefixed private/Users slug",
              "records/-private-tmp-run--Users-quantum-project/record.md"),
             ("underscore home slug", "records/_home_quantum_project/record.md"),

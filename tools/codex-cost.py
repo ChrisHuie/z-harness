@@ -27,7 +27,7 @@ import sys
 import tempfile
 import time
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 USAGE_FIELDS = (
     "input_tokens",
     "cached_input_tokens",
@@ -105,6 +105,7 @@ def scan(root, cutoff, project_filter=None):
         "corpus_replayed_usage_snapshots": 0,
         "cache_write_missing_last_snapshots": 0,
         "cache_write_missing_cumulative_snapshots": 0,
+        "cache_write_positive_last_snapshots": 0,
         "component_zero_usage_snapshots": 0,
         "component_zero_accounted_requests": 0,
         "component_zero_accounted_total_tokens": 0,
@@ -190,6 +191,8 @@ def scan(root, cutoff, project_filter=None):
                 if "cache_write_input_tokens" not in cumulative:
                     scanset["cache_write_missing_cumulative_snapshots"] += 1
                 normalized = normalized_usage(usage)
+                if normalized["cache_write_input_tokens"] > 0:
+                    scanset["cache_write_positive_last_snapshots"] += 1
                 if (normalized["total_tokens"] > 0
                         and all(normalized[field] == 0
                                 for field in USAGE_FIELDS if field != "total_tokens")):
@@ -329,7 +332,9 @@ def report(turns, scanset, out=sys.stdout):
         f"{scanset['missing_last_usage_snapshots']} missing per-request usage, "
         f"{scanset['cache_write_missing_last_snapshots']} last / "
         f"{scanset['cache_write_missing_cumulative_snapshots']} cumulative snapshots omit "
-        "cache_write_input_tokens"
+        "cache_write_input_tokens; "
+        f"{scanset['cache_write_positive_last_snapshots']} last snapshots report a positive "
+        "cache_write_input_tokens value"
     )
     write(
         f"          {scanset['component_zero_usage_snapshots']} snapshots have total_tokens > 0 "
@@ -415,7 +420,7 @@ def selftest():
     }
     request_1 = cumulative_1.copy()
     request_2 = {field: value for field, value in zip(USAGE_FIELDS, (80, 60, 0, 10, 4, 90))}
-    usage_3 = {field: value for field, value in zip(USAGE_FIELDS, (50, 0, 0, 5, 2, 55))}
+    usage_3 = {field: value for field, value in zip(USAGE_FIELDS, (50, 0, 5, 5, 2, 55))}
     orphan_usage = {field: value for field, value in zip(USAGE_FIELDS, (25, 0, 0, 5, 1, 30))}
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -426,6 +431,10 @@ def selftest():
         sub_path = os.path.join(tmp, "sub.jsonl")
         write_fixture(main_path, [
             {"timestamp": now, "type": "session_meta", "payload": {"id": "s1", "source": "vscode"}},
+            # Embedded fork history can contain another session_meta. The first
+            # record owns this file; later copied metadata must not overwrite it.
+            {"timestamp": now, "type": "session_meta", "payload": {
+                "id": "embedded", "source": {"subagent": {"thread_id": "embedded"}}}},
             {"timestamp": now, "type": "event_msg", "payload": {"type": "task_started", "turn_id": "t1"}},
             {"timestamp": now, "type": "turn_context", "payload": {"turn_id": "t1", "cwd": "/repo/a", "model": "gpt-test"}},
             {"timestamp": now, "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": cumulative_1, "last_token_usage": request_1}}},
@@ -436,7 +445,9 @@ def selftest():
             "not-json",
         ])
         write_fixture(copy_path, [
-            {"timestamp": now, "type": "session_meta", "payload": {"id": "copy", "session_id": "s1", "forked_from_id": "s1", "source": "vscode"}},
+            {"timestamp": now, "type": "session_meta", "payload": {
+                "id": "copy", "session_id": "s1", "forked_from_id": "s1",
+                "source": {"subagent": {"thread_id": "copy"}}}},
             {"timestamp": now, "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": cumulative_1, "last_token_usage": request_1}}},
             {"timestamp": now, "type": "event_msg", "payload": {"type": "task_started", "turn_id": "t1"}},
             {"timestamp": now, "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": cumulative_1, "last_token_usage": request_1}}},
@@ -464,6 +475,10 @@ def selftest():
         check("unique unattributed orphan token mass remains explicit",
               scanset["orphan_excluded_total_tokens"] == 30)
         check("subagent source is classified separately", turns["t3"]["class"] == "subagent")
+        check("first session_meta owns a file and main provenance wins copied subagent history",
+              turns["t1"]["class"] == "main" and turns["t2"]["class"] == "main")
+        check("positive cache-write observations are disclosed",
+              scanset["cache_write_positive_last_snapshots"] == 1)
         check("malformed record is counted", scanset["malformed_records"] == 1)
         check("snapshot missing last_token_usage is counted and skipped",
               scanset["missing_last_usage_snapshots"] == 1)
@@ -561,27 +576,51 @@ def selftest():
             {"timestamp": old_stamp, "type": "event_msg", "payload": {"type": "token_count",
              "info": {"total_token_usage": orphan_usage, "last_token_usage": orphan_usage}}},
         ])
-        windowed, window_scan = scan(window_dir, time.time() - 3600)
+        nested_window_dir = os.path.join(window_dir, "nested")
+        os.mkdir(nested_window_dir)
+        write_fixture(os.path.join(nested_window_dir, "recent-other-project.jsonl"), [
+            {"timestamp": recent_stamp, "type": "session_meta",
+             "payload": {"id": "other-session", "cwd": "/repo/other"}},
+            {"timestamp": recent_stamp, "type": "event_msg",
+             "payload": {"type": "task_started", "turn_id": "other-turn"}},
+            {"timestamp": recent_stamp, "type": "event_msg", "payload": {"type": "token_count",
+             "info": {"total_token_usage": request_150,
+                      "last_token_usage": request_150}}},
+        ])
+        windowed, window_scan = scan(
+            window_dir, time.time() - 3600, project_filter="/repo/w"
+        )
         check("--since uses a request's earliest stamp regardless of file order",
               set(windowed) == {"recent-turn"}
               and window_scan["replayed_usage_snapshots"] == 0
               and window_scan["corpus_replayed_usage_snapshots"] == 1)
         check("corpus and window diagnostics have scope-discriminating values",
-              window_scan["files_found"] == 5
-              and window_scan["files_in_window"] == 1
+              window_scan["files_found"] == 6
+              and window_scan["files_in_window"] == 2
+              and window_scan["selected_request_keys"] == 2
+              and window_scan["window_accounted_usage_records"] == 2
+              and window_scan["turns_in_window"] == 2
               and window_scan["corpus_orphan_usage_snapshots"] == 1
               and window_scan["orphan_usage_snapshots"] == 0
+              and window_scan["orphan_excluded_usage_records"] == 0
+              and window_scan["orphan_excluded_total_tokens"] == 0
               and window_scan["accounted_usage_records"] == 1)
         import io
         window_buffer = io.StringIO()
         rc = report(windowed, window_scan, out=window_buffer)
         window_text = window_buffer.getvalue()
-        check("report labels pre-project window scope with exact fixture counts",
+        window_lines = window_text.splitlines()
+        check("report pins every pre-project window field with discriminating counts",
               rc == 0
-              and "CORPUS  5 transcript files" in window_text
-              and "WINDOW (before --project)  1 files" in window_text
-              and "SELECTED (all projects in window)  1 turns / 1 accounted requests"
-              in window_text)
+              and "  WINDOW (before --project)  2 files contain 2 selected request "
+                  "identities; 2 accounted requests across 2 turns, 0 replayed/copy "
+                  "snapshots, 0 timestamp-less turns" in window_lines
+              and "          0 selected orphan snapshots total 0 raw tokens; after replay "
+                  "reconciliation, 0 requests / 0 tokens remain unattributed and excluded"
+                  in window_lines
+              and "  SELECTED (project containing '/repo/w')  1 turns / 1 accounted "
+                  "requests; 0 component-zero requests contribute 0 total tokens"
+                  in window_lines)
 
         replay_dir = os.path.join(tmp, "turn-replay-property")
         os.mkdir(replay_dir)
@@ -611,6 +650,11 @@ def selftest():
 
         schema_dir = os.path.join(tmp, "schema-property")
         os.mkdir(schema_dir)
+        component_zero_usage = empty_usage()
+        component_zero_usage["total_tokens"] = 42
+        missing_cache_write_usage = {
+            "input_tokens": 10, "output_tokens": 2, "total_tokens": 12,
+        }
         write_fixture(os.path.join(schema_dir, "component-zero.jsonl"), [
             {"timestamp": "2026-01-01T00:00:00Z", "type": "session_meta",
              "payload": {"id": "schema-session", "cwd": "/repo/schema"}},
@@ -618,22 +662,30 @@ def selftest():
              "payload": {"type": "task_started", "turn_id": "schema-turn"}},
             {"timestamp": "2026-01-01T00:00:02Z", "type": "event_msg",
              "payload": {"type": "token_count", "info": {
-                 "total_token_usage": {"total_tokens": 42},
-                 "last_token_usage": {"total_tokens": 42}}}},
+                 "total_token_usage": component_zero_usage,
+                 "last_token_usage": component_zero_usage}}},
+            {"timestamp": "2026-01-01T00:00:03Z", "type": "event_msg",
+             "payload": {"type": "token_count", "info": {
+                 "total_token_usage": missing_cache_write_usage,
+                 "last_token_usage": missing_cache_write_usage}}},
         ])
         schema_turns, schema_scan = scan(schema_dir, 0)
         check("missing cache-write fields are disclosed without dropping totals",
-              schema_turns["schema-turn"]["usage"]["total_tokens"] == 42
+              schema_turns["schema-turn"]["usage"]["total_tokens"] == 54
               and schema_scan["cache_write_missing_last_snapshots"] == 1
               and schema_scan["cache_write_missing_cumulative_snapshots"] == 1)
         check("component-zero snapshots are labeled by normalized values",
-              schema_scan["component_zero_usage_snapshots"] == 1)
+              schema_scan["component_zero_usage_snapshots"] == 1
+              and schema_scan["component_zero_accounted_requests"] == 1
+              and schema_scan["component_zero_accounted_total_tokens"] == 42)
 
         buffer = io.StringIO()
         rc = report(schema_turns, schema_scan, out=buffer)
         check("report discloses component-zero accounting consequence",
               rc == 0
-              and "1 component-zero requests contribute 42 total tokens" in buffer.getvalue())
+              and "1 component-zero requests contribute 42 total tokens" in buffer.getvalue()
+              and "0 last snapshots report a positive cache_write_input_tokens value"
+                  in buffer.getvalue())
 
         no_project_turns, no_project_scan = scan(
             schema_dir, 0, project_filter="/repo/not-present"

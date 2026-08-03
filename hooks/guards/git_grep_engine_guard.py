@@ -144,6 +144,8 @@ def split_commands(cmd):
 
 SHELL_KEYWORDS = {"do", "then", "else", "elif", "if", "while", "until", "time",
                   "exec", "command", "builtin", "nocorrect", "noglob"}
+ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
 
 
 def strip_shell_keywords(words):
@@ -154,30 +156,134 @@ def strip_shell_keywords(words):
     return words[k:]
 
 
+def unwrap_command_prefix(tokens):
+    """Peel common launch wrappers and return (argv tokens, environment, errors).
+
+    The hook sees shell source, not execve(2) argv.  `env`, `nice`, absolute
+    executable paths, and `sh -c` are therefore part of the security boundary:
+    treating only literal argv[0] == "git" makes the same Git invocation vanish.
+    """
+    items = list(tokens)
+    command_env = dict(os.environ)
+    errors = []
+    wrapper_depth = 0
+    while items:
+        while items and items[0][0] in SHELL_KEYWORDS:
+            items.pop(0)
+        while items and ASSIGNMENT.match(items[0][0]):
+            key, value = items.pop(0)[0].split("=", 1)
+            command_env[key] = value
+        if not items:
+            break
+
+        executable = os.path.basename(items[0][0])
+        if executable == "env":
+            wrapper_depth += 1
+            items.pop(0)
+            while items:
+                word = items[0][0]
+                if word == "--":
+                    items.pop(0)
+                    break
+                if word in {"-i", "--ignore-environment"}:
+                    command_env = {}
+                    items.pop(0)
+                    continue
+                if word in {"-u", "--unset", "-C", "--chdir"}:
+                    option = items.pop(0)[0]
+                    if not items:
+                        errors.append(f"{option} is missing its argument")
+                        break
+                    value = items.pop(0)[0]
+                    if option in {"-u", "--unset"}:
+                        command_env.pop(value, None)
+                    continue
+                if word.startswith("--unset="):
+                    command_env.pop(word.split("=", 1)[1], None)
+                    items.pop(0)
+                    continue
+                if word.startswith("--chdir="):
+                    items.pop(0)
+                    continue
+                if word.startswith("-"):
+                    errors.append(f"unmodelled env option {word!r}")
+                    break
+                if ASSIGNMENT.match(word):
+                    key, value = items.pop(0)[0].split("=", 1)
+                    command_env[key] = value
+                    continue
+                break
+            if errors:
+                break
+            continue
+
+        if executable == "nice":
+            wrapper_depth += 1
+            items.pop(0)
+            while items:
+                word = items[0][0]
+                if word == "--":
+                    items.pop(0)
+                    break
+                if word in {"-n", "--adjustment"}:
+                    option = items.pop(0)[0]
+                    if not items:
+                        errors.append(f"{option} is missing its argument")
+                        break
+                    items.pop(0)
+                    continue
+                if word.startswith("--adjustment=") or re.fullmatch(r"-\d+", word):
+                    items.pop(0)
+                    continue
+                if word.startswith("-"):
+                    errors.append(f"unmodelled nice option {word!r}")
+                break
+            if errors:
+                break
+            continue
+
+        break
+    if wrapper_depth > 8:
+        errors.append("more than eight nested command wrappers")
+    return items, command_env, errors
+
+
+def nested_shell_command(tokens):
+    """Return the command string passed to a common shell's -c, if present."""
+    items, _command_env, errors = unwrap_command_prefix(tokens)
+    if errors or not items or os.path.basename(items[0][0]) not in SHELLS:
+        return None
+    args = items[1:]
+    for index, (word, _quoting) in enumerate(args):
+        if word == "--":
+            continue
+        if word == "-c" or (word.startswith("-") and not word.startswith("--")
+                             and "c" in word[1:]):
+            return args[index + 1][0] if index + 1 < len(args) else ""
+    return None
+
+
 def git_grep_argv(tokens):
     """-> (argv after git grep, config values, unresolved relevant config),
     or None when this subcommand is not a git grep."""
-    words = [t for t, _ in tokens]
-    k0 = 0
-    while k0 < len(words) and words[k0] in SHELL_KEYWORDS:
-        k0 += 1
-    words = words[k0:]
+    items, command_env, prefix_errors = unwrap_command_prefix(tokens)
+    words = [t for t, _ in items]
     if not words:
         return None
     j = 0
-    # Leading assignments affect the future git process. Overlay them on the
-    # hook's inherited environment so --config-env and GIT_CONFIG_COUNT can be
-    # resolved exactly when possible.
-    command_env = dict(os.environ)
-    while j < len(words) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[j]):
-        key, value = words[j].split("=", 1)
-        command_env[key] = value
-        j += 1
-    if j >= len(words) or words[j] != "git":
+    if prefix_errors:
+        concealed_git = any(
+            os.path.basename(word) == "git"
+            or re.search(r"(?:^|\s)(?:/[^\s]*/)?git(?:\s|$)", word)
+            for word in words
+        )
+        if concealed_git:
+            return [], [], prefix_errors
+    if os.path.basename(words[j]) != "git":
         return None
     j += 1
     configs = []
-    unresolved_configs = []
+    unresolved_configs = list(prefix_errors)
 
     count_text = command_env.get("GIT_CONFIG_COUNT")
     if count_text is not None:
@@ -236,16 +342,49 @@ def git_grep_argv(tokens):
         j += 1
     if j >= len(words) or words[j] != "grep":
         return None
-    return tokens[k0 + j + 1:], configs, unresolved_configs
+    return items[j + 1:], configs, unresolved_configs
 
 
 CONFIG_ENGINE = {"extended": "E", "ere": "E", "perl": "P", "pcre": "P",
-                 "fixed": "F", "basic": "B"}
+                 "fixed": "F", "basic": "B", "default": "B"}
 
 
-def decide(command):
+def git_config_bool_is_false(value):
+    """Recognize Git's false spellings; everything else fails closed as true.
+
+    Git accepts non-zero decimal, signed, hexadecimal, octal, and scaled numeric
+    booleans.  A four-string true allowlist is therefore unsafe.  We only allow
+    the documented false words and numeric zero aliases; invalid spellings are
+    conservatively treated as enabling ERE, matching the guard's fail-closed role.
+    """
+    val = value.strip().lower()
+    if val in {"", "false", "no", "off"}:
+        return True
+    numeric = re.fullmatch(
+        r"([+-]?(?:0[xX][0-9a-fA-F]+|0[0-7]*|[0-9]+))(?:[kKmMgG])?", val
+    )
+    if not numeric:
+        return False
+    try:
+        number = int(numeric.group(1), 0)
+    except ValueError:
+        number = int(numeric.group(1), 10)
+    return number == 0
+
+
+def decide(command, _shell_depth=0):
     """-> (decision, reason). decision in {allow, deny, ask}."""
+    if _shell_depth > 4:
+        return ("ask", "nested shell -c depth exceeds the git-grep guard's model; "
+                "verify the command or invoke git grep directly with -P.")
     for tokens in split_commands(command):
+        nested = nested_shell_command(tokens)
+        if nested is not None:
+            if not nested:
+                return ("ask", "a shell -c wrapper is missing its command string")
+            nested_decision, nested_reason = decide(nested, _shell_depth + 1)
+            if nested_decision != "allow":
+                return nested_decision, nested_reason
         got = git_grep_argv(tokens)
         if got is None:
             continue
@@ -261,12 +400,18 @@ def decide(command):
             key, separator, value = cfg.partition("=")
             key = key.strip().lower()
             val = value.strip().lower()
-            if separator and key == "grep.patterntype":
-                if val in CONFIG_ENGINE:
-                    engine = CONFIG_ENGINE[val]
-                    engine_src = "config"
+            if key == "grep.patterntype":
+                if not separator:
+                    return ("ask", "git grep has grep.patternType with no value; Git may "
+                            "fail without diagnostics, so the guard cannot prove an engine. "
+                            "Use an explicit value or invoke git grep with -P.")
+                if val not in CONFIG_ENGINE:
+                    return ("ask", f"git grep has unrecognized grep.patternType={value!r}; "
+                            "the guard cannot prove an engine. Use -P explicitly.")
+                engine = CONFIG_ENGINE[val]
+                engine_src = "config"
             elif key == "grep.extendedregexp":
-                if not separator or val in {"1", "true", "yes", "on"}:
+                if not separator or not git_config_bool_is_false(value):
                     engine = "E"
                     engine_src = "config"
         patterns = []
@@ -305,7 +450,7 @@ def decide(command):
 
         if engine != "E":
             continue
-        engine_desc = "-E" if engine_src == "flag" else "the grep.patternType config"
+        engine_desc = "-E" if engine_src == "flag" else "Git grep configuration"
         if not patterns:
             if pattern_from_file:
                 return ("ask",
@@ -400,6 +545,9 @@ FIXTURES = [
     ("RED  REVIEW: --config-env resolves an explicit prefix assignment",
      "PT=extended git --config-env=grep.patternType=PT "
      "grep -n 'harness\\b' -- README.md", "deny"),
+    ("RED  ROUND 9: separated --config-env resolves an explicit prefix assignment",
+     "PT=extended git --config-env grep.patternType=PT "
+     "grep -n 'harness\\b' -- README.md", "deny"),
     ("ASK  REVIEW: unresolved relevant --config-env fails closed",
      "git --config-env=grep.patternType=ZHARNESS_UNSET_PATTERN_TYPE "
      "grep -n 'harness\\b' -- README.md", "ask"),
@@ -418,6 +566,29 @@ FIXTURES = [
      """git grep -P -f pats.txt -- src/""", "allow"),
     ("GREEN inside a for/do loop with the BRE engine",
      """for d in a b; do git grep -n 'x\\b' -- $d; done""", "allow"),
+    ("RED  ROUND 9: Git numeric boolean 2 selects ERE",
+     """git -c grep.extendedRegexp=2 grep -n 'harness\\b' -- README.md""", "deny"),
+    ("RED  ROUND 9: Git signed numeric boolean -1 selects ERE",
+     """git -c grep.extendedRegexp=-1 grep -n 'harness\\b' -- README.md""", "deny"),
+    ("RED  ROUND 9: Git hexadecimal boolean 0x2 selects ERE",
+     """git -c grep.extendedRegexp=0x2 grep -n 'harness\\b' -- README.md""", "deny"),
+    ("GREEN ROUND 9: Git numeric zero keeps the default BRE engine",
+     """git -c grep.extendedRegexp=0x0 grep -n 'harness\\b' -- README.md""", "allow"),
+    ("RED  ROUND 9: env wrapper cannot displace git from argv zero",
+     """env GIT_PAGER=cat git grep -nE 'harness\\b' -- README.md""", "deny"),
+    ("RED  ROUND 9: env-injected Git config remains visible",
+     "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=grep.patternType "
+     "GIT_CONFIG_VALUE_0=extended git grep -n 'harness\\b' -- README.md", "deny"),
+    ("RED  ROUND 9: nice wrapper cannot displace git from argv zero",
+     """nice -n 5 git grep -nE 'harness\\b' -- README.md""", "deny"),
+    ("RED  ROUND 9: shell -c command is recursively inspected",
+     """sh -c \"git grep -nE 'harness\\b' -- README.md\"""", "deny"),
+    ("RED  ROUND 9: absolute git path is recognized by basename",
+     """/usr/bin/git grep -nE 'harness\\b' -- README.md""", "deny"),
+    ("ASK  ROUND 9: valueless grep.patternType fails closed",
+     """git -c grep.patternType grep -n 'harness\\b' -- README.md""", "ask"),
+    ("ASK  ROUND 9: unmodelled env command splitting cannot hide git",
+     """env -S \"git grep -nE 'harness\\b' -- README.md\"""", "ask"),
 ]
 
 

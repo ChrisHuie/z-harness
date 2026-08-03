@@ -20,8 +20,8 @@ Precedence: deny > ask > allow. Reasons from every guard that fired are concaten
 so a command tripping both is told about both.
 
 Both runtimes use the same PreToolUse fields and deny shape. The Claude envelope was
-verified in-binary at 2.1.220. Codex's installed hook contract accepts only `allow` or
-`deny` for PreToolUse; an unsupported decision fails the hook while allowing the command.
+verified in-binary at 2.1.220. Codex's installed hook contract accepts `deny` with a
+non-empty reason, or no output; `allow` requires `updatedInput`, and `ask` is rejected.
 With `--runtime codex`, an `ask` result therefore maps to `deny`. PreToolUse reads stdin
 JSON and emits
   {"hookSpecificOutput":{"hookEventName":"PreToolUse",

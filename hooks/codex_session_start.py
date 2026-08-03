@@ -9,6 +9,8 @@ AGENTS.md. That prevents duplicate or version-skewed policy in the harness sourc
 
 The nearest tracked Claude-style project memory index is added as soft context. Memory is data,
 not authority: the injected header tells the agent to verify drift-prone claims before use.
+An optional `$CODEX_HOME/z-harness/AGENTS.local.md` supplies machine-local operating instructions;
+it is read from the Codex home at runtime and is never part of the plugin package.
 
 Exit codes: 0 context emitted or nothing applicable; 1 selftest failure; 2 malformed input,
 missing policy, oversized context, or an unknown argument.
@@ -21,9 +23,10 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 SUPPORTED_EVENTS = {"SessionStart", "SubagentStart"}
 MAX_CONTEXT_BYTES = 30_000
+LOCAL_CONTEXT_RELATIVE = Path("z-harness") / "AGENTS.local.md"
 
 
 def project_slug(path):
@@ -95,6 +98,19 @@ def matching_plugin_checkout(cwd, expected_name):
     return False
 
 
+def machine_local_context(codex_home=None):
+    """Return optional host-specific instructions from Codex home, never the package."""
+    home = Path(codex_home or os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    candidate = home / LOCAL_CONTEXT_RELATIVE
+    try:
+        text = candidate.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
+    except (OSError, UnicodeError) as exc:
+        raise ValueError(f"cannot read machine-local context {candidate}: {exc}") from exc
+    return text.strip()
+
+
 def is_packaged_memory(root, candidate):
     """Accept Git-tracked source files or files already copied into an installed package."""
     git_marker = root / ".git"
@@ -141,6 +157,14 @@ def build_context(root, cwd, codex_home=None):
     if not native_checkout and not applicable_agents_matches(
             cwd, policy_bytes, codex_home=codex_home):
         sections.append("# z-harness shared operating policy\n\n" + policy_bytes.decode("utf-8"))
+
+    local_context = machine_local_context(codex_home=codex_home)
+    if local_context:
+        sections.append(
+            "# z-harness machine-local operating context\n\n"
+            "These instructions apply only to this host and were loaded from Codex home, "
+            "not from the plugin package.\n\n" + local_context
+        )
 
     memory = nearest_memory(root, cwd)
     if memory is not None:
@@ -237,6 +261,15 @@ def selftest():
         (global_home / "AGENTS.md").write_text(policy, encoding="utf-8")
         context = build_context(plugin, work, codex_home=global_home)
         check("identical global AGENTS.md suppresses duplicate policy", context == "")
+
+        local_context = global_home / LOCAL_CONTEXT_RELATIVE
+        local_context.parent.mkdir()
+        local_context.write_text("`timeout` is unavailable on this host.\n", encoding="utf-8")
+        context = build_context(plugin, work, codex_home=global_home)
+        check("machine-local Codex-home context is emitted when present",
+              "`timeout` is unavailable on this host." in context)
+        check("machine-local context does not revive duplicate plugin policy",
+              "# z-harness shared operating policy" not in context)
 
         native = base / "native" / "subdir"
         native.mkdir(parents=True)

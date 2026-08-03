@@ -27,7 +27,7 @@ import sys
 import tempfile
 import time
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 USAGE_FIELDS = (
     "input_tokens",
     "cached_input_tokens",
@@ -86,12 +86,18 @@ def scan(root, cutoff, project_filter=None):
         "accounted_usage_records": 0,
         "missing_last_usage_snapshots": 0,
         "orphan_usage_snapshots": 0,
+        "orphan_usage_raw_total_tokens": 0,
+        "orphan_excluded_usage_records": 0,
+        "orphan_excluded_total_tokens": 0,
         "replayed_usage_snapshots": 0,
         "turns_without_timestamps": 0,
         "turns": 0,
     }
     turns = {}
     seen_usage_records = set()
+    observed_usage_records = {}
+    accounted_request_keys = set()
+    orphan_request_keys = set()
 
     for path in files:
         try:
@@ -154,15 +160,27 @@ def scan(root, cutoff, project_filter=None):
                 if not isinstance(cumulative, dict):
                     continue
                 scanset["usage_snapshots"] += 1
-                if not current_turn:
-                    scanset["orphan_usage_snapshots"] += 1
-                    continue
                 usage = info.get("last_token_usage")
                 if not isinstance(usage, dict):
                     scanset["missing_last_usage_snapshots"] += 1
                     continue
                 if cutoff and (observed_at is None or observed_at < cutoff):
                     continue
+                normalized_usage = {
+                    field: value if isinstance(value := usage.get(field, 0), int)
+                    and not isinstance(value, bool) and value >= 0 else 0
+                    for field in USAGE_FIELDS
+                }
+                cumulative_key = tuple(cumulative.get(field) for field in USAGE_FIELDS)
+                usage_key = tuple(normalized_usage[field] for field in USAGE_FIELDS)
+                request_key = (session_id or f"file:{path}", cumulative_key, usage_key)
+                observed_usage_records.setdefault(request_key, normalized_usage)
+                if not current_turn:
+                    scanset["orphan_usage_snapshots"] += 1
+                    scanset["orphan_usage_raw_total_tokens"] += normalized_usage["total_tokens"]
+                    orphan_request_keys.add(request_key)
+                    continue
+                accounted_request_keys.add(request_key)
                 row = turns.setdefault(current_turn, {
                     "usage": empty_usage(),
                     "class": session_class,
@@ -174,8 +192,6 @@ def scan(root, cutoff, project_filter=None):
                     "classes_seen": {session_class},
                 })
                 row["classes_seen"].add(session_class)
-                cumulative_key = tuple(cumulative.get(field) for field in USAGE_FIELDS)
-                usage_key = tuple(usage.get(field) for field in USAGE_FIELDS)
                 fingerprint = (current_turn, cumulative_key, usage_key)
                 if fingerprint in seen_usage_records:
                     scanset["replayed_usage_snapshots"] += 1
@@ -186,10 +202,13 @@ def scan(root, cutoff, project_filter=None):
                 row["requests"] += 1
                 scanset["accounted_usage_records"] += 1
                 for field in USAGE_FIELDS:
-                    value = usage.get(field, 0)
-                    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-                        row["usage"][field] += value
+                    row["usage"][field] += normalized_usage[field]
 
+    excluded_orphan_keys = orphan_request_keys - accounted_request_keys
+    scanset["orphan_excluded_usage_records"] = len(excluded_orphan_keys)
+    scanset["orphan_excluded_total_tokens"] = sum(
+        observed_usage_records[key]["total_tokens"] for key in excluded_orphan_keys
+    )
     for row in turns.values():
         # A parent turn copied into a fork is still a main turn when its source transcript exists.
         row["class"] = "main" if "main" in row["classes_seen"] else "subagent"
@@ -232,9 +251,14 @@ def report(turns, scanset, out=sys.stdout):
     write(
         f"          {scanset['malformed_records']} malformed, "
         f"{scanset['missing_last_usage_snapshots']} missing per-request usage, "
-        f"{scanset['orphan_usage_snapshots']} orphan usage snapshots, "
         f"{scanset['replayed_usage_snapshots']} replayed/copy snapshots, "
         f"{scanset['turns_without_timestamps']} timestamp-less turns"
+    )
+    write(
+        f"          {scanset['orphan_usage_snapshots']} orphan usage snapshots total "
+        f"{scanset['orphan_usage_raw_total_tokens']:,} raw tokens; after replay "
+        f"reconciliation, {scanset['orphan_excluded_usage_records']} requests / "
+        f"{scanset['orphan_excluded_total_tokens']:,} tokens remain unattributed and excluded"
     )
     if not turns:
         write("\nZERO ACCOUNTED TURNS — that is an error, not a zero-cost verdict.")
@@ -293,11 +317,13 @@ def selftest():
     request_1 = cumulative_1.copy()
     request_2 = {field: value for field, value in zip(USAGE_FIELDS, (80, 60, 0, 10, 4, 90))}
     usage_3 = {field: value for field, value in zip(USAGE_FIELDS, (50, 0, 0, 5, 2, 55))}
+    orphan_usage = {field: value for field, value in zip(USAGE_FIELDS, (25, 0, 0, 5, 1, 30))}
 
     with tempfile.TemporaryDirectory() as tmp:
         now = datetime.now().astimezone().isoformat()
         main_path = os.path.join(tmp, "main.jsonl")
         copy_path = os.path.join(tmp, "copy.jsonl")
+        orphan_path = os.path.join(tmp, "orphan.jsonl")
         sub_path = os.path.join(tmp, "sub.jsonl")
         write_fixture(main_path, [
             {"timestamp": now, "type": "session_meta", "payload": {"id": "s1", "source": "vscode"}},
@@ -312,8 +338,13 @@ def selftest():
         ])
         write_fixture(copy_path, [
             {"timestamp": now, "type": "session_meta", "payload": {"id": "copy", "session_id": "s1", "forked_from_id": "s1", "source": "vscode"}},
+            {"timestamp": now, "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": cumulative_1, "last_token_usage": request_1}}},
             {"timestamp": now, "type": "event_msg", "payload": {"type": "task_started", "turn_id": "t1"}},
             {"timestamp": now, "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": cumulative_1, "last_token_usage": request_1}}},
+        ])
+        write_fixture(orphan_path, [
+            {"timestamp": now, "type": "session_meta", "payload": {"id": "s3", "source": "vscode"}},
+            {"timestamp": now, "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": orphan_usage, "last_token_usage": orphan_usage}}},
         ])
         write_fixture(sub_path, [
             {"timestamp": now, "type": "session_meta", "payload": {"id": "s2", "source": {"subagent": {"thread_id": "x"}}}},
@@ -327,6 +358,12 @@ def selftest():
               turns["t1"]["usage"]["total_tokens"] + turns["t2"]["usage"]["total_tokens"] == 200)
         check("copied request is deduplicated across files", len(turns) == 3)
         check("copy/replay is observed in the scan report", scanset["replayed_usage_snapshots"] == 1)
+        check("raw orphan token mass is visible", scanset["orphan_usage_snapshots"] == 2
+              and scanset["orphan_usage_raw_total_tokens"] == 140)
+        check("orphan copy already accounted in-turn is reconciled",
+              scanset["orphan_excluded_usage_records"] == 1)
+        check("unique unattributed orphan token mass remains explicit",
+              scanset["orphan_excluded_total_tokens"] == 30)
         check("subagent source is classified separately", turns["t3"]["class"] == "subagent")
         check("malformed record is counted", scanset["malformed_records"] == 1)
         check("snapshot missing last_token_usage is counted and skipped",

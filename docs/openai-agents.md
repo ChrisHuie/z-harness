@@ -103,11 +103,17 @@ plugin policy whenever the active Git checkout has `.codex-plugin/plugin.json` w
 name. In that checkout the native `AGENTS.md` is authoritative even when its working bytes differ
 from the installed plugin version, preventing simultaneous version-skewed policies.
 
+For facts that apply only to one Codex host, the adapter optionally reads
+`$CODEX_HOME/z-harness/AGENTS.local.md`. That file lives outside the repository and plugin cache, is
+never packaged, and is appended only when present. Its content shares the existing 30,000-byte
+fail-closed combined-context cap. This lets the authoring host retain shell and infrastructure
+gotchas without asserting them on every plugin install.
+
 The adapter also runs for SubagentStart so a spawned context does not depend on an implicit parent
 copy. Its matcherless registration covers every subagent type, including internal reviewer threads,
-and constructs the full policy context on every start: `wc -c AGENTS.md` is 8,676 bytes in this
-revision, before the section heading and any project memory. C9 prints the current policy byte
-count. The adapter never selects a subagent model or widens the parent's sandbox/approval boundary.
+and constructs the full policy context on every start. `wc -c AGENTS.md` regenerates the
+per-injection policy size, and C9 prints the current byte count. The adapter never selects a
+subagent model or widens the parent's sandbox/approval boundary.
 
 ## Project-memory projection
 
@@ -153,8 +159,10 @@ summing turns overcounts prior work. `tools/codex-cost.py`:
 3. uses persisted turn ids plus cumulative and per-request fields to deduplicate copied/replayed
    records across files;
 4. filters individual usage records by their persisted timestamp for `--since`;
-5. classifies persisted subagent sessions separately; and
-6. treats zero accounted turns as an error.
+5. reports orphan snapshot count and raw token mass, reconciles copies of requests already accounted
+   inside turns, and explicitly reports any remaining unattributed mass as excluded;
+6. classifies persisted subagent sessions separately; and
+7. treats zero accounted turns as an error.
 
 Cached input is a subset of input and reasoning output is a subset of output. The report does not
 sum those subsets into total tokens again and does not infer dollar cost from a hard-coded price
@@ -208,6 +216,12 @@ and one project with a tracked memory index.
 1. Confirm the active Git root has `.codex-plugin/plugin.json` with name `z-harness`.
 2. Run `codex_session_start.py --selftest` to exercise byte-skew suppression.
 3. Start a new task after changing an installed plugin; existing task context cannot be retracted.
+
+**Machine-specific guidance does not load**
+
+1. Put host-only instructions in `$CODEX_HOME/z-harness/AGENTS.local.md`.
+2. Keep the file below the remaining 30,000-byte combined-context budget.
+3. Start a new task and run `codex_session_start.py --selftest` if the context is still absent.
 
 **Project memory does not load**
 

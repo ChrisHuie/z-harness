@@ -39,7 +39,7 @@ repository as a plugin:
   `/usr/bin/python3` is an instrument failure; use the vendor CLI instead of the stdlib client.
 - After a hard Docker crash, stale Electron singleton files can prevent launch. The symptom is that
   launch exits 0 with no process; the backend reports `unmarshaling start request: unexpected EOF`.
-  Deleting `backend.lock` does not fix it. Remove
-  `~/Library/Application\ Support/Docker\ Desktop/Singleton{Cookie,Lock,Socket}` and run
+  Deleting `backend.lock` does not fix it. After user approval, remove only
+  `~/Library/Application\ Support/Docker\ Desktop/Singleton{Cookie,Lock,Socket}`, then run
   `open -a Docker`. Never cycle Docker during fan-out; polling workers will misread it as
   contention.

@@ -61,6 +61,7 @@ same shared policy at both user and project scope.
 | `hooks/spawn_preflight_guard.py` | shared adapter | disk-capacity gate; maps unsupported Codex `ask` decisions to fail-closed `deny` |
 | `hooks/askq_timeout_guard.py` | Claude | AskUserQuestion AFK guard; no claimed Codex equivalent |
 | `hooks/codex_session_start.py` | Codex | injects shared policy and nearest tracked project memory without duplicate policy |
+| `$CODEX_HOME/z-harness/AGENTS.local.md` | local Codex host | optional non-packaged machine instructions appended by the session adapter |
 | `hooks/harness_check.py` | shared | mechanical gate over skills, hooks, context files, and plugin packaging |
 | `hooks/harness_report.py` | Claude | transcript evidence for Claude skill firing/reference reads |
 | `tools/cc-cost.py` | Claude | Claude request-deduplicated token accounting |

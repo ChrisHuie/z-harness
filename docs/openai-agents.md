@@ -170,9 +170,11 @@ and `trusted_hash` with validated types, requires command handlers, rejects asyn
 validates timeout types and matcher regexes. C7 pins every required
 `(event, matcher, script, flags)` tuple including `--runtime codex`.
 
-The Git-grep predicate unwraps ordinary `env`, `nice`, absolute executable paths, and nested
-`sh -c` launch shapes, and models command-scoped `-c`, `--config-env`, and `GIT_CONFIG_COUNT`
-configuration. It deliberately does not spawn `git config` from a PreToolUse hook. Repository,
+The Git-grep predicate unwraps ordinary `env`, `nice`, `nohup`, `timeout`, `stdbuf`, `setsid`,
+absolute executable paths, and nested `sh -c` launch shapes, and models command-scoped `-c`,
+`--config-env`, and `GIT_CONFIG_COUNT` configuration. Wrapper parsing is semantic and explicit:
+an arbitrary command receiving `git` as data is not assumed to execute it. The predicate deliberately
+does not spawn `git config` from a PreToolUse hook. Repository,
 worktree, system, and global Git configuration that is not materialized in the command line is
 therefore outside its argv-only proof boundary, especially when a command relies on an implicit
 grep engine. The shared policy requires explicit `git grep -P` for PCRE atoms; sandbox and approval

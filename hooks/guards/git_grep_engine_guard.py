@@ -146,6 +146,33 @@ SHELL_KEYWORDS = {"do", "then", "else", "elif", "if", "while", "until", "time",
                   "exec", "command", "builtin", "nocorrect", "noglob"}
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
+EXEC_WRAPPERS = {
+    # option flags, options consuming the next argv, attached value prefixes,
+    # bundled short flags, positional operands before the command
+    "nohup": (set(), set(), (), "", 0),
+    "timeout": (
+        {"--foreground", "--preserve-status", "--verbose"},
+        {"-k", "--kill-after", "-s", "--signal"},
+        ("--kill-after=", "--signal=", "-k", "-s"),
+        "",
+        1,
+    ),
+    "stdbuf": (
+        set(),
+        {"-i", "-o", "-e", "--input", "--output", "--error"},
+        ("--input=", "--output=", "--error=", "-i", "-o", "-e"),
+        "",
+        0,
+    ),
+    "setsid": (
+        {"-c", "--ctty", "-f", "--fork", "-w", "--wait"},
+        set(),
+        (),
+        "cfw",
+        0,
+    ),
+}
+WRAPPER_TERMINAL_OPTIONS = {"--help", "--version"}
 
 
 def strip_shell_keywords(words):
@@ -238,6 +265,53 @@ def unwrap_command_prefix(tokens):
                 if word.startswith("-"):
                     errors.append(f"unmodelled nice option {word!r}")
                 break
+            if errors:
+                break
+            continue
+
+        if executable in EXEC_WRAPPERS:
+            wrapper_depth += 1
+            flags, value_options, attached_prefixes, short_flags, positionals = (
+                EXEC_WRAPPERS[executable]
+            )
+            items.pop(0)
+            terminal = False
+            while items:
+                word = items[0][0]
+                if word in WRAPPER_TERMINAL_OPTIONS:
+                    # These options print wrapper-owned output and never execute
+                    # a following command, so there is no nested Git invocation.
+                    items.clear()
+                    terminal = True
+                    break
+                if word == "--":
+                    items.pop(0)
+                    break
+                if word in flags or (short_flags and re.fullmatch(
+                        rf"-[{re.escape(short_flags)}]+", word)):
+                    items.pop(0)
+                    continue
+                if word in value_options:
+                    option = items.pop(0)[0]
+                    if not items:
+                        errors.append(f"{executable} {option} is missing its argument")
+                        break
+                    items.pop(0)
+                    continue
+                if any(word.startswith(prefix) and word != prefix
+                       for prefix in attached_prefixes):
+                    items.pop(0)
+                    continue
+                if word.startswith("-"):
+                    errors.append(f"unmodelled {executable} option {word!r}")
+                break
+            if terminal or errors:
+                break
+            for _index in range(positionals):
+                if not items:
+                    errors.append(f"{executable} is missing a required operand before COMMAND")
+                    break
+                items.pop(0)
             if errors:
                 break
             continue
@@ -589,6 +663,30 @@ FIXTURES = [
      """git -c grep.patternType grep -n 'harness\\b' -- README.md""", "ask"),
     ("ASK  ROUND 9: unmodelled env command splitting cannot hide git",
      """env -S \"git grep -nE 'harness\\b' -- README.md\"""", "ask"),
+    ("RED  ROUND 10: nohup wrapper cannot displace git from argv zero",
+     """nohup git -c grep.patternType=extended grep -n 'harness\\b' -- README.md""", "deny"),
+    ("RED  ROUND 10: absolute nohup composes with the command shell keyword",
+     """command /usr/bin/nohup git grep -nE 'harness\\b' -- README.md""", "deny"),
+    ("RED  ROUND 10: timeout duration and options precede the command",
+     """timeout --preserve-status -k 2 5 git grep -nE 'harness\\b' -- README.md""",
+     "deny"),
+    ("RED  ROUND 10: stdbuf attached mode precedes the command",
+     """stdbuf -o0 git grep -nE 'harness\\b' -- README.md""", "deny"),
+    ("RED  ROUND 10: stdbuf separated long mode precedes the command",
+     """stdbuf --output L git grep -nE 'harness\\b' -- README.md""", "deny"),
+    ("RED  ROUND 10: setsid bundled flags precede the command",
+     """setsid -fw git grep -nE 'harness\\b' -- README.md""", "deny"),
+    ("RED  ROUND 10: exec wrappers compose rather than masking one another",
+     "env FOO=1 nohup nice git -c grep.patternType=extended "
+     "grep -n 'harness\\b' -- README.md", "deny"),
+    ("RED  ROUND 10: nohup remains visible inside a nested shell",
+     """sh -c \"nohup git grep -nE 'harness\\b' -- README.md\"""", "deny"),
+    ("GREEN ROUND 10: nohup wrapping a non-git command",
+     """nohup ls -la""", "allow"),
+    ("GREEN ROUND 10: wrapper help terminates without executing trailing git tokens",
+     """timeout --help git grep -nE 'harness\\b' -- README.md""", "allow"),
+    ("GREEN ROUND 10: an arbitrary non-wrapper is not treated as command forwarding",
+     """echo git grep -nE 'harness\\b' -- README.md""", "allow"),
 ]
 
 

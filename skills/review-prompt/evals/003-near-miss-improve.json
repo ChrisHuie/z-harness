@@ -1,0 +1,12 @@
+{
+  "skills": [
+    "review-prompt",
+    "craft-prompt"
+  ],
+  "query": "make this prompt better: 'summarize the doc'",
+  "files": [],
+  "expected_behavior": [
+    "routes to craft-prompt (improve/tune is authoring)",
+    "review-prompt abstains \u2014 its description is critique-only, never edits"
+  ]
+}

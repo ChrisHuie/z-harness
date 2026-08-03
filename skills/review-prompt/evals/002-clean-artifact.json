@@ -1,0 +1,16 @@
+{
+  "skills": [
+    "review-prompt"
+  ],
+  "query": "review prompt.md",
+  "files": [
+    {
+      "path": "prompt.md",
+      "content": "Summarize the attached changelog in <=5 bullets for release notes. Cite the section each bullet came from. If a change is ambiguous, list it under 'Needs clarification' instead of guessing.\n"
+    }
+  ],
+  "expected_behavior": [
+    "empty or near-empty findings table \u2014 no invented findings on a clean artifact",
+    "## Checked still substantive (precision beats recall theater)"
+  ]
+}

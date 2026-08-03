@@ -10,7 +10,12 @@
 > not by a CLAUDE.md line — the hook supersedes the prose per the routing ladder.
 > (6) R007, ruled IN here but dropped by the assembly, was restored to CLAUDE.md
 > 2026-08-03; the gap pass's five skill-destined IN rows (R321, R329, R330, R334, R335)
-> were restored the same day. Counts and byte figures are point-in-time.
+> were restored the same day. (7) CLAUDE.md-queue adjudication 2026-08-03: R318 and R009
+> promoted IN (trim opened the slots); R320/R322/R337/R340 stay OUT as covered-in-substance
+> by existing rows; R336 stays OUT (version-fragile anchor); R339 stays OUT (R011's
+> taxonomy never landed, so there is nothing to extend); R010–R015 unchanged. These are
+> deliberate NON-promotions — do not silently re-adjudicate. Counts and byte figures are
+> point-in-time.
 
 Every distinct principle from all four extraction passes, exactly once, with exactly one
 destination. Deduplicated on **mechanism**, not wording.

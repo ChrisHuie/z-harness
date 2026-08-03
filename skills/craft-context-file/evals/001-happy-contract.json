@@ -1,0 +1,18 @@
+{
+  "skills": [
+    "craft-context-file"
+  ],
+  "query": "write a CLAUDE.md for this repo",
+  "files": [
+    {
+      "path": "package.json",
+      "content": "{\"name\":\"demo\",\"scripts\":{\"test\":\"vitest run --coverage\",\"build\":\"tsup src/index.ts\"}}"
+    }
+  ],
+  "expected_behavior": [
+    "fires craft-context-file",
+    "output is exactly ## Files, ## Routing report, ## Validation",
+    "every kept line traces to repo evidence (the vitest/tsup commands, not invented ones)",
+    "the emitted file is measured (N lines, M bytes) against the <200-line budget"
+  ]
+}

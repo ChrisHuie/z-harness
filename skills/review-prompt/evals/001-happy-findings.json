@@ -1,0 +1,18 @@
+{
+  "skills": [
+    "review-prompt"
+  ],
+  "query": "review skills/helper/SKILL.md",
+  "files": [
+    {
+      "path": "skills/helper/SKILL.md",
+      "content": "---\nname: helper\ndescription: A useful helper for various tasks.\n---\n\n# helper\n\nIMPORTANT: You MUST ALWAYS think step by step. NEVER skip steps. ALWAYS be thorough.\nDo everything the user needs.\n"
+    }
+  ],
+  "expected_behavior": [
+    "fires review-prompt; first characters are '## Findings'",
+    "findings table catches row 7 (vague description: 'helper', 'various tasks') and row 8 (manual CoT)",
+    "each finding carries row number, quoted location, mechanism, concrete fix",
+    "## Checked names the rows swept; no edits are made to the file"
+  ]
+}

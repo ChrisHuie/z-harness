@@ -1,0 +1,11 @@
+{
+  "skills": [
+    "craft-context-file"
+  ],
+  "query": "write a CLAUDE.md",
+  "files": [],
+  "expected_behavior": [
+    "no repo signals: asks 1-3 questions (stack, commands, conventions), writes nothing",
+    "none of the three sections emitted"
+  ]
+}

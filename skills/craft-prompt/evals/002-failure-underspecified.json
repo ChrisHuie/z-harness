@@ -1,0 +1,12 @@
+{
+  "skills": [
+    "craft-prompt"
+  ],
+  "query": "make me a prompt",
+  "files": [],
+  "expected_behavior": [
+    "no confident prompt: asks 1-3 precise questions OR presents 2-3 labeled interpretations",
+    "emits none of the three contract sections",
+    "does not invent a task, domain, or audience"
+  ]
+}

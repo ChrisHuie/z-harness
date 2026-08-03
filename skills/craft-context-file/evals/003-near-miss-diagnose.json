@@ -1,0 +1,12 @@
+{
+  "skills": [
+    "craft-context-file",
+    "review-prompt"
+  ],
+  "query": "why does the agent keep ignoring the rules in our CLAUDE.md?",
+  "files": [],
+  "expected_behavior": [
+    "routes to review-prompt (diagnosis without changing the file)",
+    "craft-context-file abstains \u2014 its description routes 'review or diagnose' away"
+  ]
+}

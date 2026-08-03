@@ -1,0 +1,14 @@
+{
+  "skills": [
+    "craft-prompt"
+  ],
+  "query": "make me a prompt for reviewing a python diff for security issues, model=claude",
+  "files": [],
+  "expected_behavior": [
+    "fires craft-prompt (not review-prompt: nothing exists yet to critique)",
+    "first emitted characters are '## Prompt' \u2014 no preamble, no 'references loaded'",
+    "output is exactly three sections in order: ## Prompt, ## Rationale, ## Verify",
+    "## Rationale <=6 bullets naming stance and each selected policy block's condition",
+    "## Verify ends with one line naming what the prompt was NOT exercised against"
+  ]
+}

@@ -13,7 +13,7 @@ procedure: `ROUTING-RULE.md`. Why claims kept reversing: `INVERSIONS.md`.
 | `~/.claude/skills/` | **11 skills** — 8 rewritten, 3 new (`agent-dispatch`, `outbound-drafts`, `system-design`) |
 | `~/.claude/CLAUDE.md` | 13,430 B / 219 lines |
 | `~/.claude/settings.json` | `PreToolUse` + `PostToolUse` + `Stop` registered; `permissions.ask` **removed** |
-| `~/.claude/hooks/` | `bash_command_guard.py`, `askq_timeout_guard.py`, `harness_report.py` (+ inert `stop_hook.sh`, dead `question_timeout_guard.sh`) |
+| `~/.claude/hooks/` | `bash_command_guard.py`, `askq_timeout_guard.py`, `harness_report.py` (+ inert `stop_hook.sh`, dead `question_timeout_guard.sh` — **both deleted 2026-08-03**, preserved in git history and `PREHOOKS-*`; `harness_check.py`, `spawn_preflight_guard.py`, `harness_health.sh` added) |
 | memory | **242 files, 23 silos, nothing deleted.** Indexes cut 49,889 → 29,335 B (−41%) |
 
 **Verified from a fresh temp dir with no repo and no project `CLAUDE.md`:** the user file

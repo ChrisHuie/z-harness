@@ -1,0 +1,12 @@
+{
+  "skills": [
+    "craft-skill",
+    "craft-prompt"
+  ],
+  "query": "write a system prompt for my customer support bot",
+  "files": [],
+  "expected_behavior": [
+    "routes to craft-prompt (a single prompt, not a packaged skill)",
+    "craft-skill abstains \u2014 its description's anti-trigger names this case"
+  ]
+}

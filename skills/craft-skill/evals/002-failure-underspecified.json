@@ -1,0 +1,11 @@
+{
+  "skills": [
+    "craft-skill"
+  ],
+  "query": "make me a skill",
+  "files": [],
+  "expected_behavior": [
+    "specificity gate fires: 1-3 questions aimed at purpose, triggers, near-miss",
+    "no files written, none of the three sections emitted"
+  ]
+}

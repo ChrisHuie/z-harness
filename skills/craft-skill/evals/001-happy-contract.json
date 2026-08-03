@@ -1,0 +1,14 @@
+{
+  "skills": [
+    "craft-skill"
+  ],
+  "query": "build me a skill that formats sql files before commit \u2014 triggers: 'format sql', 'sql fmt', a .sql filename",
+  "files": [],
+  "expected_behavior": [
+    "fires craft-skill",
+    "eval scenarios are written BEFORE any body text (evals-first doctrine)",
+    "output is exactly ## Evals, ## Files, ## Validation",
+    "## Validation quotes the description verbatim with its character count (<=400)",
+    "no gate is CLAIMED as passed \u2014 harness_check / critique / fresh-session named as next steps"
+  ]
+}

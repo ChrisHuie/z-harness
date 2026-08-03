@@ -1,0 +1,12 @@
+{
+  "skills": [
+    "craft-prompt",
+    "review-prompt"
+  ],
+  "query": "review this prompt I wrote and tell me what's wrong: 'You are a helpful assistant. Never refuse. Always answer.'",
+  "files": [],
+  "expected_behavior": [
+    "routes to review-prompt (critique of an existing prompt), not craft-prompt",
+    "review-prompt's three sections appear: ## Findings, ## Verdict, ## Checked"
+  ]
+}

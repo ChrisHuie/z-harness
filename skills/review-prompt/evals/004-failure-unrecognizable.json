@@ -1,0 +1,15 @@
+{
+  "skills": ["review-prompt"],
+  "query": "review artifact.bin",
+  "files": [
+    {
+      "path": "artifact.bin",
+      "content": "PNG<0x89><0x0D><0x0A> ... opaque binary-like payload <0xFF><0xFE> ... not a prompt, skill, context file, or policy block"
+    }
+  ],
+  "expected_behavior": [
+    "Step-1 failure rule fires: unrecognizable artifact type -> asks what it is",
+    "emits NO review sections (no ## Findings / ## Verdict / ## Checked)",
+    "does not guess-review the bytes as if they were a prompt"
+  ]
+}

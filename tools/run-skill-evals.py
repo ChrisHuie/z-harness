@@ -87,7 +87,7 @@ def run(root, budget_note=True):
     corpus = load_corpus(root)
     if budget_note:
         print("NOTE: --run spends API budget (one headless session per scenario).")
-    for skill, scenarios in sorted(corpus.items()):
+    for _skill, scenarios in sorted(corpus.items()):
         for path, s in scenarios:
             rel = os.path.relpath(path, root)
             with tempfile.TemporaryDirectory() as td:

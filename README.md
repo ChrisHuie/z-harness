@@ -66,6 +66,7 @@ same shared policy at both user and project scope.
 | `hooks/harness_report.py` | Claude | transcript evidence for Claude skill firing/reference reads |
 | `tools/cc-cost.py` | Claude | Claude request-deduplicated token accounting |
 | `tools/codex-cost.py` | Codex | per-request token accounting with copied/replayed record dedupe |
+| `tools/pr-delivery-state.py` | shared | proves workspace, local HEAD, PR head, and exact-head CI agree before publication claims |
 | `projects/*/memory/` | shared data | authored Claude memory indexes; Codex receives the nearest index as soft context |
 | `harness-audit-20260801/` | record | measurements and decisions behind the original Claude rebuild |
 
@@ -82,6 +83,7 @@ python3 hooks/askq_timeout_guard.py --verify-harness
 python3 hooks/harness_report.py --selftest
 python3 tools/cc-cost.py --selftest
 python3 tools/codex-cost.py --selftest
+python3 tools/pr-delivery-state.py --selftest
 python3 tools/run-skill-evals.py --validate
 ```
 
@@ -101,6 +103,11 @@ headless model scenarios and spends API budget, so it remains manual.
 - Codex will skip changed plugin hooks until the user reviews their new hash in `/hooks`.
 - Claude skills fire through the imperative routing rule in the shared policy. Editing an existing
   installed skill hot-reloads in Claude; a new skill directory requires a new session.
+- A request to create or update a PR carries ordinary-push authority through published-head and
+  exact-head CI verification. Run
+  `python3 tools/pr-delivery-state.py --pr <number> --repo <owner/repo>` before claiming the local
+  work is on that PR; merge, force-push, comments, and thread resolution remain separately
+  authorized.
 - `git clean -fdx` in a live `~/.claude` clone deletes ignored transcripts. Plain `-fd` preserves
   them. Never use `-x` there.
 - `.gitignore` is an allowlist. New authored surfaces must be explicitly included or git cannot see

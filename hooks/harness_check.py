@@ -22,6 +22,8 @@ Runs from either clone (repo root auto-detected from this file's location). Chec
       but the repo root
   C9  Codex package contract: manifest, marketplace, hook config, context bridges,
       and their size budgets are internally consistent
+  C10 PR delivery contract: scoped publication authority, state-proof command,
+      and the ban on conflating local commits with the GitHub PR remain present
 
 Exit codes: 0 all checks pass · 1 one or more checks failed · 2 usage error or
 zero inputs (an empty scan set is an error, never a clean verdict).
@@ -39,7 +41,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 METHOD_SKILLS = ["git-workflow", "pr-review-method", "testing-ci", "agent-dispatch",
@@ -76,6 +78,8 @@ STALE_PATTERNS = [
     "docs/research/",           # birth-repo paths
     "claude-md-lines",          # retired reference
     "ph-lint",                  # linter that never existed here
+    "Each push is its own action needing its own confirmation",  # retired consent loop
+    "committed to the PR",      # local commit falsely described as published
 ]
 
 ROUTING_SKILLS = ["git-workflow", "pr-review-method", "testing-ci", "agent-dispatch",
@@ -86,6 +90,24 @@ RESERVED_BASENAMES = {"claude.md", "agents.md", "gemini.md"}
 CODEX_HOOK_ENTRY_KEYS = {"matcher", "hooks"}
 CODEX_HOOK_HANDLER_KEYS = {
     "type", "command", "commandWindows", "timeout", "async", "statusMessage"
+}
+DELIVERY_CONTRACT = {
+    "AGENTS.md": [
+        "A request to create or open a PR authorizes",
+        "A request to update, fix, address, or get an",
+        '"commit only" or "do not push" overrides that authority.',
+        "tools/pr-delivery-state.py --pr <number> --repo <owner/repo>",
+    ],
+    "skills/git-workflow/SKILL.md": [
+        "A local commit is not on a PR.",
+        "tools/pr-delivery-state.py --pr <n> --repo <owner/repo>",
+    ],
+    "skills/git-workflow/references/deferred.md": [
+        "## scoped PR publication `[body]`",
+        '"update/fix/address this PR" and "get this PR green"',
+        "corrective pushes needed until exact-head checks pass",
+        "A failed check leaves authority active for in-scope",
+    ],
 }
 
 
@@ -118,6 +140,7 @@ class Run:
                   ("harness_report", ["hooks/harness_report.py", "--selftest"]),
                   ("cc-cost", ["tools/cc-cost.py", "--selftest"]),
                   ("codex-cost", ["tools/codex-cost.py", "--selftest"]),
+                  ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"]),
                   ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"]),
                   ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"])]
         for name, cmd in suites:
@@ -388,6 +411,22 @@ class Run:
                     len(claude_text.splitlines()) < 200,
                     f"CLAUDE.md bridges AGENTS.md in {len(claude_text.splitlines())} lines")
 
+    # ---- C10 ---------------------------------------------------------------
+    def c10_delivery_contract(self):
+        for rel, markers in DELIVERY_CONTRACT.items():
+            path = os.path.join(self.root, rel)
+            try:
+                text = open(path, encoding="utf-8").read()
+            except OSError:
+                text = ""
+            missing = [marker for marker in markers if marker not in text]
+            self.result("C10", not missing,
+                        f"{rel}: delivery contract markers "
+                        f"{'present' if not missing else 'missing ' + repr(missing)}")
+        tool = os.path.join(self.root, "tools", "pr-delivery-state.py")
+        self.result("C10", os.path.isfile(tool),
+                    "tools/pr-delivery-state.py exists")
+
     def run(self):
         print(f"harness_check {VERSION}  root={self.root}  mode={'ci' if self.ci else 'local'}")
         self.c1_selftests()
@@ -399,6 +438,7 @@ class Run:
         self.c7_anchors()
         self.c8_reserved_basenames()
         self.c9_codex_package()
+        self.c10_delivery_contract()
         print(f"\n  {self.checks} checks, {len(self.failures)} failure(s)")
         if self.checks == 0:
             print("  ZERO CHECKS RAN — error, not a clean verdict")
@@ -492,6 +532,11 @@ def selftest():
         r6.c9_codex_package()
         expect_red("C9 goes red on unknown Codex hook handler key",
                    lambda: any(c == "C9" and "inventedLimit" in d for c, d in r6.failures))
+
+        r7 = Run(td, ci=True)
+        r7.c10_delivery_contract()
+        expect_red("C10 goes red on absent PR delivery contract",
+                   lambda: any(c == "C10" for c, d in r7.failures))
 
     print(f"\n  selftest: {bad} failure(s)")
     return 1 if bad else 0

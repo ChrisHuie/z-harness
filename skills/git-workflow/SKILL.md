@@ -65,10 +65,12 @@ breaks CI.
 
 ## PR and CI plumbing
 
-- **A PR at `mergeStateStatus=DIRTY` makes GitHub SKIP `pull_request` workflows** — it
-  cannot build the merge ref they check out. After each push assert BOTH a
-  non-`CONFLICTING` state **and** a non-empty `gh run list --commit <sha>`: the empty list IS
-  the failure, and the checks page still shows the stale prior run.
+- **A local commit is not on a PR.** For PR-directed work, apply the scoped publication authority
+  in `references/deferred.md`; before saying *pushed*, *on the PR*, or *landed*, run
+  `python3 <z-harness>/tools/pr-delivery-state.py --pr <n> --repo <owner/repo>`. It must show zero
+  workspace changes, local HEAD equal to PR head, and non-empty exact-head checks and workflow runs.
+- **A PR at `mergeStateStatus=DIRTY` makes GitHub SKIP `pull_request` workflows** because it cannot
+  build the merge ref. A stale checks page is not evidence for the new head.
 - **Cherry-picking one of main's commits is how a branch goes DIRTY non-obviously** — the
   pick applies cleanly, main keeps evolving those files, the merge ref then conflicts.
   Take the whole state by merging main, never a slice.
@@ -76,9 +78,6 @@ breaks CI.
   `conclusion=action_required`** — they never report, it sits `BLOCKED`, and only a
   human-attributable event clears it; a `workflow_dispatch` run never attaches to a required
   context either.
-- **Issues and PRs share one per-repo counter and never correspond** — read the number back
-  from the API once the object exists. `Closes #<n>` points at the ISSUE.
-
-**Read `references/deferred.md` first if formatters may be fighting, a push needs per-push
-confirmation, or you are sweeping a bulk rewrite** — also the pre-commit stash cache path
+**Read `references/deferred.md` first if formatters may be fighting, publication authority needs
+scoping, or you are sweeping a bulk rewrite** — also the pre-commit stash cache path
 and the zsh `:s` brace trap.

@@ -26,19 +26,23 @@ Pairs with the body's *"a hook that rewrites a staged file exits non-zero and AB
 commit"*: that rule tells you what the symptom is, this one tells you the symptom is
 permanent until the config is fixed.
 
-## per-push confirmation `[body]`
+## scoped PR publication `[body]`
 
-**Each push is its own action needing its own confirmation** — an authorization given at
-the start of a phase does not carry to the next push in that phase. Registry R165.
+PR-directed instructions carry publication authority through the requested delivery boundary:
 
-Its parent is always-on: `~/.claude/CLAUDE.md` bans `git push` and `gh pr create/merge/
-comment` on your own initiative. What is *not* in that line is the per-instance scoping, so
-this is the only home for it. Two adjuncts, both rank B, both registry-OUT:
+- "create/open a PR" covers branch creation, commits, ordinary push, PR creation, and published
+  head/check verification;
+- "update/fix/address this PR" and "get this PR green" cover commits, ordinary pushes to that PR's
+  existing head branch, and corrective pushes needed until exact-head checks pass;
+- "commit only" and "do not push" revoke publication authority for that task.
 
-- On the one push confirmation, surface the **target and the identity it goes out under**
-  (which account), and restore the working tree afterwards. Registry R164.
-- Pre-push scope check: `git diff --stat <base> HEAD` shows only the intended files.
-  Registry R166.
+The authority ends when the requested PR head matches the validated local head and its exact-head
+checks pass, or when the user ends the task. A failed check leaves authority active for in-scope
+corrections. It never includes merge, force-push, review comments, thread resolution, issue
+creation, another PR, or another branch. Before every covered push, show the target branch, remote
+repository, outbound identity, and `git diff --stat <base> HEAD`; after it, run
+`python3 <z-harness>/tools/pr-delivery-state.py --pr <n> --repo <owner/repo>`. Registry
+R164/R165/R166, revised after the local-commit/PR-head publication failure.
 
 ## bulk-rewrite sweep `[body]`
 
@@ -78,6 +82,10 @@ the body at cap.
 Registry R167 — routed OUT as a pure instance; its machine-specific half went to the
 machine bucket.
 
+**Issues and PRs share one per-repo counter and never correspond** — read the number back from the
+API once the object exists; `Closes #<n>` points at the issue. Moved from the body to fund the
+load-bearing PR delivery-state rule.
+
 ---
 
 ## Evicted from the draft body, and where each went
@@ -101,8 +109,9 @@ channels load on the same request, so the copy is paid twice.
 
 - `:61-64` — mutation-testing agents get an isolated worktree or an in-memory copy, never a
   shared checkout; commit first so `git checkout --` lands on your commit.
-- `:73-77` — never run `git push`, `gh pr create/merge/comment`, or `gh issue create` on
-  your own initiative; local git is pre-authorized.
+- `AGENTS.md` Authority boundaries — PR-directed requests grant scoped ordinary-push/PR-creation
+  authority; merge, force-push, comments, thread resolution, issues, and unrelated outward
+  mutations still require explicit authorization.
 - `:92` — report raw state: origin head, `git log @{u}..HEAD` for local-only commits,
   `gh pr checks` for CI's actual verdict.
 - `:105-109` — never run a bulk auto-rewriter over source without per-site review.

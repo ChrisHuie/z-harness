@@ -87,6 +87,7 @@ Claude Code live tree.
 | project memory | Claude injects project `MEMORY.md` | SessionStart chooses nearest tracked project index | same authored index, labelled soft/stale in Codex |
 | subagents | Agent/Task and Claude worktree mechanics | native Codex subagents and SubagentStart hook | shared opt-in policy and capacity gate; runtime orchestration differs |
 | cost accounting | requestId/UUID dedupe, max provisional usage | sums per-request `last_token_usage` once, replay dedupe | tokens only; no cross-provider price inference |
+| PR delivery state | shared `git`/`gh` evidence command | same command and GitHub API | local commit, remote PR head, and exact-head CI remain separate states |
 | skill telemetry | transcript `Skill`/`attributionSkill` evidence | no persisted equivalent asserted | Claude report remains Claude-only |
 | status line | `statusLine` in `settings.json` | product UI/CLI status | no emulation |
 | permissions/model | `settings.json` | user Codex config and active permission mode | deliberately user-controlled and not translated |
@@ -184,7 +185,19 @@ python3 hooks/codex_session_start.py --selftest
 python3 hooks/bash_command_guard.py --selftest
 python3 hooks/spawn_preflight_guard.py --selftest
 python3 tools/codex-cost.py --selftest
+python3 tools/pr-delivery-state.py --selftest
 ```
+
+For an active PR, run the live publication gate after the push:
+
+```text
+python3 tools/pr-delivery-state.py --pr <number> --repo <owner/repo>
+```
+
+The command exits zero only when there are no workspace changes, local HEAD equals the GitHub PR
+head, the PR is non-conflicting, and both exact-head check and workflow-run lists are non-empty and
+successful. Pending CI exits 3; unpublished, conflicting, or failed state exits 1; missing evidence
+exits 2.
 
 Validate the package manifest with the bundled Codex plugin validator when available:
 

@@ -1,0 +1,12 @@
+{
+  "skills": [
+    "git-workflow"
+  ],
+  "query": "Commit the current changes, but do not push anything.",
+  "files": [],
+  "expected_behavior": [
+    "Creates and verifies only the local commit because the user explicitly excluded publication.",
+    "Reports the commit as local-only and never describes it as on the remote branch or PR.",
+    "Does not run git push or another outward mutation."
+  ]
+}

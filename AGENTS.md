@@ -28,9 +28,15 @@ on unfamiliar vocabulary, then flag the decision in one sentence.
 
 ## Authority boundaries
 
-Do not initiate `git push`, `gh pr create/merge/comment`, `gh issue create`, repository cloning,
-or another outward mutation without an explicit user instruction aimed at that operation. Prepare
-the artifact and stop when publication authority is absent. Local git operations are authorized.
+A request to create or open a PR authorizes branch creation, local commits, ordinary push, PR
+creation, and published-head/check verification. A request to update, fix, address, or get an
+existing PR green authorizes local changes, commits, ordinary pushes to that PR's head branch, and
+exact-head verification, including corrective pushes needed during the same task. An explicit
+"commit only" or "do not push" overrides that authority.
+
+Merge, force-push, review comments or thread resolution, issue creation, repository cloning, and
+other outward mutations still require an explicit user instruction aimed at that operation. Local
+git operations are authorized.
 
 Do not add AI co-author trailers to commits. If one is already public, offer an amend plus
 `--force-with-lease`; do not assume permission to rewrite it.
@@ -76,8 +82,10 @@ felt—confident-wrong spends trust irrecoverably.
 
 Verification authority lives outside the model. A local passing test is one observation; the
 mechanical gate, CI verdict, and Chris's diff review are separate evidence. Report origin head,
-local-only commits, and live CI state. Describe state; never grade it. Raw state means the origin
-head, `git log @{u}..HEAD` for local-only commits, and `gh pr checks` for CI's actual verdict.
+local-only commits, remote PR head, and live CI state as separate facts. `git commit` means local
+history only. Before saying *pushed*, *on the PR*, or *landed*, run
+`python3 <z-harness>/tools/pr-delivery-state.py --pr <number> --repo <owner/repo>` and report its
+workspace-change count, local HEAD, PR head, and non-empty exact-head check/run counts.
 
 For merge, rebase, transport-shape, hook-envelope, or transcript-schema changes, run the full
 quality gate. No factual claim enters code, docs, comments, memory, or PR text without evidence

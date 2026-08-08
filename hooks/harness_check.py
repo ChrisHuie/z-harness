@@ -42,7 +42,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "2.6.0"
+VERSION = "2.7.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 AUTHORING_SKILLS = {"craft-prompt", "craft-skill", "craft-context-file", "review-prompt"}
@@ -59,6 +59,7 @@ SELFTEST_SUITES = [
     ("claim-provenance", ["tools/claim-provenance.py", "--selftest"]),
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"]),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"]),
+    ("render-packages", ["tools/render-packages.py", "--selftest"]),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"]),
     ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"]),
 ]
@@ -465,7 +466,10 @@ class Run:
     def c6_stale_patterns(self):
         me = os.path.abspath(__file__)
         targets = []
-        for rel in ("skills", "hooks", "tools", "docs", ".codex-plugin", ".agents"):
+        for rel in (
+            "skills", "hooks", "tools", "docs", "adapters", "contracts", "release",
+            ".codex-plugin", ".agents",
+        ):
             for dirpath, _dirs, files in os.walk(os.path.join(self.root, rel)):
                 if "__pycache__" in dirpath:
                     continue

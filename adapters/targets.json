@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "targets": {
+    "agent-plugins": {
+      "adapterRevision": 1,
+      "packageVersion": "0.4.0-alpha.1",
+      "format": "agent-plugins/1.0.0",
+      "manifestPath": "plugin.json",
+      "targetLevel": "portable-core",
+      "authority": "instruction-only",
+      "validationStatus": "fixture-only",
+      "testedHosts": []
+    },
+    "claude": {
+      "adapterRevision": 1,
+      "packageVersion": "0.4.0-alpha.1",
+      "format": "claude-plugin/native",
+      "manifestPath": ".claude-plugin/plugin.json",
+      "targetLevel": "portable-core",
+      "authority": "instruction-only",
+      "validationStatus": "fixture-only",
+      "testedHosts": []
+    },
+    "codex": {
+      "adapterRevision": 1,
+      "packageVersion": "0.4.0-alpha.1",
+      "format": "codex-plugin/native",
+      "manifestPath": ".codex-plugin/plugin.json",
+      "targetLevel": "portable-core",
+      "authority": "instruction-only",
+      "validationStatus": "fixture-only",
+      "testedHosts": []
+    }
+  }
+}

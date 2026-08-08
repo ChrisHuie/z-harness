@@ -4,6 +4,11 @@ This integration gives Codex the same portable policy and skill bodies as Claude
 preserving runtime-specific safety contracts. It promises equivalent operating intent, not
 identical wire events, configuration files, transcript schemas, or user interfaces.
 
+This document describes the installed v0.3 compatibility package. The v0.4 render pilot leaves
+that package unchanged while producing an isolated skills-only Codex candidate from explicit
+release inputs. See [Cross-harness packaging architecture](cross-harness-architecture.md). Static
+rendering does not establish installed-runtime compatibility.
+
 The supported OpenAI runtime in this package is Codex CLI and Codex desktop's local plugin layer.
 The OpenAI Agents SDK is an application framework rather than a Codex context/plugin host; using
 these policies in an SDK application requires an explicit runner adapter and is not claimed here.

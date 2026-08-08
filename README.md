@@ -1,11 +1,49 @@
 # z-harness
 
-A version-controlled operating harness for coding agents. One shared policy and one skill tree now
-serve both Claude Code and OpenAI Codex; runtime-specific files exist only where the products have
-different discovery, hook, transcript, or UI contracts.
+A version-controlled operating harness for coding agents. The v0.3 compatibility package serves
+Claude Code and OpenAI Codex from one shared policy and skill tree; runtime-specific files exist
+only where those products have different discovery, hook, transcript, or UI contracts.
 
-The live Claude working tree can remain `~/.claude`. Codex consumes this repository as a plugin, so
-the two runtimes do not need copied skill directories that drift independently.
+The next architecture separates canonical authoring from installable target packages. A
+deterministic renderer now provides the migration seam without changing the installed v0.3
+surface. It emits isolated, skills-only Agent Plugins, Codex, and Claude pilot artifacts for the
+real `ground-claims` skill. Rendered artifacts are unverified candidates: they are not published,
+installed, or promoted by the renderer.
+
+The live Claude installation can remain `~/.claude`, but new cross-harness authoring should occur in
+a clean repository checkout. Runtime homes and plugin caches are installed state, not release
+authority.
+
+## Cross-harness render pilot
+
+Render into a new disposable directory, then verify the exact bytes and modes recorded in each
+artifact manifest:
+
+```text
+python3 tools/render-packages.py --output /tmp/z-harness-render
+python3 tools/render-packages.py --verify /tmp/z-harness-render
+```
+
+The output contains three physically isolated package roots:
+
+| directory | package format | manifest |
+|---|---|---|
+| `agent-plugins/` | Agent Plugins 1.0 skills-only | `plugin.json` |
+| `codex/` | Codex native skills-only | `.codex-plugin/plugin.json` |
+| `claude/` | Claude Code native skills-only | `.claude-plugin/plugin.json` |
+
+`release/render.json` selects source skills and package metadata.
+`adapters/targets.json` declares target format, adapter revision, target compatibility level, and
+evidence status. Every target writes `z-harness-artifact.json`, whose inventory and digest exclude
+the manifest itself to avoid a self-referential hash and whose build record binds the renderer and
+canonicalized configuration inputs. The non-installable parent
+`render-index.json` hashes every complete target directory, including its artifact manifest.
+
+The renderer does not read Git state, clocks, environment variables, networks, runtime homes, or
+installed harness settings. It refuses existing output paths, source symlinks, empty skill sets,
+skill name/directory mismatches, and packages containing competing target manifests. See
+[`contracts/compatibility-levels.md`](contracts/compatibility-levels.md) for the compatibility and
+authority vocabulary.
 
 ## Install in Codex
 
@@ -88,6 +126,7 @@ python3 tools/claim-provenance.py --selftest
 python3 tools/pr-delivery-state.py --selftest
 python3 tools/run-skill-evals.py --selftest
 python3 tools/run-skill-evals.py --validate
+python3 tools/render-packages.py --selftest
 ```
 
 CI runs `python3 hooks/harness_check.py --ci` on every push and pull request. Local mode adds

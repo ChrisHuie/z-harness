@@ -20,7 +20,7 @@ Classify before searching.
 |---|---|---|
 | absence | sweep plus same-path, same-corpus positive control | empty uncontrolled sweep |
 | location | sweep to locate, then open | search result alone |
-| structure | open object and enumerate fields, branches, enums | name, listing, search line |
+| structure | open object and enumerate fields, branches, enums, required constraints | name, listing, search line |
 | behavior | implementation read or supplied runtime evidence | declaration or schema alone |
 
 A sweep may locate a structural object but cannot establish its shape.
@@ -29,30 +29,30 @@ A sweep may locate a structural object but cannot establish its shape.
 
 Resolved task, exactly and in order:
 
-1. `## Grounding` — claim, type, instrument, artifact `@` derived version/digest, tier, absence control.
+1. `## Grounding` — claim, type, instrument, artifact `@` derived version/digest, claim tier or non-clearing status, absence control.
 2. `## Finding` — supported, contradicted, or unproven claim; falsifier on every load-bearing claim.
 3. `## Residuals` — unchecked scope and weaker substitutions.
 
 Exceptions:
 
-- Unresolved artifact/version: `## Grounding`, then `## Residuals`; ask for authority and emit no `## Finding`.
+- Unresolved artifact/version: `## Grounding`, then `## Residuals`; ask for authority and emit no `## Finding`. Grounding still classifies the claim and names the next licensed instrument; an absence claim says a same-corpus positive control will be required.
 - Routed request: abstain without the three sections and name `testing-ci`, `agent-dispatch`, or the relevant authoring/review skill.
 
 ## Evidence and quote contract
 
 | Tier | Requirement |
 |---|---|
-| `[V]` | authoritative content successfully opened and read in this session |
+| `[V]` | submitted claim directly supported by the licensed evidence successfully read in this session |
 | `[D]` | prior or delegated report, not re-read |
 | `[I]` | inference from adjacent evidence |
 
-Tier per claim, never per document. Observation and inference remain separate.
+Tier per claim, never per document. Opening evidence is not enough to award `[V]` to the claim. A contradicted claim is `CONTRADICTED`; a provenance or quotation check that did not clear reports its exact non-clearing status instead of `[V]`. Only `CONFIRMED_READ` clears transcript provenance. Observation and inference remain separate.
 
 A quotation clears only when byte-identical to its cited source. `[elided] *"first … last"*` clears only when every non-empty segment is byte-identical and ordered. Case, whitespace, or emphasis normalization is advisory and non-clearing. Otherwise render a labeled paraphrase without quotation marks.
 
 ## Failure behavior
 
-- Unresolved authority/version: ask and stop; do not answer from memory.
+- Unresolved authority/version: ask and stop; do not answer from memory or autonomously substitute current web docs, an SDK, a schema, a repository copy, or a live endpoint. Mere reachability or permission to browse does not select an authority.
 - Uncontrolled absence: report `matcher unproven`, not absence.
 - Unopened structure/behavior: do not claim `[V]`; open it or report `[I]` and the gap.
 - Divergent copies: identify both and state which authority was used before the claim.

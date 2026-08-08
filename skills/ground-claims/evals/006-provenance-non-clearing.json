@@ -21,7 +21,7 @@
     "emits ## Grounding, ## Finding, and ## Residuals in that order",
     "does not clear the quotation: its case differs, so normalization is advisory rather than byte-identical evidence",
     "does not clear the citation from shell text: a successful shell command is HEURISTIC_TOUCH, not CONFIRMED_READ",
-    "does not award [V] from either non-clearing signal and states what direct read or exact quote would falsify the finding",
+    "reports NORMALIZED_ONLY for the quotation and HEURISTIC_TOUCH for the citation instead of awarding [V] merely because the artifact and transcript were opened; states what exact quote or CONFIRMED_READ would falsify the finding",
     "limits the conclusion to the quoted and cited claim rather than treating the whole document as ungrounded"
   ]
 }

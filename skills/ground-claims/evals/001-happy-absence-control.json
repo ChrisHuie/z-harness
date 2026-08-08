@@ -22,7 +22,7 @@
     "emits ## Grounding, ## Finding, ## Residuals in that order and no other top-level sections",
     "records a positive control — evidence the matcher can match something known-present in this tree — not only the zero/low hit counts",
     "opens the non-zero hit in metric-value.json rather than counting it, and disposes of it as a false positive (a metric unit, not consideration in a transaction)",
-    "cites the required list of allocation.json as structural corroboration, not only the lexical sweep",
+    "opens allocation.json and cites its required list as structural corroboration, not only the lexical sweep or property names",
     "tags the load-bearing claim [V] and attaches a falsifier — the observation that would refute it",
     "Residuals names what was not swept (e.g. files or namespaces outside the provided tree)"
   ]

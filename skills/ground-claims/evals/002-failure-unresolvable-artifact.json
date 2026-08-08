@@ -9,6 +9,6 @@
     "asks which artifact and which version is authoritative (installed SDK, published OpenAPI, live endpoint) before grounding anything",
     "emits no ## Finding section, because no claim is grounded yet",
     "names that this is an absence claim and will need a positive control once an artifact is supplied",
-    "does not substitute a web search summary for the artifact without labelling the substitution"
+    "does not autonomously choose current web docs, an SDK, a schema, a repository copy, or a live endpoint merely because it is reachable; browsing permission does not resolve authority"
   ]
 }

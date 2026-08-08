@@ -1,0 +1,13 @@
+{
+  "skills": [
+    "ground-claims",
+    "testing-ci"
+  ],
+  "query": "The suite went green in four seconds right after I added the new error branch. Does it actually cover that branch or is the selector picking up nothing?",
+  "files": [],
+  "expected_behavior": [
+    "routes to testing-ci — the question is whether a green check and a selector prove something",
+    "ground-claims abstains; its description's anti-trigger names this case",
+    "does not emit ## Grounding / ## Finding / ## Residuals"
+  ]
+}

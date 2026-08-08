@@ -3,7 +3,8 @@
 
 Runs from either clone (repo root auto-detected from this file's location). Checks:
 
-  C1  guard/report/accounting selftests exit 0 and emit a complete terminal receipt
+  C1  guard/report/accounting selftests exit 0, emit a complete terminal receipt,
+      and report at least as many checks as the floor recorded for that suite
   C2  shared-corpus reference copies are byte-identical across skills, and any
       basename appearing in >=2 skills is either SHARED or explicitly PER_SKILL —
       an unknown multi-skill basename fails loud
@@ -42,7 +43,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "2.7.0"
+VERSION = "2.8.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 AUTHORING_SKILLS = {"craft-prompt", "craft-skill", "craft-context-file", "review-prompt"}

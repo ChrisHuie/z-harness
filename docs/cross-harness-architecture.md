@@ -148,6 +148,54 @@ A per-target payload projection is the general answer and is not built here: no 
 needs to differ between targets, and adding a second projection axis before then would be machinery
 without a case.
 
+## Why the evidence fields exist before their producer
+
+The artifact carries evidence fields no tool currently writes. That is deliberate, and it is the
+opposite of a declaration nothing reads.
+
+The consumer is the guard, not a future producer. `validationStatus` above `fixture-only` is refused
+unless a complete evidence record is present, so the fields are a precondition on a claim rather than
+an unused slot. Before this, an adapter entry could set `validationStatus: promoted` with tested
+hosts and the artifact rendered and verified without objection; the vocabulary was assertable and
+nothing was asserting anything.
+
+The fields are not invented for the occasion. This contract already required a promoted release to
+record tested host versions, validation results, and the fresh-session installed artifact digest.
+Every other item on that list was already representable in the manifest. Those were the two that were
+not, so the artifact could name a status whose required evidence it had no place to put.
+
+The alternative was to delete `candidate` and `promoted` from the enum until a promotion runner
+exists. That was rejected because the levels are load-bearing in this contract's own vocabulary: the
+compatibility table, the authority classes, and the promotion checklist all describe states an
+artifact would then be unable to express. Shrinking the enum would move the gap from the schema to
+the contract without closing it.
+
+The consequence is that both options produce the same safety today. No producer emits evidence and
+the license set is empty, so every status above `fixture-only` is unreachable by construction rather
+than by convention. The difference is only what happens when a promotion runner arrives: the shape it
+must emit is already specified and already enforced at both ends.
+
+What this does not do is establish that any recorded evidence is true. It checks that a claim carries
+evidence of the required shape. Only a target-host run establishes the rest, and the checklist below
+is what that run has to satisfy.
+
+## Why the schema reader is written here
+
+Validating three schemas against emitted documents needs a validator. This one implements the JSON
+Schema subset these contracts use, in the standard library, rather than taking a dependency.
+
+The renderer's stated property is that it reads no environment, network, clock, or installed
+configuration. A validation dependency is resolvable state outside the repository, and a gate that
+skips when a dependency is missing reports a clean result over an unrun check. Agent Plugins 1.0.0
+already instructs a client to select locally supported validation rules rather than retrieve a schema
+while loading, so a local reader over vendored schemas is the shape that specification describes.
+
+The risk this trades into is a reader that silently ignores what it does not implement. Two things
+hold it: unknown keywords raise rather than pass, and the supported keywords are split into those
+carrying a constraint and those carrying only metadata, with a selftest asserting every constraint
+keyword rejects a violating value and that the two sets stay exhaustive. That test was added after
+`minimum` was found listed as supported and never evaluated.
+
 ## Validation and promotion
 
 Static rendering earns no runtime compatibility level. Promotion is per target and requires:

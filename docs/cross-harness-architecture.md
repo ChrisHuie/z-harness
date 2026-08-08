@@ -83,9 +83,11 @@ bytes, normalized executable modes, inventories, and digests. The renderer:
 
 - reads only repository paths named by versioned config;
 - requires a non-empty selected skill set;
-- validates immediate skill identity and required Agent Skill metadata;
+- validates immediate skill identity and required Agent Skill metadata, refusing by name any
+  frontmatter syntax it cannot decode rather than mis-decoding it;
 - rejects symlinks and non-regular files;
-- excludes only explicitly named runtime directories and records every excluded file;
+- excludes only explicitly named runtime directories and immediate files, and records every
+  excluded path;
 - records the renderer version, renderer digest, canonical render-config digest, and the selected
   target adapter-config digest;
 - normalizes file modes to `0644` or `0755` and file mtimes to the Unix epoch;
@@ -106,12 +108,53 @@ Configuration digests use UTF-8 JSON with sorted object keys and no insignifican
 artifact hashes only its selected adapter object, so a Claude-only adapter change cannot churn an
 otherwise unchanged Codex or Agent Plugins artifact.
 
+## What verification settles
+
+`--verify` answers three separate questions, and an artifact must pass all of them:
+
+1. **Contract conformance** — the artifact manifest and render index validate against the committed
+   schemas in `contracts/`, and the portable manifest validates against the vendored Agent Plugins
+   1.0.0 schema in `contracts/vendor/`.
+2. **Internal consistency** — the recorded inventory, modes, and digests match the bytes on disk.
+3. **Identity** — the build record, claims, package identity, and source digests are recomputed from
+   the render config, the adapter entry, the renderer file, and the current source tree.
+
+The third is what makes the manifest more than an assertion. Rendering and verification call the
+same derivation for the build record and the claims block, so neither can drift from the other; the
+cost of that symmetry is that neither side can detect a fault inside the shared digest helpers.
+
+Schemas are vendored rather than fetched. Agent Plugins 1.0.0 instructs a client to select locally
+supported validation rules from `$schema` rather than retrieving a schema while loading a plugin,
+and the same rule keeps the gate free of network state. `contracts/vendor/SOURCES.json` records each
+copy's upstream URL, digest, and retrieval date, and a selftest fails if the file stops matching the
+digest recorded for it. The schema reader implements the subset these contracts use and raises on any
+keyword it does not evaluate, so an unchecked constraint cannot read as a clean result.
+
+## Payload and installed inventory
+
+`payloadSha256` states which bytes the artifact ships. It does not state which bytes a given host
+installs: hosts apply their own copy rules. Agent Plugins 1.0.0 states that a skill "may contain any
+additional files and directories it needs", while the pinned Hermes revision copies `SKILL.md` plus
+the files it references under the documented support directories and does not copy unreferenced
+repository files.
+
+`CONTRACT.md` is authoring metadata in the same class as `evals/` — it specifies how a skill was
+built, not how it runs — so `runtimeExcludeFiles` removes it from the runtime payload and records it
+in `excludedPaths`. One payload identity therefore holds across all five targets, and the question of
+which hosts would have copied it does not arise. Excluding a path preserves `inputTreeSha256` and
+moves only `includedTreeSha256` and the payload digests, so the source of record stays intact.
+
+A per-target payload projection is the general answer and is not built here: no runtime file yet
+needs to differ between targets, and adding a second projection axis before then would be machinery
+without a case.
+
 ## Validation and promotion
 
 Static rendering earns no runtime compatibility level. Promotion is per target and requires:
 
 1. target-native manifest validation;
-2. exact installed skill inventory and invocation identity;
+2. exact installed skill inventory and invocation identity, compared against the artifact's payload
+   inventory so any host-side copy rule that drops a shipped file is caught before promotion;
 3. positive and negative trigger scenarios;
 4. output and side-effect assertions;
 5. project, cwd, workspace, and worktree binding checks;

@@ -16,6 +16,26 @@ An artifact records `targetLevel` separately from `earnedLevel`. A renderer may 
 only target-host evidence may advance the earned level. `unverified` is the required earned level
 for an artifact that has only been rendered or statically inspected.
 
+## Evidence required by a claim
+
+`validationStatus` is gated on the evidence this contract names, at both ends: the adapter
+configuration is refused at input time and the rendered artifact is refused at verification time,
+through one predicate.
+
+| `validationStatus` | required |
+|---|---|
+| `fixture-only` | no host evidence records at all |
+| `candidate`, `promoted` | at least one evidence record, and a non-empty license set |
+
+Each evidence record names a host, that host's version, the artifact digest observed after a
+fresh-session install, and the scenario results behind the claim. A scenario that did not pass
+cannot support a status above `fixture-only`.
+
+This checks that a claim carries its evidence, not that the evidence is true. Only a target-host
+run establishes the latter, and no such runner exists yet, so every status above `fixture-only` is
+currently unreachable: the pilot has no license set and no producer of installed-artifact digests.
+The license set is therefore a mechanical promotion blocker rather than a note.
+
 ## Authority classes
 
 - `instruction-only`: model-visible text asks for behavior. It is not an authorization boundary.
@@ -58,6 +78,11 @@ A promoted target release records all of:
 The render-time artifact manifest intentionally omits wall-clock time and ambient environment data.
 Publication provenance binds the artifact digest to a Git commit after rendering; Git state is not an
 implicit renderer input.
+
+Verification recomputes every one of those values rather than checking its shape, so a manifest
+field cannot be edited after rendering. That includes binding the recorded source digests to the
+current source tree: an artifact rendered from an older tree fails verification once the source
+moves, and that verdict is correct, because a stale artifact is what the digest exists to detect.
 
 ## Current migration boundary
 

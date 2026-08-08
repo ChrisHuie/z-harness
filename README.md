@@ -41,9 +41,17 @@ the manifest itself to avoid a self-referential hash and whose build record bind
 canonicalized configuration inputs. The non-installable parent
 `render-index.json` hashes every complete target directory, including its artifact manifest.
 
+`--verify` recomputes every manifest value rather than checking its shape. It validates the manifest
+and index against the committed schemas in `contracts/`, validates the portable manifest against the
+vendored Agent Plugins 1.0.0 schema in `contracts/vendor/`, re-derives the build record and claims
+from the render config and adapter entry, and re-reads the source tree to confirm the recorded source
+digests. An artifact whose configuration, renderer, or source has moved fails, which is the point:
+that artifact is stale.
+
 The renderer does not read Git state, clocks, environment variables, networks, runtime homes, or
 installed harness settings. It refuses existing output paths, source symlinks, empty skill sets,
-skill name/directory mismatches, and packages containing competing target manifests. See
+skill name/directory mismatches, frontmatter syntax it cannot decode, packages containing competing
+target manifests, and any compatibility status whose evidence is absent. See
 [`contracts/compatibility-levels.md`](contracts/compatibility-levels.md) for the compatibility and
 authority vocabulary.
 

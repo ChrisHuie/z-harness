@@ -9,7 +9,7 @@
       "targetLevel": "portable-core",
       "authority": "instruction-only",
       "validationStatus": "fixture-only",
-      "testedHosts": []
+      "evidence": []
     },
     "claude": {
       "adapterRevision": 1,
@@ -19,7 +19,7 @@
       "targetLevel": "portable-core",
       "authority": "instruction-only",
       "validationStatus": "fixture-only",
-      "testedHosts": []
+      "evidence": []
     },
     "codex": {
       "adapterRevision": 1,
@@ -29,7 +29,7 @@
       "targetLevel": "portable-core",
       "authority": "instruction-only",
       "validationStatus": "fixture-only",
-      "testedHosts": []
+      "evidence": []
     },
     "hermes": {
       "adapterRevision": 1,
@@ -39,7 +39,7 @@
       "targetLevel": "portable-core",
       "authority": "instruction-only",
       "validationStatus": "fixture-only",
-      "testedHosts": []
+      "evidence": []
     },
     "kimi": {
       "adapterRevision": 1,
@@ -49,7 +49,7 @@
       "targetLevel": "portable-core",
       "authority": "instruction-only",
       "validationStatus": "fixture-only",
-      "testedHosts": []
+      "evidence": []
     }
   }
 }

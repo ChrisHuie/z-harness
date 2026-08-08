@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "note": "Vendored copies of external normative schemas. Retrieved once, validated offline. Agent Plugins 1.0.0 requires a client to select locally supported validation rules from $schema rather than retrieving a schema while loading a plugin, so the gate reads this copy and never the network.",
+  "sources": [
+    {
+      "id": "agent-plugins-1.0.0-plugin-manifest",
+      "file": "agent-plugins-1.0.0.plugin.schema.json",
+      "url": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+      "sha256": "0a4aad95ce337878ad38802ebf0daa3fde76abe3f65400c86bcbb1ec0b3ab883",
+      "retrieved": "2026-08-08",
+      "governs": "plugin.json emitted for the agent-plugins target"
+    }
+  ]
+}

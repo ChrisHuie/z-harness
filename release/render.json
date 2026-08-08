@@ -41,6 +41,9 @@
   "runtimeExcludeDirectories": [
     "evals"
   ],
+  "runtimeExcludeFiles": [
+    "CONTRACT.md"
+  ],
   "targets": [
     "agent-plugins",
     "codex",

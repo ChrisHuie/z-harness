@@ -25,13 +25,15 @@ import shutil
 import stat
 import sys
 import tempfile
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Sequence, Tuple
 
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RENDER_CONFIG = ROOT / "release" / "render.json"
 DEFAULT_ADAPTER_CONFIG = ROOT / "adapters" / "targets.json"
+CONTRACTS = ROOT / "contracts"
+VENDORED_SCHEMAS = CONTRACTS / "vendor"
 ARTIFACT_MANIFEST = "z-harness-artifact.json"
 RENDER_INDEX = "render-index.json"
 ARTIFACT_SCHEMA = (
@@ -42,14 +44,27 @@ RENDER_INDEX_SCHEMA = (
     "https://github.com/ChrisHuie/z-harness/blob/main/contracts/render-index.schema.json"
 )
 AGENT_PLUGIN_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
+ARTIFACT_SCHEMA_FILE = CONTRACTS / "artifact-manifest.schema.json"
+RENDER_INDEX_SCHEMA_FILE = CONTRACTS / "render-index.schema.json"
+AGENT_PLUGIN_SCHEMA_FILE = VENDORED_SCHEMAS / "agent-plugins-1.0.0.plugin.schema.json"
 SEMVER = re.compile(
     r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
     r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
 )
 SKILL_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+# Agent Skills specification, "Frontmatter": name is "Max 64 characters", description
+# "Max 1024 characters. Non-empty." Hand-transcribed from prose at
+# https://agentskills.io/specification -- that authority publishes no machine schema to
+# vendor, so these two constants have no local pinned source to diff against.
+SKILL_NAME_MAX = 64
+SKILL_DESCRIPTION_MAX = 1024
 PACKAGE_NAME = re.compile(r"^[a-z0-9]+(?:[.-][a-z0-9]+)*$")
 KIMI_PLUGIN_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+# YAML indicators that change a scalar's meaning. The renderer reads frontmatter without
+# a YAML dependency, so any form it cannot faithfully decode is refused by name rather
+# than mis-decoded: "description: >-" would otherwise validate as the 2-char string ">-".
+YAML_UNSUPPORTED_LEADERS = ">|&*!{["
 EXPECTED_MANIFEST_PATHS = {
     "agent-plugins": "plugin.json",
     "codex": ".codex-plugin/plugin.json",
@@ -118,6 +133,69 @@ def require_string_list(value: Any, label: str, *, nonempty: bool = False) -> Li
     return list(value)
 
 
+def require_validation_evidence(
+    validation_status: str,
+    licenses: Sequence[str],
+    evidence: Any,
+    label: str,
+) -> None:
+    """Gate every compatibility status on the evidence its contract names.
+
+    `contracts/compatibility-levels.md` requires a promoted release to record tested host
+    versions, validation results, the fresh-session installed artifact digest, and a
+    license set. This is the single encoding of that rule; `load_inputs` applies it to the
+    adapter config and `verify_artifact` applies it to the rendered artifact, so neither
+    end can claim a status the other would refuse. It checks that a claim carries its
+    evidence, not that the evidence is true -- only a target-host run establishes that.
+    """
+    if not isinstance(evidence, list):
+        raise RenderError(f"{label} evidence must be an array")
+    if validation_status == "fixture-only":
+        if evidence:
+            raise RenderError(f"{label} fixture-only must record no host evidence")
+        return
+    if not evidence:
+        raise RenderError(
+            f"{label} validationStatus {validation_status!r} requires host evidence records"
+        )
+    if not licenses:
+        raise RenderError(
+            f"{label} validationStatus {validation_status!r} requires a non-empty license set"
+        )
+    seen: List[Tuple[str, str]] = []
+    for index, record in enumerate(evidence):
+        where = f"{label} evidence[{index}]"
+        if not isinstance(record, dict):
+            raise RenderError(f"{where} must be an object")
+        require_exact_keys(
+            record, {"host", "hostVersion", "installedArtifactSha256", "scenarios"}, where
+        )
+        host = require_nonempty_string(record["host"], f"{where} host")
+        host_version = require_nonempty_string(record["hostVersion"], f"{where} hostVersion")
+        if not is_sha256(record["installedArtifactSha256"]):
+            raise RenderError(f"{where} installedArtifactSha256 must be a sha256 value")
+        scenarios = record["scenarios"]
+        if not isinstance(scenarios, list) or not scenarios:
+            raise RenderError(f"{where} scenarios must be a non-empty array")
+        scenario_ids: List[str] = []
+        for position, scenario in enumerate(scenarios):
+            spot = f"{where} scenarios[{position}]"
+            if not isinstance(scenario, dict):
+                raise RenderError(f"{spot} must be an object")
+            require_exact_keys(scenario, {"id", "result"}, spot)
+            scenario_ids.append(require_nonempty_string(scenario["id"], f"{spot} id"))
+            if scenario["result"] != "pass":
+                raise RenderError(
+                    f"{spot} result {scenario['result']!r} does not support a "
+                    f"{validation_status!r} status"
+                )
+        if len(scenario_ids) != len(set(scenario_ids)):
+            raise RenderError(f"{where} scenario ids must be unique")
+        seen.append((host, host_version))
+    if len(seen) != len(set(seen)):
+        raise RenderError(f"{label} evidence host/version pairs must be unique")
+
+
 def load_inputs(
     render_path: Path = DEFAULT_RENDER_CONFIG,
     adapter_path: Path = DEFAULT_ADAPTER_CONFIG,
@@ -133,6 +211,7 @@ def load_inputs(
             "sourceSkillsPath",
             "selectedSkills",
             "runtimeExcludeDirectories",
+            "runtimeExcludeFiles",
             "targets",
         },
         "render config",
@@ -229,6 +308,14 @@ def load_inputs(
             raise RenderError(
                 "runtimeExcludeDirectories entries must be immediate directory names"
             )
+    excluded_files = require_string_list(
+        render_config["runtimeExcludeFiles"], "runtimeExcludeFiles"
+    )
+    for excluded in excluded_files:
+        if Path(excluded).name != excluded or excluded in (".", ".."):
+            raise RenderError("runtimeExcludeFiles entries must be immediate file names")
+    if "SKILL.md" in excluded_files:
+        raise RenderError("runtimeExcludeFiles must not exclude SKILL.md")
     targets = require_string_list(render_config["targets"], "targets", nonempty=True)
 
     require_exact_keys(adapter_config, {"schemaVersion", "targets"}, "adapter config")
@@ -253,7 +340,7 @@ def load_inputs(
                 "targetLevel",
                 "authority",
                 "validationStatus",
-                "testedHosts",
+                "evidence",
             },
             f"adapter {target}",
         )
@@ -274,9 +361,12 @@ def load_inputs(
             raise RenderError(f"adapter {target} has an unknown authority")
         if adapter["validationStatus"] not in VALIDATION_STATUSES:
             raise RenderError(f"adapter {target} has an unknown validationStatus")
-        require_string_list(adapter["testedHosts"], f"adapter {target} testedHosts")
-        if adapter["validationStatus"] == "fixture-only" and adapter["testedHosts"]:
-            raise RenderError(f"fixture-only adapter {target} must not claim tested hosts")
+        require_validation_evidence(
+            adapter["validationStatus"],
+            package["licenses"],
+            adapter["evidence"],
+            f"adapter {target}",
+        )
 
     return render_config, adapter_config
 
@@ -285,6 +375,11 @@ def decode_scalar(raw: str, label: str) -> str:
     value = raw.strip()
     if not value:
         raise RenderError(f"{label} must be a single-line scalar")
+    if value[0] in YAML_UNSUPPORTED_LEADERS:
+        raise RenderError(
+            f"{label} uses YAML syntax this reader does not decode ({value[0]!r}): "
+            f"write it as a single-line plain, single-quoted, or double-quoted scalar"
+        )
     if value.startswith('"'):
         try:
             decoded = json.loads(value)
@@ -326,8 +421,15 @@ def parse_skill_frontmatter(path: Path, expected_name: str) -> Dict[str, str]:
         )
     if SKILL_NAME.fullmatch(values["name"]) is None:
         raise RenderError(f"skill name is not portable kebab-case: {values['name']!r}")
-    if not 1 <= len(values["description"]) <= 1024:
-        raise RenderError(f"skill {expected_name} description must be 1-1024 characters")
+    if len(values["name"]) > SKILL_NAME_MAX:
+        raise RenderError(
+            f"skill name exceeds the Agent Skills {SKILL_NAME_MAX}-character limit: "
+            f"{len(values['name'])} characters"
+        )
+    if not 1 <= len(values["description"]) <= SKILL_DESCRIPTION_MAX:
+        raise RenderError(
+            f"skill {expected_name} description must be 1-{SKILL_DESCRIPTION_MAX} characters"
+        )
     return values
 
 
@@ -368,6 +470,7 @@ def scan_skill(
     skill_dir: Path,
     skill_name: str,
     excluded_directories: Sequence[str],
+    excluded_files: Sequence[str] = (),
 ) -> Tuple[List[Dict[str, str]], List[Dict[str, str]], List[str]]:
     if not skill_dir.is_dir():
         raise RenderError(f"selected skill directory is absent: {skill_dir}")
@@ -387,7 +490,9 @@ def scan_skill(
         relative = path.relative_to(skill_dir).as_posix()
         record = file_record(path, relative)
         all_records.append(record)
-        if Path(relative).parts[0] in excluded_directories:
+        parts = Path(relative).parts
+        immediate_file = len(parts) == 1 and parts[0] in excluded_files
+        if parts[0] in excluded_directories or immediate_file:
             excluded.append(relative)
         else:
             included.append(record)
@@ -481,7 +586,16 @@ def target_manifest(
     raise RenderError(f"no manifest builder for target {target!r}")
 
 
-def payload_records(artifact_root: Path) -> List[Dict[str, str]]:
+def artifact_records(
+    artifact_root: Path,
+    *,
+    include_manifest: bool,
+) -> List[Dict[str, str]]:
+    """Inventory a rendered target directory.
+
+    The payload inventory omits the artifact manifest because a manifest cannot contain a
+    digest of itself; the render index hashes the complete directory instead.
+    """
     records: List[Dict[str, str]] = []
     for path in sorted(artifact_root.rglob("*"), key=lambda item: item.as_posix()):
         if path.is_symlink():
@@ -491,27 +605,131 @@ def payload_records(artifact_root: Path) -> List[Dict[str, str]]:
         if not path.is_file():
             raise RenderError(f"rendered artifact contains a non-regular file: {path}")
         relative = path.relative_to(artifact_root).as_posix()
-        if relative == ARTIFACT_MANIFEST:
+        if not include_manifest and relative == ARTIFACT_MANIFEST:
             continue
         records.append(file_record(path, relative))
     if not records:
-        raise RenderError(f"artifact has zero payload files: {artifact_root}")
+        scope = "files" if include_manifest else "payload files"
+        raise RenderError(f"artifact has zero {scope}: {artifact_root}")
     return records
+
+
+def payload_records(artifact_root: Path) -> List[Dict[str, str]]:
+    return artifact_records(artifact_root, include_manifest=False)
 
 
 def complete_artifact_records(artifact_root: Path) -> List[Dict[str, str]]:
-    records: List[Dict[str, str]] = []
-    for path in sorted(artifact_root.rglob("*"), key=lambda item: item.as_posix()):
-        if path.is_symlink():
-            raise RenderError(f"rendered artifact contains a symlink: {path}")
-        if path.is_dir():
-            continue
-        if not path.is_file():
-            raise RenderError(f"rendered artifact contains a non-regular file: {path}")
-        records.append(file_record(path, path.relative_to(artifact_root).as_posix()))
-    if not records:
-        raise RenderError(f"artifact has zero files: {artifact_root}")
-    return records
+    return artifact_records(artifact_root, include_manifest=True)
+
+
+# Split deliberately. A keyword listed as supported but never evaluated is the silent
+# hatch this reader exists to avoid, so metadata that carries no constraint is named
+# separately from the keywords with a branch below, and a selftest asserts each
+# constraint keyword actually rejects a violating value.
+SCHEMA_METADATA_KEYWORDS = {"$schema", "$id", "$defs", "title", "description"}
+SCHEMA_CONSTRAINT_KEYWORDS = {
+    "$ref", "type", "const", "enum", "required", "properties", "additionalProperties",
+    "propertyNames", "minLength", "maxLength", "pattern", "items", "minItems",
+    "minProperties", "minimum",
+}
+SUPPORTED_SCHEMA_KEYWORDS = SCHEMA_METADATA_KEYWORDS | SCHEMA_CONSTRAINT_KEYWORDS
+JSON_TYPES = {
+    "object": dict, "array": list, "string": str, "integer": int,
+    "number": (int, float), "boolean": bool, "null": type(None),
+}
+
+
+def load_schema(path: Path) -> Dict[str, Any]:
+    return read_json_object(path, f"schema {path.name}")
+
+
+def conform_to_schema(
+    value: Any,
+    schema: Dict[str, Any],
+    label: str,
+    root: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Validate `value` against the subset of JSON Schema these contracts use.
+
+    An unrecognised keyword raises instead of being skipped: a validator that silently
+    ignores what it cannot evaluate reports a clean result over an unchecked constraint.
+    Written against the stdlib so the renderer keeps no third-party dependency, matching
+    the Agent Plugins loading rule that a client selects locally supported validation
+    rules rather than retrieving a schema.
+    """
+    root = schema if root is None else root
+    unknown = sorted(set(schema) - SUPPORTED_SCHEMA_KEYWORDS)
+    if unknown:
+        raise RenderError(f"{label}: schema uses unsupported keywords {unknown}")
+    if "$ref" in schema:
+        siblings = sorted(set(schema) - {"$ref"} - SCHEMA_METADATA_KEYWORDS)
+        if siblings:
+            raise RenderError(f"{label}: $ref alongside unapplied keywords {siblings}")
+        ref = schema["$ref"]
+        if not isinstance(ref, str) or not ref.startswith("#/"):
+            raise RenderError(f"{label}: only local $ref is supported, got {ref!r}")
+        target: Any = root
+        for part in ref[2:].split("/"):
+            if not isinstance(target, dict) or part not in target:
+                raise RenderError(f"{label}: unresolvable $ref {ref!r}")
+            target = target[part]
+        conform_to_schema(value, target, label, root)
+        return
+    if "const" in schema and value != schema["const"]:
+        raise RenderError(f"{label}: expected {schema['const']!r}, got {value!r}")
+    if "enum" in schema and value not in schema["enum"]:
+        raise RenderError(f"{label}: {value!r} is not one of {schema['enum']}")
+    declared = schema.get("type")
+    if declared is not None:
+        if declared not in JSON_TYPES:
+            raise RenderError(f"{label}: unsupported schema type {declared!r}")
+        expected = JSON_TYPES[declared]
+        numeric = declared in ("integer", "number")
+        if not isinstance(value, expected) or (numeric and isinstance(value, bool)):
+            raise RenderError(f"{label}: expected {declared}, got {type(value).__name__}")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if "minimum" in schema and value < schema["minimum"]:
+            raise RenderError(f"{label}: {value} is below minimum {schema['minimum']}")
+    if isinstance(value, str):
+        if "minLength" in schema and len(value) < schema["minLength"]:
+            raise RenderError(f"{label}: shorter than minLength {schema['minLength']}")
+        if "maxLength" in schema and len(value) > schema["maxLength"]:
+            raise RenderError(
+                f"{label}: {len(value)} characters exceeds maxLength {schema['maxLength']}"
+            )
+        if "pattern" in schema and re.search(schema["pattern"], value) is None:
+            raise RenderError(f"{label}: {value!r} does not match {schema['pattern']!r}")
+    if isinstance(value, list):
+        if "minItems" in schema and len(value) < schema["minItems"]:
+            raise RenderError(
+                f"{label}: {len(value)} items is fewer than minItems {schema['minItems']}"
+            )
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            for index, item in enumerate(value):
+                conform_to_schema(item, item_schema, f"{label}[{index}]", root)
+    if isinstance(value, dict):
+        if "minProperties" in schema and len(value) < schema["minProperties"]:
+            raise RenderError(
+                f"{label}: {len(value)} properties is fewer than "
+                f"minProperties {schema['minProperties']}"
+            )
+        for name in schema.get("required", []):
+            if name not in value:
+                raise RenderError(f"{label}: required property {name!r} is absent")
+        properties = schema.get("properties", {})
+        extra = schema.get("additionalProperties", True)
+        names = schema.get("propertyNames")
+        for key, member in sorted(value.items()):
+            where = f"{label}.{key}"
+            if isinstance(names, dict):
+                conform_to_schema(key, names, f"{where} (property name)", root)
+            if key in properties:
+                conform_to_schema(member, properties[key], where, root)
+            elif extra is False:
+                raise RenderError(f"{label}: property {key!r} is not permitted")
+            elif isinstance(extra, dict):
+                conform_to_schema(member, extra, where, root)
 
 
 def assert_isolated_manifest(artifact_root: Path, target: str) -> None:
@@ -617,6 +835,81 @@ def verify_target_manifest(
         raise RenderError("codex manifest interface must be an object")
 
 
+def renderer_digest() -> str:
+    return sha256_bytes(Path(__file__).resolve().read_bytes())
+
+
+def derived_build(render_config: Dict[str, Any], adapter: Dict[str, Any]) -> Dict[str, str]:
+    """The build record an artifact must carry for these exact inputs.
+
+    Rendering writes this and verification recomputes it, so a manifest cannot record a
+    renderer or configuration it was not produced from. Both sides call the same digest
+    helpers, so this binds artifact to inputs and cannot detect a fault inside
+    `canonical_json_digest` itself.
+    """
+    return {
+        "renderer": "z-harness/render-packages",
+        "rendererVersion": VERSION,
+        "rendererSha256": renderer_digest(),
+        "renderConfigSha256": canonical_json_digest(render_config),
+        "adapterConfigSha256": canonical_json_digest(adapter),
+    }
+
+
+def derived_claims(adapter: Dict[str, Any]) -> Dict[str, Any]:
+    """The claims block an artifact must carry for this adapter entry.
+
+    `earnedLevel` is pinned: rendering and static inspection earn nothing, so only a
+    target-host promotion run may raise it, and it is not read from configuration.
+    """
+    return {
+        "targetLevel": adapter["targetLevel"],
+        "earnedLevel": "unverified",
+        "authority": adapter["authority"],
+        "validationStatus": adapter["validationStatus"],
+        "evidence": adapter["evidence"],
+    }
+
+
+class SourceScan(NamedTuple):
+    """One reading of the selected skill sources, shared by rendering and verification."""
+
+    source_root: Path
+    skills: List[Dict[str, Any]]
+    aggregate_input: List[Dict[str, str]]
+    aggregate_included: List[Dict[str, str]]
+    included_by_skill: Dict[str, List[Dict[str, str]]]
+
+
+def scan_selected_skills(repo_root: Path, render_config: Dict[str, Any]) -> SourceScan:
+    source_root = resolve_source_skills_root(repo_root, render_config)
+    excluded_directories = render_config["runtimeExcludeDirectories"]
+    excluded_files = render_config["runtimeExcludeFiles"]
+    skills: List[Dict[str, Any]] = []
+    aggregate_input: List[Dict[str, str]] = []
+    aggregate_included: List[Dict[str, str]] = []
+    included_by_skill: Dict[str, List[Dict[str, str]]] = {}
+    for skill_name in sorted(render_config["selectedSkills"]):
+        all_records, included, excluded = scan_skill(
+            source_root / skill_name, skill_name, excluded_directories, excluded_files
+        )
+        skills.append({
+            "id": skill_name,
+            "inputTreeSha256": tree_digest(all_records),
+            "includedTreeSha256": tree_digest(included),
+            "includedFiles": len(included),
+            "excludedPaths": sorted(excluded),
+        })
+        included_by_skill[skill_name] = included
+        for record in all_records:
+            aggregate_input.append({**record, "path": f"{skill_name}/{record['path']}"})
+        for record in included:
+            aggregate_included.append({**record, "path": f"{skill_name}/{record['path']}"})
+    return SourceScan(
+        source_root, skills, aggregate_input, aggregate_included, included_by_skill
+    )
+
+
 def render_target(
     repo_root: Path,
     target_root: Path,
@@ -626,30 +919,18 @@ def render_target(
 ) -> Dict[str, Any]:
     package = render_config["package"]
     adapter = adapter_config["targets"][target]
-    source_skills = resolve_source_skills_root(repo_root, render_config)
-    excluded_directories = render_config["runtimeExcludeDirectories"]
-    skill_manifests: List[Dict[str, Any]] = []
-    aggregate_input: List[Dict[str, str]] = []
-    aggregate_included: List[Dict[str, str]] = []
+    scan = scan_selected_skills(repo_root, render_config)
+    skill_manifests = scan.skills
+    aggregate_input = scan.aggregate_input
+    aggregate_included = scan.aggregate_included
 
     target_root.mkdir(parents=True, exist_ok=False)
-    for skill_name in sorted(render_config["selectedSkills"]):
-        source_dir = source_skills / skill_name
-        all_records, included, excluded = scan_skill(
-            source_dir, skill_name, excluded_directories
+    for skill_name, included in sorted(scan.included_by_skill.items()):
+        copy_skill_payload(
+            scan.source_root / skill_name,
+            target_root / "skills" / skill_name,
+            included,
         )
-        copy_skill_payload(source_dir, target_root / "skills" / skill_name, included)
-        skill_manifests.append({
-            "id": skill_name,
-            "inputTreeSha256": tree_digest(all_records),
-            "includedTreeSha256": tree_digest(included),
-            "includedFiles": len(included),
-            "excludedPaths": sorted(excluded),
-        })
-        for record in all_records:
-            aggregate_input.append({**record, "path": f"{skill_name}/{record['path']}"})
-        for record in included:
-            aggregate_included.append({**record, "path": f"{skill_name}/{record['path']}"})
 
     manifest_relative = adapter["manifestPath"]
     manifest = target_manifest(target, package, adapter["packageVersion"])
@@ -673,13 +954,7 @@ def render_target(
         "target": target,
         "format": adapter["format"],
         "adapterRevision": adapter["adapterRevision"],
-        "build": {
-            "renderer": "z-harness/render-packages",
-            "rendererVersion": VERSION,
-            "rendererSha256": sha256_bytes(Path(__file__).resolve().read_bytes()),
-            "renderConfigSha256": canonical_json_digest(render_config),
-            "adapterConfigSha256": canonical_json_digest(adapter),
-        },
+        "build": derived_build(render_config, adapter),
         "source": {
             "kind": "canonical-tree",
             "inputTreeSha256": tree_digest(aggregate_input),
@@ -691,16 +966,10 @@ def render_target(
             "sha256": tree_digest(payload),
             "files": payload,
         },
-        "claims": {
-            "targetLevel": adapter["targetLevel"],
-            "earnedLevel": "unverified",
-            "authority": adapter["authority"],
-            "validationStatus": adapter["validationStatus"],
-            "testedHosts": adapter["testedHosts"],
-        },
+        "claims": derived_claims(adapter),
     }
     write_json(target_root / ARTIFACT_MANIFEST, artifact_manifest)
-    verify_artifact(target_root, target)
+    verify_artifact(repo_root, target_root, target, render_config, adapter_config)
     return artifact_manifest
 
 
@@ -759,10 +1028,31 @@ def render_all(
     return results
 
 
-def verify_artifact(artifact_root: Path, expected_target: str) -> Dict[str, Any]:
+def verify_artifact(
+    repo_root: Path,
+    artifact_root: Path,
+    expected_target: str,
+    render_config: Dict[str, Any],
+    adapter_config: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Answer whether this tree was produced by this renderer from these inputs.
+
+    Three distinct questions are settled here, and a manifest must pass all of them:
+    schema conformance against the committed contract, internal consistency between the
+    recorded inventory and the bytes on disk, and identity against the render config,
+    adapter entry, renderer digest, and current source tree. The third is why a manifest
+    field cannot be edited after rendering: every value is recomputed, not shape-checked.
+
+    Binding to the live source means an artifact rendered from an older tree fails once
+    the source moves. That verdict is correct -- the artifact is stale -- and is the
+    property that makes `inputTreeSha256` mean anything.
+    """
     artifact_root = artifact_root.resolve()
     manifest_path = artifact_root / ARTIFACT_MANIFEST
     manifest = read_json_object(manifest_path, "artifact manifest")
+    conform_to_schema(
+        manifest, load_schema(ARTIFACT_SCHEMA_FILE), "artifact manifest"
+    )
     require_exact_keys(
         manifest,
         {
@@ -805,25 +1095,38 @@ def verify_artifact(artifact_root: Path, expected_target: str) -> Dict[str, Any]
     if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
         raise RenderError("artifact adapterRevision must be a positive integer")
     require_nonempty_string(manifest["format"], "artifact format")
-    build = manifest.get("build")
-    if not isinstance(build, dict):
-        raise RenderError("artifact build must be an object")
-    require_exact_keys(
-        build,
-        {
-            "renderer",
-            "rendererVersion",
-            "rendererSha256",
-            "renderConfigSha256",
-            "adapterConfigSha256",
-        },
-        "artifact build",
-    )
-    if build["renderer"] != "z-harness/render-packages":
-        raise RenderError("artifact build renderer identity is invalid")
-    renderer_version = require_nonempty_string(
-        build["rendererVersion"], "artifact build rendererVersion"
-    )
+
+    # --- identity against the declared inputs -------------------------------------
+    package = render_config["package"]
+    adapter = adapter_config["targets"].get(expected_target)
+    if not isinstance(adapter, dict):
+        raise RenderError(f"adapter config has no object for target {expected_target!r}")
+    for field, expected in (
+        ("packageName", package["name"]),
+        ("coreVersion", package["coreVersion"]),
+        ("licenses", package["licenses"]),
+        ("packageVersion", adapter["packageVersion"]),
+        ("format", adapter["format"]),
+        ("adapterRevision", adapter["adapterRevision"]),
+    ):
+        if manifest[field] != expected:
+            raise RenderError(
+                f"artifact {field} does not match the render inputs: "
+                f"artifact={manifest[field]!r} configured={expected!r}"
+            )
+    expected_build = derived_build(render_config, adapter)
+    if manifest["build"] != expected_build:
+        drifted = sorted(
+            key for key in expected_build
+            if not isinstance(manifest["build"], dict)
+            or manifest["build"].get(key) != expected_build[key]
+        )
+        raise RenderError(
+            f"artifact build record was not produced by this renderer and configuration: "
+            f"{drifted}"
+        )
+    build = manifest["build"]
+    renderer_version = build["rendererVersion"]
     if SEMVER.fullmatch(renderer_version) is None:
         raise RenderError("artifact build rendererVersion must be strict semantic versioning")
     for digest_field in (
@@ -835,6 +1138,12 @@ def verify_artifact(artifact_root: Path, expected_target: str) -> Dict[str, Any]
             raise RenderError(f"artifact build {digest_field} must be a sha256 value")
     assert_isolated_manifest(artifact_root, expected_target)
     verify_target_manifest(artifact_root, expected_target, manifest)
+    if expected_target == "agent-plugins":
+        conform_to_schema(
+            read_json_object(artifact_root / "plugin.json", "portable manifest"),
+            load_schema(AGENT_PLUGIN_SCHEMA_FILE),
+            "agent-plugins plugin.json",
+        )
     source = manifest.get("source")
     if not isinstance(source, dict):
         raise RenderError("artifact source must be an object")
@@ -929,25 +1238,49 @@ def verify_artifact(artifact_root: Path, expected_target: str) -> Dict[str, Any]
         )
     if source["includedTreeSha256"] != tree_digest(aggregate_included):
         raise RenderError("artifact aggregate includedTreeSha256 does not match payload")
-    claims = manifest.get("claims")
-    if not isinstance(claims, dict):
-        raise RenderError("artifact claims must be an object")
-    require_exact_keys(
-        claims,
-        {"targetLevel", "earnedLevel", "authority", "validationStatus", "testedHosts"},
-        "artifact claims",
-    )
-    if claims["earnedLevel"] != "unverified":
-        raise RenderError("renderer may emit only unverified earnedLevel")
+
+    # --- source provenance against the tree that is claimed to have produced it ----
+    scan = scan_selected_skills(repo_root, render_config)
+    if source["inputTreeSha256"] != tree_digest(scan.aggregate_input):
+        raise RenderError(
+            "artifact source inputTreeSha256 does not match the current source tree: "
+            "the artifact is stale, or its recorded provenance was edited"
+        )
+    recorded_by_id = {entry["id"]: entry for entry in skills}
+    scanned_by_id = {entry["id"]: entry for entry in scan.skills}
+    if sorted(recorded_by_id) != sorted(scanned_by_id):
+        raise RenderError(
+            f"artifact skill selection does not match the render config: "
+            f"artifact={sorted(recorded_by_id)} configured={sorted(scanned_by_id)}"
+        )
+    for skill_id, scanned in sorted(scanned_by_id.items()):
+        if recorded_by_id[skill_id] != scanned:
+            raise RenderError(
+                f"artifact skill {skill_id} provenance does not match the source tree: "
+                f"input digest, included digest, file count, or excluded-path record differs"
+            )
+
+    # --- claims against the adapter entry that authorised them --------------------
+    claims = manifest["claims"]
+    expected_claims = derived_claims(adapter)
+    if claims != expected_claims:
+        drifted = sorted(
+            key for key in expected_claims if claims.get(key) != expected_claims[key]
+        )
+        raise RenderError(
+            f"artifact claims were not derived from the adapter configuration: {drifted}"
+        )
     if claims["targetLevel"] not in TARGET_LEVELS:
         raise RenderError("artifact targetLevel is unknown")
     if claims["authority"] not in AUTHORITIES:
         raise RenderError("artifact authority is unknown")
     if claims["validationStatus"] not in VALIDATION_STATUSES:
         raise RenderError("artifact validationStatus is unknown")
-    require_string_list(claims["testedHosts"], "artifact testedHosts")
-    if claims["validationStatus"] == "fixture-only" and claims["testedHosts"]:
-        raise RenderError("fixture-only artifact must not claim tested hosts")
+    if claims["earnedLevel"] != "unverified":
+        raise RenderError("renderer may emit only unverified earnedLevel")
+    require_validation_evidence(
+        claims["validationStatus"], manifest["licenses"], claims["evidence"], "artifact"
+    )
     skill_root = artifact_root / "skills"
     discovered = sorted(
         path.parent.name for path in skill_root.glob("*/SKILL.md") if path.is_file()
@@ -965,8 +1298,10 @@ def verify_artifact(artifact_root: Path, expected_target: str) -> Dict[str, Any]
 
 
 def verify_render_root(
+    repo_root: Path,
     output_root: Path,
     render_config: Dict[str, Any],
+    adapter_config: Dict[str, Any],
 ) -> Dict[str, Dict[str, Any]]:
     if not output_root.is_dir():
         raise RenderError(f"rendered output directory is absent: {output_root}")
@@ -979,6 +1314,7 @@ def verify_render_root(
             f"expected={expected}"
         )
     index = read_json_object(output_root / RENDER_INDEX, "render index")
+    conform_to_schema(index, load_schema(RENDER_INDEX_SCHEMA_FILE), "render index")
     require_exact_keys(
         index, {"$schema", "schemaVersion", "coreVersion", "targets"}, "render index"
     )
@@ -991,7 +1327,9 @@ def verify_render_root(
         raise RenderError("render index target inventory does not match render config")
     manifests: Dict[str, Dict[str, Any]] = {}
     for target in expected:
-        manifests[target] = verify_artifact(output_root / target, target)
+        manifests[target] = verify_artifact(
+            repo_root, output_root / target, target, render_config, adapter_config
+        )
         entry = indexed_targets[target]
         if not isinstance(entry, dict):
             raise RenderError(f"render index target {target} must be an object")
@@ -1015,6 +1353,38 @@ def verify_render_root(
     return manifests
 
 
+COMPLETE_EVIDENCE = {
+    "host": "claude-code",
+    "hostVersion": "2.1.0",
+    "installedArtifactSha256": "0" * 64,
+    "scenarios": [{"id": "fresh-session-invocation", "result": "pass"}],
+}
+
+
+def load_inputs_from(
+    render_config: Dict[str, Any],
+    adapter_config: Dict[str, Any],
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Round-trip two in-memory configs through the real input validation."""
+    with tempfile.TemporaryDirectory(prefix="z-harness-inputs-") as raw:
+        temp = Path(raw)
+        write_json(temp / "render.json", render_config)
+        write_json(temp / "targets.json", adapter_config)
+        return load_inputs(temp / "render.json", temp / "targets.json")
+
+
+def licensed(render_config: Dict[str, Any]) -> Dict[str, Any]:
+    copy = json.loads(json.dumps(render_config))
+    copy["package"]["licenses"] = ["MIT"]
+    return copy
+
+
+def claim_override(adapter_config: Dict[str, Any], target: str, **fields: Any) -> Dict[str, Any]:
+    copy = json.loads(json.dumps(adapter_config))
+    copy["targets"][target].update(fields)
+    return copy
+
+
 def snapshot_tree(root: Path) -> List[Tuple[str, str, bytes]]:
     snapshot: List[Tuple[str, str, bytes]] = []
     for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
@@ -1025,7 +1395,10 @@ def snapshot_tree(root: Path) -> List[Tuple[str, str, bytes]]:
     return snapshot
 
 
-def selftest() -> int:
+def selftest(
+    render_path: Path = DEFAULT_RENDER_CONFIG,
+    adapter_path: Path = DEFAULT_ADAPTER_CONFIG,
+) -> int:
     checks = 0
     failures = 0
 
@@ -1070,7 +1443,7 @@ def selftest() -> int:
         print(f"  FAIL {label}: no error")
         failures += 1
 
-    render_config, adapter_config = load_inputs()
+    render_config, adapter_config = load_inputs(render_path, adapter_path)
     with tempfile.TemporaryDirectory(prefix="z-harness-render-selftest-") as raw_temp:
         temp = Path(raw_temp)
         first = temp / "first"
@@ -1081,10 +1454,23 @@ def selftest() -> int:
             "same declared inputs produce byte-and-mode-identical trees",
             snapshot_tree(first) == snapshot_tree(second),
         )
-        verified = verify_render_root(first, render_config)
+        verified = verify_render_root(ROOT, first, render_config, adapter_config)
         expect(
             "all configured targets verify",
             sorted(verified) == sorted(render_config["targets"]),
+        )
+        expect(
+            "runtime artifacts exclude authoring-only root files",
+            all(not (first / target / "skills/ground-claims/CONTRACT.md").exists()
+                for target in render_config["targets"])
+            and (ROOT / "skills/ground-claims/CONTRACT.md").is_file(),
+        )
+        expect(
+            "every excluded source file is recorded as provenance",
+            all(
+                "CONTRACT.md" in manifest["source"]["skills"][0]["excludedPaths"]
+                for manifest in verified.values()
+            ),
         )
         expect(
             "pilot target inventory is pinned to all five supported package surfaces",
@@ -1134,19 +1520,45 @@ def selftest() -> int:
         expect(
             "rendered claims cannot self-promote runtime evidence",
             all(manifest["claims"]["earnedLevel"] == "unverified"
-                and manifest["claims"]["testedHosts"] == []
+                and manifest["claims"]["validationStatus"] == "fixture-only"
+                and manifest["claims"]["evidence"] == []
                 for manifest in verified.values()),
         )
         expect(
             "every artifact records the exact renderer and canonical config inputs",
             all(
-                manifest["build"]["rendererSha256"]
-                == sha256_bytes(Path(__file__).resolve().read_bytes())
-                and manifest["build"]["renderConfigSha256"]
-                == canonical_json_digest(render_config)
-                and manifest["build"]["adapterConfigSha256"]
-                == canonical_json_digest(adapter_config["targets"][target])
+                manifest["build"] == derived_build(
+                    render_config, adapter_config["targets"][target]
+                )
                 for target, manifest in verified.items()
+            ),
+        )
+        expect(
+            "emitted artifacts satisfy the committed artifact-manifest contract",
+            all(
+                conform_to_schema(
+                    manifest, load_schema(ARTIFACT_SCHEMA_FILE), f"{target} manifest"
+                ) is None
+                for target, manifest in verified.items()
+            ),
+        )
+        expect(
+            "the portable manifest satisfies the vendored Agent Plugins 1.0.0 schema",
+            conform_to_schema(
+                read_json_object(first / "agent-plugins/plugin.json", "portable manifest"),
+                load_schema(AGENT_PLUGIN_SCHEMA_FILE),
+                "agent-plugins plugin.json",
+            ) is None,
+        )
+        expect(
+            "the vendored schema matches the digest recorded for its upstream source",
+            sha256_bytes(AGENT_PLUGIN_SCHEMA_FILE.read_bytes())
+            == next(
+                entry["sha256"]
+                for entry in read_json_object(
+                    VENDORED_SCHEMAS / "SOURCES.json", "vendored sources"
+                )["sources"]
+                if entry["file"] == AGENT_PLUGIN_SCHEMA_FILE.name
             ),
         )
         index = read_json_object(first / RENDER_INDEX, "render index")
@@ -1199,6 +1611,7 @@ def selftest() -> int:
                 adapter_config,
             ),
         )
+        skill_body = fixture_root / "skills/ground-claims/SKILL.md"
         contract = fixture_root / "skills/ground-claims/CONTRACT.md"
         contract.write_text(contract.read_text(encoding="utf-8") + "\nmutation\n", encoding="utf-8")
         render_all(fixture_root, after_mutation, render_config, adapter_config)
@@ -1209,53 +1622,155 @@ def selftest() -> int:
             after_mutation / f"codex/{ARTIFACT_MANIFEST}", "after artifact manifest"
         )
         expect(
-            "an included source mutation changes source and payload digests",
+            "an excluded source mutation moves the input digest and leaves the payload fixed",
             before_manifest["source"]["inputTreeSha256"]
             != after_manifest["source"]["inputTreeSha256"]
             and before_manifest["payload"]["sha256"]
+            == after_manifest["payload"]["sha256"],
+        )
+        included_mutation = temp / "included-mutation"
+        original_body = skill_body.read_text(encoding="utf-8")
+        skill_body.write_text(original_body + "\nmutation\n", encoding="utf-8")
+        included_manifest = render_all(
+            fixture_root, included_mutation, render_config, adapter_config
+        )["codex"]
+        expect(
+            "an included source mutation moves both the input and payload digests",
+            included_manifest["source"]["inputTreeSha256"]
+            != after_manifest["source"]["inputTreeSha256"]
+            and included_manifest["payload"]["sha256"]
             != after_manifest["payload"]["sha256"],
         )
-
-        tampered = before_mutation / "claude/skills/ground-claims/CONTRACT.md"
-        tampered.write_text(tampered.read_text(encoding="utf-8") + "tampered\n", encoding="utf-8")
-        expect_error(
-            "artifact verification rejects a post-render file mutation",
-            lambda: verify_artifact(before_mutation / "claude", "claude"),
+        skill_body.write_text(original_body, encoding="utf-8")
+        contract.write_text(
+            contract.read_text(encoding="utf-8").replace("\nmutation\n", ""), encoding="utf-8"
         )
 
-        write_json(
-            before_mutation / "kimi/.kimi-plugin/plugin.json",
-            {"name": "shadow-manifest"},
+        # Every manifest field is recomputed at verification, so plant a defect in each
+        # one. A guard proved on a single field says nothing about its four neighbours.
+        tamper_base = temp / "tamper-base"
+        render_all(fixture_root, tamper_base, render_config, adapter_config)
+        case_index = 0
+
+        def planted(label: str, target: str, mutate: Any, contains: str = "") -> None:
+            nonlocal case_index
+            case_index += 1
+            case_root = temp / f"tamper-{case_index:02d}"
+            shutil.copytree(tamper_base / target, case_root)
+            mutate(case_root)
+            call = lambda: verify_artifact(  # noqa: E731
+                fixture_root, case_root, target, render_config, adapter_config
+            )
+            if contains:
+                expect_error_containing(label, contains, call)
+            else:
+                expect_error(label, call)
+
+        def edit_manifest(change: Any) -> Any:
+            def apply(root: Path) -> None:
+                path = root / ARTIFACT_MANIFEST
+                manifest = read_json_object(path, "artifact manifest")
+                change(manifest)
+                write_json(path, manifest)
+            return apply
+
+        def touch_payload(root: Path) -> None:
+            target_file = root / "skills/ground-claims/SKILL.md"
+            target_file.write_text(
+                target_file.read_text(encoding="utf-8") + "tampered\n", encoding="utf-8"
+            )
+
+        planted("verification rejects a post-render payload mutation", "claude", touch_payload)
+        planted(
+            "verification rejects a post-render payload mode change",
+            "claude",
+            lambda root: (root / "skills/ground-claims/SKILL.md").chmod(0o755),
         )
-        expect_error_containing(
+        planted(
+            "verification rejects a file smuggled into the payload",
+            "claude",
+            lambda root: write_bytes(root / "skills/ground-claims/EXTRA.md", b"smuggled\n"),
+        )
+        planted(
             "kimi verification rejects competing native manifest locations",
+            "kimi",
+            lambda root: write_json(root / ".kimi-plugin/plugin.json", {"name": "shadow"}),
             "manifest isolation failed",
-            lambda: verify_artifact(before_mutation / "kimi", "kimi"),
         )
-
-        write_bytes(before_mutation / "hermes/plugin.yaml", b"name: executable-shadow\n")
-        expect_error_containing(
+        planted(
             "hermes tap verification rejects executable plugin conversion",
+            "hermes",
+            lambda root: write_bytes(root / "plugin.yaml", b"name: executable-shadow\n"),
             "manifest isolation failed",
-            lambda: verify_artifact(before_mutation / "hermes", "hermes"),
         )
-
-        portable_manifest_path = before_mutation / f"agent-plugins/{ARTIFACT_MANIFEST}"
-        portable_manifest = read_json_object(portable_manifest_path, "portable artifact manifest")
-        portable_manifest["claims"]["earnedLevel"] = "governed-parity"
-        write_json(portable_manifest_path, portable_manifest)
-        expect_error(
-            "artifact verification rejects render-time compatibility self-promotion",
-            lambda: verify_artifact(before_mutation / "agent-plugins", "agent-plugins"),
+        for field, value in (
+            ("earnedLevel", "governed-parity"),
+            ("targetLevel", "governed-parity"),
+            ("authority", "host-enforced"),
+            ("validationStatus", "promoted"),
+        ):
+            planted(
+                f"verification rejects a self-promoted claims.{field}",
+                "agent-plugins",
+                edit_manifest(lambda m, f=field, v=value: m["claims"].__setitem__(f, v)),
+            )
+        planted(
+            "verification rejects host evidence a fixture-only artifact cannot have",
+            "agent-plugins",
+            edit_manifest(lambda m: m["claims"].__setitem__("evidence", [{
+                "host": "claude-code",
+                "hostVersion": "2.1.0",
+                "installedArtifactSha256": "0" * 64,
+                "scenarios": [{"id": "fresh-session", "result": "pass"}],
+            }])),
         )
-
-        codex_manifest_path = before_mutation / f"codex/{ARTIFACT_MANIFEST}"
-        codex_manifest = read_json_object(codex_manifest_path, "codex artifact manifest")
-        codex_manifest["source"]["skills"][0]["includedTreeSha256"] = "0" * 64
-        write_json(codex_manifest_path, codex_manifest)
-        expect_error(
-            "artifact verification binds included-source provenance to payload bytes",
-            lambda: verify_artifact(before_mutation / "codex", "codex"),
+        for field in ("rendererSha256", "renderConfigSha256", "adapterConfigSha256"):
+            planted(
+                f"verification rejects a substituted build.{field}",
+                "codex",
+                edit_manifest(lambda m, f=field: m["build"].__setitem__(f, "a" * 64)),
+                "not produced by this renderer",
+            )
+        planted(
+            "verification rejects a substituted build.rendererVersion",
+            "codex",
+            edit_manifest(lambda m: m["build"].__setitem__("rendererVersion", "9.9.9")),
+        )
+        for field, value in (
+            ("coreVersion", "9.9.9"),
+            ("packageVersion", "9.9.9"),
+            ("adapterRevision", 7),
+            ("format", "bogus/format"),
+            ("licenses", ["MIT"]),
+        ):
+            planted(
+                f"verification rejects a manifest {field} the configuration did not authorise",
+                "codex",
+                edit_manifest(lambda m, f=field, v=value: m.__setitem__(f, v)),
+                "does not match the render inputs",
+            )
+        planted(
+            "verification binds included-source provenance to payload bytes",
+            "codex",
+            edit_manifest(
+                lambda m: m["source"]["skills"][0].__setitem__("includedTreeSha256", "0" * 64)
+            ),
+        )
+        planted(
+            "verification binds recorded input provenance to the source tree",
+            "codex",
+            edit_manifest(
+                lambda m: m["source"].__setitem__("inputTreeSha256", "0" * 64)
+            ),
+            "does not match the current source tree",
+        )
+        planted(
+            "verification rejects an emptied excluded-path record",
+            "codex",
+            edit_manifest(
+                lambda m: m["source"]["skills"][0].__setitem__("excludedPaths", [])
+            ),
+            "provenance does not match the source tree",
         )
 
         skill_manifest = fixture_root / "skills/ground-claims/SKILL.md"
@@ -1271,6 +1786,121 @@ def selftest() -> int:
             ),
         )
         skill_manifest.write_text(original_skill, encoding="utf-8")
+
+        # The frontmatter reader has no YAML parser, so every form it cannot decode has to
+        # fail by name. Mis-decoding "description: >-" as the 2-character string ">-" would
+        # otherwise satisfy the Agent Skills 1-1024 length rule.
+        for leader, shape in ((">-", "folded block"), ("|", "literal block"), ("&a", "anchor")):
+            skill_manifest.write_text(
+                original_skill.replace(
+                    "description: Ground", f"description: {leader}\n  Ground", 1
+                ),
+                encoding="utf-8",
+            )
+            expect_error_containing(
+                f"renderer refuses a {shape} scalar instead of mis-decoding it",
+                "YAML syntax this reader does not decode",
+                lambda: render_all(
+                    fixture_root, temp / f"yaml-{shape.split()[0]}", render_config, adapter_config
+                ),
+            )
+        skill_manifest.write_text(original_skill, encoding="utf-8")
+
+        expect_error_containing(
+            "a status above fixture-only without host evidence is refused at input",
+            "requires host evidence records",
+            lambda: load_inputs_from(
+                render_config,
+                claim_override(adapter_config, "claude", validationStatus="promoted"),
+            ),
+        )
+        expect_error_containing(
+            "host evidence without a license set cannot support a promoted status",
+            "requires a non-empty license set",
+            lambda: load_inputs_from(
+                render_config,
+                claim_override(
+                    adapter_config, "claude", validationStatus="promoted",
+                    evidence=[COMPLETE_EVIDENCE],
+                ),
+            ),
+        )
+        expect_error_containing(
+            "a failed scenario cannot support a promoted status",
+            "does not support a 'promoted' status",
+            lambda: load_inputs_from(
+                licensed(render_config),
+                claim_override(
+                    adapter_config, "claude", validationStatus="promoted",
+                    evidence=[{**COMPLETE_EVIDENCE,
+                               "scenarios": [{"id": "fresh-session", "result": "fail"}]}],
+                ),
+            ),
+        )
+        expect_error_containing(
+            "a fixture-only adapter cannot carry host evidence",
+            "fixture-only must record no host evidence",
+            lambda: load_inputs_from(
+                licensed(render_config),
+                claim_override(adapter_config, "claude", evidence=[COMPLETE_EVIDENCE]),
+            ),
+        )
+        expect(
+            "complete evidence plus a license set is accepted, so the gate is not vacuous",
+            load_inputs_from(
+                licensed(render_config),
+                claim_override(
+                    adapter_config, "claude", validationStatus="promoted",
+                    evidence=[COMPLETE_EVIDENCE],
+                ),
+            ) is not None,
+        )
+        expect_error_containing(
+            "the schema reader refuses a keyword it cannot evaluate",
+            "unsupported keywords",
+            lambda: conform_to_schema(1, {"type": "integer", "multipleOf": 2}, "probe"),
+        )
+        # Every keyword the reader claims to support must reject a violating value. A
+        # keyword listed as supported but never branched on would otherwise report a
+        # clean result over an unchecked constraint -- which it did for `minimum`.
+        violations = {
+            "$ref": ({"$defs": {"n": {"type": "integer"}}, "$ref": "#/$defs/n"}, "no"),
+            "type": ({"type": "integer"}, "no"),
+            "const": ({"const": "a"}, "b"),
+            "enum": ({"enum": ["a"]}, "b"),
+            "required": ({"type": "object", "required": ["a"]}, {}),
+            "properties": ({"type": "object", "properties": {"a": {"type": "integer"}}},
+                           {"a": "no"}),
+            "additionalProperties": ({"type": "object", "additionalProperties": False},
+                                     {"a": 1}),
+            "propertyNames": ({"type": "object", "propertyNames": {"maxLength": 1}},
+                              {"ab": 1}),
+            "minLength": ({"minLength": 2}, "a"),
+            "maxLength": ({"maxLength": 1}, "ab"),
+            "pattern": ({"pattern": "^a$"}, "b"),
+            "items": ({"type": "array", "items": {"type": "integer"}}, ["no"]),
+            "minItems": ({"type": "array", "minItems": 2}, [1]),
+            "minProperties": ({"type": "object", "minProperties": 2}, {"a": 1}),
+            "minimum": ({"type": "integer", "minimum": 2}, 1),
+        }
+        expect(
+            "every constraint keyword the reader supports has a violation case",
+            set(violations) == SCHEMA_CONSTRAINT_KEYWORDS,
+        )
+        for keyword, (schema_fragment, bad_value) in sorted(violations.items()):
+            expect_error(
+                f"schema keyword {keyword} rejects a violating value",
+                lambda s=schema_fragment, v=bad_value: conform_to_schema(v, s, "probe"),
+            )
+        expect_error_containing(
+            "the schema reader enforces the vendored Agent Plugins name limit",
+            "exceeds maxLength",
+            lambda: conform_to_schema(
+                {"$schema": AGENT_PLUGIN_SCHEMA, "name": "z-" + "a" * 70},
+                load_schema(AGENT_PLUGIN_SCHEMA_FILE),
+                "oversized plugin name",
+            ),
+        )
 
         linked_skills = fixture_root / "linked-skills"
         linked_skills.symlink_to(fixture_root / "skills", target_is_directory=True)
@@ -1312,9 +1942,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str]) -> int:
     args = build_parser().parse_args(argv[1:])
-    if args.selftest:
-        return selftest()
     try:
+        if args.selftest:
+            return selftest(args.config, args.adapters)
         render_config, adapter_config = load_inputs(args.config, args.adapters)
         if args.output is not None:
             results = render_all(ROOT, args.output, render_config, adapter_config)
@@ -1325,7 +1955,7 @@ def main(argv: Sequence[str]) -> int:
                     f"payload_sha256={results[target]['payload']['sha256']}"
                 )
             return 0
-        results = verify_render_root(args.verify, render_config)
+        results = verify_render_root(ROOT, args.verify, render_config, adapter_config)
         index = read_json_object(args.verify / RENDER_INDEX, "render index")
         for target in sorted(results):
             print(

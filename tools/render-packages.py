@@ -25,10 +25,10 @@ import shutil
 import stat
 import sys
 import tempfile
-from typing import Any, Dict, Iterable, List, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RENDER_CONFIG = ROOT / "release" / "render.json"
 DEFAULT_ADAPTER_CONFIG = ROOT / "adapters" / "targets.json"
@@ -49,10 +49,13 @@ SEMVER = re.compile(
 )
 SKILL_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 PACKAGE_NAME = re.compile(r"^[a-z0-9]+(?:[.-][a-z0-9]+)*$")
+KIMI_PLUGIN_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 EXPECTED_MANIFEST_PATHS = {
     "agent-plugins": "plugin.json",
     "codex": ".codex-plugin/plugin.json",
     "claude": ".claude-plugin/plugin.json",
+    "kimi": "kimi.plugin.json",
+    "hermes": None,
 }
 COMPETING_MANIFESTS = {
     "plugin.json",
@@ -440,7 +443,7 @@ def target_manifest(
     target: str,
     package: Dict[str, Any],
     package_version: str,
-) -> Dict[str, Any]:
+) -> Optional[Dict[str, Any]]:
     common = {
         "name": package["name"],
         "version": package_version,
@@ -458,6 +461,23 @@ def target_manifest(
         return {**common, "skills": "./skills/", "interface": package["interface"]}
     if target == "claude":
         return {**common, "skills": "./skills/"}
+    if target == "kimi":
+        interface = package["interface"]
+        return {
+            "name": package["name"],
+            "version": package_version,
+            "description": package["description"],
+            "skills": "./skills/",
+            "interface": {
+                "displayName": interface["displayName"],
+                "shortDescription": interface["shortDescription"],
+                "longDescription": interface["longDescription"],
+                "developerName": interface["developerName"],
+                "websiteURL": interface["websiteURL"],
+            },
+        }
+    if target == "hermes":
+        return None
     raise RenderError(f"no manifest builder for target {target!r}")
 
 
@@ -500,7 +520,8 @@ def assert_isolated_manifest(artifact_root: Path, target: str) -> None:
         relative for relative in COMPETING_MANIFESTS
         if (artifact_root / relative).is_file()
     )
-    if present != [intended]:
+    expected = [] if intended is None else [intended]
+    if present != expected:
         raise RenderError(
             f"target {target} manifest isolation failed: intended={intended!r} present={present}"
         )
@@ -515,8 +536,45 @@ def verify_target_manifest(
     target: str,
     artifact_manifest: Dict[str, Any],
 ) -> None:
-    manifest_path = artifact_root / EXPECTED_MANIFEST_PATHS[target]
+    manifest_relative = EXPECTED_MANIFEST_PATHS[target]
+    if manifest_relative is None:
+        if target != "hermes":
+            raise RenderError(f"target {target} unexpectedly has no native manifest")
+        return
+    manifest_path = artifact_root / manifest_relative
     manifest = read_json_object(manifest_path, f"{target} package manifest")
+    if target == "kimi":
+        require_exact_keys(
+            manifest,
+            {"name", "version", "description", "skills", "interface"},
+            "kimi package manifest",
+        )
+        if manifest["name"] != artifact_manifest["packageName"]:
+            raise RenderError("kimi package name does not match artifact identity")
+        if KIMI_PLUGIN_NAME.fullmatch(manifest["name"]) is None:
+            raise RenderError("kimi package name is not a valid plugin id")
+        if manifest["version"] != artifact_manifest["packageVersion"]:
+            raise RenderError("kimi package version does not match artifact identity")
+        require_nonempty_string(manifest["description"], "kimi manifest description")
+        if manifest["skills"] != "./skills/":
+            raise RenderError("kimi manifest skills path must be ./skills/")
+        interface = manifest["interface"]
+        if not isinstance(interface, dict):
+            raise RenderError("kimi manifest interface must be an object")
+        require_exact_keys(
+            interface,
+            {
+                "displayName",
+                "shortDescription",
+                "longDescription",
+                "developerName",
+                "websiteURL",
+            },
+            "kimi manifest interface",
+        )
+        for key, value in interface.items():
+            require_nonempty_string(value, f"kimi manifest interface.{key}")
+        return
     common = {
         "name", "version", "description", "author", "homepage", "repository", "keywords"
     }
@@ -593,8 +651,15 @@ def render_target(
         for record in included:
             aggregate_included.append({**record, "path": f"{skill_name}/{record['path']}"})
 
-    manifest_path = target_root / adapter["manifestPath"]
-    write_json(manifest_path, target_manifest(target, package, adapter["packageVersion"]))
+    manifest_relative = adapter["manifestPath"]
+    manifest = target_manifest(target, package, adapter["packageVersion"])
+    if manifest_relative is None:
+        if manifest is not None:
+            raise RenderError(f"target {target} produced an undeclared native manifest")
+    else:
+        if manifest is None:
+            raise RenderError(f"target {target} did not produce its declared native manifest")
+        write_json(target_root / manifest_relative, manifest)
     assert_isolated_manifest(target_root, target)
     payload = payload_records(target_root)
     artifact_manifest = {
@@ -986,6 +1051,25 @@ def selftest() -> int:
         print(f"  FAIL {label}: no error")
         failures += 1
 
+    def expect_error_containing(label: str, expected: str, call: Any) -> None:
+        nonlocal checks, failures
+        checks += 1
+        try:
+            call()
+        except RenderError as exc:
+            if expected in str(exc):
+                print(f"  PASS {label}")
+                return
+            print(f"  FAIL {label}: wrong error {exc!r}")
+            failures += 1
+            return
+        except Exception as exc:
+            print(f"  FAIL {label}: wrong exception {exc!r}")
+            failures += 1
+            return
+        print(f"  FAIL {label}: no error")
+        failures += 1
+
     render_config, adapter_config = load_inputs()
     with tempfile.TemporaryDirectory(prefix="z-harness-render-selftest-") as raw_temp:
         temp = Path(raw_temp)
@@ -1003,6 +1087,11 @@ def selftest() -> int:
             sorted(verified) == sorted(render_config["targets"]),
         )
         expect(
+            "pilot target inventory is pinned to all five supported package surfaces",
+            set(render_config["targets"])
+            == {"agent-plugins", "codex", "claude", "kimi", "hermes"},
+        )
+        expect(
             "every artifact discovers the real ground-claims skill",
             all((first / target / "skills/ground-claims/SKILL.md").is_file()
                 for target in render_config["targets"]),
@@ -1015,11 +1104,12 @@ def selftest() -> int:
                 for target in render_config["targets"]),
         )
         expect(
-            "each target has exactly one competing-format manifest",
+            "each target has exactly its intended competing-format manifest set",
             all(
                 sorted(path for path in COMPETING_MANIFESTS
                        if (first / target / path).is_file())
-                == [EXPECTED_MANIFEST_PATHS[target]]
+                == ([] if EXPECTED_MANIFEST_PATHS[target] is None
+                    else [EXPECTED_MANIFEST_PATHS[target]])
                 for target in render_config["targets"]
             ),
         )
@@ -1028,6 +1118,18 @@ def selftest() -> int:
             read_json_object(first / "agent-plugins/plugin.json", "portable manifest").get(
                 "$schema"
             ) == AGENT_PLUGIN_SCHEMA,
+        )
+        expect(
+            "kimi artifact uses its native skills-only plugin manifest",
+            read_json_object(first / "kimi/kimi.plugin.json", "kimi manifest").get(
+                "skills"
+            ) == "./skills/",
+        )
+        expect(
+            "hermes artifact is a non-executable skill tap, not a Python plugin",
+            (first / "hermes/skills/ground-claims/SKILL.md").is_file()
+            and not (first / "hermes/plugin.yaml").exists()
+            and not (first / "hermes/__init__.py").exists(),
         )
         expect(
             "rendered claims cannot self-promote runtime evidence",
@@ -1119,6 +1221,23 @@ def selftest() -> int:
         expect_error(
             "artifact verification rejects a post-render file mutation",
             lambda: verify_artifact(before_mutation / "claude", "claude"),
+        )
+
+        write_json(
+            before_mutation / "kimi/.kimi-plugin/plugin.json",
+            {"name": "shadow-manifest"},
+        )
+        expect_error_containing(
+            "kimi verification rejects competing native manifest locations",
+            "manifest isolation failed",
+            lambda: verify_artifact(before_mutation / "kimi", "kimi"),
+        )
+
+        write_bytes(before_mutation / "hermes/plugin.yaml", b"name: executable-shadow\n")
+        expect_error_containing(
+            "hermes tap verification rejects executable plugin conversion",
+            "manifest isolation failed",
+            lambda: verify_artifact(before_mutation / "hermes", "hermes"),
         )
 
         portable_manifest_path = before_mutation / f"agent-plugins/{ARTIFACT_MANIFEST}"

@@ -55,6 +55,27 @@ Claude, Codex, Kimi, and Hermes therefore require separate adapters whenever z-h
 native behavior. A package containing several native manifests is not accepted as a shortcut:
 clients select and merge formats differently, so co-location makes the active contract ambiguous.
 
+### Kimi and Hermes adapter evidence
+
+The Kimi adapter is grounded in the official Kimi Code plugin documentation at
+[`MoonshotAI/kimi-code@01c74e9`](https://github.com/MoonshotAI/kimi-code/blob/01c74e9372fcbbbe99614e859b53b505ed1664a8/docs/en/customization/plugins.md).
+That revision accepts either root `kimi.plugin.json` or `.kimi-plugin/plugin.json`, gives the root
+file precedence when both exist, and defines `skills` as one or more plugin-root-relative paths.
+The renderer chooses only `kimi.plugin.json` and `./skills/`; the alternative manifest is a
+competing format and fails verification. This is structural evidence, not proof of installation or
+invocation behavior. The adapter must be revisited if a supported Kimi runtime rejects the emitted
+manifest or resolves the declared skill set differently.
+
+The Hermes adapter is grounded in the official skills documentation at
+[`NousResearch/hermes-agent@7132639`](https://github.com/NousResearch/hermes-agent/blob/71326399d30034e786cf42ccb9f00f686d183e4c/website/docs/user-guide/features/skills.md)
+and the plugin loader at
+[`hermes_cli/plugins.py`](https://github.com/NousResearch/hermes-agent/blob/71326399d30034e786cf42ccb9f00f686d183e4c/hermes_cli/plugins.py).
+At that revision, a GitHub skill tap is rooted at `skills/<name>/SKILL.md`. A native directory
+plugin instead requires both `plugin.yaml` and executable `__init__.py` registration, and its skills
+are namespaced explicit loads rather than ordinary indexed skills. The instruction-only pilot
+therefore emits a non-executable tap and forbids `plugin.yaml`. This choice is falsified if a
+supported Hermes runtime cannot enumerate and install the rendered tap with the documented slug.
+
 ## Rendering contract
 
 For declared repository inputs, target, and adapter revision, rendering must produce the same file
@@ -68,7 +89,8 @@ bytes, normalized executable modes, inventories, and digests. The renderer:
 - records the renderer version, renderer digest, canonical render-config digest, and the selected
   target adapter-config digest;
 - normalizes file modes to `0644` or `0755` and file mtimes to the Unix epoch;
-- emits exactly one target-format manifest per artifact;
+- emits exactly the intended target manifest set: one native manifest for manifest-based targets,
+  and none for the Hermes skill tap;
 - inventories and hashes every payload file;
 - writes no runtime compatibility claim beyond `earnedLevel: unverified`;
 - builds all targets in a temporary sibling and exposes none until every target verifies; and
@@ -106,5 +128,9 @@ Git subdirectory. Clients that accept only a repository-root package receive eit
 archive or a bot-owned publisher repository whose root is the artifact root. Publisher repositories
 contain no human edits and retain the source commit, renderer version, artifact digest, validation
 results, and rollback history.
+
+Kimi's GitHub installer and Hermes taps both resolve repository-root layouts. Their generated
+artifacts therefore need a root-preserving archive or generated publisher repository; a directory
+inside the mixed authoring repository is not, by itself, the published installation unit.
 
 Publishing, installation, trust approval, and launch are not renderer responsibilities.

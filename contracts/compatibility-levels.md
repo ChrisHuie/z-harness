@@ -35,8 +35,9 @@ not contain a competing root or native manifest:
 - Agent Plugins: `plugin.json`
 - Codex: `.codex-plugin/plugin.json`
 - Claude Code: `.claude-plugin/plugin.json`
-- Kimi Code: `kimi.plugin.json`
-- Hermes native: `plugin.yaml`
+- Kimi Code: `kimi.plugin.json` (the alternative `.kimi-plugin/plugin.json` must be absent)
+- Hermes skill tap: no native plugin manifest; `skills/<name>/SKILL.md` is required and
+  `plugin.yaml` is forbidden
 
 The canonical authoring repository is not an installation unit. Generated artifacts may be exposed
 through a marketplace subdirectory, immutable archive, or generated publisher repository, but the
@@ -62,9 +63,10 @@ implicit renderer input.
 
 The repository-root Claude/Codex package remains the v0.3 compatibility surface while the renderer
 is introduced. The pilot reads the existing canonical `skills/` tree and renders only
-`ground-claims` into isolated skills-only Agent Plugins, Codex, and Claude artifacts. It does not
-migrate a runtime home, publish packages, add MCP servers, translate hooks, or claim runtime
-compatibility.
+`ground-claims` into isolated skills-only Agent Plugins, Codex, Claude, Kimi, and Hermes artifacts.
+Kimi uses its native plugin manifest. Hermes uses a non-executable skill tap instead of a Python
+plugin. The pilot does not migrate a runtime home, publish packages, add MCP servers, translate
+hooks, or claim runtime compatibility.
 
 The next cutover moves canonical authoring away from the installable root only after protective
 tests prove every supported target artifact contains the expected skill inventory and behavior.

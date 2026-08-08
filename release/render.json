@@ -44,6 +44,8 @@
   "targets": [
     "agent-plugins",
     "codex",
-    "claude"
+    "claude",
+    "kimi",
+    "hermes"
   ]
 }

@@ -30,6 +30,26 @@
       "authority": "instruction-only",
       "validationStatus": "fixture-only",
       "testedHosts": []
+    },
+    "hermes": {
+      "adapterRevision": 1,
+      "packageVersion": "0.4.0-alpha.1",
+      "format": "hermes-skill-tap/github",
+      "manifestPath": null,
+      "targetLevel": "portable-core",
+      "authority": "instruction-only",
+      "validationStatus": "fixture-only",
+      "testedHosts": []
+    },
+    "kimi": {
+      "adapterRevision": 1,
+      "packageVersion": "0.4.0-alpha.1",
+      "format": "kimi-code-plugin/native",
+      "manifestPath": "kimi.plugin.json",
+      "targetLevel": "portable-core",
+      "authority": "instruction-only",
+      "validationStatus": "fixture-only",
+      "testedHosts": []
     }
   }
 }

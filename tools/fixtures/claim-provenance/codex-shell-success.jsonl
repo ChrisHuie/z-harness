@@ -1,0 +1,3 @@
+{"type":"turn_context","payload":{"cwd":"."}}
+{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"call_shell_ok","status":"completed","input":"sed -n '1,20p' schemas/order.json"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_shell_ok","output":[{"type":"input_text","text":"Tool execution result:"},{"type":"input_text","text":"{\"title\": \"Order\"}"}]}}

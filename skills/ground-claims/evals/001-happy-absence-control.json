@@ -1,0 +1,29 @@
+{
+  "skills": [
+    "ground-claims"
+  ],
+  "query": "Does this schema set have any object that can carry non-money consideration — barter, trade-in, goods on both sides? I need a yes/no I can put in a design doc.",
+  "files": [
+    {
+      "path": "schemas/core/allocation.json",
+      "content": "{\n  \"title\": \"Allocation\",\n  \"type\": \"object\",\n  \"properties\": {\n    \"product_id\": {\"type\": \"string\"},\n    \"allocation_percentage\": {\"type\": \"number\", \"minimum\": 0, \"maximum\": 100}\n  },\n  \"required\": [\"product_id\", \"allocation_percentage\"]\n}\n"
+    },
+    {
+      "path": "schemas/core/metric-value.json",
+      "content": "{\n  \"title\": \"MetricValue\",\n  \"properties\": {\n    \"unit\": {\"type\": \"string\", \"description\": \"When the value is monetary use the ISO 4217 code; for non-monetary, use whatever the vendor publishes.\"}\n  }\n}\n"
+    },
+    {
+      "path": "schemas/core/order.json",
+      "content": "{\n  \"title\": \"Order\",\n  \"properties\": {\n    \"total\": {\"type\": \"number\"},\n    \"currency\": {\"type\": \"string\"}\n  }\n}\n"
+    }
+  ],
+  "expected_behavior": [
+    "classifies the question as an absence question before searching, and says so",
+    "emits ## Grounding, ## Finding, ## Residuals in that order and no other top-level sections",
+    "records a positive control — evidence the matcher can match something known-present in this tree — not only the zero/low hit counts",
+    "opens the non-zero hit in metric-value.json rather than counting it, and disposes of it as a false positive (a metric unit, not consideration in a transaction)",
+    "opens allocation.json and cites its required list as structural corroboration, not only the lexical sweep or property names",
+    "tags the load-bearing claim [V] and attaches a falsifier — the observation that would refute it",
+    "Residuals names what was not swept (e.g. files or namespaces outside the provided tree)"
+  ]
+}

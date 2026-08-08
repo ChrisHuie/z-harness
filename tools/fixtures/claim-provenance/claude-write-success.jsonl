@@ -1,0 +1,2 @@
+{"type":"assistant","cwd":".","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_write_ok","name":"Write","input":{"file_path":"schemas/order.json","content":"fixture"}}]}}
+{"type":"user","cwd":".","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_write_ok","content":"File written successfully.","is_error":false}]}}

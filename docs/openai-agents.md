@@ -229,15 +229,20 @@ The aggregate gate accepts a selftest only when it exits zero and emits exactly 
 `SELFTEST-SUMMARY checks=<positive> failures=0` line. Missing, duplicate, or failing receipts are
 red even when the child process exits zero.
 
-Run focused Codex adapter selftests:
+Run focused adapter and evidence selftests:
 
 ```text
 python3 hooks/codex_session_start.py --selftest
 python3 hooks/bash_command_guard.py --selftest
 python3 hooks/spawn_preflight_guard.py --selftest
 python3 tools/codex-cost.py --selftest
+python3 tools/claim-provenance.py --selftest
 python3 tools/pr-delivery-state.py --selftest
+python3 tools/run-skill-evals.py --selftest
 ```
+
+The aggregate gate runs these receipts in CI. Actual document provenance scans and headless model
+scenarios remain manual because they require a selected document/transcript or spend API budget.
 
 For an active PR, run the live publication gate after the push:
 

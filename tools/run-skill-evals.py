@@ -31,7 +31,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REQUIRED_SHAPES = {"happy", "failure", "near-miss"}
 SECTION_RX = re.compile(r"^## [A-Z]", re.M)
@@ -122,8 +122,10 @@ def run(root, budget_note=True):
 
 def selftest():
     bad = 0
+    checks = 0
     rc = validate(ROOT, out=open(os.devnull, "w"))
     ok = rc == 0
+    checks += 1
     bad += (not ok)
     print(f"  {'PASS' if ok else 'FAIL'} real corpus validates (exit {rc})")
     with tempfile.TemporaryDirectory() as td:
@@ -133,13 +135,16 @@ def selftest():
                   open(os.path.join(d, "001-happy.json"), "w"))
         rc = validate(td, out=open(os.devnull, "w"))
         ok = rc == 1
+        checks += 1
         bad += (not ok)
         print(f"  {'PASS' if ok else 'FAIL'} planted-bad corpus goes red (exit {rc})")
         rc = validate(os.path.join(td, "empty-root"), out=open(os.devnull, "w"))
         ok = rc == 2
+        checks += 1
         bad += (not ok)
         print(f"  {'PASS' if ok else 'FAIL'} zero scenarios exits 2 (exit {rc})")
     print(f"\n  selftest: {bad} failure(s)")
+    print(f"SELFTEST-SUMMARY checks={checks} failures={bad}")
     return 1 if bad else 0
 
 

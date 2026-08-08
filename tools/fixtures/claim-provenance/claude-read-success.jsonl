@@ -1,0 +1,2 @@
+{"type":"assistant","cwd":".","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_read_ok","name":"Read","input":{"file_path":"schemas/order.json"}}]}}
+{"type":"user","cwd":".","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_read_ok","content":"{\"title\": \"Order\"}","is_error":false}]}}

@@ -1,0 +1,24 @@
+{
+  "skills": [
+    "ground-claims"
+  ],
+  "query": "scope=doc audit findings/api-notes.md — I'm about to build on it and I want to know which claims actually hold.",
+  "files": [
+    {
+      "path": "findings/api-notes.md",
+      "content": "# Order API notes\n\n**Provenance: [V] throughout.** Read against the vendored schema.\n\n## 1. Refunds\n\nThe API has no partial-refund support. The `refund` object takes a boolean.\n\n## 2. Idempotency\n\n`order.json` carries an `idempotency_key`, so retries are safe.\n\n## 3. Naming\n\nThe team calls these \"tickets\" internally, which is confusing.\n"
+    },
+    {
+      "path": "schemas/order.json",
+      "content": "{\n  \"title\": \"Order\",\n  \"properties\": {\n    \"idempotency_key\": {\"type\": \"string\"},\n    \"refund\": {\n      \"type\": \"object\",\n      \"properties\": {\n        \"amount_cents\": {\"type\": \"integer\", \"minimum\": 1},\n        \"reason\": {\"type\": \"string\"}\n      },\n      \"required\": [\"amount_cents\"]\n    }\n  }\n}\n"
+    }
+  ],
+  "expected_behavior": [
+    "flags the document-scope tag \\\"[V] throughout\\\" as a finding in its own right — one tier over mixed evidence means no claim has an individually checkable basis",
+    "audits only the load-bearing claims; claim 3 (internal naming) is left alone as not decision-changing, and Residuals says so",
+    "opens schemas/order.json rather than accepting the document's own characterisation of it",
+    "reverses claim 1: refund is an object requiring amount_cents, so partial refunds are expressible — the document's claim is contradicted by the cited artifact",
+    "does not accept claim 2 as [V] merely because the field exists; presence of idempotency_key does not establish that retries are safe, which is a behavior question the schema cannot answer",
+    "emits one ## Grounding row per audited claim, ## Finding covering only claims whose tier or content changed, and ## Residuals naming what was not audited"
+  ]
+}

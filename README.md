@@ -139,7 +139,8 @@ python3 tools/run-skill-evals.py --validate
 python3 tools/render-packages.py --selftest
 ```
 
-CI runs `python3 hooks/harness_check.py --ci` on every push and pull request. Local mode adds
+CI runs `python3 hooks/harness_check.py --ci` and `--selftest` on every push and pull
+request — the mode check and the meta-suite that proves each check can still go red. Local mode adds
 machine-specific Claude anchors. `--selftest` plants defects and proves each check family can turn
 red; a zero-input scan is an error, not a clean verdict. C1 also requires each aggregated suite to
 finish with exactly one `SELFTEST-SUMMARY` receipt, so an early exit 0 cannot impersonate a complete

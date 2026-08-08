@@ -10,3 +10,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: harness_check (ci mode — skips local-machine and binary anchors)
         run: python3 hooks/harness_check.py --ci
+      # The meta-suite proves each check can still go red on a planted defect. Running
+      # only --ci leaves that unexercised, so a check that had stopped detecting anything
+      # would report the same green as one that works.
+      - name: harness_check (meta-suite — every check proves it can go red)
+        run: python3 hooks/harness_check.py --selftest

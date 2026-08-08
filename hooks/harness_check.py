@@ -25,6 +25,8 @@ Runs from either clone (repo root auto-detected from this file's location). Chec
       and their size budgets are internally consistent
   C10 PR delivery contract: scoped publication authority, state-proof command,
       and the ban on conflating local commits with the GitHub PR remain present
+  C11 claim-vocabulary coherence: the phrases AGENTS.md bans outright appear
+      nowhere in the instruction corpus it governs
 
 Exit codes: 0 all checks pass · 1 one or more checks failed · 2 usage error or
 zero inputs (an empty scan set is an error, never a clean verdict).
@@ -43,8 +45,21 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "2.8.0"
+VERSION = "2.9.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# C11 anchor. AGENTS.md bans self-assessment carrying no technical sense and keeps words
+# like `clean` and `verified` usable, because the corpus needs them for a tree or a head.
+# That split holds only while the banned side stays absent from the files telling an agent
+# what to emit, and one canonical file mandating a phrase another one bans is invisible to
+# every per-file check. Terms are read from AGENTS.md rather than restated here, so the
+# prose and the gate cannot drift apart.
+BANNED_VOCAB_ANCHOR = "banned outright:"
+
+# The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
+# that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
+# the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
+SELFTEST_FLOOR = 47
 
 AUTHORING_SKILLS = {"craft-prompt", "craft-skill", "craft-context-file", "review-prompt"}
 BODY_CHAR_CAP = 5000          # chars after frontmatter — the builders' instrument
@@ -714,6 +729,57 @@ class Run:
         self.result("C10", os.path.isfile(tool),
                     "tools/pr-delivery-state.py exists")
 
+    # ---- C11 ---------------------------------------------------------------
+    def c11_claim_vocabulary(self):
+        """Corpus-level: no phrase AGENTS.md bans outright survives in the files it governs.
+
+        Loads the whole instruction corpus in one pass, because a contradiction between two
+        canonical files is invisible to any check that judges one file at a time. Fails loud
+        when its own anchor is missing rather than reporting a clean sweep over nothing.
+        """
+        source = os.path.join(self.root, "AGENTS.md")
+        try:
+            agents_text = open(source, encoding="utf-8").read()
+        except OSError as exc:
+            self.result("C11", False, f"cannot enforce: AGENTS.md unreadable: {exc}")
+            return
+        sentence = re.search(re.escape(BANNED_VOCAB_ANCHOR) + r"([^.]*)\.", agents_text)
+        if not sentence:
+            self.result("C11", False,
+                        f"cannot enforce: no {BANNED_VOCAB_ANCHOR!r} anchor in AGENTS.md")
+            return
+        terms = re.findall(r"\*([^*\n]+)\*", sentence.group(1))
+        if not terms:
+            self.result("C11", False, "cannot enforce: anchor lists zero banned phrases")
+            return
+        # The anchor sentence names the phrases, so it is the one place they may appear.
+        governed = {"AGENTS.md": agents_text.replace(sentence.group(0), "")}
+        for rel in ("CLAUDE.md",):
+            path = os.path.join(self.root, rel)
+            if os.path.isfile(path):
+                governed[rel] = open(path, encoding="utf-8").read()
+        skills_dir = os.path.join(self.root, "skills")
+        for skill in sorted(os.listdir(skills_dir)) if os.path.isdir(skills_dir) else []:
+            body = os.path.join(skills_dir, skill, "SKILL.md")
+            if os.path.isfile(body):
+                governed[f"skills/{skill}/SKILL.md"] = open(body, encoding="utf-8").read()
+        if not governed:
+            self.result("C11", False, "cannot enforce: zero governed files in scan set")
+            return
+        hits = []
+        for term in terms:
+            pattern = re.compile(r"\b" + re.escape(term.strip()) + r"\b", re.I)
+            for rel, text in sorted(governed.items()):
+                if pattern.search(text):
+                    hits.append(f"{rel}:{term.strip()!r}")
+        self.result(
+            "C11", not hits,
+            f"claim vocabulary: {len(terms)} banned phrase(s) absent from "
+            f"{len(governed)} governed file(s) "
+            f"[references/ and tool sources out of scan set]"
+            + (f" — present: {hits}" if hits else ""),
+        )
+
     def run(self):
         print(f"harness_check {VERSION}  root={self.root}  mode={'ci' if self.ci else 'local'}")
         self.c1_selftests()
@@ -727,6 +793,7 @@ class Run:
         self.c8_reserved_basenames()
         self.c9_codex_package()
         self.c10_delivery_contract()
+        self.c11_claim_vocabulary()
         print(f"\n  {self.checks} checks, {len(self.failures)} failure(s)")
         if self.checks == 0:
             print("  ZERO CHECKS RAN — error, not a clean verdict")
@@ -827,6 +894,35 @@ def selftest():
         expect_red("C1 rejects an unclassified selftest-capable script",
                    lambda: any(c == "C1" and "unclassified" in d
                                for c, d in c1_inventory.failures))
+
+        vocab_root = os.path.join(td, "vocab")
+        os.makedirs(os.path.join(vocab_root, "skills", "gamma"))
+        anchor = ("Self-assessment carrying no technical sense is banned outright: "
+                  "*looks good*, *solid*. Clean and verified stay usable.\n")
+        open(os.path.join(vocab_root, "AGENTS.md"), "w").write(anchor)
+        open(os.path.join(vocab_root, "skills/gamma/SKILL.md"), "w").write(
+            "---\nname: gamma\ndescription: ok\n---\n\nThe tree is clean and the head is "
+            "verified.\n"
+        )
+        c11_clean = Run(vocab_root, ci=True)
+        c11_clean.c11_claim_vocabulary()
+        expect_red("C11 control: permitted words in a governed file stay green",
+                   lambda: not c11_clean.failures)
+
+        open(os.path.join(vocab_root, "skills/gamma/SKILL.md"), "a").write(
+            "\nThis looks good to me.\n"
+        )
+        c11_hit = Run(vocab_root, ci=True)
+        c11_hit.c11_claim_vocabulary()
+        expect_red("C11 goes red when a governed file uses a banned phrase",
+                   lambda: any(c == "C11" and "looks good" in d for c, d in c11_hit.failures))
+
+        open(os.path.join(vocab_root, "AGENTS.md"), "w").write("no anchor sentence here\n")
+        c11_anchor = Run(vocab_root, ci=True)
+        c11_anchor.c11_claim_vocabulary()
+        expect_red("C11 fails loud when its own anchor is missing, never silently clean",
+                   lambda: any(c == "C11" and "cannot enforce" in d
+                               for c, d in c11_anchor.failures))
 
         r = Run(td, ci=True)
         r.c2_shared_identity()
@@ -1097,6 +1193,13 @@ def selftest():
         r7.c10_delivery_contract()
         expect_red("C10 goes red on absent PR delivery contract",
                    lambda: any(c == "C10" for c, d in r7.failures))
+
+    observed = checks
+    expect_red(
+        f"meta-suite runs at least its recorded floor of {SELFTEST_FLOOR} proofs "
+        f"(observed {observed})",
+        lambda: observed >= SELFTEST_FLOOR,
+    )
 
     print(f"\n  selftest: {bad} failure(s)")
     print(f"SELFTEST-SUMMARY checks={checks} failures={bad}")

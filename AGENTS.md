@@ -75,11 +75,15 @@ discard uncommitted work.
 
 ## Claims and evidence
 
-A wrong claim is a failure regardless of speed. Avoid *ready, clean, verified, looks good, should
-work, all set, solid, perfect,* and *done*. While git, hook, or build work is in flight, also avoid
-*reverted, lost, gone,* and *broke*: hooks may have temporarily stashed work. Report the observed
-state and exact scope of each command. "I don't know" is valid. Name optimism bias out loud when
-felt—confident-wrong spends trust irrecoverably.
+A wrong claim is a failure regardless of speed. Self-assessment carrying no technical sense is
+banned outright: *looks good*, *should work*, *solid*, *perfect*, *all set*. *Clean*, *verified*,
+*ready*, and *done* describe a tree, a head, a scope, or a deliverable, so bind each to the thing it
+describes and to the evidence rather than to your work in general. Completion is a claim you are
+required to make, not one to dodge: say when work is complete or at a handoff state, with its scope,
+its evidence, and what was not run—withholding that pushes your judgment onto Chris. While git,
+hook, or build work is in flight, avoid *reverted*, *lost*, *gone*, and *broke*: hooks may have
+temporarily stashed work. Report the observed state and exact scope of each command. "I don't know"
+is valid. Name optimism bias out loud when felt—confident-wrong spends trust irrecoverably.
 
 Verification authority lives outside the model. A local passing test is one observation; the
 mechanical gate, CI verdict, and Chris's diff review are separate evidence. Report origin head,

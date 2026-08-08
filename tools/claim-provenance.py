@@ -157,41 +157,90 @@ def check_quotes(doc_path, root, min_quote=MIN_QUOTE_CHARS):
     }, []
 
 
+def _paths_from_claude(record, opened):
+    """Claude Code: {"message": {"content": [{"type": "tool_use", "input": {...}}]}}."""
+    message = record.get("message") or {}
+    content = message.get("content")
+    if not isinstance(content, list):
+        return False
+    saw = False
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "tool_use":
+            continue
+        saw = True
+        args = block.get("input") or {}
+        fp = args.get("file_path")
+        if isinstance(fp, str):
+            opened.add(fp)
+        command = args.get("command")
+        if isinstance(command, str):
+            opened.update(PATH_IN_SHELL.findall(command))
+    return saw
+
+
+def _paths_from_codex(record, opened):
+    """Codex: {"type": "response_item", "payload": {"type": "function_call"|"custom_tool_call"}}.
+
+    function_call carries `arguments` as a JSON *string*; custom_tool_call carries `input`
+    as free text (shell or JS). Both are scanned for path-shaped tokens, and arguments is
+    additionally parsed so an explicit path value is taken structurally rather than by regex.
+    """
+    if record.get("type") != "response_item":
+        return False
+    payload = record.get("payload") or {}
+    kind = payload.get("type")
+    if kind not in ("function_call", "custom_tool_call"):
+        return False
+    for key in ("arguments", "input"):
+        blob = payload.get(key)
+        if not isinstance(blob, str):
+            continue
+        opened.update(PATH_IN_SHELL.findall(blob))
+        try:
+            parsed = json.loads(blob)
+        except ValueError:
+            continue
+        if isinstance(parsed, dict):
+            for field in ("file_path", "path", "filename", "file"):
+                value = parsed.get(field)
+                if isinstance(value, str):
+                    opened.add(value)
+    return True
+
+
 def transcript_paths(transcript_path):
-    """Every file path this session demonstrably touched."""
+    """Every file path a session demonstrably touched, across both runtimes.
+
+    Returns (paths, runtime). Both extractors run on every record rather than sniffing the
+    format up front: a detector that guesses wrong yields an empty set, and an empty set is
+    indistinguishable from a session that opened nothing — the all-clear failure this tool
+    exists to refuse.
+    """
     opened = set()
+    seen = {"claude-code": 0, "codex": 0}
     try:
         fh = open(transcript_path, "r", encoding="utf-8", errors="replace")
     except OSError:
-        return None
+        return None, None
     with fh:
         for line in fh:
             try:
                 record = json.loads(line)
             except ValueError:
                 continue
-            message = record.get("message") or {}
-            content = message.get("content")
-            if not isinstance(content, list):
-                continue
-            for block in content:
-                if not isinstance(block, dict) or block.get("type") != "tool_use":
-                    continue
-                args = block.get("input") or {}
-                fp = args.get("file_path")
-                if isinstance(fp, str):
-                    opened.add(fp)
-                command = args.get("command")
-                if isinstance(command, str):
-                    opened.update(PATH_IN_SHELL.findall(command))
-    return opened
+            if _paths_from_claude(record, opened):
+                seen["claude-code"] += 1
+            if _paths_from_codex(record, opened):
+                seen["codex"] += 1
+    runtime = max(seen, key=lambda k: seen[k]) if any(seen.values()) else None
+    return opened, runtime
 
 
 def check_citations(doc_path, transcript_path):
     doc = read_text(doc_path)
     if doc is None:
         return None, [f"cannot read document: {doc_path}"]
-    opened = transcript_paths(transcript_path)
+    opened, runtime = transcript_paths(transcript_path)
     if opened is None:
         return None, [f"cannot read transcript: {transcript_path}"]
 
@@ -203,7 +252,12 @@ def check_citations(doc_path, transcript_path):
                       for seen in opened)
         if not touched:
             findings.append(f"cited but never opened in this session: {rel}")
-    return {"cited": len(cited), "opened": len(opened), "findings": findings}, []
+    return {
+        "cited": len(cited),
+        "opened": len(opened),
+        "findings": findings,
+        "runtime": runtime,
+    }, []
 
 
 def selftest():
@@ -272,6 +326,32 @@ def selftest():
             fh.write("Per `schemas/ghost.json` the field is required.")
         got, _ = check_citations(uncited, transcript)
         results.append(("citations go red on a never-opened file", bool(got and got["findings"])))
+        results.append(("claude-code transcript is identified as such",
+                        bool(got and got["runtime"] == "claude-code")))
+
+        # Codex writes rollout records, not message/content blocks. An adapter with no
+        # red-going test is an assumption, so both shapes it reads are planted here:
+        # function_call carrying JSON arguments, and custom_tool_call carrying free text.
+        codex = os.path.join(tmp, "codex.jsonl")
+        with open(codex, "w") as fh:
+            fh.write(json.dumps({"type": "response_item", "payload": {
+                "type": "function_call", "name": "read_file",
+                "arguments": json.dumps({"file_path": os.path.join(src, "order.json")})}}) + "\n")
+            fh.write(json.dumps({"type": "response_item", "payload": {
+                "type": "custom_tool_call", "name": "exec",
+                "input": "grep -n title schemas/order.json"}}) + "\n")
+        got, _ = check_citations(clean, codex)
+        results.append(("codex transcript is identified and its paths extracted",
+                        bool(got and got["runtime"] == "codex" and not got["findings"])))
+
+        # An unreadable format must not resolve to "opened nothing", which would silently
+        # mark every citation as fabricated.
+        alien = os.path.join(tmp, "alien.jsonl")
+        with open(alien, "w") as fh:
+            fh.write(json.dumps({"kind": "something-else", "data": [1, 2, 3]}) + "\n")
+        got, _ = check_citations(clean, alien)
+        results.append(("unrecognised transcript reports no runtime rather than empty",
+                        bool(got and got["runtime"] is None)))
 
     print("selftest")
     failed = 0
@@ -340,13 +420,18 @@ def main():
                 print(f"error: {e}", file=sys.stderr)
             return 2
         print(f"citations  {got['cited']} cited path(s) against {got['opened']} path(s) "
-              f"touched in the transcript")
+              f"touched in a {got['runtime'] or 'UNRECOGNISED'} transcript")
         for f in got["findings"]:
             print(f"  FAIL  {f}")
         if got["cited"] == 0:
             vacuous = True
             print("  VACUOUS  the document cites no backticked paths — there was nothing "
                   "to reconcile. This is not a pass.")
+        if got["runtime"] is None or got["opened"] == 0:
+            vacuous = True
+            print("  VACUOUS  no tool calls were recognised in this transcript. Either the "
+                  "format is not claude-code or codex, or the session opened nothing. "
+                  "Every citation would read as never-opened, so this is not a pass.")
         print("  note  shell-derived paths are heuristic; a variable-expanded path reads "
               "as never-opened")
         total += len(got["findings"])

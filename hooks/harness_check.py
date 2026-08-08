@@ -50,18 +50,22 @@ BODY_CHAR_CAP = 5000          # chars after frontmatter — the builders' instru
 BODY_LINE_CAP = 500           # authoring skills (spec cap)
 DESC_CAP = 400                # house cap (spec ceiling is 1024)
 
+# (name, command, floor). The floor is a shrink-only ratchet: a suite reporting fewer
+# checks than its floor goes red. Without it a receipt of checks=1 reads the same as
+# checks=111, so a suite can be gutted with nothing failing. Raise a floor in the same
+# commit that adds the checks; lowering one is a deliberate, reviewable edit.
 SELFTEST_SUITES = [
-    ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"]),
-    ("askq_timeout_guard", ["hooks/askq_timeout_guard.py", "--selftest"]),
-    ("harness_report", ["hooks/harness_report.py", "--selftest"]),
-    ("cc-cost", ["tools/cc-cost.py", "--selftest"]),
-    ("codex-cost", ["tools/codex-cost.py", "--selftest"]),
-    ("claim-provenance", ["tools/claim-provenance.py", "--selftest"]),
-    ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"]),
-    ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"]),
-    ("render-packages", ["tools/render-packages.py", "--selftest"]),
-    ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"]),
-    ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"]),
+    ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"], 111),
+    ("askq_timeout_guard", ["hooks/askq_timeout_guard.py", "--selftest"], 13),
+    ("harness_report", ["hooks/harness_report.py", "--selftest"], 12),
+    ("cc-cost", ["tools/cc-cost.py", "--selftest"], 8),
+    ("codex-cost", ["tools/codex-cost.py", "--selftest"], 28),
+    ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 42),
+    ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 8),
+    ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
+    ("render-packages", ["tools/render-packages.py", "--selftest"], 26),
+    ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
+    ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 16),
 ]
 # Recursive meta-suite, plus predicates exercised through bash_command_guard.
 SELFTEST_COMPONENTS = {
@@ -326,7 +330,7 @@ class Run:
     def c1_selftests(self, suites=None):
         if suites is None:
             suites = SELFTEST_SUITES
-        for name, cmd in suites:
+        for name, cmd, floor in suites:
             try:
                 p = subprocess.run(
                     [sys.executable, os.path.join(self.root, cmd[0])] + cmd[1:],
@@ -338,18 +342,21 @@ class Run:
             receipts = re.findall(
                 rb"^SELFTEST-SUMMARY checks=(\d+) failures=(\d+)$", p.stdout, re.M
             )
-            receipt_ok = (len(receipts) == 1 and int(receipts[0][0]) > 0
+            receipt_ok = (len(receipts) == 1 and int(receipts[0][0]) >= floor
                           and int(receipts[0][1]) == 0)
             detail = f"selftest {name}: exit {p.returncode}; terminal receipts={len(receipts)}"
             if len(receipts) == 1:
-                detail += f" checks={int(receipts[0][0])} failures={int(receipts[0][1])}"
+                detail += (f" checks={int(receipts[0][0])} floor={floor} "
+                           f"failures={int(receipts[0][1])}")
+                if int(receipts[0][0]) < floor:
+                    detail += " below-floor"
             self.result("C1", p.returncode == 0 and receipt_ok, detail)
 
     def c1_selftest_inventory(self, suites=None, components=None):
         """Every script exposing --selftest is aggregated or explicitly classified."""
         suites = SELFTEST_SUITES if suites is None else suites
         components = SELFTEST_COMPONENTS if components is None else components
-        aggregated = {cmd[0] for _name, cmd in suites}
+        aggregated = {cmd[0] for _name, cmd, _floor in suites}
         actual = set()
         for rel_root in ("hooks", "tools"):
             base = os.path.join(self.root, rel_root)
@@ -774,7 +781,7 @@ def selftest():
         failing_suite = os.path.join(td, "failing-selftest.py")
         open(failing_suite, "w").write("raise SystemExit(1)\n")
         c1_run = Run(td, ci=True)
-        c1_run.c1_selftests([("planted-failure", [failing_suite])])
+        c1_run.c1_selftests([("planted-failure", [failing_suite], 1)])
         expect_red("C1 goes red when an aggregated selftest fails",
                    lambda: any(c == "C1" and "exit 1" in d
                                for c, d in c1_run.failures))
@@ -782,7 +789,7 @@ def selftest():
         truncated_suite = os.path.join(td, "truncated-selftest.py")
         open(truncated_suite, "w").write("print('PASS first check')\nraise SystemExit(0)\n")
         c1_truncated = Run(td, ci=True)
-        c1_truncated.c1_selftests([("planted-truncation", [truncated_suite])])
+        c1_truncated.c1_selftests([("planted-truncation", [truncated_suite], 1)])
         expect_red("C1 rejects exit zero without a terminal selftest receipt",
                    lambda: any(c == "C1" and "terminal receipts=0" in d
                                for c, d in c1_truncated.failures))
@@ -793,10 +800,22 @@ def selftest():
             "print('SELFTEST-SUMMARY checks=1 failures=0')\n"
         )
         c1_duplicate = Run(td, ci=True)
-        c1_duplicate.c1_selftests([("planted-duplicate", [duplicate_suite])])
+        c1_duplicate.c1_selftests([("planted-duplicate", [duplicate_suite], 1)])
         expect_red("C1 rejects ambiguous duplicate terminal receipts",
                    lambda: any(c == "C1" and "terminal receipts=2" in d
                                for c, d in c1_duplicate.failures))
+
+        shrunk_suite = os.path.join(td, "shrunk-selftest.py")
+        open(shrunk_suite, "w").write("print('SELFTEST-SUMMARY checks=1 failures=0')\n")
+        c1_shrunk = Run(td, ci=True)
+        c1_shrunk.c1_selftests([("planted-shrink", [shrunk_suite], 5)])
+        expect_red("C1 goes red when a suite reports fewer checks than its floor",
+                   lambda: any(c == "C1" and "below-floor" in d
+                               for c, d in c1_shrunk.failures))
+        c1_at_floor = Run(td, ci=True)
+        c1_at_floor.c1_selftests([("planted-at-floor", [shrunk_suite], 1)])
+        expect_red("C1 floor control: the same suite exactly at its floor stays green",
+                   lambda: not c1_at_floor.failures)
 
         os.makedirs(os.path.join(td, "tools"))
         open(os.path.join(td, "tools", "unregistered.py"), "w").write(

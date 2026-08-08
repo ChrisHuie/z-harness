@@ -856,6 +856,11 @@ def derived_build(render_config: Dict[str, Any], adapter: Dict[str, Any]) -> Dic
     }
 
 
+def derived_upstream_locks(render_config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Upstream locks the render inputs authorise. Nothing declares an upstream yet."""
+    return []
+
+
 def derived_claims(adapter: Dict[str, Any]) -> Dict[str, Any]:
     """The claims block an artifact must carry for this adapter entry.
 
@@ -959,7 +964,7 @@ def render_target(
             "kind": "canonical-tree",
             "inputTreeSha256": tree_digest(aggregate_input),
             "includedTreeSha256": tree_digest(aggregate_included),
-            "upstreamLocks": [],
+            "upstreamLocks": derived_upstream_locks(render_config),
             "skills": skill_manifests,
         },
         "payload": {
@@ -1160,6 +1165,14 @@ def verify_artifact(
         raise RenderError("artifact source digests must be sha256 values")
     if not isinstance(source["upstreamLocks"], list):
         raise RenderError("artifact upstreamLocks must be an array")
+    # No configuration declares an upstream, so the renderer has nothing to derive a lock
+    # from and every recorded lock would be an unbacked provenance and license claim. When
+    # upstreams become declarable this compares against the declared set instead of empty.
+    if source["upstreamLocks"] != derived_upstream_locks(render_config):
+        raise RenderError(
+            "artifact records upstream locks no render input declares: "
+            "an upstream provenance or license claim cannot originate in the artifact"
+        )
     upstream_ids: List[str] = []
     for index, lock in enumerate(source["upstreamLocks"]):
         if not isinstance(lock, dict):
@@ -1351,6 +1364,65 @@ def verify_render_root(
         if entry != expected_entry:
             raise RenderError(f"render index target {target} does not match artifact bytes")
     return manifests
+
+
+def leaf_paths(node: Any, prefix: str = "") -> List[str]:
+    """Every addressable leaf of a JSON document, empty containers included."""
+    if isinstance(node, dict) and node:
+        found: List[str] = []
+        for key, member in sorted(node.items()):
+            found += leaf_paths(member, f"{prefix}.{key}" if prefix else key)
+        return found
+    if isinstance(node, list) and node:
+        found = []
+        for index, member in enumerate(node):
+            found += leaf_paths(member, f"{prefix}[{index}]")
+        return found
+    return [prefix]
+
+
+def _walk_to(root: Any, path: str) -> Tuple[Any, Any]:
+    tokens: List[Any] = []
+    for part in path.split("."):
+        while "[" in part:
+            head, rest = part.split("[", 1)
+            if head:
+                tokens.append(head)
+            index, part = rest.split("]", 1)
+            tokens.append(int(index))
+        if part:
+            tokens.append(part)
+    node = root
+    for token in tokens[:-1]:
+        node = node[token]
+    return node, tokens[-1]
+
+
+def read_path(root: Any, path: str) -> Any:
+    node, last = _walk_to(root, path)
+    return node[last]
+
+
+def write_path(root: Any, path: str, value: Any) -> None:
+    node, last = _walk_to(root, path)
+    node[last] = value
+
+
+def shape_preserving_variant(value: Any) -> Any:
+    """A different value of the same JSON shape, so a binding is tested, not a type rule."""
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, int):
+        return value + 1
+    if isinstance(value, str):
+        if is_sha256(value):
+            return "a" * 64
+        return value + "-x"
+    if isinstance(value, list):
+        return ["injected"] if not value else value[:-1]
+    if isinstance(value, dict):
+        return {**value, "injected": 1}
+    return "injected"
 
 
 COMPLETE_EVIDENCE = {
@@ -1771,6 +1843,97 @@ def selftest(
                 lambda m: m["source"]["skills"][0].__setitem__("excludedPaths", [])
             ),
             "provenance does not match the source tree",
+        )
+
+        # Hand-picked cases only cover the fields someone thought of. This sweep is
+        # generated from the rendered documents, so a field added later is swept without
+        # anyone remembering to add a case.
+        #
+        # It proves coverage, not attribution: a leaf can be rejected by some check other
+        # than the one meant to bind it, and removing a binding can leave the sweep green
+        # because a redundant mechanism catches the same mutation. The cases above assert
+        # the error text, which is what pins each rejection to its intended guard. Both
+        # layers are needed and neither substitutes for the other.
+        base_manifest = read_json_object(
+            tamper_base / f"claude/{ARTIFACT_MANIFEST}", "sweep manifest"
+        )
+        manifest_paths = leaf_paths(base_manifest)
+        survivors: List[str] = []
+        for position, path in enumerate(manifest_paths):
+            case_root = temp / f"sweep-manifest-{position:03d}"
+            shutil.copytree(tamper_base / "claude", case_root)
+            mutated = json.loads(json.dumps(base_manifest))
+            write_path(mutated, path, shape_preserving_variant(read_path(mutated, path)))
+            write_json(case_root / ARTIFACT_MANIFEST, mutated)
+            try:
+                verify_artifact(
+                    fixture_root, case_root, "claude", render_config, adapter_config
+                )
+                survivors.append(path)
+            except RenderError:
+                continue
+            except Exception as exc:  # noqa: BLE001
+                survivors.append(f"{path} (crashed: {type(exc).__name__})")
+        expect(
+            f"no artifact-manifest leaf survives mutation ({len(manifest_paths)} swept)"
+            + (f" -- survived: {survivors}" if survivors else ""),
+            bool(manifest_paths) and not survivors,
+        )
+
+        base_index = read_json_object(tamper_base / RENDER_INDEX, "sweep render index")
+        index_paths = leaf_paths(base_index)
+        index_survivors: List[str] = []
+        for position, path in enumerate(index_paths):
+            case_root = temp / f"sweep-index-{position:03d}"
+            shutil.copytree(tamper_base, case_root)
+            mutated = json.loads(json.dumps(base_index))
+            write_path(mutated, path, shape_preserving_variant(read_path(mutated, path)))
+            write_json(case_root / RENDER_INDEX, mutated)
+            try:
+                verify_render_root(fixture_root, case_root, render_config, adapter_config)
+                index_survivors.append(path)
+            except RenderError:
+                continue
+            except Exception as exc:  # noqa: BLE001
+                index_survivors.append(f"{path} (crashed: {type(exc).__name__})")
+        expect(
+            f"no render-index leaf survives mutation ({len(index_paths)} swept)"
+            + (f" -- survived: {index_survivors}" if index_survivors else ""),
+            bool(index_paths) and not index_survivors,
+        )
+
+        # A generated mutator only produces shape-invalid values, so structural claims
+        # that are individually well-formed need their own cases.
+        planted(
+            "verification rejects a well-formed but undeclared upstream lock",
+            "codex",
+            edit_manifest(lambda m: m["source"]["upstreamLocks"].append({
+                "id": "some-vendor/pack",
+                "revision": "v2.1.0",
+                "sha256": "b" * 64,
+                "licenses": ["Apache-2.0"],
+            })),
+            "upstream locks no render input declares",
+        )
+        planted(
+            "verification rejects a well-formed but absent extra skill record",
+            "codex",
+            edit_manifest(lambda m: m["source"]["skills"].append({
+                "id": "ghost",
+                "inputTreeSha256": "c" * 64,
+                "includedTreeSha256": "d" * 64,
+                "includedFiles": 1,
+                "excludedPaths": [],
+            })),
+        )
+        planted(
+            "verification rejects a well-formed but absent extra payload record",
+            "codex",
+            edit_manifest(lambda m: m["payload"]["files"].append({
+                "path": "skills/ground-claims/GHOST.md",
+                "mode": "0644",
+                "sha256": "e" * 64,
+            })),
         )
 
         skill_manifest = fixture_root / "skills/ground-claims/SKILL.md"

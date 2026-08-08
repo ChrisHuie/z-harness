@@ -1,6 +1,6 @@
 ---
 name: ground-claims
-description: Grounding a claim about an external artifact before asserting it — spec, schema, API, config, or another system's source. Use before claiming something does or lacks X, when a grep's emptiness is the evidence, before quoting a file into a doc, and when a structural claim rests on a name not the object. Not for judging a test or green check (testing-ci) or an agent's report (agent-dispatch).
+description: Grounding a claim about an external artifact — spec, schema, API, config, or another system's source. Use when asked to check, confirm, or verify what one says, whether it supports X, or to run the checks; and before writing that something does or lacks X, or quoting a file into a doc. Not for judging a test or green check (testing-ci) or an agent's report (agent-dispatch).
 argument-hint: "<claim or question about an external artifact> [artifact=<path|url|package>] [scope=claim|doc]"
 allowed-tools: Read, Grep, Glob
 metadata:
@@ -68,11 +68,11 @@ State the type in the output. If a weaker instrument was substituted for the lic
 An empty result tests the matcher first and the world second. Before an absence claim is emitted, show the matcher finding something known to be present in the same corpus, through the same path.
 
 ```
-# absence claim
-grep -rl 'barter' schemas/          → 0
-# positive control: same matcher, same corpus, known-present term
-grep -rl 'product_id' schemas/      → 47   ✓ matcher reaches the corpus
+claim    matcher 'barter'      corpus schemas/  →  0 files
+control  matcher 'product_id'  corpus schemas/  → 47 files  ✓ matcher reaches the corpus
 ```
+
+The control uses the same matcher syntax, the same corpus, and the same path as the claim. Changing any of the three tests something else.
 
 Without the control, emit `matcher unproven`, not an absence claim. Path-qualified matchers fail this most often: the prefix stops matching after a layout change and every query returns zero.
 
@@ -95,6 +95,17 @@ Where the toolchain allows, match mechanically rather than by eye.
 Tier per claim, never per document. A document-scope tier gives an unverified sentence the same badge as a verbatim read, which is the specific mechanism this skill exists to block.
 
 For each load-bearing claim, write the observation that would refute it. A falsifier is close to self-executing: stating one for a claim you have not grounded surfaces the gap while you write, which is the whole point. A claim with no expressible falsifier is not yet a claim.
+
+### scope=doc — auditing claims someone already wrote
+
+The same five steps, applied per claim, to a finished document rather than a claim in flight.
+
+1. Enumerate the load-bearing claims — the ones whose reversal would change a decision. Leave the rest alone; auditing everything is how an audit stops finishing.
+2. For each, identify the artifact the document cites. A claim citing nothing is `[I]` until an artifact is found for it, and that is worth recording on its own.
+3. Run Steps 1–5 against that artifact, at the version the document claims rather than the current one.
+4. Emit one `## Grounding` row per audited claim; `## Finding` lists only the claims whose tier or content changed; `## Residuals` names the claims not audited and why.
+
+A document-scope provenance tag in the source — one tier covering mixed evidence — is itself a finding, because it means no claim in that document has an individually checkable basis.
 
 ### Checklist
 
@@ -127,6 +138,6 @@ Stop and re-check when: an absence claim is being written and no control has bee
 
 ## Verification
 
-Grounded when: every load-bearing claim names its instrument and artifact; every absence claim has a passing control; every quote byte-matches; tiers are per claim; falsifiers are stated; and `## Residuals` is non-empty, because a genuinely exhaustive check is rare enough that an empty residual list usually means the boundary was not examined.
+Grounded when the checklist above is clean and `## Residuals` is non-empty — a genuinely exhaustive check is rare enough that an empty residual list usually means the boundary was never examined.
 
-Self-check before emitting: for each claim, can you name the exact command or file read that produced it? If the answer is "it was in the search output", the tier is `[I]`, not `[V]`.
+Self-check before emitting: for each claim, name the exact command or file read that produced it. If the answer is "it was in the search output", the tier is `[I]`, not `[V]`.

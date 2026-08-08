@@ -10,6 +10,7 @@ After compaction, a summary that says a skill was loaded is not its body; reload
 | `pr-review-method` | reviewing a PR or judging whether feedback was addressed |
 | `testing-ci` | proving a test, guard, selector, or green check catches a break |
 | `agent-dispatch` | before spawning agents and before trusting their reports |
+| `ground-claims` | grounding claims about external specs, schemas, APIs, configs, or quoted artifacts |
 | `prebid-adcp` | AdCP/Prebid authority, versions, conformance, or registries |
 | `system-design` | trust boundaries, irreversible effects, or a party you do not control |
 | `outbound-drafts` | issue bodies, PR text, comments, briefings, or handovers |

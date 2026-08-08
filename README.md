@@ -52,7 +52,7 @@ same shared policy at both user and project scope.
 |---|---|---|
 | `AGENTS.md` | shared | canonical always-on operating policy; native project context for Codex |
 | `CLAUDE.md` | Claude | thin `@AGENTS.md` bridge plus Claude-only mechanics |
-| `skills/` | shared | eleven portable skills; Claude discovers them in place, Codex through the plugin |
+| `skills/` | shared | twelve portable skills; Claude discovers them in place, Codex through the plugin |
 | `.codex-plugin/plugin.json` | Codex | plugin identity, install metadata, and skill entry point |
 | `.agents/plugins/marketplace.json` | Codex | Git-backed marketplace entry for CLI/app installation |
 | `hooks/hooks.json` | Codex | SessionStart/SubagentStart policy injection and PreToolUse guard wiring |
@@ -66,6 +66,7 @@ same shared policy at both user and project scope.
 | `hooks/harness_report.py` | Claude | transcript evidence for Claude skill firing/reference reads |
 | `tools/cc-cost.py` | Claude | Claude request-deduplicated token accounting |
 | `tools/codex-cost.py` | Codex | per-request token accounting with copied/replayed record dedupe |
+| `tools/claim-provenance.py` | shared | exact quote and successful-read provenance checks for local documents |
 | `tools/pr-delivery-state.py` | shared | proves workspace, local HEAD, PR head, and exact-head CI agree before publication claims |
 | ignored `projects/*/memory/` | Claude-local data | host-bound Claude memory remains on the authoring machine and is not packaged for Codex |
 | ignored `harness-audit-*/` | publisher-local record | pre-migration snapshots and machine-derived evidence stay beside the authoring checkout, never in the plugin package |
@@ -83,7 +84,9 @@ python3 hooks/askq_timeout_guard.py --verify-harness
 python3 hooks/harness_report.py --selftest
 python3 tools/cc-cost.py --selftest
 python3 tools/codex-cost.py --selftest
+python3 tools/claim-provenance.py --selftest
 python3 tools/pr-delivery-state.py --selftest
+python3 tools/run-skill-evals.py --selftest
 python3 tools/run-skill-evals.py --validate
 ```
 
@@ -91,10 +94,14 @@ CI runs `python3 hooks/harness_check.py --ci` on every push and pull request. Lo
 machine-specific Claude anchors. `--selftest` plants defects and proves each check family can turn
 red; a zero-input scan is an error, not a clean verdict. C1 also requires each aggregated suite to
 finish with exactly one `SELFTEST-SUMMARY` receipt, so an early exit 0 cannot impersonate a complete
-test run.
+test run. It also fails when a script exposing `--selftest` is neither aggregated nor explicitly
+classified as a component/meta-suite.
 
 Skill contract eval validation is free and offline. `tools/run-skill-evals.py --run` executes
 headless model scenarios and spends API budget, so it remains manual.
+
+Document quote/citation scans are also manual because they require the target document, artifact
+root, and session transcript. Their detector selftest is blocking through C1.
 
 ## Mechanics worth knowing
 

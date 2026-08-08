@@ -42,15 +42,32 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "2.5.0"
+VERSION = "2.6.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-METHOD_SKILLS = ["git-workflow", "pr-review-method", "testing-ci", "agent-dispatch",
-                 "outbound-drafts", "system-design", "prebid-adcp"]
-AUTHORING_SKILLS = ["craft-prompt", "craft-skill", "craft-context-file", "review-prompt"]
+AUTHORING_SKILLS = {"craft-prompt", "craft-skill", "craft-context-file", "review-prompt"}
 BODY_CHAR_CAP = 5000          # chars after frontmatter — the builders' instrument
 BODY_LINE_CAP = 500           # authoring skills (spec cap)
 DESC_CAP = 400                # house cap (spec ceiling is 1024)
+
+SELFTEST_SUITES = [
+    ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"]),
+    ("askq_timeout_guard", ["hooks/askq_timeout_guard.py", "--selftest"]),
+    ("harness_report", ["hooks/harness_report.py", "--selftest"]),
+    ("cc-cost", ["tools/cc-cost.py", "--selftest"]),
+    ("codex-cost", ["tools/codex-cost.py", "--selftest"]),
+    ("claim-provenance", ["tools/claim-provenance.py", "--selftest"]),
+    ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"]),
+    ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"]),
+    ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"]),
+    ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"]),
+]
+# Recursive meta-suite, plus predicates exercised through bash_command_guard.
+SELFTEST_COMPONENTS = {
+    "hooks/harness_check.py",
+    "hooks/guards/git_grep_engine_guard.py",
+    "hooks/guards/zsh_rev_modifier_guard.py",
+}
 
 # C2: basenames shared verbatim across skills. A same-basename file NOT listed in
 # either set is a loud failure — decide SHARED vs PER_SKILL and add it here.
@@ -84,7 +101,7 @@ STALE_PATTERNS = [
 ]
 
 ROUTING_SKILLS = ["git-workflow", "pr-review-method", "testing-ci", "agent-dispatch",
-                  "prebid-adcp", "system-design", "outbound-drafts",
+                  "ground-claims", "prebid-adcp", "system-design", "outbound-drafts",
                   "craft-prompt", "craft-skill", "craft-context-file", "review-prompt"]
 
 RESERVED_BASENAMES = {"claude.md", "agents.md", "gemini.md"}
@@ -151,6 +168,16 @@ def method_body_within_cap(path):
 def authoring_body_within_cap(path):
     size = len(open(path, encoding="utf-8").read().splitlines())
     return size <= BODY_LINE_CAP, size
+
+
+def skill_names(root):
+    skills_dir = os.path.join(root, "skills")
+    if not os.path.isdir(skills_dir):
+        return []
+    return sorted(
+        name for name in os.listdir(skills_dir)
+        if os.path.isfile(os.path.join(skills_dir, name, "SKILL.md"))
+    )
 
 
 def validate_codex_hook_config(hook_config):
@@ -297,14 +324,7 @@ class Run:
     # ---- C1 ----------------------------------------------------------------
     def c1_selftests(self, suites=None):
         if suites is None:
-            suites = [("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"]),
-                      ("askq_timeout_guard", ["hooks/askq_timeout_guard.py", "--selftest"]),
-                      ("harness_report", ["hooks/harness_report.py", "--selftest"]),
-                      ("cc-cost", ["tools/cc-cost.py", "--selftest"]),
-                      ("codex-cost", ["tools/codex-cost.py", "--selftest"]),
-                      ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"]),
-                      ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"]),
-                      ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"])]
+            suites = SELFTEST_SUITES
         for name, cmd in suites:
             try:
                 p = subprocess.run(
@@ -323,6 +343,36 @@ class Run:
             if len(receipts) == 1:
                 detail += f" checks={int(receipts[0][0])} failures={int(receipts[0][1])}"
             self.result("C1", p.returncode == 0 and receipt_ok, detail)
+
+    def c1_selftest_inventory(self, suites=None, components=None):
+        """Every script exposing --selftest is aggregated or explicitly classified."""
+        suites = SELFTEST_SUITES if suites is None else suites
+        components = SELFTEST_COMPONENTS if components is None else components
+        aggregated = {cmd[0] for _name, cmd in suites}
+        actual = set()
+        for rel_root in ("hooks", "tools"):
+            base = os.path.join(self.root, rel_root)
+            if not os.path.isdir(base):
+                continue
+            for dirpath, _dirs, files in os.walk(base):
+                for filename in files:
+                    if not filename.endswith(".py"):
+                        continue
+                    path = os.path.join(dirpath, filename)
+                    text = open(path, encoding="utf-8", errors="replace").read()
+                    if (re.search(r"^def selftest\(", text, re.M)
+                            or re.search(r"['\"]--selftest['\"]", text)):
+                        actual.add(os.path.relpath(path, self.root))
+        declared = aggregated | set(components)
+        unknown = sorted(actual - declared)
+        stale = sorted(declared - actual)
+        self.result(
+            "C1", bool(actual) and not unknown and not stale,
+            f"selftest inventory: discovered={len(actual)} aggregated={len(aggregated)} "
+            f"components={len(components)}"
+            + (f" unclassified={unknown}" if unknown else "")
+            + (f" stale={stale}" if stale else ""),
+        )
 
     # ---- C2 ----------------------------------------------------------------
     def c2_shared_identity(self):
@@ -387,22 +437,29 @@ class Run:
 
     # ---- C4 / C5 -----------------------------------------------------------
     def c4_descriptions(self):
-        for skill in METHOD_SKILLS + AUTHORING_SKILLS:
+        names = skill_names(self.root)
+        if not names:
+            self.result("C4", False, "zero skills discovered")
+            return
+        for skill in names:
             p = os.path.join(self.root, "skills", skill, "SKILL.md")
             ok, n = description_within_cap(p)
             self.result("C4", ok, f"{skill}: description {n} chars (cap {DESC_CAP})")
 
     def c5_bodies(self):
-        for skill in METHOD_SKILLS:
-            ok, n = method_body_within_cap(
-                os.path.join(self.root, "skills", skill, "SKILL.md")
-            )
-            self.result("C5", ok,
-                        f"{skill}: body {n} chars (cap {BODY_CHAR_CAP})")
-        for skill in AUTHORING_SKILLS:
+        names = skill_names(self.root)
+        if not names:
+            self.result("C5", False, "zero skills discovered")
+            return
+        for skill in names:
             p = os.path.join(self.root, "skills", skill, "SKILL.md")
-            ok, n = authoring_body_within_cap(p)
-            self.result("C5", ok, f"{skill}: {n} lines (cap {BODY_LINE_CAP})")
+            if skill in AUTHORING_SKILLS:
+                ok, n = authoring_body_within_cap(p)
+                self.result("C5", ok, f"{skill}: {n} lines (cap {BODY_LINE_CAP})")
+            else:
+                ok, n = method_body_within_cap(p)
+                self.result("C5", ok,
+                            f"{skill}: body {n} chars (cap {BODY_CHAR_CAP})")
 
     # ---- C6 ----------------------------------------------------------------
     def c6_stale_patterns(self):
@@ -648,6 +705,7 @@ class Run:
     def run(self):
         print(f"harness_check {VERSION}  root={self.root}  mode={'ci' if self.ci else 'local'}")
         self.c1_selftests()
+        self.c1_selftest_inventory()
         self.c2_shared_identity()
         self.c3_reference_resolution()
         self.c4_descriptions()
@@ -736,6 +794,16 @@ def selftest():
                    lambda: any(c == "C1" and "terminal receipts=2" in d
                                for c, d in c1_duplicate.failures))
 
+        os.makedirs(os.path.join(td, "tools"))
+        open(os.path.join(td, "tools", "unregistered.py"), "w").write(
+            "def selftest():\n    return 0\n"
+        )
+        c1_inventory = Run(td, ci=True)
+        c1_inventory.c1_selftest_inventory(suites=[], components=set())
+        expect_red("C1 rejects an unclassified selftest-capable script",
+                   lambda: any(c == "C1" and "unclassified" in d
+                               for c, d in c1_inventory.failures))
+
         r = Run(td, ci=True)
         r.c2_shared_identity()
         expect_red("C2 goes red on diverged copies",
@@ -753,17 +821,12 @@ def selftest():
                    lambda: any(c == "C3" and "zero authored" in d
                                for c, d in c3_empty_run.failures))
         r2 = Run(td, ci=True)
-        r2.checks = 0
-        for s in ["alpha"]:
-            skill_path = os.path.join(sk, s, "SKILL.md")
-            ok, n = description_within_cap(skill_path)
-            r2.result("C4", ok, f"{s}: {n}")
-            ok, b = method_body_within_cap(skill_path)
-            r2.result("C5", ok, f"{s}: {b}")
-        expect_red("C4 goes red on 500-char description",
-                   lambda: any(c == "C4" for c, d in r2.failures))
-        expect_red("C5 goes red on 6,000-char body",
-                   lambda: any(c == "C5" for c, d in r2.failures))
+        r2.c4_descriptions()
+        r2.c5_bodies()
+        expect_red("C4 discovers a new skill and rejects its 500-char description",
+                   lambda: any(c == "C4" and "alpha" in d for c, d in r2.failures))
+        expect_red("C5 discovers a new skill and rejects its 6,000-char body",
+                   lambda: any(c == "C5" and "alpha" in d for c, d in r2.failures))
         authoring_fixture = os.path.join(td, "authoring-over-line-cap.md")
         open(authoring_fixture, "w").write("\n".join(["line"] * (BODY_LINE_CAP + 1)))
         authoring_run = Run(td, ci=True)

@@ -1,0 +1,27 @@
+{
+  "skills": [
+    "ground-claims"
+  ],
+  "query": "scope=doc audit findings/order-note.md. The quote only changes capitalization, and the transcript shows a successful shell command naming the schema, so can I call both verified?",
+  "files": [
+    {
+      "path": "findings/order-note.md",
+      "content": "# Order note\n\nPer `schemas/order.json`, *\"a binding reporting contract protects ordered evidence\"*.\n"
+    },
+    {
+      "path": "schemas/order.json",
+      "content": "A binding reporting contract protects ordered evidence\n"
+    },
+    {
+      "path": "session.jsonl",
+      "content": "{\"type\":\"turn_context\",\"payload\":{\"cwd\":\".\"}}\n{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"name\":\"exec\",\"call_id\":\"call_shell\",\"status\":\"completed\",\"input\":\"sed -n '1,20p' schemas/order.json\"}}\n{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call_output\",\"call_id\":\"call_shell\",\"output\":[{\"type\":\"input_text\",\"text\":\"A binding reporting contract protects ordered evidence\"}]}}\n"
+    }
+  ],
+  "expected_behavior": [
+    "emits ## Grounding, ## Finding, and ## Residuals in that order",
+    "does not clear the quotation: its case differs, so normalization is advisory rather than byte-identical evidence",
+    "does not clear the citation from shell text: a successful shell command is HEURISTIC_TOUCH, not CONFIRMED_READ",
+    "does not award [V] from either non-clearing signal and states what direct read or exact quote would falsify the finding",
+    "limits the conclusion to the quoted and cited claim rather than treating the whole document as ungrounded"
+  ]
+}

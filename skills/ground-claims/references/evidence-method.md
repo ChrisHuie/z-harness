@@ -37,8 +37,13 @@ The mechanical verifier extracts markdown-emphasized quotations: `*"exact source
 | `CONFIRMED_READ` | direct read plus successful correlated result, same real path inside `--root` | yes |
 | `HEURISTIC_TOUCH` | shell path sighting, write, or edit | no |
 | `FAILED_ATTEMPT` | correlated result reports failure | no |
-| `AMBIGUOUS` | unknown tool, missing result/cwd, duplicate correlation, or path escape | no |
+| `OUT_OF_ROOT` | real file the session touched that this `--root` cannot describe | no |
+| `AMBIGUOUS` | unknown tool, missing result or cwd, or duplicate correlation | no |
 | `UNSEEN` | no matching evidence | no |
+
+`OUT_OF_ROOT` is scope; `AMBIGUOUS` is doubt. A receipt dominated by the first means the root is too narrow for the document; one dominated by the second means the transcript itself is weak evidence.
+
+A failing result leads with its error. Result text is inspected only at its start, because a read's payload is the cited file's own contents and an error-shaped sentence inside a source file is not a failed read. An explicit success flag settles the question on its own.
 
 These statuses answer whether the provenance claim clears. Do not replace a non-clearing status with `[V]` merely because the source file or transcript was opened. `[V]` applies only when licensed evidence directly supports the submitted claim; for transcript provenance that requires `CONFIRMED_READ`.
 
@@ -76,3 +81,5 @@ This verifier cannot detect a claim that cites no path or a quotation outside it
 - Presenting normalized or reordered text as a quotation.
 - Using one `[V]` badge for mixed evidence.
 - Promoting a contradicted claim or non-clearing verifier result to `[V]` because its evidence was inspected.
+- Trusting a tool's semantics without confirming them. A sort order, version comparison, glob, or regex dialect can return a confident wrong answer with no error; when a tool's output is load-bearing, confirm it did what you think.
+- Lowering the bar after a run of corroborating reads. A confirming streak never trips a re-check, so the least-verified step is the one after several that agreed.

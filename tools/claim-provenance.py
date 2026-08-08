@@ -5,10 +5,15 @@ Quotes pass only when an extracted span is byte-identical to a uniquely resolved
 file, or when a ``[elided]`` quote contains byte-identical segments in source order.
 Case, whitespace, or markdown-emphasis normalization is advisory and never clears.
 
+A citation is a backticked token carrying a path separator or a known file extension.
+A dotted prose identifier is not a citation, so the check does not manufacture blockers
+on ordinary technical writing.
+
 Citations pass only when a Claude Code or Codex transcript contains a direct read call,
 a correlated successful result, and a path that resolves to the same file inside
 ``--root``. Shell mentions, writes, failed calls, and uncorrelated calls are reported but
-never clear a citation.
+never clear a citation. Paths the session really read that fall outside ``--root`` are
+reported ``OUT_OF_ROOT`` -- scope, distinct from ``AMBIGUOUS`` doubt.
 
 Exit codes: 0 verified · 1 findings, advisory-only matches, or inconclusive/vacuous
 evidence · 2 usage or I/O error.
@@ -21,12 +26,28 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 MIN_QUOTE_CHARS = 24
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "fixtures", "claim-provenance")
 
-PATH_IN_BACKTICKS = re.compile(r"`([^`\n]+?\.[A-Za-z0-9]{1,16})`")
+# A citation is inferred from backticks, so the inferrer decides what the document is held
+# to. Accepting any dotted token makes ordinary prose identifiers -- `client.decline`,
+# `billing_measurement.vendor`, `v3.1.11` -- into citations that can never resolve, and a
+# check that always reports blockers gets muted, which is the same end state as no check.
+# A citation must therefore carry a path separator or a known file extension, and never
+# whitespace. Extend CITATION_EXTENSIONS rather than loosening the shape.
+CITATION_EXTENSIONS = (
+    "c cc cfg conf cpp cs css csv env go graphql h hpp html ini java js json jsonl jsx kt "
+    "lock lua m md mdx mjs php pl proto py pyi r rb rs rst scala sh sql svg swift toml ts "
+    "tsx txt vue xml yaml yml zsh"
+).split()
+PATH_IN_BACKTICKS = re.compile(
+    r"`("
+    r"(?:[^`\s]*[\\/][^`\s]*\.[A-Za-z0-9]{1,16})"          # any path-separated token
+    r"|(?:[^`\s]+\.(?:" + "|".join(CITATION_EXTENSIONS) + r"))"  # bare file with known suffix
+    r")`"
+)
 PATH_TOKEN = re.compile(
     r"(?<![A-Za-z0-9_])(?:[A-Za-z]:[\\/]|/|\.\.?/)?"
     r"[A-Za-z0-9_@.\\/\-]+\.[A-Za-z0-9]{1,16}"
@@ -40,9 +61,14 @@ WHITESPACE = re.compile(r"\s+")
 CONFIRMED_READ = "CONFIRMED_READ"
 HEURISTIC_TOUCH = "HEURISTIC_TOUCH"
 FAILED_ATTEMPT = "FAILED_ATTEMPT"
+OUT_OF_ROOT = "OUT_OF_ROOT"
 AMBIGUOUS = "AMBIGUOUS"
 UNSEEN = "UNSEEN"
-STATUSES = (CONFIRMED_READ, HEURISTIC_TOUCH, FAILED_ATTEMPT, AMBIGUOUS, UNSEEN)
+# OUT_OF_ROOT is scope, not doubt: the session touched a real file that this --root cannot
+# describe. Pooling it into AMBIGUOUS drowns genuine uncertainty -- on one real transcript it
+# was 293 of 313 evidence rows -- and the EVIDENCE receipt is exactly what a reader uses to
+# judge whether provenance was thin. Neither status clears a citation.
+STATUSES = (CONFIRMED_READ, HEURISTIC_TOUCH, FAILED_ATTEMPT, OUT_OF_ROOT, AMBIGUOUS, UNSEEN)
 
 READ_TOOLS = {"read", "read_file", "read_text_file", "readfile", "view_image"}
 WRITE_TOOLS = {"write", "edit", "write_file", "apply_patch", "patch"}
@@ -264,6 +290,11 @@ def _result_failed(result):
         return True
     if str(result.get("status", "")).casefold() in {"error", "failed", "cancelled"}:
         return True
+    # An explicit success flag is authoritative. Runtimes are inconsistent about emitting
+    # it -- a real Claude session carried is_error on 125 of 203 tool results -- so the
+    # text heuristics below still run whenever no explicit signal is present.
+    if result.get("is_error") is False or result.get("isError") is False:
+        return False
     output = result.get("output", result.get("content", ""))
 
     def flatten(value):
@@ -278,25 +309,30 @@ def _result_failed(result):
         return ""
 
     text = flatten(output).strip()
+    # Both patterns are anchored to the start. A read's payload IS the cited file's contents,
+    # so an unanchored search reports a successful read as a failure whenever the file itself
+    # discusses a missing-file error -- which is exactly the error-handling source most likely
+    # to be cited. A failing result leads with its error; a source file does not.
     return bool(re.match(r"(?is)^(?:error|failed|exception)\s*:", text)
-                or re.search(r"(?i)\b(?:no such file|file does not exist)\b", text[:500]))
+                or re.match(r"(?is)^\s*(?:no such file|file does not exist)", text))
 
 
 def _resolve_tool_path(raw_path, cwd, root):
+    """-> (resolved, code, detail). `code` distinguishes out-of-scope from unknown."""
     root_real, error = _root(root)
     if error:
-        return None, error
+        return None, "io", error
     portable = raw_path.replace("\\", os.sep)
     if os.path.isabs(portable):
         candidate = os.path.realpath(portable)
     else:
         if not cwd:
-            return None, "relative tool path has no recorded cwd"
+            return None, "no_cwd", "relative tool path has no recorded cwd"
         base = cwd if os.path.isabs(cwd) else os.path.join(root_real, cwd)
         candidate = os.path.realpath(os.path.join(base, portable))
     if not _inside(candidate, root_real):
-        return None, "tool path resolves outside --root"
-    return candidate, None
+        return None, "outside", "tool path resolves outside --root"
+    return candidate, None, None
 
 
 def _make_call(runtime, call_id, name, args, raw_blob, cwd):
@@ -318,11 +354,13 @@ def _make_call(runtime, call_id, name, args, raw_blob, cwd):
 def _finish_call(call, result, root, evidence):
     failed = result is None or _result_failed(result)
     for raw_path in call["paths"]:
-        resolved, path_error = _resolve_tool_path(raw_path, call["cwd"], root)
+        resolved, path_code, path_error = _resolve_tool_path(raw_path, call["cwd"], root)
         if result is None:
             status, detail = AMBIGUOUS, "call has no correlated result"
         elif failed:
             status, detail = FAILED_ATTEMPT, "correlated result reports failure"
+        elif path_code == "outside":
+            status, detail = OUT_OF_ROOT, path_error
         elif path_error:
             status, detail = AMBIGUOUS, path_error
         elif call["operation"] == "read":
@@ -660,6 +698,62 @@ def selftest():
                      os.path.join(FIXTURES, "claude-read-success.jsonl"))
         record("same basename in another directory does not clear",
                run.returncode == 1 and UNSEEN in run.stdout)
+
+        # A read's payload is the cited file's own contents. Error-shaped prose inside a
+        # legitimately-read source file must not be read as a failed call, including when the
+        # runtime omits an explicit success flag -- real transcripts omit it on many results.
+        error_prose = os.path.join(schemas, "loader.py")
+        with open(error_prose, "w", encoding="utf-8") as fh:
+            fh.write('def load(p):\n    # raises when there is no such file at p\n    ...\n')
+        prose_doc = document("prose.md", "See `schemas/loader.py`.")
+        for label, extra in (("with is_error false", {"is_error": False}),
+                             ("without an explicit flag", {})):
+            unflagged = document(
+                f"unflagged-{len(extra)}.jsonl",
+                "\n".join([
+                    json.dumps({"type": "assistant", "cwd": tmp, "message": {"content": [
+                        {"type": "tool_use", "id": "prose", "name": "Read",
+                         "input": {"file_path": error_prose}}]}}),
+                    json.dumps({"type": "user", "cwd": tmp, "message": {"content": [
+                        dict({"type": "tool_result", "tool_use_id": "prose",
+                              "content": read_text(error_prose)}, **extra)]}}),
+                ]) + "\n",
+            )
+            run = invoke("--citations", prose_doc, "--root", tmp, "--transcript", unflagged)
+            record(f"file content naming a missing-file error still clears ({label})",
+                   run.returncode == 0 and "CONFIRMED_READ=1" in run.stdout)
+
+        # A dotted prose identifier is not a citation; treating it as one guarantees a
+        # blocker on any technical document, and a check that always fails gets muted.
+        identifiers = document(
+            "identifiers.md",
+            "The field `billing_measurement.vendor` at `v3.1.11` calls `client.decline`.",
+        )
+        run = invoke("--citations", identifiers, "--root", tmp, "--transcript",
+                     os.path.join(FIXTURES, "claude-read-success.jsonl"))
+        record("dotted prose identifiers are not citations",
+               "cited=0" in run.stdout and "not found under --root" not in run.stdout)
+
+        # Scope is not doubt: a real file the root cannot describe is OUT_OF_ROOT.
+        with tempfile.TemporaryDirectory() as elsewhere:
+            far = os.path.join(elsewhere, "far.json")
+            with open(far, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            far_transcript = document(
+                "far.jsonl",
+                "\n".join([
+                    json.dumps({"type": "assistant", "cwd": tmp, "message": {"content": [
+                        {"type": "tool_use", "id": "far", "name": "Read",
+                         "input": {"file_path": far}}]}}),
+                    json.dumps({"type": "user", "cwd": tmp, "message": {"content": [
+                        {"type": "tool_result", "tool_use_id": "far",
+                         "content": source, "is_error": False}]}}),
+                ]) + "\n",
+            )
+            run = invoke("--citations", citation_doc, "--root", tmp,
+                         "--transcript", far_transcript)
+            record("path outside the root is scoped, not ambiguous",
+                   f"{OUT_OF_ROOT}=1" in run.stdout and f"{AMBIGUOUS}=0" in run.stdout)
 
         relative_transcript = document(
             "relative.jsonl",

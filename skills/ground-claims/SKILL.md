@@ -59,7 +59,7 @@ Quotes must be byte-identical. An elision clears only when labeled `[elided]` an
 | `[D]` | prior report or delegated result, not re-read here |
 | `[I]` | inference from adjacent evidence such as a name, listing, or summary |
 
-Opening evidence does not make a claim `[V]`. Report its contradiction or non-clearing status: `CONTRADICTED`, `NORMALIZED_ONLY`, `HEURISTIC_TOUCH`, `FAILED_ATTEMPT`, `AMBIGUOUS`, or `UNSEEN`. Use `[V]` only when the required check clears; transcript provenance requires `CONFIRMED_READ`. Never tier a whole document. State observation before inference. Give every load-bearing claim a falsifier.
+Opening evidence does not make a claim `[V]`. Report its contradiction or non-clearing status: `CONTRADICTED`, `NORMALIZED_ONLY`, `HEURISTIC_TOUCH`, `FAILED_ATTEMPT`, `OUT_OF_ROOT`, `AMBIGUOUS`, or `UNSEEN`. Use `[V]` only when the required check clears; transcript provenance requires `CONFIRMED_READ`. Never tier a whole document. State observation before inference. Give every load-bearing claim a falsifier.
 
 ### 5. Emit the matching shape
 

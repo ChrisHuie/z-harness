@@ -19,12 +19,14 @@ Search is licensed to locate an object. A structural conclusion requires opening
 
 ## Quotations
 
-The mechanical verifier extracts markdown-emphasized quotations: `*"exact source text"*`.
+The mechanical verifier extracts explicitly bound markdown-emphasized quotations: ``[source: `path`] *"exact source text"*``.
 
-- Ordinary quote: raw span must occur byte-for-byte in a uniquely resolved cited file.
-- Elision: prefix the quote with `[elided]`; each non-empty segment must occur byte-for-byte and in order.
+- Source binding: every quote names exactly one source immediately before the quote. A separately cited file never becomes a fallback source; an unbound quote reports `UNBOUND_SOURCE`.
+- Ordinary quote: raw span must occur byte-for-byte in the bound, uniquely resolved file.
+- Elision: use ``[source: `path`] [elided] *"first … last"*``; each non-empty segment must occur byte-for-byte and in order in that source.
 - Ellipsis without `[elided]` is not verification syntax.
-- Case, whitespace, or markdown-emphasis normalization is reported `NORMALIZED_ONLY` and exits non-zero.
+- Comparison reads document and source as bytes. CRLF differs from LF, and distinct undecodable bytes remain distinct.
+- Case, whitespace, newline, decoding-replacement, or markdown-emphasis normalization is reported `NORMALIZED_ONLY` and exits non-zero.
 - A paraphrase uses no quotation marks and is labeled as a paraphrase.
 - Zero extracted quotes or zero resolved cited files is vacuous, not clean.
 
@@ -43,11 +45,11 @@ The mechanical verifier extracts markdown-emphasized quotations: `*"exact source
 
 `OUT_OF_ROOT` is scope; `AMBIGUOUS` is doubt. A receipt dominated by the first means the root is too narrow for the document; one dominated by the second means the transcript itself is weak evidence.
 
-A failing result leads with its error. Result text is inspected only at its start, because a read's payload is the cited file's own contents and an error-shaped sentence inside a source file is not a failed read. An explicit success flag settles the question on its own.
+A failing result leads with its error. Result text is inspected only at its start, because a read's payload is the cited file's own contents and an error-shaped sentence inside a source file is not a failed read. An explicit success flag settles the question on its own, including when successful source content begins with `Error:`.
 
 These statuses answer whether the provenance claim clears. Do not replace a non-clearing status with `[V]` merely because the source file or transcript was opened. `[V]` applies only when licensed evidence directly supports the submitted claim; for transcript provenance that requires `CONFIRMED_READ`.
 
-Qualified citations preserve all directory components. A bare basename resolves only when unique below `--root`. Absolute paths, `..`, and symlinks are accepted only when their real path remains inside the root. Malformed transcript records make the run inconclusive.
+Qualified citations preserve all directory components. A path separator is sufficient for an extensionless citation such as `docs/Makefile`; a bare token requires a known extension. A bare basename resolves only when unique below `--root`. Absolute paths, `..`, and symlinks are accepted only when their real path remains inside the root. Malformed transcript records, including valid JSON with wrong payload or message types, make the run inconclusive instead of raising an exception.
 
 Shell evidence is intentionally non-clearing: command text can name a file without reading it, and success can belong to another command. A successful write proves mutation, not prior observation.
 
@@ -59,7 +61,7 @@ python3 tools/claim-provenance.py --citations <doc> --root <artifact-root> --tra
 python3 tools/claim-provenance.py --quotes <doc> --citations <doc> --root <artifact-root> --transcript <session.jsonl>
 ```
 
-Exit `0` means the selected checks verified. Exit `1` means findings, advisory-only matches, inconclusive evidence, or a vacuous scan. Exit `2` means usage or I/O failure. The selftest must end with one `SELFTEST-SUMMARY checks=<positive> failures=0` receipt.
+Exit `0` means the selected checks verified. Its success receipt names only the selected quote and/or citation scopes. Exit `1` means findings, advisory-only matches, inconclusive evidence, or a vacuous scan. Exit `2` means usage or I/O failure. The selftest must end with one `SELFTEST-SUMMARY checks=<positive> failures=0` receipt.
 
 This verifier cannot detect a claim that cites no path or a quotation outside its extraction syntax. A clean run therefore covers only the exact scan receipt it prints.
 

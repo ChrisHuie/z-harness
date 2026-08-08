@@ -66,7 +66,7 @@ same shared policy at both user and project scope.
 | `hooks/harness_report.py` | Claude | transcript evidence for Claude skill firing/reference reads |
 | `tools/cc-cost.py` | Claude | Claude request-deduplicated token accounting |
 | `tools/codex-cost.py` | Codex | per-request token accounting with copied/replayed record dedupe |
-| `tools/claim-provenance.py` | shared | exact quote and successful-read provenance checks for local documents |
+| `tools/claim-provenance.py` | shared | explicitly bound byte-exact quote and successful-read provenance checks for local documents |
 | `tools/pr-delivery-state.py` | shared | proves workspace, local HEAD, PR head, and exact-head CI agree before publication claims |
 | ignored `projects/*/memory/` | Claude-local data | host-bound Claude memory remains on the authoring machine and is not packaged for Codex |
 | ignored `harness-audit-*/` | publisher-local record | pre-migration snapshots and machine-derived evidence stay beside the authoring checkout, never in the plugin package |

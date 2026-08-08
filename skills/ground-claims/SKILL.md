@@ -49,7 +49,7 @@ For absence, prove the matcher reaches the same corpus with a known-present cont
 
 For structure, cite the object's `required` list (including absent/empty), each relevant field's required/optional status, branches, enums, and constraints. For behavior, separate what a declaration permits from what implementation or supplied runtime evidence establishes. Put missing runtime exercise in `## Residuals`.
 
-Quotes must be byte-identical. An elision clears only when labeled `[elided]` and all non-empty segments appear byte-identically in order. Normalization is advisory only; otherwise use a labeled, unquoted paraphrase.
+Bind each quote to one source: ``[source: `path`] *"exact text"*``. Its bytes must occur there; another citation is not a fallback. Elisions use ``[source: `path`] [elided] *"first … last"*`` with non-empty, ordered exact segments. Normalization is advisory; otherwise write a labeled unquoted paraphrase.
 
 ### 4. Tier and falsify per claim
 
@@ -59,7 +59,7 @@ Quotes must be byte-identical. An elision clears only when labeled `[elided]` an
 | `[D]` | prior report or delegated result, not re-read here |
 | `[I]` | inference from adjacent evidence such as a name, listing, or summary |
 
-Opening evidence does not make a claim `[V]`. Report its contradiction or non-clearing status: `CONTRADICTED`, `NORMALIZED_ONLY`, `HEURISTIC_TOUCH`, `FAILED_ATTEMPT`, `OUT_OF_ROOT`, `AMBIGUOUS`, or `UNSEEN`. Use `[V]` only when the required check clears; transcript provenance requires `CONFIRMED_READ`. Never tier a whole document. State observation before inference. Give every load-bearing claim a falsifier.
+Opening evidence does not make a claim `[V]`. Report its contradiction or non-clearing status: `CONTRADICTED`, `UNBOUND_SOURCE`, `NORMALIZED_ONLY`, `HEURISTIC_TOUCH`, `FAILED_ATTEMPT`, `OUT_OF_ROOT`, `AMBIGUOUS`, or `UNSEEN`. Use `[V]` only when the required check clears; transcript provenance requires `CONFIRMED_READ`. Never tier a whole document. State observation before inference. Give every load-bearing claim a falsifier.
 
 ### 5. Emit the matching shape
 
@@ -74,7 +74,7 @@ Enumerate only load-bearing claims. Apply the method to each cited authority at 
 - Artifact and version were derived, and competing copies were checked.
 - Question type preceded the instrument; located structure was opened.
 - Absence has a same-corpus positive control and individual hit dispositions.
-- Quotes are exact or labeled ordered elisions; normalized-only text did not clear.
+- Each quote has one source and is byte-exact or an ordered elision; unbound and normalized text did not clear.
 - Each `[V]` claim was supported by the licensed direct evidence; opening contrary or non-clearing evidence did not promote it.
 - Every load-bearing claim has a falsifier; unchecked scope is explicit.
 

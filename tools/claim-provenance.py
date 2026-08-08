@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Verify a document's local quotes and citations against exact source evidence.
 
-Quotes pass only when an extracted span is byte-identical to a uniquely resolved cited
-file, or when a ``[elided]`` quote contains byte-identical segments in source order.
-Case, whitespace, or markdown-emphasis normalization is advisory and never clears.
+Quotes pass only when ``[source: `<path>`]`` binds the extracted span to one uniquely
+resolved cited file and the span is byte-identical to that file. A ``[elided]`` quote
+passes when its byte-identical segments occur in source order. Case, whitespace, or
+markdown-emphasis normalization is advisory and never clears.
 
 A citation is a backticked token carrying a path separator or a known file extension.
 A dotted prose identifier is not a citation, so the check does not manufacture blockers
@@ -26,7 +27,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "2.1.0"
+VERSION = "3.0.0"
 MIN_QUOTE_CHARS = 24
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "fixtures", "claim-provenance")
@@ -42,19 +43,26 @@ CITATION_EXTENSIONS = (
     "lock lua m md mdx mjs php pl proto py pyi r rb rs rst scala sh sql svg swift toml ts "
     "tsx txt vue xml yaml yml zsh"
 ).split()
-PATH_IN_BACKTICKS = re.compile(
-    r"`("
-    r"(?:[^`\s]*[\\/][^`\s]*\.[A-Za-z0-9]{1,16})"          # any path-separated token
-    r"|(?:[^`\s]+\.(?:" + "|".join(CITATION_EXTENSIONS) + r"))"  # bare file with known suffix
-    r")`"
+PATH_SEPARATED_CITATION = r"(?:[^`\s]*[\\/][^`\s]+)"
+BARE_KNOWN_CITATION = (
+    r"(?:[^`\s]+\.(?:" + "|".join(CITATION_EXTENSIONS) + r"))"
 )
+CITATION_TOKEN_PATTERN = (
+    r"(?:" + PATH_SEPARATED_CITATION + r"|" + BARE_KNOWN_CITATION + r")"
+)
+PATH_IN_BACKTICKS = re.compile(r"`(" + CITATION_TOKEN_PATTERN + r")`")
+CITATION_TOKEN = re.compile(r"^(?:" + CITATION_TOKEN_PATTERN + r")$")
 PATH_TOKEN = re.compile(
     r"(?<![A-Za-z0-9_])(?:[A-Za-z]:[\\/]|/|\.\.?/)?"
     r"[A-Za-z0-9_@.\\/\-]+\.[A-Za-z0-9]{1,16}"
 )
-QUOTED_SPAN_TEMPLATE = r'(?P<elided>\[elided\]\s*)?\*"(?P<quote>[^\"]{%d,}?)"\*'
+QUOTED_SPAN_TEMPLATE = rb'(?P<elided>\[elided\]\s*)?\*"(?P<quote>[^\"]{%d,}?)"\*'
+BOUND_QUOTED_SPAN_TEMPLATE = (
+    rb'\[source:\s*`(?P<source>[^`\r\n]+)`\]\s*'
+    rb'(?P<elided>\[elided\]\s*)?\*"(?P<quote>[^\"]{%d,}?)"\*'
+)
 UNWRAPPED_QUOTE = re.compile(r'(?<!\*)"[^"\n]{24,}"(?!\*)')
-ELLIPSIS = re.compile(r"…|\.\.\.")
+ELLIPSIS = re.compile(rb"\xe2\x80\xa6|\.\.\.")
 EMPHASIS = re.compile(r"\*\*|\*|`")
 WHITESPACE = re.compile(r"\s+")
 
@@ -84,8 +92,24 @@ def read_text(path):
         return None
 
 
+def read_bytes(path):
+    try:
+        with open(path, "rb") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def _document_text(body):
+    return body.decode("utf-8", errors="surrogateescape")
+
+
 def cited_paths(doc_text):
     return sorted({path.strip() for path in PATH_IN_BACKTICKS.findall(doc_text)})
+
+
+def _citation_token(value):
+    return bool(CITATION_TOKEN.fullmatch(value))
 
 
 def _inside(candidate, root):
@@ -144,6 +168,8 @@ def resolve_citation(path, root):
 
 
 def _advisory_normalize(text):
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", errors="replace")
     return WHITESPACE.sub(" ", EMPHASIS.sub("", text)).strip().casefold()
 
 
@@ -160,7 +186,7 @@ def _ordered(segments, body, transform=lambda value: value):
 
 
 def check_quotes(doc_path, root, min_quote=MIN_QUOTE_CHARS):
-    doc = read_text(doc_path)
+    doc = read_bytes(doc_path)
     if doc is None:
         return None, [f"cannot read document: {doc_path}"]
     root_real, error = _root(root)
@@ -169,23 +195,41 @@ def check_quotes(doc_path, root, min_quote=MIN_QUOTE_CHARS):
 
     corpus = {}
     resolution_findings = []
-    for cited in cited_paths(doc):
-        full, state, detail = resolve_citation(cited, root_real)
-        if state != "resolved":
-            resolution_findings.append(detail)
-            continue
-        body = read_text(full)
-        if body is None:
-            return None, [f"cannot read cited file: {full}"]
-        corpus[full] = body
-
     quoted_span = re.compile(QUOTED_SPAN_TEMPLATE % min_quote)
+    bound_span = re.compile(BOUND_QUOTED_SPAN_TEMPLATE % min_quote)
+    bindings = {match.span("quote"): match for match in bound_span.finditer(doc)}
     findings = []
     advisories = []
     checked = compared = verified = 0
     for match in quoted_span.finditer(doc):
         raw = match.group("quote")
         checked += 1
+        binding = bindings.get(match.span("quote"))
+        if binding is None:
+            findings.append(
+                "UNBOUND_SOURCE quote lacks explicit source binding [source: `<path>`]: "
+                + repr(raw[:90])
+            )
+            continue
+        cited = _document_text(binding.group("source")).strip()
+        if not _citation_token(cited):
+            findings.append(
+                f"quote source is not a path-separated or known-extension citation: {cited}"
+            )
+            continue
+        if cited not in corpus:
+            full, state, detail = resolve_citation(cited, root_real)
+            if state != "resolved":
+                resolution_findings.append(detail)
+                corpus[cited] = (None, None)
+                continue
+            body = read_bytes(full)
+            if body is None:
+                return None, [f"cannot read cited file: {full}"]
+            corpus[cited] = (full, body)
+        _full, body = corpus[cited]
+        if body is None:
+            continue
         if ELLIPSIS.search(raw):
             if not match.group("elided"):
                 findings.append(
@@ -198,45 +242,45 @@ def check_quotes(doc_path, root, min_quote=MIN_QUOTE_CHARS):
                 findings.append("invalid [elided] quote: every segment must be non-empty")
                 continue
             compared += len(segments)
-            if any(_ordered(segments, body) for body in corpus.values()):
+            if _ordered(segments, body):
                 verified += 1
-            elif any(_ordered(segments, body, _advisory_normalize)
-                     for body in corpus.values()):
+            elif _ordered(segments, body, _advisory_normalize):
                 advisories.append(
-                    "NORMALIZED_ONLY ordered elision; case, whitespace, or emphasis differs: "
-                    + repr(raw[:90])
+                    f"NORMALIZED_ONLY ordered elision in {cited}; case, whitespace, or "
+                    f"emphasis differs: {raw[:90]!r}"
                 )
             else:
-                findings.append("unmatched or out-of-order [elided] quote: " + repr(raw[:90]))
+                findings.append(
+                    f"unmatched or out-of-order [elided] quote in {cited}: {raw[:90]!r}"
+                )
             continue
 
         compared += 1
-        if any(raw in body for body in corpus.values()):
+        if raw in body:
             verified += 1
-        elif any(_advisory_normalize(raw) in _advisory_normalize(body)
-                 for body in corpus.values()):
+        elif _advisory_normalize(raw) in _advisory_normalize(body):
             advisories.append(
-                "NORMALIZED_ONLY quote; case, whitespace, or emphasis differs: "
-                + repr(raw[:90])
+                f"NORMALIZED_ONLY quote in {cited}; case, whitespace, or emphasis differs: "
+                f"{raw[:90]!r}"
             )
         else:
-            findings.append("unmatched exact quote: " + repr(raw[:90]))
+            findings.append(f"unmatched exact quote in {cited}: {raw[:90]!r}")
 
     return {
         "checked": checked,
         "compared": compared,
         "verified": verified,
-        "files": len(corpus),
+        "files": len({full for full, _body in corpus.values() if full is not None}),
         "resolution_findings": resolution_findings,
         "findings": findings,
         "advisories": advisories,
-        "skipped": len(UNWRAPPED_QUOTE.findall(doc)),
-        "vacuous": checked == 0 or not corpus,
+        "skipped": len(UNWRAPPED_QUOTE.findall(_document_text(doc))),
+        "vacuous": checked == 0 or compared == 0,
     }, []
 
 
 def _tool_kind(name):
-    base = (name or "").casefold().rsplit(".", 1)[-1]
+    base = name.casefold().rsplit(".", 1)[-1] if isinstance(name, str) else ""
     if base in READ_TOOLS:
         return "read"
     if base in WRITE_TOOLS:
@@ -347,7 +391,7 @@ def _make_call(runtime, call_id, name, args, raw_blob, cwd):
         "name": name or "<unnamed>",
         "operation": operation,
         "paths": sorted(set(paths)),
-        "cwd": cwd,
+        "cwd": cwd if isinstance(cwd, str) else None,
     }
 
 
@@ -408,14 +452,39 @@ def transcript_evidence(transcript_path, root):
             if not isinstance(record, dict):
                 malformed_records += 1
                 continue
+            record_type = record.get("type")
+            if record_type is not None and not isinstance(record_type, str):
+                malformed_records += 1
+                continue
 
-            payload = record.get("payload") or {}
-            if record.get("type") in {"turn_context", "session_meta"}:
+            raw_payload = record.get("payload")
+            if raw_payload is None:
+                payload = {}
+            elif isinstance(raw_payload, dict):
+                payload = raw_payload
+            else:
+                malformed_records += 1
+                continue
+            raw_message = record.get("message")
+            if raw_message is None:
+                message = {}
+            elif isinstance(raw_message, dict):
+                message = raw_message
+            else:
+                malformed_records += 1
+                continue
+            record_cwd = record.get("cwd")
+            if record_cwd is not None and not isinstance(record_cwd, str):
+                malformed_records += 1
+                continue
+            if record_type in {"turn_context", "session_meta"}:
                 candidate_cwd = payload.get("cwd")
                 if isinstance(candidate_cwd, str):
                     codex_cwd = candidate_cwd
+                elif candidate_cwd is not None:
+                    malformed_records += 1
+                    continue
 
-            message = record.get("message") or {}
             content = message.get("content")
             if isinstance(content, list):
                 for block in content:
@@ -425,30 +494,42 @@ def transcript_evidence(transcript_path, root):
                         runtime_calls["claude-code"] += 1
                         call_id = block.get("id")
                         if not isinstance(call_id, str):
+                            malformed_records += 1
                             continue
                         if call_id in pending:
                             duplicate_calls += 1
                             _finish_call(pending.pop(call_id), None, root, evidence)
-                        args = block.get("input") if isinstance(block.get("input"), dict) else {}
+                        raw_args = block.get("input", {})
+                        if not isinstance(raw_args, dict):
+                            malformed_records += 1
+                            continue
+                        args = raw_args
                         pending[call_id] = _make_call(
                             "claude-code", call_id, block.get("name"), args,
-                            json.dumps(args, sort_keys=True), record.get("cwd")
+                            json.dumps(args, sort_keys=True), record_cwd
                         )
                     elif block.get("type") == "tool_result":
                         call_id = block.get("tool_use_id")
+                        if not isinstance(call_id, str):
+                            malformed_records += 1
+                            continue
                         call = pending.pop(call_id, None)
                         if call is None:
                             unmatched_results += 1
                         else:
                             _finish_call(call, block, root, evidence)
 
-            if record.get("type") != "response_item" or not isinstance(payload, dict):
+            if record_type != "response_item":
                 continue
             kind = payload.get("type")
+            if kind is not None and not isinstance(kind, str):
+                malformed_records += 1
+                continue
             if kind in {"function_call", "custom_tool_call"}:
                 runtime_calls["codex"] += 1
                 call_id = payload.get("call_id")
                 if not isinstance(call_id, str):
+                    malformed_records += 1
                     continue
                 if call_id in pending:
                     duplicate_calls += 1
@@ -459,6 +540,9 @@ def transcript_evidence(transcript_path, root):
                 )
             elif kind in {"function_call_output", "custom_tool_call_output"}:
                 call_id = payload.get("call_id")
+                if not isinstance(call_id, str):
+                    malformed_records += 1
+                    continue
                 call = pending.pop(call_id, None)
                 if call is None:
                     unmatched_results += 1
@@ -569,13 +653,69 @@ def selftest():
                 fh.write(text)
             return path
 
-        exact = document("exact.md", f'`schemas/order.json` says *"{source}"*.')
+        def document_bytes(name, body):
+            path = os.path.join(tmp, name)
+            with open(path, "wb") as fh:
+                fh.write(body)
+            return path
+
+        exact = document(
+            "exact.md", f'[source: `schemas/order.json`] *"{source}"*.'
+        )
         run = invoke("--quotes", exact, "--root", tmp)
         record("exact quote clears", run.returncode == 0 and "verified=1" in run.stdout)
 
+        bound = document(
+            "bound.md", f'[source: `schemas/order.json`] *"{source}"*.'
+        )
+        run = invoke("--quotes", bound, "--root", tmp)
+        record("explicit source binding clears",
+               run.returncode == 0 and "verified=1" in run.stdout)
+        unbound = document(
+            "unbound.md", f'`schemas/order.json` says *"{source}"*.'
+        )
+        run = invoke("--quotes", unbound, "--root", tmp)
+        record("quote without explicit source binding goes red",
+               run.returncode == 1 and "explicit source binding" in run.stdout)
+
+        other_source = "A different source contains this otherwise exact quotation"
+        with open(os.path.join(schemas, "other.txt"), "w", encoding="utf-8") as fh:
+            fh.write(other_source)
+        wrong_source = document(
+            "wrong-source.md",
+            f'[source: `schemas/order.json`] *"{other_source}"*. '
+            "The comparison source is `schemas/other.txt`.",
+        )
+        run = invoke("--quotes", wrong_source, "--root", tmp)
+        record("quote cannot clear against a separately cited source",
+               run.returncode == 1 and "schemas/order.json" in run.stdout)
+
+        crlf_source = b"A first source line with enough bytes\r\nA second source line stays distinct"
+        with open(os.path.join(schemas, "crlf.txt"), "wb") as fh:
+            fh.write(crlf_source)
+        crlf_doc = document_bytes(
+            "crlf.md",
+            b'[source: `schemas/crlf.txt`] *"A first source line with enough bytes\n'
+            b'A second source line stays distinct"*.',
+        )
+        run = invoke("--quotes", crlf_doc, "--root", tmp)
+        record("CRLF and LF quotes are not byte-identical", run.returncode == 1)
+
+        invalid_source = b"An invalid byte \xff must not equal a different invalid byte in evidence"
+        with open(os.path.join(schemas, "invalid.bin"), "wb") as fh:
+            fh.write(invalid_source)
+        invalid_doc = document_bytes(
+            "invalid.md",
+            b'[source: `schemas/invalid.bin`] *"An invalid byte \xfe must not equal a '
+            b'different invalid byte in evidence"*.',
+        )
+        run = invoke("--quotes", invalid_doc, "--root", tmp)
+        record("replacement decoding cannot manufacture byte identity", run.returncode == 1)
+
         fabricated = document(
             "fabricated.md",
-            '`schemas/order.json` says *"A legally binding settlement guarantee exists"*.'
+            '[source: `schemas/order.json`] '
+            '*"A legally binding settlement guarantee exists"*.'
         )
         record("fabricated quote goes red",
                invoke("--quotes", fabricated, "--root", tmp).returncode == 1)
@@ -585,7 +725,7 @@ def selftest():
             ("whitespace-only quote does not clear", source.replace(" ", "  ")),
         ):
             path = document(label.replace(" ", "-") + ".md",
-                            f'`schemas/order.json` says *"{quote}"*.')
+                            f'[source: `schemas/order.json`] *"{quote}"*.')
             run = invoke("--quotes", path, "--root", tmp)
             record(label, run.returncode == 1 and "NORMALIZED_ONLY" in run.stdout)
 
@@ -594,7 +734,8 @@ def selftest():
             fh.write("A binding **reporting** contract protects ordered evidence")
         emphasis = document(
             "emphasis.md",
-            '`schemas/emphasis.md` says *"A binding reporting contract protects ordered evidence"*.'
+            '[source: `schemas/emphasis.md`] '
+            '*"A binding reporting contract protects ordered evidence"*.'
         )
         run = invoke("--quotes", emphasis, "--root", tmp)
         record("emphasis-normalized quote does not clear",
@@ -602,25 +743,29 @@ def selftest():
 
         ordered = document(
             "ordered.md",
-            '`schemas/order.json` says [elided] *"A binding reporting … ordered evidence"*.'
+            '[source: `schemas/order.json`] '
+            '[elided] *"A binding reporting … ordered evidence"*.'
         )
         record("labeled ordered elision clears",
                invoke("--quotes", ordered, "--root", tmp).returncode == 0)
         reversed_elision = document(
             "reversed.md",
-            '`schemas/order.json` says [elided] *"ordered evidence … A binding reporting"*.'
+            '[source: `schemas/order.json`] '
+            '[elided] *"ordered evidence … A binding reporting"*.'
         )
         record("reversed elision goes red",
                invoke("--quotes", reversed_elision, "--root", tmp).returncode == 1)
         unlabeled = document(
             "unlabeled.md",
-            '`schemas/order.json` says *"A binding reporting … ordered evidence"*.'
+            '[source: `schemas/order.json`] '
+            '*"A binding reporting … ordered evidence"*.'
         )
         run = invoke("--quotes", unlabeled, "--root", tmp)
         record("unlabeled elision goes red",
                run.returncode == 1 and "without a preceding [elided]" in run.stdout)
         empty_elision = document(
-            "empty-elision.md", '`schemas/order.json` says [elided] *"... ... ..."*.'
+            "empty-elision.md",
+            '[source: `schemas/order.json`] [elided] *"... ... ..."*.',
         )
         record("zero-segment elision goes red",
                invoke("--quotes", empty_elision, "--root", tmp,
@@ -639,13 +784,15 @@ def selftest():
             fh.write("A version two quotation with different exact contents")
         wrong_version = document(
             "wrong-version.md",
-            '`schemas/v2/order.json` says '
+            '[source: `schemas/v2/order.json`] '
             '*"A version one quotation that must not cross directories"*.'
         )
         record("qualified citation cannot fall back to another basename",
                invoke("--quotes", wrong_version, "--root", tmp).returncode == 1)
         ambiguous = document(
-            "ambiguous.md", '`order.json` says *"A binding reporting contract protects ordered evidence"*.'
+            "ambiguous.md",
+            '[source: `order.json`] '
+            '*"A binding reporting contract protects ordered evidence"*.',
         )
         run = invoke("--quotes", ambiguous, "--root", tmp)
         record("ambiguous bare basename goes red",
@@ -655,19 +802,24 @@ def selftest():
             outside_file = os.path.join(outside, "outside.json")
             with open(outside_file, "w", encoding="utf-8") as fh:
                 fh.write(source)
-            absolute = document("absolute.md", f'`{outside_file}` says *"{source}"*.')
+            absolute = document(
+                "absolute.md", f'[source: `{outside_file}`] *"{source}"*.'
+            )
             run = invoke("--quotes", absolute, "--root", tmp)
             record("absolute path outside root goes red",
                    run.returncode == 1 and "escapes --root" in run.stdout)
             traversal = document(
-                "traversal.md", f'`../{os.path.basename(outside)}/outside.json` says *"{source}"*.'
+                "traversal.md",
+                f'[source: `../{os.path.basename(outside)}/outside.json`] *"{source}"*.',
             )
             record("dot-dot escape goes red",
                    invoke("--quotes", traversal, "--root", tmp).returncode == 1)
             link = os.path.join(schemas, "linked.json")
             try:
                 os.symlink(outside_file, link)
-                linked = document("linked.md", f'`schemas/linked.json` says *"{source}"*.')
+                linked = document(
+                    "linked.md", f'[source: `schemas/linked.json`] *"{source}"*.'
+                )
                 run = invoke("--quotes", linked, "--root", tmp)
                 record("symlink escape goes red",
                        run.returncode == 1 and "escapes --root" in run.stdout)
@@ -683,6 +835,27 @@ def selftest():
                          os.path.join(FIXTURES, fixture))
             record(f"{runtime} successful correlated read clears",
                    run.returncode == 0 and "CONFIRMED_READ=1" in run.stdout)
+
+        os.makedirs(os.path.join(tmp, "docs"))
+        with open(os.path.join(tmp, "docs", "Makefile"), "w", encoding="utf-8") as fh:
+            fh.write("all:\n\t@true\n")
+        extensionless = document(
+            "extensionless.md", "See `schemas/order.json` and `docs/Makefile`."
+        )
+        run = invoke("--citations", extensionless, "--root", tmp, "--transcript",
+                     os.path.join(FIXTURES, "claude-read-success.jsonl"))
+        record("path-separated extensionless citations are checked",
+               run.returncode == 1 and "cited=2" in run.stdout
+               and "docs/Makefile" in run.stdout)
+
+        run = invoke("--quotes", bound, "--root", tmp)
+        record("quotes-only success receipt stays in scope",
+               run.returncode == 0
+               and "successful correlated direct read" not in run.stdout)
+        run = invoke("--citations", citation_doc, "--root", tmp, "--transcript",
+                     os.path.join(FIXTURES, "claude-read-success.jsonl"))
+        record("citations-only success receipt stays in scope",
+               run.returncode == 0 and "extracted quotes" not in run.stdout)
 
         for label, fixture, status in (
             ("failed read does not clear", "claude-read-failed.jsonl", FAILED_ATTEMPT),
@@ -722,6 +895,34 @@ def selftest():
             run = invoke("--citations", prose_doc, "--root", tmp, "--transcript", unflagged)
             record(f"file content naming a missing-file error still clears ({label})",
                    run.returncode == 0 and "CONFIRMED_READ=1" in run.stdout)
+
+        leading_error = "Error: this is literal source content, not a failed tool call"
+        with open(os.path.join(schemas, "leading-error.txt"), "w", encoding="utf-8") as fh:
+            fh.write(leading_error)
+        leading_error_doc = document(
+            "leading-error.md", "See `schemas/leading-error.txt`."
+        )
+        for label, extra, expected_code, expected_status in (
+            ("explicit success", {"is_error": False}, 0, CONFIRMED_READ),
+            ("no success flag", {}, 1, FAILED_ATTEMPT),
+        ):
+            leading_error_transcript = document(
+                f"leading-error-{len(extra)}.jsonl",
+                "\n".join([
+                    json.dumps({"type": "assistant", "cwd": tmp, "message": {"content": [
+                        {"type": "tool_use", "id": "leading-error", "name": "Read",
+                         "input": {"file_path": os.path.join(schemas, "leading-error.txt")}}
+                    ]}}),
+                    json.dumps({"type": "user", "cwd": tmp, "message": {"content": [
+                        dict({"type": "tool_result", "tool_use_id": "leading-error",
+                              "content": leading_error}, **extra)
+                    ]}}),
+                ]) + "\n",
+            )
+            run = invoke("--citations", leading_error_doc, "--root", tmp,
+                         "--transcript", leading_error_transcript)
+            record(f"leading Error text respects {label}",
+                   run.returncode == expected_code and expected_status in run.stdout)
 
         # A dotted prose identifier is not a citation; treating it as one guarantees a
         # blocker on any technical document, and a check that always fails gets muted.
@@ -777,6 +978,19 @@ def selftest():
         run = invoke("--citations", citation_doc, "--root", tmp, "--transcript", malformed)
         record("malformed transcript goes red",
                run.returncode == 1 and "malformed record" in run.stdout)
+        wrong_shapes = document(
+            "wrong-shapes.jsonl",
+            read_text(os.path.join(FIXTURES, "claude-read-success.jsonl"))
+            + json.dumps({"type": "turn_context", "payload": [{"cwd": tmp}]}) + "\n"
+            + json.dumps({"type": "assistant", "message": [{"content": []}]}) + "\n"
+            + json.dumps({"type": [], "message": {"content": []}}) + "\n"
+            + json.dumps({"type": "response_item", "payload": {"type": []}}) + "\n",
+        )
+        run = invoke("--citations", citation_doc, "--root", tmp,
+                     "--transcript", wrong_shapes)
+        record("valid JSON with wrong record shapes is inconclusive, not a crash",
+               run.returncode == 1 and "malformed=4" in run.stdout
+               and "malformed record" in run.stdout)
         pending = document(
             "pending.jsonl",
             json.dumps({"type": "assistant", "cwd": ".", "message": {"content": [{
@@ -891,8 +1105,12 @@ def main(argv=None):
     if vacuous:
         print("At least one check was VACUOUS. Treat it as unperformed.")
     elif blockers == 0:
-        print("Verified: extracted quotes are exact or labeled ordered elisions, and every "
-              "cited path has a successful correlated direct read.")
+        if args.quotes:
+            print("Verified quotes: every selected quote has an explicit source binding and "
+                  "is byte-exact or a labeled ordered elision.")
+        if args.citations:
+            print("Verified citations: every cited path has a successful correlated direct "
+                  "read.")
     return 1 if blockers or vacuous else 0
 
 

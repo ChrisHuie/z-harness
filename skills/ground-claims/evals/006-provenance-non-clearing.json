@@ -6,7 +6,7 @@
   "files": [
     {
       "path": "findings/order-note.md",
-      "content": "# Order note\n\nPer `schemas/order.json`, *\"a binding reporting contract protects ordered evidence\"*.\n"
+      "content": "# Order note\n\n[source: `schemas/order.json`] *\"a binding reporting contract protects ordered evidence\"*.\n"
     },
     {
       "path": "schemas/order.json",

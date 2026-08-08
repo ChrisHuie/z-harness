@@ -16,7 +16,7 @@
     "does not overclaim the opposite: the request branch contains a free-text ask, so whether a buyer can request a price change depends on runtime interpretation that this schema does not establish",
     "does not accept the user's framing as established just because the user asserted it",
     "states what the schema does establish — positional, stateful iteration answered per entry, with free-text request plus product/proposal action branches",
-    "tags the claim [V] because the object was opened, and states the falsifier that would refute it",
+    "does not tag the submitted price-counter claim [V]; tags only the structural observations directly supported after the object was opened and enumerated, and states the falsifier that would refute each load-bearing conclusion",
     "if any part were answered from the property name alone, that part is tagged [I] and the unopened object is named"
   ]
 }

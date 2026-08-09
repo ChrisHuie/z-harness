@@ -109,13 +109,20 @@ EXPECTED_FORMATS = {
     "kimi": "kimi-code-plugin/native",
     "hermes": "hermes-skill-tap/github",
 }
+# Every manifest name a target host would honour. `.cursor-plugin/plugin.json` is in
+# Codex's discoverable list, and Hermes' loader falls back from `plugin.yaml` to
+# `plugin.yml`; both were absent, so the isolation guard could not see a file that would
+# convert a tap root into a Python directory plugin. The payload inventory rejects such a
+# file today, but that is a different mechanism answering a different question.
 COMPETING_MANIFESTS = {
     "plugin.json",
     ".codex-plugin/plugin.json",
     ".claude-plugin/plugin.json",
+    ".cursor-plugin/plugin.json",
     "kimi.plugin.json",
     ".kimi-plugin/plugin.json",
     "plugin.yaml",
+    "plugin.yml",
 }
 WINDOWS_RESERVED_NAMES = {
     "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
@@ -2549,6 +2556,12 @@ def selftest(
             lambda root: write_json(root / ".kimi-plugin/plugin.json", {"name": "shadow"}),
             "render.invalid",
         )
+        for spelling in ("plugin.yml", ".cursor-plugin/plugin.json"):
+            planted(
+                f"isolation rejects {spelling}, a manifest name a target host honours",
+                "hermes" if spelling.endswith(".yml") else "codex",
+                lambda root, rel=spelling: write_bytes(root / rel, b"name: shadow\n"),
+            )
         planted(
             "hermes tap verification rejects executable plugin conversion",
             "hermes",

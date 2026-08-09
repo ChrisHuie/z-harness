@@ -66,7 +66,7 @@ SELFTEST_SUITES = [
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 178),
     ("ci-gate", ["tools/ci-gate.py", "--selftest"], 16),
-    ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 50),
+    ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 61),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
     ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 16),
     ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 66),
@@ -106,6 +106,8 @@ STALE_PATTERNS = [
     "ph-lint",                  # linter that never existed here
     "Each push is its own action needing its own confirmation",  # retired consent loop
     "committed to the PR",      # local commit falsely described as published
+    "contain no `targetLevel`", # artifacts carry the claims block; denied in two docs
+    "no validation status",     # same denial, README wording
 ]
 
 ROUTING_SKILLS = ["git-workflow", "pr-review-method", "testing-ci", "agent-dispatch",

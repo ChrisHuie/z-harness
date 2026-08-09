@@ -198,8 +198,14 @@ fixed byte goldens, and negative mutations remain load-bearing.
 ## Publication, host evidence, and rollback
 
 No publisher, host runner, promotion gate, or rollback mechanism exists yet. Render artifacts
-therefore contain no `targetLevel`, `earnedLevel`, `validationStatus`, `authority`, installed digest,
-or runtime evidence.
+therefore contain no host evidence, no installed digest, and no `authority`: every artifact carries
+`evidence: []`, and authority is absent because it belongs to a guarded fact rather than a package.
+
+They do carry `targetLevel`, `earnedLevel`, and `validationStatus`, derived from the target's adapter
+entry. `earnedLevel` is pinned to `unverified` and never read from configuration, and a
+`validationStatus` above `fixture-only` requires host evidence records plus a non-empty license set,
+so no status a host receipt would justify is reachable while no host receipt producer exists. See
+[`contracts/compatibility-levels.md`](../contracts/compatibility-levels.md) for the evidence rule.
 
 A future publisher must verify the exact subject at its commit/upload fence and bind both the
 logical artifact digest and an immutable transport identity. Host observations belong in separate

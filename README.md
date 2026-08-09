@@ -57,7 +57,8 @@ Ownership, ACLs, xattrs, birth times, and Git-clone directory metadata are outsi
 
 Canonical `argument-hint` metadata is retained only in the Claude projection. `allowed-tools` is
 omitted from every rendered target because hosts do not give it one portable authority meaning.
-Rendered artifacts contain no validation status, earned compatibility, or runtime evidence. See
+Rendered artifacts record `validationStatus: fixture-only` and `earnedLevel: unverified`, and carry
+no runtime evidence and no package-wide authority. See
 [`contracts/compatibility-levels.md`](contracts/compatibility-levels.md) for that separation.
 
 ## Install in Codex

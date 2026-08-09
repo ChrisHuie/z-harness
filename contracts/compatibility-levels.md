@@ -116,11 +116,11 @@ the target's adapter entry and gated on the evidence above:
 `z-harness-framed-sha256-v2` frames its algorithm identifier and domain, then preserves the sequence
 supplied by the caller. Tree digests sort records by path and frame path, canonical file mode, size,
 and content digest in that fixed order. JSON digests frame one UTF-8 canonical JSON value with sorted
-object keys; array order is retained. Nine domains are in use: build contracts, the canonical
-render configuration, the selected adapter entry, source input, included source, per-skill input
-and per-skill included source, target payload, and complete artifact identities. Empty directories
-are forbidden,
-so directory topology is derived from file paths.
+object keys; array order is retained. Seven fixed digest domains are in use: build contracts, the
+canonical render configuration, the selected adapter entry, source input, included source, target
+payload, and complete artifact. Two more are emitted per selected skill, for that skill's own input
+and included source, so the total tracks the selected inventory rather than being a fixed count.
+Empty directories are forbidden, so directory topology is derived from file paths.
 
 The cross-transport logical digest does not claim ownership, ACLs, xattrs, birth time, or directory
 metadata: Git does not preserve those properties. Renderer-owned output separately conforms to

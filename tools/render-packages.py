@@ -57,6 +57,32 @@ PROJECTION_GOLDEN = GOLDENS / "ground-claims-projection.json"
 DIGEST_GOLDEN = GOLDENS / "digests.json"
 DIGEST_ALGORITHM = "z-harness-framed-sha256-v2"
 FILESYSTEM_PROFILE = "z-harness-posix-tree-v1"
+# Every digest domain a render may emit. `framed_digest` is the one choke point all of
+# them pass through, so a selftest that spies there and compares for equality catches a
+# new domain, a renamed domain, and a domain that stopped being reached. Spying on
+# `tree_digest` instead sees only the five tree domains and misses the four JSON ones.
+# The count is not a constant: it is seven fixed domains plus two per selected skill.
+DIGEST_DOMAINS_FIXED = frozenset({
+    "build.contracts",
+    "config.render",
+    "config.adapter-entry",
+    "source.input",
+    "source.selected",
+    "payload",
+    "artifact",
+})
+DIGEST_DOMAINS_PER_SKILL = ("source.skill.{skill}.input", "source.skill.{skill}.selected")
+# Both prose surfaces that enumerate the domains must carry this sentence verbatim, so
+# changing the set above forces the documents to change with it rather than drifting into
+# a partial enumeration.
+DIGEST_DOMAIN_SENTENCE = (
+    "Seven fixed digest domains are in use: build contracts, the canonical render "
+    "configuration, the selected adapter entry, source input, included source, target "
+    "payload, and complete artifact. Two more are emitted per selected skill, for that "
+    "skill's own input and included source, so the total tracks the selected inventory "
+    "rather than being a fixed count."
+)
+DIGEST_DOMAIN_DOCS = ("docs/cross-harness-architecture.md", "contracts/compatibility-levels.md")
 CONTRACT_FILES = (
     Path(__file__).resolve(),
     ARTIFACT_SCHEMA_FILE,
@@ -3307,17 +3333,39 @@ def selftest(
         )
 
         domains: List[str] = []
-        original_tree_digest = globals()["tree_digest"]
-        def recording_tree_digest(records: Sequence[Dict[str, Any]], domain: str) -> str:
+        original_framed_digest = globals()["framed_digest"]
+        def recording_framed_digest(domain: str, values: Sequence[bytes]) -> str:
             domains.append(domain)
-            return original_tree_digest(records, domain)
-        globals()["tree_digest"] = recording_tree_digest
+            return original_framed_digest(domain, values)
+        globals()["framed_digest"] = recording_framed_digest
         try:
             render_all(ROOT, temp / "domain-callsite", render_config, adapter_config)
         finally:
-            globals()["tree_digest"] = original_tree_digest
-        required_domains = {"build.contracts", "source.input", "source.selected", "payload", "artifact"}
-        expect("production call sites exercise every required digest domain", required_domains <= set(domains))
+            globals()["framed_digest"] = original_framed_digest
+        expected_domains = set(DIGEST_DOMAINS_FIXED)
+        for skill in render_config["selectedSkills"]:
+            for template in DIGEST_DOMAINS_PER_SKILL:
+                expected_domains.add(template.format(skill=skill))
+        # Equality, not containment: a subset check is monotone, so it stays green when a
+        # domain is added and when one silently stops being reached.
+        expect(
+            "production call sites emit exactly the declared digest domains "
+            f"(expected {len(expected_domains)}, observed {len(set(domains))})",
+            set(domains) == expected_domains,
+        )
+        expect(
+            "every declared digest domain is distinct from every other",
+            len(expected_domains) == len(DIGEST_DOMAINS_FIXED) + len(
+                DIGEST_DOMAINS_PER_SKILL
+            ) * len(render_config["selectedSkills"]),
+        )
+        for relative in DIGEST_DOMAIN_DOCS:
+            prose = " ".join((ROOT / relative).read_text(encoding="utf-8").split())
+            expect(
+                f"{relative} states the digest-domain contract "
+                "(line wrapping folded, otherwise exact)",
+                DIGEST_DOMAIN_SENTENCE in prose,
+            )
 
         original_verify_root = globals()["verify_render_root"]
         def planted_stage_verify(*_args: Any, **_kwargs: Any) -> Any:

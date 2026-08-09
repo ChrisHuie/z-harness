@@ -234,8 +234,33 @@ EXEC_WRAPPERS = {
         "dimsu",
         0,
     ),
+    # Flags read from `sudo --help` on this host rather than recalled. sudo runs the
+    # command in the same argv the outer shell already expanded, so a wrapped git is the
+    # same invocation and was previously invisible to both guards.
+    "sudo": (
+        {"-A", "--askpass", "-b", "--background", "-B", "--bell", "-E",
+         "--preserve-env", "-H", "--set-home", "-i", "--login", "-K",
+         "--remove-timestamp", "-k", "--reset-timestamp", "-n",
+         "--non-interactive", "-P", "--preserve-groups", "-S", "--stdin",
+         "-s", "--shell"},
+        {"-C", "--close-from", "-D", "--chdir", "-g", "--group", "-h", "--host",
+         "-p", "--prompt", "-R", "--chroot", "-T", "--command-timeout",
+         "-U", "--other-user", "-u", "--user"},
+        ("--close-from=", "--chdir=", "--group=", "--host=", "--prompt=",
+         "--chroot=", "--command-timeout=", "--other-user=", "--user=",
+         "--preserve-env=", "-C", "-D", "-g", "-h", "-p", "-R", "-T", "-U", "-u"),
+        "AbBEHiKknPSs",
+        0,
+    ),
 }
 WRAPPER_TERMINAL_OPTIONS = {"--help", "--version"}
+# Launchers that do run the command that follows but whose argv rewriting this guard does
+# not model. Peeling them by guesswork would mis-locate the command, and ignoring them
+# returns allow for a wrapped invocation, so they are reported as an unresolved prefix and
+# the decision becomes `ask`.
+UNMODELLED_EXEC_WRAPPERS = {"xargs", "script", "strace", "dtruss", "ltrace", "watch",
+                            "parallel", "flock", "chroot", "unshare", "doas", "runuser",
+                            "su", "systemd-run", "ssh"}
 
 
 def strip_shell_keywords(words):
@@ -259,7 +284,17 @@ def unwrap_command_prefix(tokens):
     wrapper_depth = 0
     while items:
         while items and items[0][0] in SHELL_KEYWORDS:
-            items.pop(0)
+            keyword = items.pop(0)[0]
+            if keyword not in {"command", "builtin"} or not items:
+                continue
+            # `command -p git ...` still runs git; `command -v git` only prints a path.
+            # Stripping the keyword alone left `-p` sitting where argv[0] was expected,
+            # so the invocation stopped looking like git.
+            if items[0][0] in {"-v", "-V", "--version"}:
+                items.clear()
+                break
+            if items[0][0] == "-p":
+                items.pop(0)
         while items and ASSIGNMENT.match(items[0][0]):
             key, value = items.pop(0)[0].split("=", 1)
             command_env[key] = value
@@ -378,6 +413,13 @@ def unwrap_command_prefix(tokens):
             if errors:
                 break
             continue
+
+        if executable in UNMODELLED_EXEC_WRAPPERS:
+            # Do not guess where the command starts; say so and let the caller ask.
+            errors.append(
+                f"{executable!r} launches the command that follows, and this guard does "
+                f"not model how it rewrites argv")
+            break
 
         break
     if wrapper_depth > 8:
@@ -756,6 +798,18 @@ FIXTURES = [
      """git grep -EOe'harness\\b' -- README.md""", "allow"),
     ("GREEN CLUSTER: a letter this git rejects outright is not the guard's business",
      """git grep -EZe'harness\\b' -- README.md""", "allow"),
+    # Prefix peeling is shared with the zsh guard, so a launcher missing from that table
+    # hid the same invocation from both.
+    ("RED WRAPPER: sudo",
+     """sudo git grep -nE 'harness\\b' -- README.md""", "deny"),
+    ("RED WRAPPER: sudo with a target user",
+     """sudo -u root git grep -nE 'harness\\b' -- README.md""", "deny"),
+    ("RED WRAPPER: command -p still executes git",
+     """command -p git grep -nE 'harness\\b' -- README.md""", "deny"),
+    ("GREEN WRAPPER: command -v only prints a path",
+     """command -v git grep -nE 'harness\\b' -- README.md""", "allow"),
+    ("ASK WRAPPER: xargs is unmodelled and conceals git",
+     """xargs git grep -nE 'harness\\b' -- README.md""", "ask"),
     ("GREEN patternType=perl via config - the intended engine",
      """git -c grep.patternType=perl grep 'x\\b' -- src/""", "allow"),
     ("GREEN -P with a -f pattern file",

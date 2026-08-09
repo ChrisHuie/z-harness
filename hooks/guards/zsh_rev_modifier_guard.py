@@ -120,6 +120,20 @@ def decide(command, _depth=0):
     """-> (decision, reason)."""
     hits = []
     for tokens in split_commands(command):
+        # An unresolvable prefix hides where the command starts, so `git` may be present
+        # and unfindable. The sibling grep guard already fails closed on this; discarding
+        # the same errors here left `xargs git show $SHA:src/f.py` reading as allow while
+        # the bare form denied.
+        _items, _env, prefix_errors = unwrap_command_prefix(tokens)
+        if prefix_errors:
+            words = [text for text, _ in tokens]
+            if any(os.path.basename(word) == "git" for word in words):
+                return ("ask",
+                        "this command launches git through a prefix this guard cannot "
+                        "resolve (" + "; ".join(prefix_errors) + "), so it cannot prove "
+                        "whether a `rev:path` argument survives zsh expansion. Run git "
+                        "directly, or confirm by hand that no argument carries a `:` "
+                        "followed by a zsh history-modifier letter.")
         scan_this_command = is_rev_path_git(tokens)
         # `<shell> -c '...'` hides the git invocation one level down, and the two shells
         # mangle at different moments. Only zsh applies a history modifier, so a zsh -c
@@ -265,6 +279,26 @@ FIXTURES = [
      "SHA=x; nice git show $SHA:src/f.py", "deny"),
     ("RED WRAPPER: command",
      "SHA=x; command git show $SHA:src/f.py", "deny"),
+    # The mangling happens in the OUTER zsh, before any launcher runs, so the launcher's
+    # identity does not change whether the hazard exists -- only whether this guard can
+    # still see git. Both guards shared one prefix peeler that modelled neither of these.
+    ("RED WRAPPER: sudo",
+     "SHA=x; sudo git show $SHA:src/f.py", "deny"),
+    ("RED WRAPPER: sudo with a target user",
+     "SHA=x; sudo -u root git show $SHA:src/f.py", "deny"),
+    ("RED WRAPPER: sudo with an attached long option",
+     "SHA=x; sudo --user=root git show $SHA:src/f.py", "deny"),
+    ("RED WRAPPER: command -p still executes git",
+     "SHA=x; command -p git show $SHA:src/f.py", "deny"),
+    ("GREEN WRAPPER: command -v only prints a path, it does not run git",
+     "SHA=x; command -v git show $SHA:src/f.py", "allow"),
+    # A launcher whose argv rewriting is not modelled must not read as clean.
+    ("ASK WRAPPER: xargs is unmodelled and conceals git",
+     "SHA=x; xargs git show $SHA:src/f.py", "ask"),
+    ("ASK WRAPPER: ssh is unmodelled and conceals git",
+     "SHA=x; ssh host git show $SHA:src/f.py", "ask"),
+    ("GREEN WRAPPER: an unmodelled launcher with no git in it is not this guard's business",
+     "xargs ls -la", "allow"),
     # A nested shell mangles at a different moment depending on which shell it is.
     ("RED NESTED: sh -c body in double quotes - the OUTER zsh expands it first",
      'sh -c "SHA=x; git show $SHA:src/f.py"', "deny"),

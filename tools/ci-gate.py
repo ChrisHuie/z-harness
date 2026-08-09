@@ -21,7 +21,7 @@ WORKFLOW = ROOT / ".github/workflows/check.yml"
 # 165 here and 178 in harness_check -- and a fake that hardcodes its own number tests the
 # literal rather than the contract.
 SUITE_FLOORS = {
-    "harness_check": 49,
+    "harness_check": 52,
     "render-packages": 178,
     "bash_command_guard": 111,
     "git_grep_engine_guard": 66,

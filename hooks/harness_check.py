@@ -36,6 +36,7 @@ zero inputs (an empty scan set is an error, never a clean verdict).
                                tree, then exit
 """
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -110,6 +111,23 @@ STALE_PATTERNS = [
     "contain no `targetLevel`", # artifacts carry the claims block; denied in two docs
     "no validation status",     # same denial, README wording
 ]
+
+# C1: source digest per aggregated suite. A receipt's check count is self-reported, so a
+# stub can satisfy any floor; binding the source is what makes a receipt evidence.
+SUITE_SOURCE_GOLDEN = "contracts/goldens/suite-sources.json"
+
+
+def suite_source_golden(root=None):
+    """Recorded source digest per aggregated suite, or None when the file is absent.
+
+    Absent is tolerated so an installed package without contracts/ still runs; a suite
+    listed in the registry but missing from a PRESENT golden is a failure, not a skip.
+    """
+    path = os.path.join(root or ROOT, SUITE_SOURCE_GOLDEN)
+    if not os.path.isfile(path):
+        return None
+    return json.load(open(path, encoding="utf-8")).get("suites", {})
+
 
 # C6/C8 scan set: everything tracked EXCEPT these. Written down rather than implied by a
 # directory list, so a surface added later is scanned by default and an omission is a
@@ -342,10 +360,40 @@ class Run:
             self.failures.append((check, detail))
 
     # ---- C1 ----------------------------------------------------------------
-    def c1_selftests(self, suites=None):
+    def c1_selftests(self, suites=None, sources=None):
+        """Aggregate every suite, and bind what produced each receipt.
+
+        A receipt's check count is self-reported. An eight-line stub printing
+        `SELFTEST-SUMMARY suite=<name> checks=<floor> failures=0` satisfied the floor and
+        took the whole gate green, including for the tool that proves PR delivery state.
+        The floor only ever defended against a suite that reported honestly, so the source
+        of each suite is pinned: a suite cannot be replaced by something that merely
+        claims to have run.
+        """
         if suites is None:
             suites = SELFTEST_SUITES
+        if sources is None:
+            sources = suite_source_golden()
         for name, cmd, floor in suites:
+            if sources is not None:
+                expected = sources.get(name)
+                path = os.path.join(self.root, cmd[0])
+                actual = (
+                    hashlib.sha256(open(path, "rb").read()).hexdigest()
+                    if os.path.isfile(path) else None
+                )
+                if expected is None:
+                    self.result("C1", False,
+                                f"selftest {name}: no source digest recorded in "
+                                f"{os.path.basename(SUITE_SOURCE_GOLDEN)}")
+                    continue
+                if actual != expected:
+                    self.result("C1", False,
+                                f"selftest {name}: {cmd[0]} does not match its recorded "
+                                f"source digest; if the tool changed on purpose, update "
+                                f"its entry in {os.path.basename(SUITE_SOURCE_GOLDEN)} in "
+                                f"the same commit and review that diff")
+                    continue
             try:
                 p = subprocess.run(
                     [sys.executable, os.path.join(self.root, cmd[0])] + cmd[1:],
@@ -832,10 +880,14 @@ def selftest():
         open(os.path.join(td, "sub", "claude.md"), "w").write("collision")
         open(os.path.join(td, "settings.json"), "w").write("{}")
 
+        def planted_sources(name, path):
+            """Digest a synthetic suite so the source binding applies to it too."""
+            return {name: hashlib.sha256(open(path, "rb").read()).hexdigest()}
+
         failing_suite = os.path.join(td, "failing-selftest.py")
         open(failing_suite, "w").write("raise SystemExit(1)\n")
         c1_run = Run(td, ci=True)
-        c1_run.c1_selftests([("planted-failure", [failing_suite], 1)])
+        c1_run.c1_selftests([("planted-failure", [failing_suite], 1)], sources=planted_sources("planted-failure", failing_suite))
         expect_red("C1 goes red when an aggregated selftest fails",
                    lambda: any(c == "C1" and "exit 1" in d
                                for c, d in c1_run.failures))
@@ -843,7 +895,7 @@ def selftest():
         truncated_suite = os.path.join(td, "truncated-selftest.py")
         open(truncated_suite, "w").write("print('PASS first check')\nraise SystemExit(0)\n")
         c1_truncated = Run(td, ci=True)
-        c1_truncated.c1_selftests([("planted-truncation", [truncated_suite], 1)])
+        c1_truncated.c1_selftests([("planted-truncation", [truncated_suite], 1)], sources=planted_sources("planted-truncation", truncated_suite))
         expect_red("C1 rejects exit zero without a terminal selftest receipt",
                    lambda: any(c == "C1" and "terminal receipts=0" in d
                                for c, d in c1_truncated.failures))
@@ -854,7 +906,7 @@ def selftest():
             "print('SELFTEST-SUMMARY suite=planted-duplicate checks=1 failures=0')\n"
         )
         c1_duplicate = Run(td, ci=True)
-        c1_duplicate.c1_selftests([("planted-duplicate", [duplicate_suite], 1)])
+        c1_duplicate.c1_selftests([("planted-duplicate", [duplicate_suite], 1)], sources=planted_sources("planted-duplicate", duplicate_suite))
         expect_red("C1 rejects ambiguous duplicate terminal receipts",
                    lambda: any(c == "C1" and "terminal receipts=2" in d
                                for c, d in c1_duplicate.failures))
@@ -864,7 +916,7 @@ def selftest():
             "print('SELFTEST-SUMMARY suite=planted-shrink checks=1 failures=0')\n"
         )
         c1_shrunk = Run(td, ci=True)
-        c1_shrunk.c1_selftests([("planted-shrink", [shrunk_suite], 5)])
+        c1_shrunk.c1_selftests([("planted-shrink", [shrunk_suite], 5)], sources=planted_sources("planted-shrink", shrunk_suite))
         expect_red("C1 goes red when a suite reports fewer checks than its floor",
                    lambda: any(c == "C1" and "below-floor" in d
                                for c, d in c1_shrunk.failures))
@@ -873,7 +925,31 @@ def selftest():
         open(at_floor_suite, "w").write(
             "print('SELFTEST-SUMMARY suite=planted-at-floor checks=1 failures=0')\n"
         )
-        c1_at_floor.c1_selftests([("planted-at-floor", [at_floor_suite], 1)])
+        c1_at_floor.c1_selftests([("planted-at-floor", [at_floor_suite], 1)], sources=planted_sources("planted-at-floor", at_floor_suite))
+        # The stub that motivated this: an honest-looking receipt over no work. It clears
+        # the floor, so only the source binding can reject it.
+        stub_suite = os.path.join(td, "stub-selftest.py")
+        open(stub_suite, "w").write(
+            "print('SELFTEST-SUMMARY suite=planted-stub checks=99 failures=0')\n"
+        )
+        c1_stub = Run(td, ci=True)
+        c1_stub.c1_selftests([("planted-stub", [stub_suite], 8)],
+                             sources={"planted-stub": "0" * 64})
+        expect_red("C1 rejects a suite whose source does not match its recorded digest",
+                   lambda: any(c == "C1" and "recorded source digest" in d
+                               for c, d in c1_stub.failures))
+        c1_registered = Run(td, ci=True)
+        c1_registered.c1_selftests([("planted-stub", [stub_suite], 8)],
+                                   sources={"other": "0" * 64})
+        expect_red("C1 rejects a suite absent from a present source golden",
+                   lambda: any(c == "C1" and "no source digest recorded" in d
+                               for c, d in c1_registered.failures))
+        c1_bound = Run(td, ci=True)
+        c1_bound.c1_selftests([("planted-stub", [stub_suite], 8)],
+                              sources=planted_sources("planted-stub", stub_suite))
+        expect_red("C1 source-binding control: a matching digest still runs the suite",
+                   lambda: not any("recorded source digest" in d
+                                   for _c, d in c1_bound.failures))
         expect_red("C1 floor control: the same suite exactly at its floor stays green",
                    lambda: not c1_at_floor.failures)
 

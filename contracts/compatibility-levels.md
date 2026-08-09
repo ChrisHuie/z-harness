@@ -72,6 +72,18 @@ invoking turn rather than restriction to the named tools, but those documentatio
 version-bound to the tested CLI. The conservative omission does not claim that runtime behavior.
 Adding permission metadata later requires a target-owned authority overlay and denial-path tests.
 
+## Changing a native manifest
+
+`contracts/goldens/native-manifests.json` holds the expected bytes of every target-native
+manifest. Rendering builds the manifest from `release/render.json`; verification compares it to
+that golden. The two derivations are independent, which is what makes a rethreaded edit to a
+rendered artifact detectable.
+
+There is deliberately no command that rewrites the golden from a render. A detector whose
+documented remedy clears the detection proves nothing, and the point of an authored golden is that
+a person reads the bytes. Editing package metadata therefore means updating the golden by hand in
+the same commit, so the manifest change appears in review as a diff rather than as a digest.
+
 ## Package isolation
 
 Each installable artifact has one package format and one intended target family. A target root must
@@ -91,7 +103,8 @@ repository, but a client must receive exactly one target root.
 
 ## Render identity
 
-Artifact schema v2 contains only facts derivable during rendering:
+Artifact schema v3 contains facts derivable during rendering, plus the claims block derived from
+the target's adapter entry and gated on the evidence above:
 
 - package, target, version, format, and adapter revision;
 - exact renderer, closed render schema/golden set, render-config, and selected adapter-config

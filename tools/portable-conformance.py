@@ -20,6 +20,7 @@ import tarfile
 import tempfile
 import tomllib
 from typing import Any, Callable, Dict, List, Sequence, Tuple
+import urllib.error
 import urllib.request
 import zipfile
 
@@ -84,6 +85,17 @@ VENDOR_SOURCE_KEYS = {
 
 class ConformanceError(Exception):
     pass
+
+
+class TransportError(ConformanceError):
+    """An upstream fetch failed to complete.
+
+    Distinct from a conformance failure on purpose: an unreachable or rate-limited
+    upstream says nothing about whether the rendered artifact conforms, and reporting the
+    two the same way turns an outage into a false verdict about this change. A digest
+    mismatch is NOT a transport error — that is a supply-chain finding and stays a
+    conformance failure.
+    """
 
 
 def strict_json_loads(data: str, label: str) -> Any:
@@ -260,8 +272,11 @@ def download(
     response_opener: Callable[..., Any] = urllib.request.urlopen,
 ) -> None:
     request = urllib.request.Request(url, headers={"User-Agent": "z-harness-conformance/1"})
-    with response_opener(request, timeout=60) as response, destination.open("wb") as out:
-        shutil.copyfileobj(response, out, length=1024 * 1024)
+    try:
+        with response_opener(request, timeout=60) as response, destination.open("wb") as out:
+            shutil.copyfileobj(response, out, length=1024 * 1024)
+    except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+        raise TransportError(f"upstream fetch failed for {url}: {exc}") from exc
     actual = sha256(destination)
     if actual != expected:
         raise ConformanceError(
@@ -532,10 +547,12 @@ def fetch_pypi_metadata(metadata_url: str) -> Any:
     request = urllib.request.Request(
         metadata_url, headers={"User-Agent": "z-harness-conformance/1"}
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return strict_json_loads(
-            response.read().decode("utf-8"), f"PyPI metadata from {metadata_url}"
-        )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = response.read().decode("utf-8")
+    except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+        raise TransportError(f"upstream fetch failed for {metadata_url}: {exc}") from exc
+    return strict_json_loads(payload, f"PyPI metadata from {metadata_url}")
 
 
 def download_wheels(
@@ -873,11 +890,26 @@ def conformance() -> int:
                     f"unknown={sorted(set(completed) - expected_labels)} "
                     f"duplicates={len(completed) - len(set(completed))}"
                 )
+    except TransportError as exc:
+        # An outage is not a verdict about this change. Still non-zero so nothing merges on
+        # an unverified conformance claim, but labelled so the red is readable.
+        print(f"portable-conformance: transport: {exc}", file=sys.stderr)
+        print(
+            f"CONFORMANCE-SUMMARY checks={len(completed)} failures=0 "
+            f"transport_failures=1 exit=1"
+        )
+        return 1
     except Exception as exc:
         print(f"portable-conformance: {exc}", file=sys.stderr)
-        print(f"CONFORMANCE-SUMMARY checks={len(completed)} failures=1 exit=1")
+        print(
+            f"CONFORMANCE-SUMMARY checks={len(completed)} failures=1 "
+            f"transport_failures=0 exit=1"
+        )
         return 1
-    print(f"CONFORMANCE-SUMMARY checks={len(completed)} failures=0 exit=0")
+    print(
+        f"CONFORMANCE-SUMMARY checks={len(completed)} failures=0 "
+        f"transport_failures=0 exit=0"
+    )
     return 0
 
 

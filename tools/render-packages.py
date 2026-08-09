@@ -1297,7 +1297,11 @@ def verify_target_manifest(
     if manifest != golden or manifest_path.read_bytes() != json_bytes(golden):
         raise RenderError(
             "manifest.golden_mismatch",
-            f"{target} native manifest differs from the hand-authored byte golden",
+            f"{target} native manifest differs from the hand-authored byte golden in "
+            f"{NATIVE_MANIFEST_GOLDEN.name}. If the artifact was edited, this is the "
+            f"rejection. If release/render.json was edited on purpose, hand-update the "
+            f"golden to the new bytes in the same commit and review that diff — the "
+            f"golden is authored rather than generated so the change is read by a person",
         )
     if target == "kimi":
         require_exact_keys(

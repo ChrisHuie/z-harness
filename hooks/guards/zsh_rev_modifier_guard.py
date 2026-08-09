@@ -71,6 +71,10 @@ EXPANSION_BRACED = re.compile(
     r":g?([" + MODS + r"])(?=[}/:0-9])")
 
 # git subcommands that take a `rev:path` / `rev:./path` argument
+# How many `<shell> -c` layers this guard will unwrap. Reaching it returns `ask`, never
+# `allow`: an input the guard cannot model is not a clean verdict.
+NEST_DEPTH_LIMIT = 4
+
 REV_PATH_SUBCOMMANDS = {"show", "diff", "cat-file", "log", "ls-tree", "archive",
                         "checkout", "restore", "grep", "rev-parse", "blame"}
 
@@ -122,10 +126,20 @@ def decide(command, _depth=0):
         # body is re-scanned as zsh source. For sh/bash/dash/ksh the inner body is safe
         # on its own -- but the OUTER zsh still expands anything not single-quoted before
         # the inner shell ever starts, so this command's own tokens are scanned instead.
-        # Bounded, because a crafted command can nest without limit.
-        if not scan_this_command and _depth < 4:
+        if not scan_this_command:
             inner = nested_shell_command(tokens)
             if inner is not None:
+                # Recursion is bounded because a crafted command can nest without limit,
+                # and the bound fails CLOSED. Falling through to the scan below would
+                # have returned allow, so a payload wrapped in five shells was accepted
+                # while the same payload wrapped in four was denied.
+                if _depth >= NEST_DEPTH_LIMIT:
+                    return ("ask",
+                            f"nested shell invocations exceed this guard's depth limit of "
+                            f"{NEST_DEPTH_LIMIT}, so it cannot prove what the innermost "
+                            f"command becomes after each shell expands it. Run the inner "
+                            f"command directly, or confirm by hand that no `rev:path` "
+                            f"argument reaches git through a zsh expansion.")
                 items, _env, _errs = unwrap_command_prefix(tokens)
                 shell = os.path.basename(items[0][0]) if items else ""
                 if shell == "zsh":
@@ -265,14 +279,49 @@ FIXTURES = [
 ]
 
 
+def _nest(payload, layers):
+    """Wrap `payload` in `layers` single-quoted `zsh -c` invocations."""
+    for _ in range(layers):
+        payload = "zsh -c '" + payload.replace("'", "'\\''") + "'"
+    return payload
+
+
+# The depth bound must fail CLOSED. An earlier draft fell through to the token scan once
+# the limit was reached, so the same payload denied at four layers and was ALLOWED at
+# five. Generated rather than hand-escaped, because the quoting is the point of the case
+# and a typo in it would silently test a different command.
+_HAZARD = "SHA=x; git show $SHA:src/f.py"
+FIXTURES += [
+    (f"RED NESTED: hazard at depth {NEST_DEPTH_LIMIT}, the last modelled layer",
+     _nest(_HAZARD, NEST_DEPTH_LIMIT), "deny"),
+    (f"ASK NESTED: hazard at depth {NEST_DEPTH_LIMIT + 1} cannot be proven either way",
+     _nest(_HAZARD, NEST_DEPTH_LIMIT + 1), "ask"),
+    (f"ASK NESTED: a benign command past the limit is also unprovable, not clean",
+     _nest("git status", NEST_DEPTH_LIMIT + 1), "ask"),
+    ("GREEN NESTED: a benign command at the last modelled depth still allows",
+     _nest("git status", NEST_DEPTH_LIMIT), "allow"),
+]
+
+
 def selftest():
     if not FIXTURES:
         print("SCAN SET EMPTY - zero fixtures is an error", file=sys.stderr)
         return 2
-    print("scan set: %d fixtures (%d must-deny, %d must-allow); shell under test = zsh 5.9"
+    census = {}
+    for fixture in FIXTURES:
+        census[fixture[2]] = census.get(fixture[2], 0) + 1
+    # Every outcome class is counted, so adding one cannot leave this line describing a
+    # scan set that no longer exists.
+    unclassified = sum(count for outcome, count in census.items()
+                       if outcome not in ("deny", "allow", "ask"))
+    if unclassified:
+        print("UNKNOWN EXPECTED OUTCOME in fixtures - cannot report the scan set",
+              file=sys.stderr)
+        return 2
+    print("scan set: %d fixtures (%s); shell under test = zsh 5.9"
           % (len(FIXTURES),
-             sum(1 for f in FIXTURES if f[2] == "deny"),
-             sum(1 for f in FIXTURES if f[2] == "allow")))
+             ", ".join(f"{count} must-{outcome}"
+                       for outcome, count in sorted(census.items()))))
     bad = 0
     for label, cmd, want in FIXTURES:
         got, _ = decide(cmd)

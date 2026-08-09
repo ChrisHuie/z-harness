@@ -32,7 +32,11 @@ Exit codes:  0 = decision emitted on stdout (allow/deny/ask)
 import json
 import os
 import re
+import shutil
+import string
+import subprocess
 import sys
+import tempfile
 
 PCRE_ONLY = re.compile(r"\\[bBdDsSwWAZzhHvVR]|\(\?[:=!<Pi#'-]")
 ENGINE_P = re.compile(r"^--perl-regexp$|^-[a-zA-Z]*P[a-zA-Z]*$")
@@ -59,8 +63,10 @@ GREP_SHORT_PATTERN_ARG = {"e", "f"}
 GREP_SHORT_VALUE = set("mABC")
 GREP_SHORT_NOARG = set("achilnopqrvwzHILW")
 # `-O` takes an OPTIONAL value, so argv alone cannot say whether the rest of the cluster
-# is its argument. It is deliberately in none of the sets above: a cluster reaching it
-# is unmodelled and falls through rather than being parsed wrong in either direction.
+# is its argument. It is named here so the table-versus-git check can tell "deliberately
+# unmodelled" apart from "forgotten", but it is in none of the sets above: a cluster
+# reaching it falls through rather than being parsed wrong in either direction.
+GREP_SHORT_OPTIONAL_VALUE = {"O"}
 
 
 def short_option_cluster(text):
@@ -820,6 +826,70 @@ FIXTURES = [
 ]
 
 
+def measure_git_short_options():
+    """Classify every ASCII letter against the INSTALLED git. -> (accepted, takes_value).
+
+    Probed outside any repository, because git parses its options before it looks for
+    `.git`, so the three outcomes separate cleanly and no fixture repo is needed:
+    `unknown switch` is a rejected letter, `expects a ... value` / `cannot open` is a
+    letter that takes one, and `not a git repository` is a letter that needs none.
+
+    Returns None when git cannot be run at all, which the caller reports as a failure
+    rather than a skip: an unmeasured table is not a verified one.
+    """
+    probe_root = tempfile.mkdtemp(prefix="z-harness-git-optprobe-")
+    accepted, takes_value = set(), set()
+    try:
+        for char in string.ascii_letters:
+            try:
+                result = subprocess.run(
+                    ["git", "grep", f"-{char}", "x"], cwd=probe_root,
+                    capture_output=True, text=True, timeout=10,
+                )
+            except (OSError, subprocess.SubprocessError):
+                return None
+            stderr = result.stderr or ""
+            if "unknown switch" in stderr:
+                continue
+            accepted.add(char)
+            if "expects" in stderr or "requires a value" in stderr or "cannot open" in stderr:
+                takes_value.add(char)
+    finally:
+        shutil.rmtree(probe_root, ignore_errors=True)
+    return (accepted, takes_value) if accepted else None
+
+
+def check_option_table_against_git():
+    """-> list of failure strings. Empty means the table matches the installed git."""
+    measured = measure_git_short_options()
+    if measured is None:
+        return ["cannot enforce: the installed git could not be probed, so the "
+                "short-option table is unverified"]
+    accepted, takes_value = measured
+    modelled = (set(GREP_SHORT_ENGINE) | set(GREP_SHORT_PATTERN_ARG)
+                | GREP_SHORT_VALUE | GREP_SHORT_NOARG | GREP_SHORT_OPTIONAL_VALUE)
+    failures = []
+    gap = sorted(accepted - modelled)
+    if gap:
+        failures.append(
+            f"this git accepts short flag(s) {gap} that short_option_cluster does not "
+            f"model, so a cluster containing one falls through and its pattern is never "
+            f"parsed; add each to the correct set in the same commit")
+    stale = sorted(modelled - accepted)
+    if stale:
+        failures.append(
+            f"the table models short flag(s) {stale} that this git rejects; remove them "
+            f"so the table describes the tool actually installed")
+    # -e and -f are the pattern-carrying flags and are modelled separately by design.
+    measured_value = sorted(takes_value - set(GREP_SHORT_PATTERN_ARG))
+    if set(measured_value) != GREP_SHORT_VALUE:
+        failures.append(
+            f"this git takes a value for {measured_value} but the table says "
+            f"{sorted(GREP_SHORT_VALUE)}; a mis-typed arity either swallows the pattern "
+            f"or leaves it unparsed")
+    return failures
+
+
 def selftest():
     if not FIXTURES:
         print("SCAN SET EMPTY - zero fixtures is an error, not a clean verdict",
@@ -838,9 +908,20 @@ def selftest():
         print("  %-4s want=%-5s got=%-5s  %s" % ("PASS" if ok else "FAIL", want, got, label))
         if not ok:
             print("        cmd: %s" % cmd)
+    # The fixtures above test the table against itself. This one tests it against the
+    # tool, which is the only thing that can catch the table going stale under a git
+    # upgrade or on a host whose git differs from the authoring one.
+    table_failures = check_option_table_against_git()
+    bad += len(table_failures)
+    if table_failures:
+        for failure in table_failures:
+            print("  FAIL short-option table vs installed git: %s" % failure)
+    else:
+        print("  PASS short-option table matches the installed git")
+    checks = len(FIXTURES) + 1
     print("failures: %d" % bad)
     print("SELFTEST-SUMMARY suite=git_grep_engine_guard checks=%d failures=%d" % (
-        len(FIXTURES), bad))
+        checks, bad))
     return 0 if bad == 0 else 1
 
 

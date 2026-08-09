@@ -5,9 +5,9 @@ promotion authority, publication, and rollback are separate records and state tr
 
 ## Compatibility vocabulary
 
-The following levels are planning vocabulary for a future host-validation and promotion system.
-They are deliberately absent from render configuration, `z-harness-artifact.json`, and
-`render-index.json`.
+An adapter declares the level it targets, and the artifact records that alongside the level it has
+earned. `earnedLevel` is not read from configuration: it is pinned to `unverified`, because
+rendering and static inspection earn nothing and only a target-host promotion run may advance it.
 
 | level | evidence a future promotion decision would require |
 |---|---|
@@ -19,6 +19,39 @@ They are deliberately absent from render configuration, `z-harness-artifact.json
 The current renderer earns none of these levels. It emits reproducible package candidates and
 immutable render-time facts only. No host receipt producer, promotion decision maker, publication
 ledger, or rollback controller exists in this pilot.
+
+## Evidence required by a claim
+
+`validationStatus` is gated on the evidence this contract names, at both ends: the adapter
+configuration is refused at input time and the rendered artifact is refused at verification time,
+through one predicate, so neither end can claim a status the other would reject.
+
+| `validationStatus` | required |
+|---|---|
+| `fixture-only` | no host evidence records at all |
+| `candidate`, `promoted` | at least one evidence record, and a non-empty license set |
+
+Each evidence record names a host, that host's version, the artifact digest observed after a
+fresh-session install, and the scenario results behind the claim. A scenario that did not pass
+cannot support a status above `fixture-only`.
+
+This checks that a claim carries evidence of the required shape, not that the evidence is true;
+only a target-host run establishes the latter. Because no producer of host receipts exists and the
+pilot declares no license, every status above `fixture-only` is currently unreachable by
+construction rather than by convention, and the absent license set is a mechanical promotion
+blocker rather than a note.
+
+## Why authority is not an artifact field
+
+`authority` is deliberately absent from render configuration and from every rendered artifact, and
+it is the one field of this family that stays absent. Authority is a property of a guarded fact —
+its mechanism, the host version enforcing it, and the scope over which it holds — so a
+package-wide scalar would assert something no package can hold. An adapter that set
+`authority: external-boundary` while carrying no evidence would be making exactly the claim the
+authority vocabulary below exists to discipline.
+
+Recording authority therefore requires a target-owned overlay keyed per guarded fact, with
+denial-path evidence, not a field on the package manifest.
 
 ## Authority vocabulary
 

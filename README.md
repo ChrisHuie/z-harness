@@ -35,15 +35,18 @@ The output contains five physically isolated package roots:
 | `hermes/` | Hermes Agent GitHub skill tap | no native manifest; `skills/` is the tap root |
 
 `release/render.json` selects source skills and package metadata. `adapters/targets.json` declares
-only immutable render policy: target format, package version, manifest path, and adapter revision.
+per-target render policy — target format, package version, manifest path and adapter revision — and
+the compatibility claims an artifact carries: `targetLevel`, `validationStatus`, and the `evidence`
+records that gate any status above `fixture-only`.
 Every target writes `z-harness-artifact.json`; its payload inventory excludes that manifest to avoid
 a self-reference, while the non-installable parent `render-index.json` records a domain-separated
 digest of every complete target directory, including its artifact manifest.
 
 `--verify` validates the manifests against committed schemas, compares native manifests with
 hand-authored goldens, re-projects the selected source into the expected target payload, and
-recomputes every immutable build, source, payload, and complete-artifact value. It also rejects
-unknown physical entries before reading a manifest. An artifact whose configuration, renderer,
+recomputes every immutable build, source, payload, and complete-artifact value. It rejects an unknown entry at the
+render root before reading any JSON; an unknown entry inside a target root is rejected by the payload
+inventory, which is read after that target's manifest. An artifact whose configuration, renderer,
 closed render schema/golden set, or selected source has moved fails as stale. Compatibility prose,
 the network-conformance lock, and vendored-source metadata are CI/review inputs rather than artifact
 digest inputs.

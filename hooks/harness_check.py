@@ -139,6 +139,11 @@ def suite_source_golden(root=None):
 # C6/C8 scan set: everything tracked EXCEPT these. Written down rather than implied by a
 # directory list, so a surface added later is scanned by default and an omission is a
 # reviewable line instead of a forgotten tuple entry.
+# Printing the resolved set size is not a floor on it: adding one filename to
+# SCAN_EXCLUSIONS removed a file from the sweep and the verdict stayed green with a
+# smaller number nobody compares. Lower this only in the commit that removes the files.
+C6_SCAN_FLOOR = 162
+
 SCAN_EXCLUSIONS = (
     "hooks/harness_check.py",   # this file names every tripwire; it cannot sweep itself
     "*.pyc",                    # build output
@@ -574,7 +579,7 @@ class Run:
                             f"{skill}: body {n} chars (cap {BODY_CHAR_CAP})")
 
     # ---- C6 ----------------------------------------------------------------
-    def c6_stale_patterns(self):
+    def c6_stale_patterns(self, scan_floor=None):
         """Tripwires over the whole shipped surface, not a remembered directory list.
 
         The scan set is every tracked file minus SCAN_EXCLUSIONS. A hardcoded directory
@@ -597,9 +602,15 @@ class Run:
             if not os.path.isfile(absolute):
                 continue
             targets.append(absolute)
-        if not targets:
-            print("  FATAL C6: zero files in scan set")
-            self.failures.append(("C6", "zero files"))
+        # The floor is a parameter so planted-defect fixture trees, which hold a handful of
+        # files, can assert the tripwire logic instead of tripping a floor sized for the
+        # real repository. Production callers take the default.
+        floor = C6_SCAN_FLOOR if scan_floor is None else scan_floor
+        if len(targets) < floor:
+            print(f"  FATAL C6: {len(targets)} files in scan set, floor is {floor}")
+            self.failures.append(
+                ("C6", f"scan set shrank to {len(targets)}, floor {floor}")
+            )
             return
         for pat in STALE_PATTERNS:
             hits = [t for t in targets
@@ -1103,28 +1114,33 @@ def selftest():
         expect_red("C5 goes red on an authoring skill over the line cap",
                    lambda: any(c == "C5" for c, _d in authoring_run.failures))
         r3 = Run(td, ci=True)
-        r3.c6_stale_patterns()
+        r3.c6_stale_patterns(scan_floor=1)
         expect_red("C6 goes red on planted stale pattern",
                    lambda: any(c == "C6" and "NOT INSTALLED" in d for c, d in r3.failures))
         os.makedirs(os.path.join(td, "docs"))
         open(os.path.join(td, "docs", "relocated.md"), "w").write("committed to the PR")
         r3_docs = Run(td, ci=True)
-        r3_docs.c6_stale_patterns()
+        r3_docs.c6_stale_patterns(scan_floor=1)
         expect_red("C6 scans docs and goes red on a relocated stale claim",
                    lambda: any(c == "C6" and "committed to the PR" in d
                                for c, d in r3_docs.failures))
         empty_c6 = os.path.join(td, "empty-c6")
         os.makedirs(empty_c6)
         c6_empty_run = Run(empty_c6, ci=True)
-        c6_empty_run.c6_stale_patterns()
+        c6_empty_run.c6_stale_patterns(scan_floor=1)
         expect_red("C6 goes red on a zero-file scan",
-                   lambda: any(c == "C6" and d == "zero files"
+                   lambda: any(c == "C6" and "scan set shrank to 0" in d
                                for c, d in c6_empty_run.failures))
+        c6_shrunk = Run(td, ci=True)
+        c6_shrunk.c6_stale_patterns(scan_floor=99)
+        expect_red("C6 goes red when its scan set shrinks below its floor",
+                   lambda: any(c == "C6" and "floor 99" in d
+                               for c, d in c6_shrunk.failures))
         # The scan set used to be a hardcoded directory tuple, so a stale claim in a
         # tracked root file was invisible. Prove the derived set reaches one.
         open(os.path.join(td, "statusline.sh"), "w").write("#!/bin/sh\n# ph-lint\n")
         r3_root = Run(td, ci=True)
-        r3_root.c6_stale_patterns()
+        r3_root.c6_stale_patterns(scan_floor=1)
         expect_red("C6 reaches a tracked root file outside any scanned directory",
                    lambda: any(c == "C6" and "ph-lint" in d for c, d in r3_root.failures))
         os.remove(os.path.join(td, "statusline.sh"))

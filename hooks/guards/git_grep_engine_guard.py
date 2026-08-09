@@ -41,12 +41,6 @@ import tempfile
 from typing import NamedTuple
 
 PCRE_ONLY = re.compile(r"\\[bBdDsSwWAZzhHvVR]|\(\?[:=!<Pi#'-]")
-ENGINE_P = re.compile(r"^--perl-regexp$|^-[a-zA-Z]*P[a-zA-Z]*$")
-ENGINE_F = re.compile(r"^--fixed-strings$|^-[a-zA-Z]*F[a-zA-Z]*$")
-# short flags that consume the NEXT argv element
-TAKES_ARG = {"-e", "-f", "--max-depth", "--threads", "-m", "--max-count",
-             "--open-files-in-pager", "--color", "-A", "-B", "-C", "--context",
-             "--after-context", "--before-context", "-C"}
 UNRESOLVED = re.compile(r"\$[A-Za-z_{(]|`")
 
 MAX_COMMAND_CHARS = 1024 * 1024
@@ -92,25 +86,36 @@ def shell_source_is_dynamic(command):
 # argument, which denied a command carrying no pattern hazard at all.
 GREP_SHORT_ENGINE = {"E": "E", "F": "F", "G": "G", "P": "P"}
 GREP_SHORT_PATTERN_ARG = {"e", "f"}
-# `-Em1` is rejected ("switch `m' expects a numerical value"), so a value never rides the
-# cluster; it is always the next token.
+# These options accept either a separated number or an attached decimal suffix. A decimal
+# suffix with no option letter is Git's `-NUM` context shorthand and may follow another
+# clustered flag (`-E3`).
 GREP_SHORT_VALUE = set("mABC")
 GREP_SHORT_NOARG = set("achilnopqrvwzHILW")
-# `-O` takes an OPTIONAL value, so argv alone cannot say whether the rest of the cluster
-# is its argument. It is named here so the table-versus-git check can tell "deliberately
-# unmodelled" apart from "forgotten", but it is in none of the sets above: a cluster
-# reaching it falls through rather than being parsed wrong in either direction.
 GREP_SHORT_OPTIONAL_VALUE = {"O"}
+GREP_LONG_ENGINE = {
+    "--basic-regexp": "G",
+    "--extended-regexp": "E",
+    "--fixed-strings": "F",
+    "--perl-regexp": "P",
+}
+GREP_LONG_PATTERN_ARG = {"--regexp": "e", "--file": "f"}
+GREP_LONG_REQUIRED_VALUE = {
+    "--max-depth", "--threads", "--max-count", "--after-context",
+    "--before-context", "--context",
+}
+# Git's parse-options optional arguments are attached with `=`. A bare optional option
+# never consumes the next argv token; treating it as required hid a following `-E`.
+GREP_LONG_OPTIONAL_VALUE = {"--color", "--open-files-in-pager"}
 
 
 def short_option_cluster(text):
     """Parse a single-dash git grep short-option cluster.
 
     -> (engine letters in order, kind, terminating letter, attached argument), where kind
-    is "pattern" for -e/-f, "value" for a flag whose value is the next token, or "plain"
-    when the cluster is all no-argument flags. Returns None when the cluster holds a
-    letter this guard does not model, leaving that spelling to the existing handling
-    rather than parsing it wrong.
+    is "pattern" for -e/-f, "value" for a numeric option, "optional" for -O, or
+    "plain" when the cluster is all no-argument flags. The attached argument is populated
+    for `-ePATTERN`, `-m1`, `-A3`, `-3`, and `-Opager`. Returns None when the cluster is
+    invalid or contains a letter this guard does not model.
 
     Engines are returned in order because git applies last-one-wins: `-EG` greps as BRE
     and is harmless, `-GE` greps as ERE and is the hazard.
@@ -119,12 +124,20 @@ def short_option_cluster(text):
         return None
     engines = []
     for index, char in enumerate(text[1:], start=1):
+        suffix = text[index + 1:]
         if char in GREP_SHORT_PATTERN_ARG:
-            return (engines, "pattern", char, text[index + 1:] or None)
+            return (engines, "pattern", char, suffix or None)
         if char in GREP_SHORT_VALUE:
-            if text[index + 1:]:
-                return None          # git rejects an attached value; do not model it
-            return (engines, "value", char, None)
+            if suffix and not suffix.isdecimal():
+                return None
+            return (engines, "value", char, suffix or None)
+        if char.isdecimal():
+            numeric = text[index:]
+            if not numeric.isdecimal():
+                return None
+            return (engines, "value", "NUM", numeric)
+        if char in GREP_SHORT_OPTIONAL_VALUE:
+            return (engines, "optional", char, suffix or None)
         if char in GREP_SHORT_ENGINE:
             engines.append(GREP_SHORT_ENGINE[char])
             continue
@@ -786,13 +799,47 @@ def decide(command, _shell_depth=0):
                     engine_src = "config"
         patterns = []
         pattern_from_file = False
+        pattern_declared = False
         k = 0
         while k < len(argv):
             text, quoting = argv[k]
             if text == "--":
                 k += 1
-                # first thing after -- is a pathspec, pattern must already be set
+                # With no earlier -e/-f or positional pattern, parse-options assigns the
+                # first operand after `--` to PATTERN. Once a pattern is declared, every
+                # operand after `--` is a pathspec.
+                if not pattern_declared and k < len(argv):
+                    patterns.append(argv[k])
+                    pattern_declared = True
                 break
+            long_name = text.partition("=")[0] if text.startswith("--") else ""
+            if long_name in GREP_LONG_ENGINE:
+                engine = GREP_LONG_ENGINE[long_name]
+                engine_src = "flag"
+                k += 1
+                continue
+            if long_name in GREP_LONG_PATTERN_ARG:
+                letter = GREP_LONG_PATTERN_ARG[long_name]
+                attached = text.partition("=")[2] if "=" in text else None
+                if attached is None and k + 1 < len(argv):
+                    attached, quoting = argv[k + 1]
+                    k += 2
+                else:
+                    k += 1
+                pattern_declared = True
+                if letter == "f":
+                    pattern_from_file = True
+                elif attached is not None:
+                    patterns.append((attached, quoting))
+                continue
+            if long_name in GREP_LONG_REQUIRED_VALUE:
+                k += 1 if "=" in text else 2
+                continue
+            if long_name in GREP_LONG_OPTIONAL_VALUE:
+                # Only `--option=value` supplies the optional argument. In either form
+                # this token is complete, so the next token remains an option or pattern.
+                k += 1
+                continue
             cluster = short_option_cluster(text)
             if cluster is not None:
                 # A modelled single-dash cluster is authoritative: it knows the order of
@@ -803,9 +850,13 @@ def decide(command, _shell_depth=0):
                     engine = cluster_engine
                     engine_src = "flag"
                 if kind == "value":
-                    k += 2
+                    k += 1 if attached is not None else 2
+                    continue
+                if kind == "optional":
+                    k += 1
                     continue
                 if kind == "pattern":
+                    pattern_declared = True
                     if letter == "f":
                         pattern_from_file = True
                     if attached is not None:
@@ -821,21 +872,9 @@ def decide(command, _shell_depth=0):
                         continue
                 k += 1
                 continue
-            if ENGINE_P.match(text):
-                engine = "P"
-                engine_src = "flag"
-            elif ENGINE_F.match(text):
-                engine = "F"
-                engine_src = "flag"
-            elif text in ("--extended-regexp",) or re.match(r"^-[a-zA-Z]*E[a-zA-Z]*$", text):
-                engine = "E"
-                engine_src = "flag"
-            elif text.startswith("-"):
-                if text in TAKES_ARG:
-                    k += 2
-                    continue
-            elif not patterns:
+            if not text.startswith("-") and not pattern_declared:
                 patterns.append((text, quoting))
+                pattern_declared = True
             k += 1
 
         if engine != "E":
@@ -979,13 +1018,43 @@ FIXTURES = [
      """git grep -Eoe'harness\\b' -- README.md""", "deny"),
     ("RED  CLUSTER: -m takes the NEXT token, so the later -e is still the pattern",
      """git grep -Em 1 -e'harness\\b' -- README.md""", "deny"),
+    ("RED  NUMERIC: -m accepts an attached decimal value after the engine",
+     """git grep -Em1 'harness\\b' -- README.md""", "deny"),
+    ("GREEN NUMERIC: attached -m preserves an explicit PCRE engine",
+     """git grep -Pm1 'harness\\b' -- README.md""", "allow"),
+    ("RED  NUMERIC: -A accepts an attached decimal value after the engine",
+     """git grep -EA3 'harness\\b' -- README.md""", "deny"),
+    ("RED  NUMERIC: -B accepts an attached decimal value after the engine",
+     """git grep -EB3 'harness\\b' -- README.md""", "deny"),
+    ("RED  NUMERIC: -C accepts an attached decimal value after the engine",
+     """git grep -EC3 'harness\\b' -- README.md""", "deny"),
+    ("RED  NUMERIC: -NUM context shorthand may follow the engine in a cluster",
+     """git grep -E3 'harness\\b' -- README.md""", "deny"),
+    ("GREEN NUMERIC: attached context preserves an explicit PCRE engine",
+     """git grep -PA3 'harness\\b' -- README.md""", "allow"),
+    ("RED  OPTIONAL: bare --color does not consume the following engine",
+     """git grep --color -E 'harness\\b' -- README.md""", "deny"),
+    ("RED  OPTIONAL: --color=value remains one complete option",
+     """git grep --color=never -E 'harness\\b' -- README.md""", "deny"),
+    ("GREEN OPTIONAL: bare --color preserves an explicit PCRE engine",
+     """git grep --color -P 'harness\\b' -- README.md""", "allow"),
+    ("RED  OPTIONAL: bare --open-files-in-pager does not consume the engine",
+     """git grep --open-files-in-pager -E 'harness\\b' -- README.md""", "deny"),
+    ("RED  OPTIONAL: attached pager value does not consume the engine",
+     """git grep --open-files-in-pager=cat -E 'harness\\b' -- README.md""", "deny"),
+    ("RED  TERMINATOR: first operand after -- is the pattern when none came before",
+     """git grep -E -- 'harness\\b' README.md""", "deny"),
+    ("GREEN TERMINATOR: -- pattern preserves an explicit PCRE engine",
+     """git grep -P -- 'harness\\b' README.md""", "allow"),
+    ("GREEN TERMINATOR: after -e, operands following -- are pathspecs",
+     """git grep -E -e 'harness' -- 'path\\b'""", "allow"),
     ("RED  ENGINE ORDER: -GE is last-wins ERE",
      """git grep -GE -e 'harness\\b' -- README.md""", "deny"),
     ("GREEN ENGINE ORDER: -EG is last-wins BRE - git returns the intended line",
      """git grep -EG -e 'harness\\b' -- README.md""", "allow"),
     ("GREEN ENGINE ORDER: -EPe is last-wins PCRE",
      """git grep -EPe'harness\\b' -- README.md""", "allow"),
-    ("GREEN CLUSTER: -O takes an OPTIONAL value, so the cluster is unmodelled",
+    ("GREEN CLUSTER: -O takes the attached remainder as its optional value",
      """git grep -EOe'harness\\b' -- README.md""", "allow"),
     ("GREEN CLUSTER: a letter this git rejects outright is not the guard's business",
      """git grep -EZe'harness\\b' -- README.md""", "allow"),
@@ -1162,6 +1231,53 @@ def check_option_table_against_git():
     return failures
 
 
+def check_option_grammar_against_git():
+    """Exercise the valid spellings whose argv grammar is load-bearing here."""
+    failures = []
+    try:
+        with tempfile.TemporaryDirectory(prefix="z-harness-git-grammar-") as repo:
+            initialized = subprocess.run(
+                ["git", "init", "--quiet"], cwd=repo,
+                capture_output=True, text=True, timeout=10,
+            )
+            if initialized.returncode:
+                return ["cannot initialize the temporary Git grammar fixture: "
+                        + (initialized.stderr or "no diagnostic").strip()]
+            fixture = os.path.join(repo, "fixture.txt")
+            with open(fixture, "w", encoding="utf-8") as stream:
+                stream.write("harness\nharnessb\n")
+            indexed = subprocess.run(
+                ["git", "add", "fixture.txt"], cwd=repo,
+                capture_output=True, text=True, timeout=10,
+            )
+            if indexed.returncode:
+                return ["cannot index the temporary Git grammar fixture: "
+                        + (indexed.stderr or "no diagnostic").strip()]
+            cases = (
+                ("attached -m", ["-Em1", r"harness\b", "--", "fixture.txt"]),
+                ("attached -A", ["-EA3", r"harness\b", "--", "fixture.txt"]),
+                ("attached -B", ["-EB3", r"harness\b", "--", "fixture.txt"]),
+                ("attached -C", ["-EC3", r"harness\b", "--", "fixture.txt"]),
+                ("-NUM shorthand", ["-E3", r"harness\b", "--", "fixture.txt"]),
+                ("bare optional --color",
+                 ["--color", "--no-color", "-E", r"harness\b", "--", "fixture.txt"]),
+                ("-- pattern state", ["-E", "--", r"harness\b", "fixture.txt"]),
+            )
+            for label, args in cases:
+                observed = subprocess.run(
+                    ["git", "grep", *args], cwd=repo,
+                    capture_output=True, text=True, timeout=10,
+                )
+                if observed.returncode != 0 or "harnessb" not in observed.stdout:
+                    failures.append(
+                        f"installed Git did not accept {label} with the measured ERE "
+                        f"behavior (rc={observed.returncode}, stdout={observed.stdout!r}, "
+                        f"stderr={observed.stderr!r})")
+    except (OSError, subprocess.SubprocessError) as exc:
+        failures.append(f"installed Git grammar probe failed closed: {exc!r}")
+    return failures
+
+
 def selftest():
     if not FIXTURES:
         print("SCAN SET EMPTY - zero fixtures is an error, not a clean verdict",
@@ -1190,7 +1306,14 @@ def selftest():
             print("  FAIL short-option table vs installed git: %s" % failure)
     else:
         print("  PASS short-option table matches the installed git")
-    checks = len(FIXTURES) + 1
+    grammar_failures = check_option_grammar_against_git()
+    bad += len(grammar_failures)
+    if grammar_failures:
+        for failure in grammar_failures:
+            print("  FAIL option grammar vs installed git: %s" % failure)
+    else:
+        print("  PASS attached-value, optional-value, and -- grammar matches installed git")
+    checks = len(FIXTURES) + 2
     print("failures: %d" % bad)
     print("SELFTEST-SUMMARY suite=git_grep_engine_guard checks=%d failures=%d" % (
         checks, bad))

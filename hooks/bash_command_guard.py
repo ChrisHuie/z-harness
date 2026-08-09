@@ -129,6 +129,12 @@ def selftest():
         ("mixed-shell", "sh -c 'zsh -c \"git show $SHA:src/f.py\"'", "deny"),
         ("dynamic-exec", "$TOOL show $SHA:src/f.py", "ask"),
         ("command-query", "command -v git show $SHA:src/f.py", None),
+        ("numeric-ere", "git grep -Em1 'harness\\b' -- README.md", "deny"),
+        ("numeric-pcre", "git grep -Pm1 'harness\\b' -- README.md", None),
+        ("optional-ere", "git grep --color -E 'harness\\b' -- README.md", "deny"),
+        ("optional-pcre", "git grep --color -P 'harness\\b' -- README.md", None),
+        ("terminator-ere", "git grep -E -- 'harness\\b' README.md", "deny"),
+        ("terminator-pcre", "git grep -P -- 'harness\\b' README.md", None),
     )
     for label, command, want in hook_cases:
         raw = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})

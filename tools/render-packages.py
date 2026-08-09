@@ -865,8 +865,15 @@ def scan_skill(
         # CONTRACT.md into all five targets while every check stayed green, because the
         # artifact faithfully matched a projection that had already included them. An
         # eval fixture is an eval fixture wherever it sits.
-        parts = Path(relative).parts
-        if set(parts[:-1]) & set(excluded_directories) or parts[-1] in excluded_files:
+        # Match every path component, case-insensitively, against both name sets. Exact
+        # matching on the first-and-last components alone let `references/Evals/` and a
+        # DIRECTORY named CONTRACT.md ship. Under-excluding leaks authoring fixtures into
+        # five published payloads; over-excluding drops a file a review would notice, so
+        # the tolerant direction is the safe one here.
+        parts = [part.casefold() for part in Path(relative).parts]
+        excluded_names = {name.casefold() for name in excluded_directories}
+        excluded_names |= {name.casefold() for name in excluded_files}
+        if set(parts) & excluded_names:
             excluded.append(relative)
         else:
             included.append(record)
@@ -916,6 +923,25 @@ def record_for_bytes(relative: str, data: bytes, mode: str = "0644") -> Dict[str
     return {"path": relative, "mode": mode, "size": len(data), "sha256": sha256_bytes(data)}
 
 
+def payload_bytes_for(source: Path, skill_name: str, relative: str, target: str) -> bytes:
+    """Bytes a target ships for one source file, with every one scanned for portability.
+
+    The guard previously reached only SKILL.md's own fields, so a host construct in any
+    reference file was copied verbatim into all five targets. Every payload file is text
+    a host may read, so every payload file is scanned; bytes that are not valid UTF-8 are
+    not text and are passed through unexamined rather than guessed at.
+    """
+    if relative == "SKILL.md":
+        return projected_skill_bytes(source, skill_name, target)
+    data = source.read_bytes()
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data
+    require_portable_text(text, f"skill {skill_name} payload {relative}")
+    return data
+
+
 def copy_skill_payload(
     source_dir: Path,
     target_dir: Path,
@@ -925,11 +951,7 @@ def copy_skill_payload(
     for record in sorted(included, key=lambda item: item["path"]):
         source = source_dir / record["path"]
         destination = target_dir / record["path"]
-        data = (
-            projected_skill_bytes(source, source_dir.name, target)
-            if record["path"] == "SKILL.md"
-            else source.read_bytes()
-        )
+        data = payload_bytes_for(source, source_dir.name, record["path"], target)
         write_bytes(destination, data, record["mode"])
 
 
@@ -1112,10 +1134,8 @@ def expected_payload_records(
     for skill_name, included in sorted(scan.included_by_skill.items()):
         for source_record in sorted(included, key=lambda item: item["path"]):
             source = scan.source_root / skill_name / source_record["path"]
-            data = (
-                projected_skill_bytes(source, skill_name, target)
-                if source_record["path"] == "SKILL.md"
-                else source.read_bytes()
+            data = payload_bytes_for(
+                source, skill_name, source_record["path"], target
             )
             records.append(record_for_bytes(
                 f"skills/{skill_name}/{source_record['path']}",
@@ -2186,6 +2206,48 @@ def selftest(
                 for target in render_config["targets"]
             ),
         )
+        # Exact matching on first-and-last components let a case variant and a DIRECTORY
+        # named like an excluded file through. Both ship into five payloads if this fails.
+        case_fixture = temp / "case-exclusion-repo"
+        (case_fixture / "skills").mkdir(parents=True)
+        shutil.copytree(ROOT / "skills/ground-claims", case_fixture / "skills/ground-claims")
+        (case_fixture / "skills/ground-claims/references/Evals").mkdir(parents=True)
+        (case_fixture / "skills/ground-claims/references/Evals/f.json").write_text(
+            "{}\n", encoding="utf-8")
+        (case_fixture / "skills/ground-claims/references/CONTRACT.md").mkdir()
+        (case_fixture / "skills/ground-claims/references/CONTRACT.md/inner.txt").write_text(
+            "x\n", encoding="utf-8")
+        case_out = temp / "case-exclusion"
+        render_all(case_fixture, case_out, render_config, adapter_config)
+        expect(
+            "exclusion matches a case variant and a directory named like an excluded file",
+            not any(
+                path.exists()
+                for target in render_config["targets"]
+                for path in (
+                    case_out / target / "skills/ground-claims/references/Evals",
+                    case_out / target / "skills/ground-claims/references/CONTRACT.md",
+                )
+            ),
+        )
+
+        # The portability guard reached only SKILL.md's own fields, so any reference file
+        # was copied verbatim into all five targets unexamined.
+        ref_fixture = temp / "reference-construct-repo"
+        (ref_fixture / "skills").mkdir(parents=True)
+        shutil.copytree(ROOT / "skills/ground-claims", ref_fixture / "skills/ground-claims")
+        ref_file = ref_fixture / "skills/ground-claims/references/evidence-method.md"
+        ref_file.write_text(
+            ref_file.read_text(encoding="utf-8") + "\nRun $ARGUMENTS now.\n", encoding="utf-8"
+        )
+        expect_code(
+            "a host construct in a reference file is refused, not copied to five targets",
+            "skill.body.arguments",
+            lambda: render_all(
+                ref_fixture, temp / "reference-construct", render_config, adapter_config
+            ),
+        )
+
         expect(
             "every nested exclusion is still recorded as provenance",
             all(

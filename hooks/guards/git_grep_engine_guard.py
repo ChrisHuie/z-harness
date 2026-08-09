@@ -43,6 +43,36 @@ TAKES_ARG = {"-e", "-f", "--max-depth", "--threads", "-m", "--max-count",
              "--after-context", "--before-context", "-C"}
 UNRESOLVED = re.compile(r"\$[A-Za-z_{(]|`")
 
+# git grep uses parse-options(3): single-dash short flags cluster, and -e/-f take their
+# argument attached to the cluster when anything follows the letter. Matching only the
+# separated spellings let `-eharness\b` and `-fpatterns.txt` through with the pattern
+# never entering `patterns`, so the engine check ran against an empty list and allowed.
+GREP_SHORT_ENGINE = {"E": "E", "F": "F", "P": "P"}
+GREP_SHORT_PATTERN_ARG = {"e", "f"}
+GREP_SHORT_NOARG = set("GiIlLwvhHcqzarRnO")
+
+
+def short_option_cluster(text):
+    """Parse a single-dash git grep short-option cluster.
+
+    -> (engine letters seen, 'e'/'f' terminator or None, its attached argument or None),
+    or None when the cluster holds a letter this guard does not model. Returning None
+    leaves an unmodelled spelling to the existing handling rather than parsing it wrong.
+    """
+    if len(text) < 2 or not text.startswith("-") or text.startswith("--"):
+        return None
+    engines = []
+    for index, char in enumerate(text[1:], start=1):
+        if char in GREP_SHORT_PATTERN_ARG:
+            return (engines, char, text[index + 1:] or None)
+        if char in GREP_SHORT_ENGINE:
+            engines.append(GREP_SHORT_ENGINE[char])
+            continue
+        if char in GREP_SHORT_NOARG:
+            continue
+        return None
+    return (engines, None, None)
+
 
 def split_commands(cmd):
     """Split on UNQUOTED && || ; | newline ( ) and yield token lists.
@@ -513,11 +543,21 @@ def decide(command, _shell_depth=0):
             elif text in ("--extended-regexp",) or re.match(r"^-[a-zA-Z]*E[a-zA-Z]*$", text):
                 engine = "E"
                 engine_src = "flag"
-            elif text in ("-e", "-f"):
-                if text == "-f":
+            elif (cluster := short_option_cluster(text)) is not None and cluster[1]:
+                cluster_engines, letter, attached = cluster
+                for cluster_engine in cluster_engines:
+                    engine = cluster_engine
+                    engine_src = "flag"
+                if letter == "f":
                     pattern_from_file = True
+                if attached is not None:
+                    # -eharness\b / -fpatterns.txt: the argument rides the same token.
+                    if letter == "e":
+                        patterns.append((attached, quoting))
+                    k += 1
+                    continue
                 if k + 1 < len(argv):
-                    if text == "-e":
+                    if letter == "e":
                         patterns.append(argv[k + 1])
                     k += 2
                     continue
@@ -641,6 +681,26 @@ FIXTURES = [
      "deny"),
     ("ASK  UNMODELLED 2026-08-02: -E with a -f pattern file - guard cannot see the patterns",
      """git grep -nE -f pats.txt -- src/""", "ask"),
+    # git grep uses parse-options(3), so -e/-f take an attached argument. Matching only
+    # the separated spelling allowed every form below while the separated control denied.
+    ("RED  ATTACHED: -e argument riding the same token",
+     """git grep -E -e'harness\\b' -- README.md""", "deny"),
+    ("RED  ATTACHED: same, double-quoted argument",
+     '''git grep -E -e"harness\\b" -- README.md''', "deny"),
+    ("RED  ATTACHED: engine and -e clustered, argument attached",
+     """git grep -Ee'harness\\b' -- README.md""", "deny"),
+    ("RED  ATTACHED: no-arg flag before the clustered engine and -e",
+     """git grep -nEe'x = \\d' -- README.md""", "deny"),
+    ("ASK  ATTACHED: -f pattern file attached to its flag",
+     """git grep -nE -fpats.txt -- src/""", "ask"),
+    ("GREEN ATTACHED: -P with an attached -e argument is the intended engine",
+     """git grep -P -e'harness\\b' -- README.md""", "allow"),
+    ("GREEN ATTACHED: -F fixed strings with an attached -e argument",
+     """git grep -F -e'harness\\b' -- README.md""", "allow"),
+    ("GREEN ATTACHED: no engine flag, attached -e - BRE is fine",
+     """git grep -e'harness\\b' -- README.md""", "allow"),
+    ("GREEN ATTACHED: unmodelled cluster letter falls through, not parsed wrong",
+     """git grep -EZe'harness\\b' -- README.md""", "allow"),
     ("GREEN patternType=perl via config - the intended engine",
      """git -c grep.patternType=perl grep 'x\\b' -- src/""", "allow"),
     ("GREEN -P with a -f pattern file",

@@ -48,7 +48,10 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from git_grep_engine_guard import split_commands, strip_shell_keywords  # noqa: E402
+from git_grep_engine_guard import (  # noqa: E402
+    nested_shell_command, split_commands, strip_shell_keywords,
+    unwrap_command_prefix,
+)
 
 MODS = "aAcehlPqQrstu"
 # unbraced parameter expansions, INCLUDING positionals and specials. $( is excluded.
@@ -81,12 +84,18 @@ MOD_MEANING = {
 
 
 def is_rev_path_git(tokens):
-    """True when this subcommand's argv is `git [-C x] <rev:path subcommand> ...`."""
-    words = strip_shell_keywords([t for t, _ in tokens])
+    """True when this subcommand's argv is `git [-C x] <rev:path subcommand> ...`.
+
+    The hook sees shell source, not execve(2) argv, so `git`, `/usr/bin/git`, `env git`
+    and `nice git` are the same invocation. Comparing argv[0] to the literal "git" made
+    every wrapper spelling vanish from this guard while the bare form was denied, so the
+    prefix is peeled by the same helper the sibling grep guard uses rather than by a
+    second hand-rolled walk that can drift from it.
+    """
+    items, _command_env, _errors = unwrap_command_prefix(tokens)
+    words = strip_shell_keywords([t for t, _ in items])
     j = 0
-    while j < len(words) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[j]):
-        j += 1
-    if j >= len(words) or words[j] != "git":
+    if j >= len(words) or os.path.basename(words[j]) != "git":
         return False
     j += 1
     options_with_args = {
@@ -103,11 +112,30 @@ def is_rev_path_git(tokens):
     return j < len(words) and words[j] in REV_PATH_SUBCOMMANDS
 
 
-def decide(command):
+def decide(command, _depth=0):
     """-> (decision, reason)."""
     hits = []
     for tokens in split_commands(command):
-        if not is_rev_path_git(tokens):
+        scan_this_command = is_rev_path_git(tokens)
+        # `<shell> -c '...'` hides the git invocation one level down, and the two shells
+        # mangle at different moments. Only zsh applies a history modifier, so a zsh -c
+        # body is re-scanned as zsh source. For sh/bash/dash/ksh the inner body is safe
+        # on its own -- but the OUTER zsh still expands anything not single-quoted before
+        # the inner shell ever starts, so this command's own tokens are scanned instead.
+        # Bounded, because a crafted command can nest without limit.
+        if not scan_this_command and _depth < 4:
+            inner = nested_shell_command(tokens)
+            if inner is not None:
+                items, _env, _errs = unwrap_command_prefix(tokens)
+                shell = os.path.basename(items[0][0]) if items else ""
+                if shell == "zsh":
+                    decision, reason = decide(inner, _depth + 1)
+                    if decision != "allow":
+                        return (decision, reason)
+                scan_this_command = any(
+                    is_rev_path_git(nested) for nested in split_commands(inner)
+                )
+        if not scan_this_command:
             continue
         for text, quoting in tokens:
             if quoting == "'":          # single-quoted: the outer shell never expands it
@@ -209,6 +237,31 @@ FIXTURES = [
      "git show '$SHA:src'/f.py", "allow"),
     ("RED REVIEW: --attr-source consumes its argument before git show",
      "git --attr-source HEAD show $SHA:src/f.py", "deny"),
+    # The hook reads shell source, not execve(2) argv. Comparing argv[0] to the literal
+    # "git" made every spelling below vanish while the bare form above was denied.
+    ("RED WRAPPER: absolute executable path",
+     "SHA=x; /usr/bin/git show $SHA:src/f.py", "deny"),
+    ("RED WRAPPER: env",
+     "SHA=x; env git show $SHA:src/f.py", "deny"),
+    ("RED WRAPPER: env with an inline assignment",
+     "env GIT_PAGER=cat git show $SHA:src/f.py", "deny"),
+    ("RED WRAPPER: nohup",
+     "SHA=x; nohup git show $SHA:src/f.py", "deny"),
+    ("RED WRAPPER: nice",
+     "SHA=x; nice git show $SHA:src/f.py", "deny"),
+    ("RED WRAPPER: command",
+     "SHA=x; command git show $SHA:src/f.py", "deny"),
+    # A nested shell mangles at a different moment depending on which shell it is.
+    ("RED NESTED: sh -c body in double quotes - the OUTER zsh expands it first",
+     'sh -c "SHA=x; git show $SHA:src/f.py"', "deny"),
+    ("RED NESTED: zsh -c body in single quotes - the INNER zsh applies the modifier",
+     "zsh -c 'SHA=x; git show $SHA:src/f.py'", "deny"),
+    ("GREEN NESTED: sh -c body in single quotes - sh has no history modifiers",
+     "sh -c 'SHA=x; git show $SHA:src/f.py'", "allow"),
+    ("GREEN NESTED: bash -c body in single quotes - same reason",
+     "bash -c 'SHA=x; git show $SHA:src/f.py'", "allow"),
+    ("GREEN NESTED: nested shell with no rev:path git inside",
+     'sh -c "git status"', "allow"),
 ]
 
 

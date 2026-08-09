@@ -30,6 +30,7 @@ JSON and emits
 `decision:"block"` is deprecated for PreToolUse and is not used.
 """
 import json
+import subprocess
 import sys
 import pathlib
 
@@ -121,6 +122,36 @@ def selftest():
     failures += (not ok)
     print(f"  {'PASS' if ok else 'FAIL'} codex-ask-closed   want=deny  got={decision!s:<5} "
           "unsupported confirmation maps to deny")
+    hook_cases = (
+        ("command-terminator", "command -- git grep -Ee'harness\\b' -- README.md", "deny"),
+        ("exec-argv0", "SHA=x; exec -a harmless git show $SHA:src/f.py", "deny"),
+        ("env-s-pcre", "env -S \"git grep -Pe'harness\\b' -- README.md\"", None),
+        ("mixed-shell", "sh -c 'zsh -c \"git show $SHA:src/f.py\"'", "deny"),
+        ("dynamic-exec", "$TOOL show $SHA:src/f.py", "ask"),
+        ("command-query", "command -v git show $SHA:src/f.py", None),
+    )
+    for label, command, want in hook_cases:
+        raw = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+        result = subprocess.run(
+            [sys.executable, __file__], input=raw, capture_output=True, text=True,
+            timeout=5,
+        )
+        rc, stdout, stderr = result.returncode, result.stdout, result.stderr
+        emitted = json.loads(stdout) if stdout else None
+        got = ((emitted or {}).get("hookSpecificOutput", {})
+               .get("permissionDecision"))
+        ok = rc == 0 and not stderr and got == want
+        total += 1
+        failures += (not ok)
+        print(f"  {'PASS' if ok else 'FAIL'} json-stdin         {label:<18} "
+              f"want={want!s:<5} got={got!s:<5}")
+    oversized = "echo " + ("x" * grep_guard.MAX_COMMAND_CHARS)
+    got, reason = decide(oversized)
+    ok = got == "ask" and "parse limit" in reason
+    total += 1
+    failures += (not ok)
+    print(f"  {'PASS' if ok else 'FAIL'} parse-limit       want=ask   got={got:<5} "
+          "oversized source fails closed")
     class BrokenGuard:
         @staticmethod
         def decide(_command):

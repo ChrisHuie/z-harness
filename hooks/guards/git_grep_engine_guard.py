@@ -32,11 +32,13 @@ Exit codes:  0 = decision emitted on stdout (allow/deny/ask)
 import json
 import os
 import re
+import shlex
 import shutil
 import string
 import subprocess
 import sys
 import tempfile
+from typing import NamedTuple
 
 PCRE_ONLY = re.compile(r"\\[bBdDsSwWAZzhHvVR]|\(\?[:=!<Pi#'-]")
 ENGINE_P = re.compile(r"^--perl-regexp$|^-[a-zA-Z]*P[a-zA-Z]*$")
@@ -46,6 +48,38 @@ TAKES_ARG = {"-e", "-f", "--max-depth", "--threads", "-m", "--max-count",
              "--open-files-in-pager", "--color", "-A", "-B", "-C", "--context",
              "--after-context", "--before-context", "-C"}
 UNRESOLVED = re.compile(r"\$[A-Za-z_{(]|`")
+
+MAX_COMMAND_CHARS = 1024 * 1024
+MAX_SUBCOMMANDS = 16384
+MAX_TOKENS = 65536
+MAX_PREFIX_DEPTH = 8
+MAX_ENV_SPLITS = 4
+
+
+class CommandParseError(ValueError):
+    """The Bash source cannot be tokenized within the guard's closed limits."""
+
+
+class PrefixResolution(NamedTuple):
+    """One resolved command boundary shared by both Bash predicates."""
+
+    items: list
+    command_env: dict
+    errors: tuple
+    hazard_hint: bool
+
+
+class ShellInvocation(NamedTuple):
+    shell: str
+    command: str
+
+
+def shell_source_is_dynamic(command):
+    stripped = command.strip()
+    return bool(re.fullmatch(
+        r"(?:\$[A-Za-z_][A-Za-z0-9_]*|\$\{[^}]+\}|\$\([^)]*\)|`[^`]*`)",
+        stripped,
+    ))
 
 # git grep uses parse-options(3): single-dash short flags cluster, and -e/-f take their
 # argument attached to the cluster when anything follows the letter. Matching only the
@@ -106,8 +140,14 @@ def split_commands(cmd):
     Tokens are (text, quoting) where quoting is one of '', "'", '"'.
     Heredoc bodies are dropped: a `<<'EOF' ... EOF` payload is not argv.
     """
+    if not isinstance(cmd, str):
+        raise CommandParseError("command source is not text")
+    if len(cmd) > MAX_COMMAND_CHARS:
+        raise CommandParseError(
+            f"command source exceeds the {MAX_COMMAND_CHARS}-byte parse limit")
     out, cur = [], []
     tok_parts, tok_mode_parts, tok_modes, q, i = [], [], set(), "", 0
+    token_count = 0
     # strip heredoc bodies so python/EOF payloads never reach the tokenizer
     cmd = re.sub(r"<<-?\s*'?\"?([A-Za-z_][A-Za-z0-9_]*)'?\"?\n.*?\n\1\b",
                  " __HEREDOC__ ", cmd, flags=re.S)
@@ -121,8 +161,12 @@ def split_commands(cmd):
             tok_modes.add(mode)
 
     def flush_tok():
-        nonlocal tok_parts, tok_mode_parts, tok_modes
+        nonlocal tok_parts, tok_mode_parts, tok_modes, token_count
         if tok_parts or tok_modes:
+            token_count += 1
+            if token_count > MAX_TOKENS:
+                raise CommandParseError(
+                    f"command source exceeds the {MAX_TOKENS}-token parse limit")
             quoting = (next(iter(tok_modes)) if len(tok_modes) == 1
                        else "mixed:" + "".join(tok_mode_parts))
             cur.append(("".join(tok_parts), quoting))
@@ -133,6 +177,9 @@ def split_commands(cmd):
         flush_tok()
         if cur:
             out.append(cur)
+            if len(out) > MAX_SUBCOMMANDS:
+                raise CommandParseError(
+                    f"command source exceeds the {MAX_SUBCOMMANDS}-subcommand parse limit")
         cur = []
 
     while i < n:
@@ -179,6 +226,8 @@ def split_commands(cmd):
                 elif ch == "}":
                     depth -= 1
                 i += 1
+            if depth:
+                raise CommandParseError("command source has an unclosed parameter expansion")
             continue
         if cmd.startswith("&&", i) or cmd.startswith("||", i):
             flush_cmd()
@@ -194,14 +243,20 @@ def split_commands(cmd):
             continue
         append_tok(c)
         i += 1
+    if q:
+        raise CommandParseError("command source has an unclosed quote")
     flush_cmd()
     return out
 
 
-SHELL_KEYWORDS = {"do", "then", "else", "elif", "if", "while", "until", "time",
-                  "exec", "command", "builtin", "nocorrect", "noglob"}
+CONTROL_KEYWORDS = {"do", "then", "else", "elif", "if", "while", "until", "time",
+                    "nocorrect", "noglob"}
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
+GIT_HAZARD_SUBCOMMANDS = {
+    "grep", "show", "diff", "cat-file", "log", "ls-tree", "archive", "checkout",
+    "restore", "rev-parse", "blame",
+}
 EXEC_WRAPPERS = {
     # option flags, options consuming the next argv, attached value prefixes,
     # bundled short flags, positional operands before the command
@@ -262,46 +317,142 @@ UNMODELLED_EXEC_WRAPPERS = {"xargs", "script", "strace", "dtruss", "ltrace", "wa
                             "parallel", "flock", "chroot", "unshare", "doas", "runuser",
                             "su", "systemd-run", "ssh"}
 
+def _literal_git_word(word):
+    return (os.path.basename(word) == "git"
+            or bool(re.search(r"(?:^|\s)(?:/[^\s]*/)?git(?:\s|$)", word)))
 
-def strip_shell_keywords(words):
-    """Drop leading shell keywords so `do git ...` still gates on git."""
-    k = 0
-    while k < len(words) and words[k] in SHELL_KEYWORDS:
-        k += 1
-    return words[k:]
+
+def command_has_git_hazard_hint(tokens):
+    """True when unresolved command discovery could conceal a relevant Git invocation."""
+    words = [text for text, _quoting in tokens]
+    if any(_literal_git_word(word) for word in words):
+        return True
+    meaningful = [word for word in words
+                  if word not in CONTROL_KEYWORDS and not ASSIGNMENT.match(word)]
+    if not meaningful or not UNRESOLVED.search(meaningful[0]):
+        return False
+    return any(os.path.basename(word) in GIT_HAZARD_SUBCOMMANDS
+               for word in meaningful[1:])
+
+
+def source_has_git_hazard_hint(command):
+    """Conservative Git-hazard hint for a nested command source string."""
+    try:
+        commands = split_commands(command)
+    except CommandParseError:
+        return True
+    return any(command_has_git_hazard_hint(tokens) for tokens in commands)
+
+
+def _split_env_string(value):
+    if len(value) > MAX_COMMAND_CHARS:
+        raise CommandParseError("env -S string exceeds the command parse limit")
+    try:
+        words = shlex.split(value, posix=True)
+    except ValueError as exc:
+        raise CommandParseError(f"env -S string cannot be parsed ({exc})") from exc
+    if not words:
+        raise CommandParseError("env -S string resolves to no arguments")
+    if len(words) > MAX_TOKENS:
+        raise CommandParseError("env -S string exceeds the token parse limit")
+    return [(word, "") for word in words]
 
 
 def unwrap_command_prefix(tokens):
-    """Peel common launch wrappers and return (argv tokens, environment, errors).
+    """Resolve the executable boundary shared by both guards.
 
-    The hook sees shell source, not execve(2) argv.  `env`, `nice`, absolute
-    executable paths, and `sh -c` are therefore part of the security boundary:
-    treating only literal argv[0] == "git" makes the same Git invocation vanish.
+    The result retains uncertainty instead of guessing through a dynamic executable,
+    malformed wrapper, or argv-rewriting launcher. Callers combine that uncertainty with
+    `hazard_hint` and return `ask` rather than treating an unresolved command as clean.
     """
+    original = list(tokens)
     items = list(tokens)
     command_env = dict(os.environ)
     errors = []
     wrapper_depth = 0
+    env_splits = 0
     while items:
-        while items and items[0][0] in SHELL_KEYWORDS:
-            keyword = items.pop(0)[0]
-            if keyword not in {"command", "builtin"} or not items:
-                continue
-            # `command -p git ...` still runs git; `command -v git` only prints a path.
-            # Stripping the keyword alone left `-p` sitting where argv[0] was expected,
-            # so the invocation stopped looking like git.
-            if items[0][0] in {"-v", "-V", "--version"}:
-                items.clear()
-                break
-            if items[0][0] == "-p":
-                items.pop(0)
+        while items and items[0][0] in CONTROL_KEYWORDS:
+            items.pop(0)
         while items and ASSIGNMENT.match(items[0][0]):
             key, value = items.pop(0)[0].split("=", 1)
             command_env[key] = value
         if not items:
             break
 
-        executable = os.path.basename(items[0][0])
+        executable_text = items[0][0]
+        if UNRESOLVED.search(executable_text):
+            errors.append(f"dynamic executable {executable_text!r} cannot be resolved")
+            break
+        executable = os.path.basename(executable_text)
+
+        if executable == "builtin":
+            wrapper_depth += 1
+            items.pop(0)
+            if not items:
+                break
+            if items[0][0] == "--":
+                items.pop(0)
+                if not items:
+                    break
+            if items[0][0] in {"command", "exec"}:
+                continue
+            if items[0][0].startswith("-"):
+                errors.append(f"unmodelled builtin option {items[0][0]!r}")
+            else:
+                # `builtin NAME` refuses to run an external command.
+                items.clear()
+            break
+
+        if executable == "command":
+            wrapper_depth += 1
+            items.pop(0)
+            terminal = False
+            while items:
+                word = items[0][0]
+                if word == "--":
+                    items.pop(0)
+                    break
+                if word == "-p" or re.fullmatch(r"-p+", word):
+                    items.pop(0)
+                    continue
+                if word in {"-v", "-V", "--version"} or (
+                        re.fullmatch(r"-[pvV]+", word) and any(c in word for c in "vV")):
+                    items.clear()
+                    terminal = True
+                    break
+                if word.startswith("-"):
+                    errors.append(f"unmodelled command option {word!r}")
+                break
+            if terminal or errors:
+                break
+            continue
+
+        if executable == "exec":
+            wrapper_depth += 1
+            items.pop(0)
+            while items:
+                word = items[0][0]
+                if word == "--":
+                    items.pop(0)
+                    break
+                if word == "-a":
+                    items.pop(0)
+                    if not items:
+                        errors.append("exec -a is missing argv0")
+                        break
+                    items.pop(0)
+                    continue
+                if word in {"-c", "-l"} or re.fullmatch(r"-[cl]+", word):
+                    items.pop(0)
+                    continue
+                if word.startswith("-"):
+                    errors.append(f"unmodelled exec option {word!r}")
+                break
+            if errors:
+                break
+            continue
+
         if executable == "env":
             wrapper_depth += 1
             items.pop(0)
@@ -329,6 +480,31 @@ def unwrap_command_prefix(tokens):
                     continue
                 if word.startswith("--chdir="):
                     items.pop(0)
+                    continue
+                split_value = None
+                if word in {"-S", "--split-string"}:
+                    option = items.pop(0)[0]
+                    if not items:
+                        errors.append(f"env {option} is missing its argument")
+                        break
+                    split_value = items.pop(0)[0]
+                elif word.startswith("--split-string="):
+                    split_value = word.split("=", 1)[1]
+                    items.pop(0)
+                elif word.startswith("-S") and word != "-S":
+                    split_value = word[2:]
+                    items.pop(0)
+                if split_value is not None:
+                    env_splits += 1
+                    if env_splits > MAX_ENV_SPLITS:
+                        errors.append(
+                            f"env -S nesting exceeds the limit of {MAX_ENV_SPLITS}")
+                        break
+                    try:
+                        items = _split_env_string(split_value) + items
+                    except CommandParseError as exc:
+                        errors.append(str(exc))
+                        break
                     continue
                 if word.startswith("-"):
                     errors.append(f"unmodelled env option {word!r}")
@@ -422,47 +598,48 @@ def unwrap_command_prefix(tokens):
             break
 
         break
-    if wrapper_depth > 8:
-        errors.append("more than eight nested command wrappers")
-    return items, command_env, errors
+    if wrapper_depth > MAX_PREFIX_DEPTH:
+        errors.append(f"more than {MAX_PREFIX_DEPTH} nested command wrappers")
+    return PrefixResolution(
+        items, command_env, tuple(errors), command_has_git_hazard_hint(original))
 
 
-def nested_shell_command(tokens):
-    """Return the command string passed to a common shell's -c, if present."""
-    items, _command_env, errors = unwrap_command_prefix(tokens)
-    if errors or not items or os.path.basename(items[0][0]) not in SHELLS:
+def nested_shell_invocation(resolution):
+    """Return the resolved shell and its `-c` body, if this command invokes one."""
+    if resolution.errors or not resolution.items:
         return None
-    args = items[1:]
+    shell = os.path.basename(resolution.items[0][0])
+    if shell not in SHELLS:
+        return None
+    args = resolution.items[1:]
     for index, (word, _quoting) in enumerate(args):
         if word == "--":
             continue
         if word == "-c" or (word.startswith("-") and not word.startswith("--")
                              and "c" in word[1:]):
-            return args[index + 1][0] if index + 1 < len(args) else ""
+            command = args[index + 1][0] if index + 1 < len(args) else ""
+            return ShellInvocation(shell, command)
     return None
 
-
-def git_grep_argv(tokens):
+def git_grep_argv(tokens, resolution=None):
     """-> (argv after git grep, config values, unresolved relevant config),
     or None when this subcommand is not a git grep."""
-    items, command_env, prefix_errors = unwrap_command_prefix(tokens)
+    resolution = resolution or unwrap_command_prefix(tokens)
+    items = resolution.items
+    command_env = resolution.command_env
     words = [t for t, _ in items]
     if not words:
         return None
     j = 0
-    if prefix_errors:
-        concealed_git = any(
-            os.path.basename(word) == "git"
-            or re.search(r"(?:^|\s)(?:/[^\s]*/)?git(?:\s|$)", word)
-            for word in words
-        )
-        if concealed_git:
-            return [], [], prefix_errors
+    if resolution.errors:
+        if resolution.hazard_hint:
+            return [], [], list(resolution.errors)
+        return None
     if os.path.basename(words[j]) != "git":
         return None
     j += 1
     configs = []
-    unresolved_configs = list(prefix_errors)
+    unresolved_configs = []
 
     count_text = command_env.get("GIT_CONFIG_COUNT")
     if count_text is not None:
@@ -556,15 +733,29 @@ def decide(command, _shell_depth=0):
     if _shell_depth > 4:
         return ("ask", "nested shell -c depth exceeds the git-grep guard's model; "
                 "verify the command or invoke git grep directly with -P.")
-    for tokens in split_commands(command):
-        nested = nested_shell_command(tokens)
-        if nested is not None:
-            if not nested:
+    try:
+        commands = split_commands(command)
+    except CommandParseError as exc:
+        return ("ask", f"the Bash command cannot be parsed safely ({exc}); "
+                "rewrite it as a direct command before proceeding.")
+    for tokens in commands:
+        resolution = unwrap_command_prefix(tokens)
+        if resolution.errors and resolution.hazard_hint:
+            return ("ask", "a possible Git invocation crosses an unresolved command "
+                    "prefix (" + "; ".join(resolution.errors) + "); invoke Git directly "
+                    "so the pattern engine can be verified.")
+        invocation = nested_shell_invocation(resolution)
+        if invocation is not None:
+            if not invocation.command:
                 return ("ask", "a shell -c wrapper is missing its command string")
-            nested_decision, nested_reason = decide(nested, _shell_depth + 1)
+            if shell_source_is_dynamic(invocation.command):
+                return ("ask", "a shell -c command string is dynamic, so the Git grep "
+                        "engine cannot be inspected before execution")
+            nested_decision, nested_reason = decide(
+                invocation.command, _shell_depth + 1)
             if nested_decision != "allow":
                 return nested_decision, nested_reason
-        got = git_grep_argv(tokens)
+        got = git_grep_argv(tokens, resolution)
         if got is None:
             continue
         argv, configs, unresolved_configs = got
@@ -806,8 +997,22 @@ FIXTURES = [
      """sudo -u root git grep -nE 'harness\\b' -- README.md""", "deny"),
     ("RED WRAPPER: command -p still executes git",
      """command -p git grep -nE 'harness\\b' -- README.md""", "deny"),
+    ("RED WRAPPER: command -- still executes git",
+     "command -- git grep -Ee'harness\\b' -- README.md", "deny"),
+    ("RED WRAPPER: builtin command -- still executes git",
+     "builtin command -- git grep -Ee'harness\\b' -- README.md", "deny"),
+    ("RED WRAPPER: exec -a consumes argv0 before executing git",
+     "exec -a harmless git grep -Ee'harness\\b' -- README.md", "deny"),
+    ("RED WRAPPER: exec -c still executes git",
+     "exec -c git grep -Ee'harness\\b' -- README.md", "deny"),
+    ("RED WRAPPER: exec -- still executes git",
+     "exec -- git grep -Ee'harness\\b' -- README.md", "deny"),
     ("GREEN WRAPPER: command -v only prints a path",
      """command -v git grep -nE 'harness\\b' -- README.md""", "allow"),
+    ("GREEN WRAPPER: clustered command -pv only prints a path",
+     "command -pv git grep -nE 'harness\\b' -- README.md", "allow"),
+    ("GREEN WRAPPER: builtin refuses to execute an external git",
+     "builtin git grep -nE 'harness\\b' -- README.md", "allow"),
     ("ASK WRAPPER: xargs is unmodelled and conceals git",
      """xargs git grep -nE 'harness\\b' -- README.md""", "ask"),
     ("GREEN patternType=perl via config - the intended engine",
@@ -837,8 +1042,21 @@ FIXTURES = [
      """/usr/bin/git grep -nE 'harness\\b' -- README.md""", "deny"),
     ("ASK  ROUND 9: valueless grep.patternType fails closed",
      """git -c grep.patternType grep -n 'harness\\b' -- README.md""", "ask"),
-    ("ASK  ROUND 9: unmodelled env command splitting cannot hide git",
-     """env -S \"git grep -nE 'harness\\b' -- README.md\"""", "ask"),
+    ("RED  ROUND 9: env -S command splitting is parsed before git",
+     """env -S \"git grep -nE 'harness\\b' -- README.md\"""", "deny"),
+    ("RED  ROUND 12: attached env -S command splitting is parsed",
+     """env -S\"git grep -nE 'harness\\b' -- README.md\"""", "deny"),
+    ("RED  ROUND 12: long env split-string command splitting is parsed",
+     """env --split-string=\"git grep -nE 'harness\\b' -- README.md\"""", "deny"),
+    ("GREEN ROUND 12: env -S preserves an explicit PCRE engine",
+     """env -S \"git grep -nP 'harness\\b' -- README.md\"""", "allow"),
+    ("ASK  ROUND 12: a dynamic executable with Git grep arguments is unresolved",
+     """$TOOL grep -nE 'harness\\b' -- README.md""", "ask"),
+    ("ASK  ROUND 12: command-prefix depth fails closed",
+     ("command " * (MAX_PREFIX_DEPTH + 1))
+     + "git grep -nE 'harness\\b' -- README.md", "ask"),
+    ("ASK  ROUND 12: an unclosed Git command is not a clean parse",
+     """git grep -nE 'harness\\b""", "ask"),
     ("RED  ROUND 10: nohup wrapper cannot displace git from argv zero",
      """nohup git -c grep.patternType=extended grep -n 'harness\\b' -- README.md""", "deny"),
     ("RED  ROUND 10: absolute nohup composes with the command shell keyword",

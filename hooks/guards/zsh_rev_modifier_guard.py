@@ -49,8 +49,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from git_grep_engine_guard import (  # noqa: E402
-    nested_shell_command, split_commands, strip_shell_keywords,
-    unwrap_command_prefix,
+    CommandParseError, MAX_PREFIX_DEPTH, nested_shell_invocation, shell_source_is_dynamic,
+    source_has_git_hazard_hint, split_commands, unwrap_command_prefix,
 )
 
 MODS = "aAcehlPqQrstu"
@@ -87,7 +87,7 @@ MOD_MEANING = {
 }
 
 
-def is_rev_path_git(tokens):
+def is_rev_path_git(tokens, resolution=None):
     """True when this subcommand's argv is `git [-C x] <rev:path subcommand> ...`.
 
     The hook sees shell source, not execve(2) argv, so `git`, `/usr/bin/git`, `env git`
@@ -96,8 +96,10 @@ def is_rev_path_git(tokens):
     prefix is peeled by the same helper the sibling grep guard uses rather than by a
     second hand-rolled walk that can drift from it.
     """
-    items, _command_env, _errors = unwrap_command_prefix(tokens)
-    words = strip_shell_keywords([t for t, _ in items])
+    resolution = resolution or unwrap_command_prefix(tokens)
+    if resolution.errors:
+        return False
+    words = [t for t, _ in resolution.items]
     j = 0
     if j >= len(words) or os.path.basename(words[j]) != "git":
         return False
@@ -116,75 +118,26 @@ def is_rev_path_git(tokens):
     return j < len(words) and words[j] in REV_PATH_SUBCOMMANDS
 
 
-def decide(command, _depth=0):
-    """-> (decision, reason)."""
+def _zsh_expansion_hits(tokens):
     hits = []
-    for tokens in split_commands(command):
-        # An unresolvable prefix hides where the command starts, so `git` may be present
-        # and unfindable. The sibling grep guard already fails closed on this; discarding
-        # the same errors here left `xargs git show $SHA:src/f.py` reading as allow while
-        # the bare form denied.
-        _items, _env, prefix_errors = unwrap_command_prefix(tokens)
-        if prefix_errors:
-            words = [text for text, _ in tokens]
-            if any(os.path.basename(word) == "git" for word in words):
-                return ("ask",
-                        "this command launches git through a prefix this guard cannot "
-                        "resolve (" + "; ".join(prefix_errors) + "), so it cannot prove "
-                        "whether a `rev:path` argument survives zsh expansion. Run git "
-                        "directly, or confirm by hand that no argument carries a `:` "
-                        "followed by a zsh history-modifier letter.")
-        scan_this_command = is_rev_path_git(tokens)
-        # `<shell> -c '...'` hides the git invocation one level down, and the two shells
-        # mangle at different moments. Only zsh applies a history modifier, so a zsh -c
-        # body is re-scanned as zsh source. For sh/bash/dash/ksh the inner body is safe
-        # on its own -- but the OUTER zsh still expands anything not single-quoted before
-        # the inner shell ever starts, so this command's own tokens are scanned instead.
-        if not scan_this_command:
-            inner = nested_shell_command(tokens)
-            if inner is not None:
-                # Recursion is bounded because a crafted command can nest without limit,
-                # and the bound fails CLOSED. Falling through to the scan below would
-                # have returned allow, so a payload wrapped in five shells was accepted
-                # while the same payload wrapped in four was denied.
-                if _depth >= NEST_DEPTH_LIMIT:
-                    return ("ask",
-                            f"nested shell invocations exceed this guard's depth limit of "
-                            f"{NEST_DEPTH_LIMIT}, so it cannot prove what the innermost "
-                            f"command becomes after each shell expands it. Run the inner "
-                            f"command directly, or confirm by hand that no `rev:path` "
-                            f"argument reaches git through a zsh expansion.")
-                items, _env, _errs = unwrap_command_prefix(tokens)
-                shell = os.path.basename(items[0][0]) if items else ""
-                if shell == "zsh":
-                    decision, reason = decide(inner, _depth + 1)
-                    if decision != "allow":
-                        return (decision, reason)
-                scan_this_command = any(
-                    is_rev_path_git(nested) for nested in split_commands(inner)
-                )
-        if not scan_this_command:
+    for text, quoting in tokens:
+        if quoting == "'":
             continue
-        for text, quoting in tokens:
-            if quoting == "'":          # single-quoted: the outer shell never expands it
-                continue
-            if quoting.startswith("mixed:"):
-                modes = quoting.split(":", 1)[1]
-            else:
-                code = {"": "U", "'": "S", '"': "D"}.get(quoting, "U")
-                modes = code * len(text)
-            for rx in (EXPANSION, EXPANSION_BRACED):
-                for m in rx.finditer(text):
-                    # zsh sees a modifier only when the parameter, colon and
-                    # modifier letter occupy one shell-quoting segment. A quote
-                    # beginning immediately after the colon, a quote ending
-                    # before it, or an escaped colon makes the rev:path form safe.
-                    matched_modes = modes[m.start():m.end(1)]
-                    if (matched_modes and len(set(matched_modes)) == 1
-                            and matched_modes[0] != "S"):
-                        hits.append((m.group(0), text, m.group(1)))
-    if not hits:
-        return ("allow", "")
+        if quoting.startswith("mixed:"):
+            modes = quoting.split(":", 1)[1]
+        else:
+            code = {"": "U", "'": "S", '"': "D"}.get(quoting, "U")
+            modes = code * len(text)
+        for rx in (EXPANSION, EXPANSION_BRACED):
+            for match in rx.finditer(text):
+                matched_modes = modes[match.start():match.end(1)]
+                if (matched_modes and len(set(matched_modes)) == 1
+                        and matched_modes[0] != "S"):
+                    hits.append((match.group(0), text, match.group(1)))
+    return hits
+
+
+def _deny_hits(hits):
     tok, arg, mod = hits[0]
     braced = re.sub(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", r"${\1}",
                     tok.split(":")[0]) + ":" + tok.split(":", 1)[1]
@@ -198,6 +151,45 @@ def decide(command, _depth=0):
             "swallowed and the empty output reads as 'the file/symbol is absent' - that is the "
             "failure this blocks. (%d occurrence(s) in this command.)"
             % (tok, MOD_MEANING.get(mod, mod), mod, arg[:80], braced, len(hits)))
+
+
+def decide(command, _depth=0, _shell="zsh"):
+    """-> (decision, reason), tracking the shell that expands each source layer."""
+    try:
+        commands = split_commands(command)
+    except CommandParseError as exc:
+        return ("ask", f"the Bash command cannot be parsed safely ({exc}); rewrite it "
+                "as a direct command before proceeding.")
+    for tokens in commands:
+        resolution = unwrap_command_prefix(tokens)
+        if resolution.errors and resolution.hazard_hint:
+            return ("ask",
+                    "this command may launch Git through a prefix the guard cannot "
+                    "resolve (" + "; ".join(resolution.errors) + "), so it cannot prove "
+                    "whether a `rev:path` argument survives shell expansion. Run Git "
+                    "directly with a literal executable.")
+        direct_git = is_rev_path_git(tokens, resolution)
+        invocation = nested_shell_invocation(resolution)
+        descendant_git = (invocation is not None
+                          and source_has_git_hazard_hint(invocation.command))
+        if _shell == "zsh" and (direct_git or descendant_git):
+            hits = _zsh_expansion_hits(tokens)
+            if hits:
+                return _deny_hits(hits)
+        if invocation is None:
+            continue
+        if _depth >= NEST_DEPTH_LIMIT:
+            return ("ask",
+                    f"nested shell invocations exceed this guard's depth limit of "
+                    f"{NEST_DEPTH_LIMIT}, so it cannot prove what the innermost command "
+                    "becomes after each shell expands it. Run the inner command directly.")
+        if not invocation.command or shell_source_is_dynamic(invocation.command):
+            return ("ask", "a shell -c command string is empty or dynamic, so its Git "
+                    "arguments cannot be inspected before execution")
+        decision, reason = decide(invocation.command, _depth + 1, invocation.shell)
+        if decision != "allow":
+            return (decision, reason)
+    return ("allow", "")
 
 
 FIXTURES = [
@@ -290,9 +282,29 @@ FIXTURES = [
      "SHA=x; sudo --user=root git show $SHA:src/f.py", "deny"),
     ("RED WRAPPER: command -p still executes git",
      "SHA=x; command -p git show $SHA:src/f.py", "deny"),
+    ("RED WRAPPER: command -- still executes git",
+     "SHA=x; command -- git show $SHA:src/f.py", "deny"),
+    ("RED WRAPPER: builtin command -- still executes git",
+     "SHA=x; builtin command -- git show $SHA:src/f.py", "deny"),
+    ("RED WRAPPER: exec -a consumes argv0 before executing git",
+     "SHA=x; exec -a harmless git show $SHA:src/f.py", "deny"),
+    ("RED WRAPPER: exec -c still executes git",
+     "SHA=x; exec -c git show $SHA:src/f.py", "deny"),
+    ("RED WRAPPER: exec -- still executes git",
+     "SHA=x; exec -- git show $SHA:src/f.py", "deny"),
     ("GREEN WRAPPER: command -v only prints a path, it does not run git",
      "SHA=x; command -v git show $SHA:src/f.py", "allow"),
     # A launcher whose argv rewriting is not modelled must not read as clean.
+    ("RED WRAPPER: env -S double-quoted source expands in the outer zsh",
+     "SHA=x; env -S \"git show $SHA:src/f.py\"", "deny"),
+    ("GREEN WRAPPER: env -S single-quoted source is passed literally",
+     "SHA=x; env -S 'git show $SHA:src/f.py'", "allow"),
+    ("ASK WRAPPER: a dynamic executable with Git arguments is unresolved",
+     "$TOOL show $SHA:src/f.py", "ask"),
+    ("ASK WRAPPER: command-prefix depth fails closed",
+     ("command " * (MAX_PREFIX_DEPTH + 1)) + "git show $SHA:src/f.py", "ask"),
+    ("ASK WRAPPER: an unclosed Git command is not a clean parse",
+     "git show '$SHA:src/f.py", "ask"),
     ("ASK WRAPPER: xargs is unmodelled and conceals git",
      "SHA=x; xargs git show $SHA:src/f.py", "ask"),
     ("ASK WRAPPER: ssh is unmodelled and conceals git",
@@ -308,6 +320,14 @@ FIXTURES = [
      "sh -c 'SHA=x; git show $SHA:src/f.py'", "allow"),
     ("GREEN NESTED: bash -c body in single quotes - same reason",
      "bash -c 'SHA=x; git show $SHA:src/f.py'", "allow"),
+    ("RED NESTED: sh enters zsh and the inner zsh expands its double-quoted body",
+     "sh -c 'zsh -c \"git show $SHA:src/f.py\"'", "deny"),
+    ("RED NESTED: zsh expands a double-quoted body before entering sh",
+     "zsh -c 'sh -c \"git show $SHA:src/f.py\"'", "deny"),
+    ("RED NESTED: bash enters zsh and the inner zsh expands its body",
+     "bash -c 'zsh -c \"git show $SHA:src/f.py\"'", "deny"),
+    ("GREEN NESTED: a sh-to-bash chain never applies zsh modifiers",
+     "sh -c 'bash -c \"git show $SHA:src/f.py\"'", "allow"),
     ("GREEN NESTED: nested shell with no rev:path git inside",
      'sh -c "git status"', "allow"),
 ]

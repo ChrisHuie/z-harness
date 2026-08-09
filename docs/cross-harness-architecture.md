@@ -69,6 +69,38 @@ fields, using the shared production projection implementation. Blocking selftest
 the pilot's exact projected bytes with fixed goldens. Coherently rewriting payload bytes and their
 recorded hashes therefore does not pass, but this is not a second projection implementation.
 
+## Codex source basis
+
+Codex was previously the only target whose root contract this repository asserted without citing
+an artifact. It is grounded in
+[`openai/codex@646f7c0`](https://github.com/openai/codex/blob/646f7c0a91b8e327d263335da68ae8ef212895ce/codex-rs/exec-server-protocol/src/protocol.rs),
+whose `DISCOVERABLE_PLUGIN_MANIFEST_PATHS` lists `.codex-plugin/plugin.json` first, alongside
+`.claude-plugin/plugin.json` and `.cursor-plugin/plugin.json`.
+
+Codex reads **two** package routes, and the portable one is checked first. At that revision
+`find_plugin_manifest_path` returns a root `plugin.json` whenever its `$schema` is Agent
+Plugins-shaped, and `parse_agent_plugin_manifest_uri` then synthesises the component paths rather
+than requiring them: a root Agent Plugins manifest is loaded with `skills` set to `./skills` and an
+interface derived from the portable fields. The `agent-plugins` artifact is therefore already
+Codex-loadable, and its skill is discovered, with no `.codex-plugin/` present at all.
+
+The separate `codex` target is consequently not required for loading. Its whole Codex-visible
+delta is authored storefront presentation — `category`, `capabilities`, `defaultPrompt`,
+`brandColor`, and a long description distinct from the short one — plus headroom for `apps` and
+`hooks`, which the portable route cannot express. A standalone `.codex-plugin/plugin.json` with no
+root `plugin.json` parses as the legacy format and its declared `skills` path is read directly.
+
+That dual route is also why package isolation is protecting against a demonstrable hazard rather
+than a hypothetical one. In a root that carried both manifests, the root file decides everything:
+an Agent Plugins `$schema` that Codex does not support causes it to reject the package outright
+with no fallback to the perfectly valid `.codex-plugin/plugin.json` beside it, so a future schema
+version bump would silently disable the whole package; a root manifest carrying a `com.openai`
+extension object causes the overlay file to be ignored entirely; and an overlay cannot redirect the
+skills path in any case, because `skills` is not among the three fields it contributes.
+
+Neither route has been exercised against a Codex runtime. This is implementation-source evidence at
+one pinned revision, not an installation or a session.
+
 ## Kimi and Hermes source basis
 
 The Kimi layout is grounded in
@@ -198,8 +230,14 @@ fixed byte goldens, and negative mutations remain load-bearing.
 ## Publication, host evidence, and rollback
 
 No publisher, host runner, promotion gate, or rollback mechanism exists yet. Render artifacts
-therefore contain no `targetLevel`, `earnedLevel`, `validationStatus`, `authority`, installed digest,
-or runtime evidence.
+therefore contain no host evidence, no installed digest, and no `authority`: every artifact carries
+`evidence: []`, and authority is absent because it belongs to a guarded fact rather than a package.
+
+They do carry `targetLevel`, `earnedLevel`, and `validationStatus`, derived from the target's adapter
+entry. `earnedLevel` is pinned to `unverified` and never read from configuration, and a
+`validationStatus` above `fixture-only` requires host evidence records plus a non-empty license set,
+so no status a host receipt would justify is reachable while no host receipt producer exists. See
+[`contracts/compatibility-levels.md`](../contracts/compatibility-levels.md) for the evidence rule.
 
 A future publisher must verify the exact subject at its commit/upload fence and bind both the
 logical artifact digest and an immutable transport identity. Host observations belong in separate

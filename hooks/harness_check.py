@@ -14,13 +14,13 @@ Runs from either clone (repo root auto-detected from this file's location). Chec
   C4  every description <= 400 chars (house cap inside the 1024 spec ceiling)
   C5  method-skill bodies <= 5,000 chars after frontmatter; authoring-skill
       bodies <= 500 lines
-  C6  stale-claim tripwires: patterns that once shipped false stay at zero in
-      live channels (skills/, hooks/, tools/, AGENTS.md, CLAUDE.md)
+  C6  stale-claim tripwires: patterns that once shipped false stay at zero across
+      every tracked file except the declared SCAN_EXCLUSIONS
   C7  anchors: routing-table skills exist; Claude and Codex hook commands resolve;
       [local] original audit paths exist, `timeout` still absent, askq binary
       anchors hold
   C8  reserved context basenames (CLAUDE.md/AGENTS.md/GEMINI.md) exist nowhere
-      but the repo root
+      but the repo root, .git excluded as a path component (not a substring)
   C9  Codex package contract: manifest, marketplace, hook config, context bridges,
       and their size budgets are internally consistent
   C10 PR delivery contract: scoped publication authority, state-proof command,
@@ -37,6 +37,8 @@ zero inputs (an empty scan set is an error, never a clean verdict).
   harness_check.py --selftest  prove each check can go RED on a planted-defect
                                tree, then exit
 """
+import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -92,9 +94,9 @@ SELFTEST_SUITES = [
     ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 42),
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 8),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
-    ("render-packages", ["tools/render-packages.py", "--selftest"], 178),
-    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 16),
-    ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 50),
+    ("render-packages", ["tools/render-packages.py", "--selftest"], 187),
+    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 17),
+    ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 63),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
     ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 16),
     ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 66),
@@ -148,11 +150,43 @@ STALE_PATTERNS = [
     "ph-lint",                  # linter that never existed here
     "Each push is its own action needing its own confirmation",  # retired consent loop
     "committed to the PR",      # local commit falsely described as published
+    "contain no `targetLevel`", # artifacts carry the claims block; denied in two docs
+    "no validation status",     # same denial, README wording
 ]
+
+# C1: source digest per aggregated suite. A receipt's check count is self-reported, so a
+# stub can satisfy any floor; binding the source is what makes a receipt evidence.
+SUITE_SOURCE_GOLDEN = "contracts/goldens/suite-sources.json"
+
+
+def suite_source_golden(root=None):
+    """Recorded source digest per aggregated suite, or None when the file is absent.
+
+    Absent is tolerated so an installed package without contracts/ still runs; a suite
+    listed in the registry but missing from a PRESENT golden is a failure, not a skip.
+    """
+    path = os.path.join(root or ROOT, SUITE_SOURCE_GOLDEN)
+    if not os.path.isfile(path):
+        return None
+    return json.load(open(path, encoding="utf-8")).get("suites", {})
+
+
+# C6/C8 scan set: everything tracked EXCEPT these. Written down rather than implied by a
+# directory list, so a surface added later is scanned by default and an omission is a
+# reviewable line instead of a forgotten tuple entry.
+SCAN_EXCLUSIONS = (
+    "*.pyc",                    # build output
+    "*.jsonl",                  # recorded transcript fixtures, not authored prose
+    "**/__pycache__/**",
+)
 
 ROUTING_SKILLS = ["git-workflow", "pr-review-method", "testing-ci", "agent-dispatch",
                   "ground-claims", "prebid-adcp", "system-design", "outbound-drafts",
                   "craft-prompt", "craft-skill", "craft-context-file", "review-prompt"]
+
+# Claude events that must stay registered in settings.json; the Codex counterpart is
+# REQUIRED_CODEX_HANDLERS. Without this, deleting the hooks block was a silent pass.
+REQUIRED_CLAUDE_EVENTS = ('PostToolUse', 'PreToolUse')
 
 RESERVED_BASENAMES = {"claude.md", "agents.md", "gemini.md"}
 CODEX_HOOK_TOP_LEVEL_KEYS = {"description", "hooks"}
@@ -372,10 +406,46 @@ class Run:
             self.failures.append((check, detail))
 
     # ---- C1 ----------------------------------------------------------------
-    def c1_selftests(self, suites=None):
+    def c1_selftests(self, suites=None, sources=None):
+        """Aggregate every suite, and bind what produced each receipt.
+
+        A receipt's check count is self-reported. An eight-line stub printing
+        `SELFTEST-SUMMARY suite=<name> checks=<floor> failures=0` satisfied the floor and
+        took the whole gate green, including for the tool that proves PR delivery state.
+        The floor only ever defended against a suite that reported honestly, so the source
+        of each suite is pinned: a suite cannot be replaced by something that merely
+        claims to have run.
+        """
         if suites is None:
             suites = SELFTEST_SUITES
+        if sources is None:
+            sources = suite_source_golden()
         for name, cmd, floor in suites:
+            # README calls these positive floors. A floor of zero accepted a receipt of
+            # checks=0, so the word was doing no work.
+            if floor < 1:
+                self.result("C1", False,
+                            f"selftest {name}: floor {floor} is not positive")
+                continue
+            if sources is not None:
+                expected = sources.get(name)
+                path = os.path.join(self.root, cmd[0])
+                actual = (
+                    hashlib.sha256(open(path, "rb").read()).hexdigest()
+                    if os.path.isfile(path) else None
+                )
+                if expected is None:
+                    self.result("C1", False,
+                                f"selftest {name}: no source digest recorded in "
+                                f"{os.path.basename(SUITE_SOURCE_GOLDEN)}")
+                    continue
+                if actual != expected:
+                    self.result("C1", False,
+                                f"selftest {name}: {cmd[0]} does not match its recorded "
+                                f"source digest; if the tool changed on purpose, update "
+                                f"its entry in {os.path.basename(SUITE_SOURCE_GOLDEN)} in "
+                                f"the same commit and review that diff")
+                    continue
             try:
                 p = subprocess.run(
                     [sys.executable, os.path.join(self.root, cmd[0])] + cmd[1:],
@@ -530,21 +600,28 @@ class Run:
 
     # ---- C6 ----------------------------------------------------------------
     def c6_stale_patterns(self):
+        """Tripwires over the whole shipped surface, not a remembered directory list.
+
+        The scan set is every tracked file minus SCAN_EXCLUSIONS. A hardcoded directory
+        tuple silently omitted settings.json, statusline.sh, .gitignore, and the whole of
+        .github/, so a false claim could live in a shipped file the guard never opened.
+        Deriving the set means a new directory is covered by default and an omission has
+        to be written down.
+        """
         me = os.path.abspath(__file__)
-        targets = []
-        for rel in (
-            "skills", "hooks", "tools", "docs", "adapters", "contracts", "release",
-            ".codex-plugin", ".agents",
-        ):
-            for dirpath, _dirs, files in os.walk(os.path.join(self.root, rel)):
-                if "__pycache__" in dirpath:
-                    continue
-                targets += [os.path.join(dirpath, f) for f in files
-                            if not f.endswith((".pyc", ".jsonl"))]
-        targets += [os.path.join(self.root, name)
-                    for name in ("AGENTS.md", "CLAUDE.md", "README.md")
-                    if os.path.isfile(os.path.join(self.root, name))]
-        targets = [t for t in targets if os.path.abspath(t) != me]
+        surface, paths, error = package_paths(self.root)
+        if error:
+            self.result("C6", False, f"cannot enumerate scan set: {error}")
+            return
+        targets, excluded = [], 0
+        for rel in paths:
+            if any(fnmatch.fnmatch(rel, pattern) for pattern in SCAN_EXCLUSIONS):
+                excluded += 1
+                continue
+            absolute = os.path.join(self.root, rel)
+            if os.path.abspath(absolute) == me or not os.path.isfile(absolute):
+                continue
+            targets.append(absolute)
         if not targets:
             print("  FATAL C6: zero files in scan set")
             self.failures.append(("C6", "zero files"))
@@ -553,7 +630,8 @@ class Run:
             hits = [t for t in targets
                     if pat in open(t, encoding="utf-8", errors="replace").read()]
             self.result("C6", not hits,
-                        f"tripwire {pat!r}: {len(hits)} hit(s)"
+                        f"tripwire {pat!r}: {len(hits)} hit(s) over {len(targets)} "
+                        f"{surface} files ({excluded} excluded)"
                         + (f" e.g. {os.path.relpath(hits[0], self.root)}" if hits else ""))
 
     # ---- C7 ----------------------------------------------------------------
@@ -562,6 +640,21 @@ class Run:
             p = os.path.join(self.root, "skills", skill)
             self.result("C7", os.path.isdir(p), f"routing-table skill exists: {skill}")
         st = json.load(open(os.path.join(self.root, "settings.json")))
+        # Deleting the hooks block unregistered every Claude guard and produced zero checks
+        # and zero failures -- a silent pass over an empty scan set, which this file's own
+        # exit-code contract calls an error. The Codex side is bound by
+        # REQUIRED_CODEX_HANDLERS; this is its Claude counterpart.
+        claude_handlers = sum(
+            len(entry.get("hooks", []))
+            for entries in st.get("hooks", {}).values()
+            for entry in entries
+        )
+        self.result("C7", claude_handlers >= len(REQUIRED_CLAUDE_EVENTS),
+                    f"settings.json registers {claude_handlers} Claude hook handler(s) "
+                    f"across {len(st.get('hooks', {}))} event(s)")
+        for event in REQUIRED_CLAUDE_EVENTS:
+            self.result("C7", event in st.get("hooks", {}),
+                        f"settings.json registers required Claude event {event}")
         for event, entries in st.get("hooks", {}).items():
             for entry in entries:
                 for h in entry.get("hooks", []):
@@ -628,16 +721,27 @@ class Run:
 
     # ---- C8 ----------------------------------------------------------------
     def c8_reserved_basenames(self):
-        hits = []
+        """A reserved context basename anywhere but the repo root is auto-loaded instructions.
+
+        The exclusion is the `.git` directory itself, matched as a path component. A
+        substring test also excluded `.github/`, where a planted CLAUDE.md passed while the
+        identical bytes under docs/ failed — so the one directory a reviewer is least
+        likely to read was the one place the guard could not see.
+        """
+        hits, scanned = [], 0
         for dirpath, dirs, files in os.walk(self.root):
-            if ".git" in dirpath:
-                continue
+            dirs[:] = [d for d in dirs if d != ".git"]
             for f in files:
+                scanned += 1
                 if f.lower() in RESERVED_BASENAMES:
                     p = os.path.join(dirpath, f)
                     if os.path.dirname(os.path.abspath(p)) != os.path.abspath(self.root):
                         hits.append(os.path.relpath(p, self.root))
-        self.result("C8", not hits, f"reserved basenames outside root: {hits or 'none'}")
+        if not scanned:
+            self.result("C8", False, "zero files in scan set")
+            return
+        self.result("C8", not hits,
+                    f"reserved basenames outside root over {scanned} files: {hits or 'none'}")
 
     # ---- C9 ----------------------------------------------------------------
     def c9_codex_package(self):
@@ -977,10 +1081,14 @@ def selftest():
         open(os.path.join(td, "sub", "claude.md"), "w").write("collision")
         open(os.path.join(td, "settings.json"), "w").write("{}")
 
+        def planted_sources(name, path):
+            """Digest a synthetic suite so the source binding applies to it too."""
+            return {name: hashlib.sha256(open(path, "rb").read()).hexdigest()}
+
         failing_suite = os.path.join(td, "failing-selftest.py")
         open(failing_suite, "w").write("raise SystemExit(1)\n")
         c1_run = Run(td, ci=True)
-        c1_run.c1_selftests([("planted-failure", [failing_suite], 1)])
+        c1_run.c1_selftests([("planted-failure", [failing_suite], 1)], sources=planted_sources("planted-failure", failing_suite))
         expect_red("C1 goes red when an aggregated selftest fails",
                    lambda: any(c == "C1" and "exit 1" in d
                                for c, d in c1_run.failures))
@@ -988,7 +1096,7 @@ def selftest():
         truncated_suite = os.path.join(td, "truncated-selftest.py")
         open(truncated_suite, "w").write("print('PASS first check')\nraise SystemExit(0)\n")
         c1_truncated = Run(td, ci=True)
-        c1_truncated.c1_selftests([("planted-truncation", [truncated_suite], 1)])
+        c1_truncated.c1_selftests([("planted-truncation", [truncated_suite], 1)], sources=planted_sources("planted-truncation", truncated_suite))
         expect_red("C1 rejects exit zero without a terminal selftest receipt",
                    lambda: any(c == "C1" and "terminal receipts=0" in d
                                for c, d in c1_truncated.failures))
@@ -999,7 +1107,7 @@ def selftest():
             "print('SELFTEST-SUMMARY suite=planted-duplicate checks=1 failures=0')\n"
         )
         c1_duplicate = Run(td, ci=True)
-        c1_duplicate.c1_selftests([("planted-duplicate", [duplicate_suite], 1)])
+        c1_duplicate.c1_selftests([("planted-duplicate", [duplicate_suite], 1)], sources=planted_sources("planted-duplicate", duplicate_suite))
         expect_red("C1 rejects ambiguous duplicate terminal receipts",
                    lambda: any(c == "C1" and "terminal receipts=2" in d
                                for c, d in c1_duplicate.failures))
@@ -1009,7 +1117,7 @@ def selftest():
             "print('SELFTEST-SUMMARY suite=planted-shrink checks=1 failures=0')\n"
         )
         c1_shrunk = Run(td, ci=True)
-        c1_shrunk.c1_selftests([("planted-shrink", [shrunk_suite], 5)])
+        c1_shrunk.c1_selftests([("planted-shrink", [shrunk_suite], 5)], sources=planted_sources("planted-shrink", shrunk_suite))
         expect_red("C1 goes red when a suite reports fewer checks than its floor",
                    lambda: any(c == "C1" and "below-floor" in d
                                for c, d in c1_shrunk.failures))
@@ -1018,7 +1126,40 @@ def selftest():
         open(at_floor_suite, "w").write(
             "print('SELFTEST-SUMMARY suite=planted-at-floor checks=1 failures=0')\n"
         )
-        c1_at_floor.c1_selftests([("planted-at-floor", [at_floor_suite], 1)])
+        c1_at_floor.c1_selftests([("planted-at-floor", [at_floor_suite], 1)], sources=planted_sources("planted-at-floor", at_floor_suite))
+        # The stub that motivated this: an honest-looking receipt over no work. It clears
+        # the floor, so only the source binding can reject it.
+        stub_suite = os.path.join(td, "stub-selftest.py")
+        open(stub_suite, "w").write(
+            "print('SELFTEST-SUMMARY suite=planted-stub checks=99 failures=0')\n"
+        )
+        c1_zero_floor = Run(td, ci=True)
+        c1_zero_floor.c1_selftests([("planted-zero-floor", [at_floor_suite], 0)],
+                                   sources=planted_sources("planted-zero-floor", at_floor_suite))
+        expect_red("C1 rejects a floor of zero, which accepted a suite reporting no checks",
+                   lambda: any(c == "C1" and "not positive" in d
+                               for c, d in c1_zero_floor.failures))
+        expect_red("every registered suite floor is positive",
+                   lambda: all(floor >= 1 for _n, _c, floor in SELFTEST_SUITES))
+
+        c1_stub = Run(td, ci=True)
+        c1_stub.c1_selftests([("planted-stub", [stub_suite], 8)],
+                             sources={"planted-stub": "0" * 64})
+        expect_red("C1 rejects a suite whose source does not match its recorded digest",
+                   lambda: any(c == "C1" and "recorded source digest" in d
+                               for c, d in c1_stub.failures))
+        c1_registered = Run(td, ci=True)
+        c1_registered.c1_selftests([("planted-stub", [stub_suite], 8)],
+                                   sources={"other": "0" * 64})
+        expect_red("C1 rejects a suite absent from a present source golden",
+                   lambda: any(c == "C1" and "no source digest recorded" in d
+                               for c, d in c1_registered.failures))
+        c1_bound = Run(td, ci=True)
+        c1_bound.c1_selftests([("planted-stub", [stub_suite], 8)],
+                              sources=planted_sources("planted-stub", stub_suite))
+        expect_red("C1 source-binding control: a matching digest still runs the suite",
+                   lambda: not any("recorded source digest" in d
+                                   for _c, d in c1_bound.failures))
         expect_red("C1 floor control: the same suite exactly at its floor stays green",
                    lambda: not c1_at_floor.failures)
 
@@ -1207,6 +1348,20 @@ def selftest():
         )
         open(nested_yaml, "w").write("message: evidence required\n")
 
+        hooks_stripped = os.path.join(td, "no-hooks")
+        os.makedirs(hooks_stripped, exist_ok=True)
+        open(os.path.join(hooks_stripped, "settings.json"), "w").write('{"hooks": {}}')
+        for rel in ROUTING_SKILLS:
+            os.makedirs(os.path.join(hooks_stripped, "skills", rel), exist_ok=True)
+        c7_nohooks = Run(hooks_stripped, ci=True)
+        try:
+            c7_nohooks.c7_anchors()
+        except Exception:
+            pass
+        expect_red("C7 goes red when settings.json registers no Claude hook handlers",
+                   lambda: any(c == "C7" and "Claude hook handler" in d
+                               for c, d in c7_nohooks.failures))
+
         r = Run(td, ci=True)
         r.c2_shared_identity()
         expect_red("C2 goes red on diverged copies",
@@ -1255,10 +1410,36 @@ def selftest():
         expect_red("C6 goes red on a zero-file scan",
                    lambda: any(c == "C6" and d == "zero files"
                                for c, d in c6_empty_run.failures))
+        # The scan set used to be a hardcoded directory tuple, so a stale claim in a
+        # tracked root file was invisible. Prove the derived set reaches one.
+        open(os.path.join(td, "statusline.sh"), "w").write("#!/bin/sh\n# ph-lint\n")
+        r3_root = Run(td, ci=True)
+        r3_root.c6_stale_patterns()
+        expect_red("C6 reaches a tracked root file outside any scanned directory",
+                   lambda: any(c == "C6" and "ph-lint" in d for c, d in r3_root.failures))
+        os.remove(os.path.join(td, "statusline.sh"))
+
         r4 = Run(td, ci=True)
         r4.c8_reserved_basenames()
         expect_red("C8 goes red on nested claude.md",
                    lambda: any(c == "C8" for c, d in r4.failures))
+        # `.git` was matched as a substring, which also excluded `.github/` — the one
+        # directory whose CLAUDE.md a runtime would auto-load and a reviewer least expects.
+        os.makedirs(os.path.join(td, ".github", "workflows"), exist_ok=True)
+        open(os.path.join(td, ".github", "CLAUDE.md"), "w").write("planted")
+        r4_github = Run(td, ci=True)
+        r4_github.c8_reserved_basenames()
+        expect_red("C8 sees .github/, which a .git substring filter excluded",
+                   lambda: any(c == "C8" and ".github/CLAUDE.md" in d
+                               for c, d in r4_github.failures))
+        os.remove(os.path.join(td, ".github", "CLAUDE.md"))
+        c8_empty = os.path.join(td, "empty-c8")
+        os.makedirs(c8_empty, exist_ok=True)
+        c8_empty_run = Run(c8_empty, ci=True)
+        c8_empty_run.c8_reserved_basenames()
+        expect_red("C8 goes red on a zero-file scan",
+                   lambda: any(c == "C8" and "zero files" in d
+                               for c, d in c8_empty_run.failures))
         r5 = Run(td, ci=True)
         r5.c9_codex_package()
         expect_red("C9 goes red on absent plugin package",

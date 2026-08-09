@@ -83,18 +83,24 @@ VENDOR_SOURCE_KEYS = {
 }
 
 
+# The index response chooses the file URL. Pin the hosts that may serve it so a poisoned
+# or intercepted response cannot redirect the fetch to an arbitrary origin.
+PYPI_FILE_HOSTS = {"files.pythonhosted.org"}
+
+
 class ConformanceError(Exception):
     pass
 
 
 class TransportError(ConformanceError):
-    """An upstream fetch failed to complete.
+    """The upstream could not be reached, so no verdict about this change is available.
 
-    Distinct from a conformance failure on purpose: an unreachable or rate-limited
-    upstream says nothing about whether the rendered artifact conforms, and reporting the
-    two the same way turns an outage into a false verdict about this change. A digest
-    mismatch is NOT a transport error — that is a supply-chain finding and stays a
-    conformance failure.
+    An unreachable or rate-limited host says nothing about whether the rendered artifact
+    conforms, and reporting the two identically turns an outage into a false verdict. Three
+    kinds of failure are deliberately NOT transport, because each IS a statement about the
+    subject: a digest mismatch (supply chain), an HTTP status the server chose to return
+    such as 404 or 410 (the pinned artifact is gone, which is a fact about the pin), and a
+    local filesystem error (our disk, not their host).
     """
 
 
@@ -273,10 +279,30 @@ def download(
 ) -> None:
     request = urllib.request.Request(url, headers={"User-Agent": "z-harness-conformance/1"})
     try:
-        with response_opener(request, timeout=60) as response, destination.open("wb") as out:
-            shutil.copyfileobj(response, out, length=1024 * 1024)
+        response_context = response_opener(request, timeout=60)
+    except urllib.error.HTTPError as exc:
+        # The server answered. A pinned artifact that returns 404/410 is a fact about the
+        # pin, not an outage, so it must not be excused as transport.
+        raise ConformanceError(
+            f"pinned artifact unavailable at {url}: HTTP {exc.code} {exc.reason}"
+        ) from exc
     except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
-        raise TransportError(f"upstream fetch failed for {url}: {exc}") from exc
+        raise TransportError(f"upstream unreachable for {url}: {exc}") from exc
+    try:
+        with response_context as response:
+            try:
+                out = destination.open("wb")
+            except OSError as exc:
+                raise ConformanceError(f"cannot write {destination}: {exc}") from exc
+            with out:
+                try:
+                    shutil.copyfileobj(response, out, length=1024 * 1024)
+                except OSError as exc:
+                    raise TransportError(
+                        f"upstream stream failed for {url}: {exc}"
+                    ) from exc
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+        raise TransportError(f"upstream unreachable for {url}: {exc}") from exc
     actual = sha256(destination)
     if actual != expected:
         raise ConformanceError(
@@ -549,10 +575,24 @@ def fetch_pypi_metadata(metadata_url: str) -> Any:
     )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
-            payload = response.read().decode("utf-8")
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        raise ConformanceError(
+            f"pinned metadata unavailable at {metadata_url}: HTTP {exc.code} {exc.reason}"
+        ) from exc
     except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
-        raise TransportError(f"upstream fetch failed for {metadata_url}: {exc}") from exc
-    return strict_json_loads(payload, f"PyPI metadata from {metadata_url}")
+        raise TransportError(f"upstream unreachable for {metadata_url}: {exc}") from exc
+    # A non-UTF8 or non-JSON body is an intermediary serving something other than the
+    # index -- a transport-shaped failure. UnicodeDecodeError is a ValueError, so it has
+    # to be named explicitly or it escapes classification entirely.
+    try:
+        payload = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise TransportError(f"non-UTF8 body from {metadata_url}: {exc}") from exc
+    try:
+        return strict_json_loads(payload, f"PyPI metadata from {metadata_url}")
+    except ConformanceError as exc:
+        raise TransportError(f"non-JSON body from {metadata_url}: {exc}") from exc
 
 
 def download_wheels(
@@ -582,7 +622,23 @@ def download_wheels(
                 f"PyPI metadata digest differs for {entry['filename']}: {published}"
             )
         wheel = download_root / entry["filename"]
-        downloader(matches[0]["url"], wheel, entry["sha256"])
+        # The URL is chosen by the index response, not by our lock, so it is untrusted
+        # input. The digest still bounds what gets USED, but an unvalidated URL is an
+        # arbitrary-fetch primitive from the runner: any scheme urllib supports, any host,
+        # no TLS. Lock URLs are already required to be https; hold the response to the
+        # same rule and to the host that serves this index's files.
+        wheel_url = matches[0].get("url")
+        if not isinstance(wheel_url, str) or not wheel_url.startswith("https://"):
+            raise ConformanceError(
+                f"PyPI supplied a non-https URL for {entry['filename']}: {wheel_url!r}"
+            )
+        wheel_host = wheel_url.split("/", 3)[2]
+        if wheel_host not in PYPI_FILE_HOSTS:
+            raise ConformanceError(
+                f"PyPI supplied {entry['filename']} from an unexpected host "
+                f"{wheel_host!r}; permitted: {sorted(PYPI_FILE_HOSTS)}"
+            )
+        downloader(wheel_url, wheel, entry["sha256"])
         verify_wheel_metadata(wheel, entry)
         safe_extract_wheel(wheel, site)
 
@@ -891,26 +947,41 @@ def conformance() -> int:
                     f"duplicates={len(completed) - len(set(completed))}"
                 )
     except TransportError as exc:
-        # An outage is not a verdict about this change. Still non-zero so nothing merges on
-        # an unverified conformance claim, but labelled so the red is readable.
+        # An outage is not a verdict about this change -- but it is not a clean result
+        # either, and `failures=0` reads as one. This job is the only defense against a
+        # vendored schema that was neutered with its recorded digest recomputed, so under a
+        # fetch failure a tampered tree and a pristine tree produced identical summaries and
+        # `failures=0 transport_failures=1` is exactly the signal an operator re-runs rather
+        # than investigates. The verdict is stated as unavailable instead of clean.
         print(f"portable-conformance: transport: {exc}", file=sys.stderr)
         print(
             f"CONFORMANCE-SUMMARY checks={len(completed)} failures=0 "
-            f"transport_failures=1 exit=1"
+            f"transport_failures=1 verdict=unavailable exit=1"
         )
         return 1
     except Exception as exc:
         print(f"portable-conformance: {exc}", file=sys.stderr)
         print(
             f"CONFORMANCE-SUMMARY checks={len(completed)} failures=1 "
-            f"transport_failures=0 exit=1"
+            f"transport_failures=0 verdict=fail exit=1"
         )
         return 1
     print(
         f"CONFORMANCE-SUMMARY checks={len(completed)} failures=0 "
-        f"transport_failures=0 exit=0"
+        f"transport_failures=0 verdict=pass exit=0"
     )
     return 0
+
+
+def _classification_of(opener: Callable[..., Any]) -> BaseException:
+    """Return the exception fetch_pypi_metadata raises for a given opener."""
+    import unittest.mock
+    with unittest.mock.patch.object(urllib.request, "urlopen", opener):
+        try:
+            fetch_pypi_metadata("https://pypi.invalid/simple/x/json")
+        except BaseException as exc:  # noqa: BLE001
+            return exc
+    return RuntimeError("no exception raised")
 
 
 def selftest() -> int:
@@ -1363,6 +1434,55 @@ def selftest() -> int:
                 downloader=fake_downloader,
             )),
         )
+
+        # The index response chooses the URL, so it is untrusted input. Prove the fetch is
+        # refused before the downloader ever sees it, for a foreign scheme and a foreign
+        # https host, and prove the legitimate host is still accepted so this is not a
+        # blanket rejection.
+        reached: List[str] = []
+
+        def recording_downloader(url: str, destination: Path, _expected: str) -> None:
+            reached.append(url)
+            shutil.copyfile(malicious_wheel, destination)
+
+        def loader_returning(url: str) -> Callable[[str], Any]:
+            def loader(_metadata_url: str) -> Any:
+                return {"urls": [{
+                    "filename": malicious_entry["filename"],
+                    "digests": {"sha256": malicious_sha},
+                    "url": url,
+                }]}
+            return loader
+
+        for label, url in (
+            ("file:// URL", f"file://{malicious_wheel}"),
+            ("plain http URL", "http://files.pythonhosted.org/x.whl"),
+            ("unexpected https host", "https://evil.invalid/x.whl"),
+        ):
+            before = len(reached)
+            refused = rejects(lambda u=url: download_wheels(
+                {"pythonWheels": [malicious_entry]},
+                download_root,
+                extracted_site,
+                metadata_loader=loader_returning(u),
+                downloader=recording_downloader,
+            ))
+            expect(
+                f"an index-supplied {label} is refused before any fetch",
+                refused and len(reached) == before,
+            )
+        expect(
+            "the legitimate file host is still accepted, so the rule is not a blanket refusal",
+            rejects(lambda: download_wheels(
+                {"pythonWheels": [malicious_entry]},
+                download_root,
+                extracted_site,
+                metadata_loader=loader_returning(
+                    "https://files.pythonhosted.org/packages/x.whl"
+                ),
+                downloader=recording_downloader,
+            )) and len(reached) > 0,
+        )
         for target in ARTIFACT_TARGETS:
             path = temp / target / "z-harness-artifact.json"
             path.parent.mkdir(parents=True)
@@ -1613,6 +1733,108 @@ def selftest() -> int:
             "lock loader rejects duplicate wheel package and filename entries",
             rejects(lambda: load_lock(duplicate_wheel_path)),
         )
+    # Failure classification. Every arm below was previously unreachable by any test: the
+    # class existed, both `except` arms in conformance() had never executed, and four
+    # failure modes were mislabelled. A verdict label nothing exercises is not a verdict.
+    def classify(opener: Callable[..., Any], expected: type) -> bool:
+        with tempfile.TemporaryDirectory() as raw:
+            target = Path(raw) / "artifact"
+            try:
+                download("https://example.invalid/x", target, "0" * 64,
+                         response_opener=opener)
+            except expected as exc:  # noqa: B902
+                return type(exc) is expected or isinstance(exc, expected)
+            except Exception:
+                return False
+        return False
+
+    class _Resp(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def _raise(exc: Exception) -> Callable[..., Any]:
+        def opener(*_a: Any, **_k: Any) -> Any:
+            raise exc
+        return opener
+
+    expect(
+        "an unreachable host is transport, not a conformance verdict",
+        classify(_raise(urllib.error.URLError("no route")), TransportError),
+    )
+    expect(
+        "a timeout is transport",
+        classify(_raise(TimeoutError("timed out")), TransportError),
+    )
+    expect(
+        "a pinned artifact returning HTTP 404 is a conformance failure, not an outage",
+        classify(
+            _raise(urllib.error.HTTPError("u", 404, "Not Found", None, None)),
+            ConformanceError,
+        )
+        and not classify(
+            _raise(urllib.error.HTTPError("u", 404, "Not Found", None, None)),
+            TransportError,
+        ),
+    )
+    expect(
+        "a digest mismatch stays a conformance failure",
+        classify(lambda *_a, **_k: _Resp(b"payload"), ConformanceError)
+        and not classify(lambda *_a, **_k: _Resp(b"payload"), TransportError),
+    )
+    expect(
+        "a non-UTF8 metadata body is transport, not an unclassified crash",
+        isinstance(
+            _classification_of(lambda *_a, **_k: _Resp(b"\xff\xfe not utf8")),
+            TransportError,
+        ),
+    )
+    expect(
+        "a non-JSON metadata body is transport, not a conformance verdict",
+        isinstance(
+            _classification_of(lambda *_a, **_k: _Resp(b"<html>proxy error</html>")),
+            TransportError,
+        ),
+    )
+    def local_write_failure() -> BaseException:
+        # The destination is an existing directory, so open("wb") raises IsADirectoryError
+        # (an OSError) AFTER the upstream was reached successfully. Reaching this arm via a
+        # real local error is the point: the digest path would pass for the wrong reason.
+        with tempfile.TemporaryDirectory() as raw:
+            blocked = Path(raw) / "occupied"
+            blocked.mkdir()
+            try:
+                download("https://example.invalid/x", blocked, "0" * 64,
+                         response_opener=lambda *_a, **_k: _Resp(b"payload"))
+            except BaseException as exc:  # noqa: BLE001
+                return exc
+        return RuntimeError("no exception raised")
+
+    _local = local_write_failure()
+    # The summary is the whole point of the transport/conformance split, and this job is
+    # the only defense against a vendored schema neutered with its digest recomputed. A
+    # fetch failure must not read as a clean result, or a tampered tree and a pristine one
+    # produce the same operator response: re-run.
+    import inspect as _inspect
+    _conformance_src = _inspect.getsource(conformance)
+    expect(
+        "a transport failure reports its verdict as unavailable, never as clean",
+        'verdict=unavailable' in _conformance_src
+        and _conformance_src.count("verdict=") == 3,
+    )
+    expect(
+        "no summary arm reports failures=0 without also stating a verdict",
+        all(
+            "verdict=" in segment.split("exit=")[0]
+            for segment in _conformance_src.split("CONFORMANCE-SUMMARY ")[1:]
+        ),
+    )
+
+    expect(
+        "a local write failure is a conformance failure, not blamed on the upstream",
+        isinstance(_local, ConformanceError) and not isinstance(_local, TransportError)
+        and "cannot write" in str(_local),
+    )
+
     print(f"SELFTEST-SUMMARY suite=portable-conformance checks={checks} failures={failures}")
     return 1 if failures else 0
 

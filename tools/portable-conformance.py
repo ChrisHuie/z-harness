@@ -947,24 +947,28 @@ def conformance() -> int:
                     f"duplicates={len(completed) - len(set(completed))}"
                 )
     except TransportError as exc:
-        # An outage is not a verdict about this change. Still non-zero so nothing merges on
-        # an unverified conformance claim, but labelled so the red is readable.
+        # An outage is not a verdict about this change -- but it is not a clean result
+        # either, and `failures=0` reads as one. This job is the only defense against a
+        # vendored schema that was neutered with its recorded digest recomputed, so under a
+        # fetch failure a tampered tree and a pristine tree produced identical summaries and
+        # `failures=0 transport_failures=1` is exactly the signal an operator re-runs rather
+        # than investigates. The verdict is stated as unavailable instead of clean.
         print(f"portable-conformance: transport: {exc}", file=sys.stderr)
         print(
             f"CONFORMANCE-SUMMARY checks={len(completed)} failures=0 "
-            f"transport_failures=1 exit=1"
+            f"transport_failures=1 verdict=unavailable exit=1"
         )
         return 1
     except Exception as exc:
         print(f"portable-conformance: {exc}", file=sys.stderr)
         print(
             f"CONFORMANCE-SUMMARY checks={len(completed)} failures=1 "
-            f"transport_failures=0 exit=1"
+            f"transport_failures=0 verdict=fail exit=1"
         )
         return 1
     print(
         f"CONFORMANCE-SUMMARY checks={len(completed)} failures=0 "
-        f"transport_failures=0 exit=0"
+        f"transport_failures=0 verdict=pass exit=0"
     )
     return 0
 
@@ -1806,6 +1810,25 @@ def selftest() -> int:
         return RuntimeError("no exception raised")
 
     _local = local_write_failure()
+    # The summary is the whole point of the transport/conformance split, and this job is
+    # the only defense against a vendored schema neutered with its digest recomputed. A
+    # fetch failure must not read as a clean result, or a tampered tree and a pristine one
+    # produce the same operator response: re-run.
+    import inspect as _inspect
+    _conformance_src = _inspect.getsource(conformance)
+    expect(
+        "a transport failure reports its verdict as unavailable, never as clean",
+        'verdict=unavailable' in _conformance_src
+        and _conformance_src.count("verdict=") == 3,
+    )
+    expect(
+        "no summary arm reports failures=0 without also stating a verdict",
+        all(
+            "verdict=" in segment.split("exit=")[0]
+            for segment in _conformance_src.split("CONFORMANCE-SUMMARY ")[1:]
+        ),
+    )
+
     expect(
         "a local write failure is a conformance failure, not blamed on the upstream",
         isinstance(_local, ConformanceError) and not isinstance(_local, TransportError)

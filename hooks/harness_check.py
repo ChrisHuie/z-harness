@@ -68,7 +68,7 @@ SELFTEST_SUITES = [
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 185),
     ("ci-gate", ["tools/ci-gate.py", "--selftest"], 17),
-    ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 61),
+    ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 63),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
     ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 16),
     ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 66),
@@ -141,6 +141,10 @@ SCAN_EXCLUSIONS = (
 ROUTING_SKILLS = ["git-workflow", "pr-review-method", "testing-ci", "agent-dispatch",
                   "ground-claims", "prebid-adcp", "system-design", "outbound-drafts",
                   "craft-prompt", "craft-skill", "craft-context-file", "review-prompt"]
+
+# Claude events that must stay registered in settings.json; the Codex counterpart is
+# REQUIRED_CODEX_HANDLERS. Without this, deleting the hooks block was a silent pass.
+REQUIRED_CLAUDE_EVENTS = ('PostToolUse', 'PreToolUse')
 
 RESERVED_BASENAMES = {"claude.md", "agents.md", "gemini.md"}
 CODEX_HOOK_TOP_LEVEL_KEYS = {"description", "hooks"}
@@ -375,6 +379,12 @@ class Run:
         if sources is None:
             sources = suite_source_golden()
         for name, cmd, floor in suites:
+            # README calls these positive floors. A floor of zero accepted a receipt of
+            # checks=0, so the word was doing no work.
+            if floor < 1:
+                self.result("C1", False,
+                            f"selftest {name}: floor {floor} is not positive")
+                continue
             if sources is not None:
                 expected = sources.get(name)
                 path = os.path.join(self.root, cmd[0])
@@ -588,6 +598,21 @@ class Run:
             p = os.path.join(self.root, "skills", skill)
             self.result("C7", os.path.isdir(p), f"routing-table skill exists: {skill}")
         st = json.load(open(os.path.join(self.root, "settings.json")))
+        # Deleting the hooks block unregistered every Claude guard and produced zero checks
+        # and zero failures -- a silent pass over an empty scan set, which this file's own
+        # exit-code contract calls an error. The Codex side is bound by
+        # REQUIRED_CODEX_HANDLERS; this is its Claude counterpart.
+        claude_handlers = sum(
+            len(entry.get("hooks", []))
+            for entries in st.get("hooks", {}).values()
+            for entry in entries
+        )
+        self.result("C7", claude_handlers >= len(REQUIRED_CLAUDE_EVENTS),
+                    f"settings.json registers {claude_handlers} Claude hook handler(s) "
+                    f"across {len(st.get('hooks', {}))} event(s)")
+        for event in REQUIRED_CLAUDE_EVENTS:
+            self.result("C7", event in st.get("hooks", {}),
+                        f"settings.json registers required Claude event {event}")
         for event, entries in st.get("hooks", {}).items():
             for entry in entries:
                 for h in entry.get("hooks", []):
@@ -932,6 +957,15 @@ def selftest():
         open(stub_suite, "w").write(
             "print('SELFTEST-SUMMARY suite=planted-stub checks=99 failures=0')\n"
         )
+        c1_zero_floor = Run(td, ci=True)
+        c1_zero_floor.c1_selftests([("planted-zero-floor", [at_floor_suite], 0)],
+                                   sources=planted_sources("planted-zero-floor", at_floor_suite))
+        expect_red("C1 rejects a floor of zero, which accepted a suite reporting no checks",
+                   lambda: any(c == "C1" and "not positive" in d
+                               for c, d in c1_zero_floor.failures))
+        expect_red("every registered suite floor is positive",
+                   lambda: all(floor >= 1 for _n, _c, floor in SELFTEST_SUITES))
+
         c1_stub = Run(td, ci=True)
         c1_stub.c1_selftests([("planted-stub", [stub_suite], 8)],
                              sources={"planted-stub": "0" * 64})
@@ -978,6 +1012,20 @@ def selftest():
                    lambda: "c1_selftests" in called)
         expect_red("Run.run invokes the C1 inventory call site",
                    lambda: "c1_selftest_inventory" in called)
+
+        hooks_stripped = os.path.join(td, "no-hooks")
+        os.makedirs(hooks_stripped, exist_ok=True)
+        open(os.path.join(hooks_stripped, "settings.json"), "w").write('{"hooks": {}}')
+        for rel in ROUTING_SKILLS:
+            os.makedirs(os.path.join(hooks_stripped, "skills", rel), exist_ok=True)
+        c7_nohooks = Run(hooks_stripped, ci=True)
+        try:
+            c7_nohooks.c7_anchors()
+        except Exception:
+            pass
+        expect_red("C7 goes red when settings.json registers no Claude hook handlers",
+                   lambda: any(c == "C7" and "Claude hook handler" in d
+                               for c, d in c7_nohooks.failures))
 
         r = Run(td, ci=True)
         r.c2_shared_identity()

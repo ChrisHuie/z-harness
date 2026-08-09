@@ -45,33 +45,53 @@ UNRESOLVED = re.compile(r"\$[A-Za-z_{(]|`")
 
 # git grep uses parse-options(3): single-dash short flags cluster, and -e/-f take their
 # argument attached to the cluster when anything follows the letter. Matching only the
-# separated spellings let `-eharness\b` and `-fpatterns.txt` through with the pattern
+# separated spellings let `-e'harness\b'` and `-fpatterns.txt` through with the pattern
 # never entering `patterns`, so the engine check ran against an empty list and allowed.
-GREP_SHORT_ENGINE = {"E": "E", "F": "F", "P": "P"}
+#
+# Every letter below was measured against git 2.46.1 on this host rather than recalled;
+# an earlier draft of this table guessed and was wrong in both directions -- it omitted
+# -o, -p and -W, which allowed `git grep -EWe'harness\b'`, and it listed -O as taking no
+# argument, which denied a command carrying no pattern hazard at all.
+GREP_SHORT_ENGINE = {"E": "E", "F": "F", "G": "G", "P": "P"}
 GREP_SHORT_PATTERN_ARG = {"e", "f"}
-GREP_SHORT_NOARG = set("GiIlLwvhHcqzarRnO")
+# `-Em1` is rejected ("switch `m' expects a numerical value"), so a value never rides the
+# cluster; it is always the next token.
+GREP_SHORT_VALUE = set("mABC")
+GREP_SHORT_NOARG = set("achilnopqrvwzHILW")
+# `-O` takes an OPTIONAL value, so argv alone cannot say whether the rest of the cluster
+# is its argument. It is deliberately in none of the sets above: a cluster reaching it
+# is unmodelled and falls through rather than being parsed wrong in either direction.
 
 
 def short_option_cluster(text):
     """Parse a single-dash git grep short-option cluster.
 
-    -> (engine letters seen, 'e'/'f' terminator or None, its attached argument or None),
-    or None when the cluster holds a letter this guard does not model. Returning None
-    leaves an unmodelled spelling to the existing handling rather than parsing it wrong.
+    -> (engine letters in order, kind, terminating letter, attached argument), where kind
+    is "pattern" for -e/-f, "value" for a flag whose value is the next token, or "plain"
+    when the cluster is all no-argument flags. Returns None when the cluster holds a
+    letter this guard does not model, leaving that spelling to the existing handling
+    rather than parsing it wrong.
+
+    Engines are returned in order because git applies last-one-wins: `-EG` greps as BRE
+    and is harmless, `-GE` greps as ERE and is the hazard.
     """
     if len(text) < 2 or not text.startswith("-") or text.startswith("--"):
         return None
     engines = []
     for index, char in enumerate(text[1:], start=1):
         if char in GREP_SHORT_PATTERN_ARG:
-            return (engines, char, text[index + 1:] or None)
+            return (engines, "pattern", char, text[index + 1:] or None)
+        if char in GREP_SHORT_VALUE:
+            if text[index + 1:]:
+                return None          # git rejects an attached value; do not model it
+            return (engines, "value", char, None)
         if char in GREP_SHORT_ENGINE:
             engines.append(GREP_SHORT_ENGINE[char])
             continue
         if char in GREP_SHORT_NOARG:
             continue
         return None
-    return (engines, None, None)
+    return (engines, "plain", None, None)
 
 
 def split_commands(cmd):
@@ -534,6 +554,34 @@ def decide(command, _shell_depth=0):
                 k += 1
                 # first thing after -- is a pathspec, pattern must already be set
                 break
+            cluster = short_option_cluster(text)
+            if cluster is not None:
+                # A modelled single-dash cluster is authoritative: it knows the order of
+                # the engine letters, which the -E regex below does not. `-EG` greps as
+                # BRE and is harmless; the regex reads any E anywhere and denied it.
+                cluster_engines, kind, letter, attached = cluster
+                for cluster_engine in cluster_engines:
+                    engine = cluster_engine
+                    engine_src = "flag"
+                if kind == "value":
+                    k += 2
+                    continue
+                if kind == "pattern":
+                    if letter == "f":
+                        pattern_from_file = True
+                    if attached is not None:
+                        # -e'harness\b' / -fpatterns.txt: the argument rides the token.
+                        if letter == "e":
+                            patterns.append((attached, quoting))
+                        k += 1
+                        continue
+                    if k + 1 < len(argv):
+                        if letter == "e":
+                            patterns.append(argv[k + 1])
+                        k += 2
+                        continue
+                k += 1
+                continue
             if ENGINE_P.match(text):
                 engine = "P"
                 engine_src = "flag"
@@ -543,24 +591,6 @@ def decide(command, _shell_depth=0):
             elif text in ("--extended-regexp",) or re.match(r"^-[a-zA-Z]*E[a-zA-Z]*$", text):
                 engine = "E"
                 engine_src = "flag"
-            elif (cluster := short_option_cluster(text)) is not None and cluster[1]:
-                cluster_engines, letter, attached = cluster
-                for cluster_engine in cluster_engines:
-                    engine = cluster_engine
-                    engine_src = "flag"
-                if letter == "f":
-                    pattern_from_file = True
-                if attached is not None:
-                    # -eharness\b / -fpatterns.txt: the argument rides the same token.
-                    if letter == "e":
-                        patterns.append((attached, quoting))
-                    k += 1
-                    continue
-                if k + 1 < len(argv):
-                    if letter == "e":
-                        patterns.append(argv[k + 1])
-                    k += 2
-                    continue
             elif text.startswith("-"):
                 if text in TAKES_ARG:
                     k += 2
@@ -699,7 +729,26 @@ FIXTURES = [
      """git grep -F -e'harness\\b' -- README.md""", "allow"),
     ("GREEN ATTACHED: no engine flag, attached -e - BRE is fine",
      """git grep -e'harness\\b' -- README.md""", "allow"),
-    ("GREEN ATTACHED: unmodelled cluster letter falls through, not parsed wrong",
+    # Every case below was cross-checked against git 2.46.1 on a two-line fixture where
+    # ERE matches the decoy line and PCRE matches the intended one, so "deny" means git
+    # was measured returning the wrong line, not that the spelling merely looked risky.
+    ("RED  CLUSTER: -W function-context before the attached -e",
+     """git grep -EWe'harness\\b' -- README.md""", "deny"),
+    ("RED  CLUSTER: -p show-function before the attached -e",
+     """git grep -Epe'harness\\b' -- README.md""", "deny"),
+    ("RED  CLUSTER: -o only-matching before the attached -e",
+     """git grep -Eoe'harness\\b' -- README.md""", "deny"),
+    ("RED  CLUSTER: -m takes the NEXT token, so the later -e is still the pattern",
+     """git grep -Em 1 -e'harness\\b' -- README.md""", "deny"),
+    ("RED  ENGINE ORDER: -GE is last-wins ERE",
+     """git grep -GE -e 'harness\\b' -- README.md""", "deny"),
+    ("GREEN ENGINE ORDER: -EG is last-wins BRE - git returns the intended line",
+     """git grep -EG -e 'harness\\b' -- README.md""", "allow"),
+    ("GREEN ENGINE ORDER: -EPe is last-wins PCRE",
+     """git grep -EPe'harness\\b' -- README.md""", "allow"),
+    ("GREEN CLUSTER: -O takes an OPTIONAL value, so the cluster is unmodelled",
+     """git grep -EOe'harness\\b' -- README.md""", "allow"),
+    ("GREEN CLUSTER: a letter this git rejects outright is not the guard's business",
      """git grep -EZe'harness\\b' -- README.md""", "allow"),
     ("GREEN patternType=perl via config - the intended engine",
      """git -c grep.patternType=perl grep 'x\\b' -- src/""", "allow"),

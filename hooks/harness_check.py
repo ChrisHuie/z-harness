@@ -14,13 +14,13 @@ Runs from either clone (repo root auto-detected from this file's location). Chec
   C4  every description <= 400 chars (house cap inside the 1024 spec ceiling)
   C5  method-skill bodies <= 5,000 chars after frontmatter; authoring-skill
       bodies <= 500 lines
-  C6  stale-claim tripwires: patterns that once shipped false stay at zero in
-      live channels (skills/, hooks/, tools/, AGENTS.md, CLAUDE.md)
+  C6  stale-claim tripwires: patterns that once shipped false stay at zero across
+      every tracked file except the declared SCAN_EXCLUSIONS
   C7  anchors: routing-table skills exist; Claude and Codex hook commands resolve;
       [local] original audit paths exist, `timeout` still absent, askq binary
       anchors hold
   C8  reserved context basenames (CLAUDE.md/AGENTS.md/GEMINI.md) exist nowhere
-      but the repo root
+      but the repo root, .git excluded as a path component (not a substring)
   C9  Codex package contract: manifest, marketplace, hook config, context bridges,
       and their size budgets are internally consistent
   C10 PR delivery contract: scoped publication authority, state-proof command,
@@ -35,6 +35,7 @@ zero inputs (an empty scan set is an error, never a clean verdict).
   harness_check.py --selftest  prove each check can go RED on a planted-defect
                                tree, then exit
 """
+import fnmatch
 import json
 import os
 import re
@@ -65,7 +66,7 @@ SELFTEST_SUITES = [
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 8),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 178),
-    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 16),
+    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 17),
     ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 61),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
     ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 16),
@@ -109,6 +110,15 @@ STALE_PATTERNS = [
     "contain no `targetLevel`", # artifacts carry the claims block; denied in two docs
     "no validation status",     # same denial, README wording
 ]
+
+# C6/C8 scan set: everything tracked EXCEPT these. Written down rather than implied by a
+# directory list, so a surface added later is scanned by default and an omission is a
+# reviewable line instead of a forgotten tuple entry.
+SCAN_EXCLUSIONS = (
+    "*.pyc",                    # build output
+    "*.jsonl",                  # recorded transcript fixtures, not authored prose
+    "**/__pycache__/**",
+)
 
 ROUTING_SKILLS = ["git-workflow", "pr-review-method", "testing-ci", "agent-dispatch",
                   "ground-claims", "prebid-adcp", "system-design", "outbound-drafts",
@@ -490,21 +500,28 @@ class Run:
 
     # ---- C6 ----------------------------------------------------------------
     def c6_stale_patterns(self):
+        """Tripwires over the whole shipped surface, not a remembered directory list.
+
+        The scan set is every tracked file minus SCAN_EXCLUSIONS. A hardcoded directory
+        tuple silently omitted settings.json, statusline.sh, .gitignore, and the whole of
+        .github/, so a false claim could live in a shipped file the guard never opened.
+        Deriving the set means a new directory is covered by default and an omission has
+        to be written down.
+        """
         me = os.path.abspath(__file__)
-        targets = []
-        for rel in (
-            "skills", "hooks", "tools", "docs", "adapters", "contracts", "release",
-            ".codex-plugin", ".agents",
-        ):
-            for dirpath, _dirs, files in os.walk(os.path.join(self.root, rel)):
-                if "__pycache__" in dirpath:
-                    continue
-                targets += [os.path.join(dirpath, f) for f in files
-                            if not f.endswith((".pyc", ".jsonl"))]
-        targets += [os.path.join(self.root, name)
-                    for name in ("AGENTS.md", "CLAUDE.md", "README.md")
-                    if os.path.isfile(os.path.join(self.root, name))]
-        targets = [t for t in targets if os.path.abspath(t) != me]
+        surface, paths, error = package_paths(self.root)
+        if error:
+            self.result("C6", False, f"cannot enumerate scan set: {error}")
+            return
+        targets, excluded = [], 0
+        for rel in paths:
+            if any(fnmatch.fnmatch(rel, pattern) for pattern in SCAN_EXCLUSIONS):
+                excluded += 1
+                continue
+            absolute = os.path.join(self.root, rel)
+            if os.path.abspath(absolute) == me or not os.path.isfile(absolute):
+                continue
+            targets.append(absolute)
         if not targets:
             print("  FATAL C6: zero files in scan set")
             self.failures.append(("C6", "zero files"))
@@ -513,7 +530,8 @@ class Run:
             hits = [t for t in targets
                     if pat in open(t, encoding="utf-8", errors="replace").read()]
             self.result("C6", not hits,
-                        f"tripwire {pat!r}: {len(hits)} hit(s)"
+                        f"tripwire {pat!r}: {len(hits)} hit(s) over {len(targets)} "
+                        f"{surface} files ({excluded} excluded)"
                         + (f" e.g. {os.path.relpath(hits[0], self.root)}" if hits else ""))
 
     # ---- C7 ----------------------------------------------------------------
@@ -588,16 +606,27 @@ class Run:
 
     # ---- C8 ----------------------------------------------------------------
     def c8_reserved_basenames(self):
-        hits = []
+        """A reserved context basename anywhere but the repo root is auto-loaded instructions.
+
+        The exclusion is the `.git` directory itself, matched as a path component. A
+        substring test also excluded `.github/`, where a planted CLAUDE.md passed while the
+        identical bytes under docs/ failed — so the one directory a reviewer is least
+        likely to read was the one place the guard could not see.
+        """
+        hits, scanned = [], 0
         for dirpath, dirs, files in os.walk(self.root):
-            if ".git" in dirpath:
-                continue
+            dirs[:] = [d for d in dirs if d != ".git"]
             for f in files:
+                scanned += 1
                 if f.lower() in RESERVED_BASENAMES:
                     p = os.path.join(dirpath, f)
                     if os.path.dirname(os.path.abspath(p)) != os.path.abspath(self.root):
                         hits.append(os.path.relpath(p, self.root))
-        self.result("C8", not hits, f"reserved basenames outside root: {hits or 'none'}")
+        if not scanned:
+            self.result("C8", False, "zero files in scan set")
+            return
+        self.result("C8", not hits,
+                    f"reserved basenames outside root over {scanned} files: {hits or 'none'}")
 
     # ---- C9 ----------------------------------------------------------------
     def c9_codex_package(self):
@@ -922,10 +951,36 @@ def selftest():
         expect_red("C6 goes red on a zero-file scan",
                    lambda: any(c == "C6" and d == "zero files"
                                for c, d in c6_empty_run.failures))
+        # The scan set used to be a hardcoded directory tuple, so a stale claim in a
+        # tracked root file was invisible. Prove the derived set reaches one.
+        open(os.path.join(td, "statusline.sh"), "w").write("#!/bin/sh\n# ph-lint\n")
+        r3_root = Run(td, ci=True)
+        r3_root.c6_stale_patterns()
+        expect_red("C6 reaches a tracked root file outside any scanned directory",
+                   lambda: any(c == "C6" and "ph-lint" in d for c, d in r3_root.failures))
+        os.remove(os.path.join(td, "statusline.sh"))
+
         r4 = Run(td, ci=True)
         r4.c8_reserved_basenames()
         expect_red("C8 goes red on nested claude.md",
                    lambda: any(c == "C8" for c, d in r4.failures))
+        # `.git` was matched as a substring, which also excluded `.github/` — the one
+        # directory whose CLAUDE.md a runtime would auto-load and a reviewer least expects.
+        os.makedirs(os.path.join(td, ".github", "workflows"), exist_ok=True)
+        open(os.path.join(td, ".github", "CLAUDE.md"), "w").write("planted")
+        r4_github = Run(td, ci=True)
+        r4_github.c8_reserved_basenames()
+        expect_red("C8 sees .github/, which a .git substring filter excluded",
+                   lambda: any(c == "C8" and ".github/CLAUDE.md" in d
+                               for c, d in r4_github.failures))
+        os.remove(os.path.join(td, ".github", "CLAUDE.md"))
+        c8_empty = os.path.join(td, "empty-c8")
+        os.makedirs(c8_empty, exist_ok=True)
+        c8_empty_run = Run(c8_empty, ci=True)
+        c8_empty_run.c8_reserved_basenames()
+        expect_red("C8 goes red on a zero-file scan",
+                   lambda: any(c == "C8" and "zero files" in d
+                               for c, d in c8_empty_run.failures))
         r5 = Run(td, ci=True)
         r5.c9_codex_package()
         expect_red("C9 goes red on absent plugin package",

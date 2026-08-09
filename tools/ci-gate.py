@@ -15,6 +15,18 @@ from typing import Callable, List, Optional, Sequence, Tuple
 VERSION = "1.0.0"
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github/workflows/check.yml"
+
+# One floor per suite, read by both the production spec table and the selftest's fake
+# runner. Two hand-maintained copies had already drifted -- render-packages was floored at
+# 165 here and 178 in harness_check -- and a fake that hardcodes its own number tests the
+# literal rather than the contract.
+SUITE_FLOORS = {
+    "harness_check": 49,
+    "render-packages": 178,
+    "bash_command_guard": 111,
+    "git_grep_engine_guard": 66,
+    "zsh_rev_modifier_guard": 31,
+}
 EXPECTED_WORKFLOW = """name: harness-check
 on:
   push:
@@ -151,11 +163,16 @@ def command_specs(render_root: Path) -> List[Tuple[List[str], ReceiptSpec]]:
                 ),
             ),
         ),
-        ([python, "hooks/harness_check.py", "--selftest"], selftest_receipt("harness_check", 46)),
-        ([python, "tools/render-packages.py", "--selftest"], selftest_receipt("render-packages", 165)),
-        ([python, "hooks/bash_command_guard.py", "--selftest"], selftest_receipt("bash_command_guard", 111)),
-        ([python, "hooks/guards/git_grep_engine_guard.py", "--selftest"], selftest_receipt("git_grep_engine_guard", 66)),
-        ([python, "hooks/guards/zsh_rev_modifier_guard.py", "--selftest"], selftest_receipt("zsh_rev_modifier_guard", 31)),
+        ([python, "hooks/harness_check.py", "--selftest"],
+         selftest_receipt("harness_check", SUITE_FLOORS["harness_check"])),
+        ([python, "tools/render-packages.py", "--selftest"],
+         selftest_receipt("render-packages", SUITE_FLOORS["render-packages"])),
+        ([python, "hooks/bash_command_guard.py", "--selftest"],
+         selftest_receipt("bash_command_guard", SUITE_FLOORS["bash_command_guard"])),
+        ([python, "hooks/guards/git_grep_engine_guard.py", "--selftest"],
+         selftest_receipt("git_grep_engine_guard", SUITE_FLOORS["git_grep_engine_guard"])),
+        ([python, "hooks/guards/zsh_rev_modifier_guard.py", "--selftest"],
+         selftest_receipt("zsh_rev_modifier_guard", SUITE_FLOORS["zsh_rev_modifier_guard"])),
         (
             [python, "tools/run-skill-evals.py", "--validate"],
             ReceiptSpec(
@@ -280,6 +297,23 @@ def selftest() -> int:
         ) is not None,
     )
 
+    # SUITE_FLOORS and harness_check's SELFTEST_SUITES are two tables describing one
+    # contract. They had already drifted before this assertion existed, so bind them.
+    import importlib.util as _il
+    _spec = _il.spec_from_file_location("_hc", ROOT / "hooks/harness_check.py")
+    _hc = _il.module_from_spec(_spec)
+    _spec.loader.exec_module(_hc)
+    _harness_floors = {name: floor for name, _cmd, floor in _hc.SELFTEST_SUITES}
+    _drift = {
+        suite: (floor, _harness_floors.get(suite))
+        for suite, floor in SUITE_FLOORS.items()
+        if suite != "harness_check" and _harness_floors.get(suite) != floor
+    }
+    expect(
+        f"gate floors agree with harness_check's registry (drift: {_drift or 'none'})",
+        not _drift,
+    )
+
     fake_calls: List[Sequence[str]] = []
     def fake_runner(argv: Sequence[str]) -> Result:
         fake_calls.append(argv)
@@ -287,15 +321,15 @@ def selftest() -> int:
         if "harness_check.py --ci" in joined:
             return Result(0, "HARNESS-SUMMARY mode=ci checks=1 failures=0 exit=0\n")
         if "harness_check.py --selftest" in joined:
-            return Result(0, "SELFTEST-SUMMARY suite=harness_check checks=46 failures=0\n")
+            return Result(0, f"SELFTEST-SUMMARY suite=harness_check checks={SUITE_FLOORS['harness_check']} failures=0\n")
         if "render-packages.py --selftest" in joined:
-            return Result(0, "SELFTEST-SUMMARY suite=render-packages checks=165 failures=0\n")
+            return Result(0, f"SELFTEST-SUMMARY suite=render-packages checks={SUITE_FLOORS['render-packages']} failures=0\n")
         if "bash_command_guard.py" in joined:
-            return Result(0, "SELFTEST-SUMMARY suite=bash_command_guard checks=111 failures=0\n")
+            return Result(0, f"SELFTEST-SUMMARY suite=bash_command_guard checks={SUITE_FLOORS['bash_command_guard']} failures=0\n")
         if "git_grep_engine_guard.py" in joined:
-            return Result(0, "SELFTEST-SUMMARY suite=git_grep_engine_guard checks=66 failures=0\n")
+            return Result(0, f"SELFTEST-SUMMARY suite=git_grep_engine_guard checks={SUITE_FLOORS['git_grep_engine_guard']} failures=0\n")
         if "zsh_rev_modifier_guard.py" in joined:
-            return Result(0, "SELFTEST-SUMMARY suite=zsh_rev_modifier_guard checks=31 failures=0\n")
+            return Result(0, f"SELFTEST-SUMMARY suite=zsh_rev_modifier_guard checks={SUITE_FLOORS['zsh_rev_modifier_guard']} failures=0\n")
         if "run-skill-evals.py" in joined:
             return Result(0, "EVAL-VALIDATE-SUMMARY scenarios=1 skills=1 failures=0 exit=0\n")
         if "--output" in argv:

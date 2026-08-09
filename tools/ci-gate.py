@@ -33,7 +33,7 @@ EVAL_SKILL_FLOOR = 6
 # literal rather than the contract.
 SUITE_FLOORS = {
     "harness_check": 72,
-    "render-packages": 189,
+    "render-packages": 192,
     "bash_command_guard": 111,
     "git_grep_engine_guard": 66,
     "zsh_rev_modifier_guard": 31,

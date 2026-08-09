@@ -149,9 +149,12 @@ same-user pathname replacement during the render is outside the pilot's boundary
 Schema v2 uses `z-harness-framed-sha256-v2`. The algorithm frames its identifier and domain, then
 preserves the caller-supplied sequence. Tree digests sort records by path and frame path, mode, size,
 and content SHA-256 in fixed order. JSON digests frame one UTF-8 canonical JSON value with sorted
-object keys and retained array order. Separate domains prevent reinterpretation between contract,
-configuration, source-input, source-included, payload, and complete-artifact scopes. Independent
-golden examples pin both canonical-JSON and file-tree framing.
+object keys and retained array order. Separate domains prevent reinterpretation between scopes.
+Seven fixed digest domains are in use: build contracts, the canonical render configuration, the
+selected adapter entry, source input, included source, target payload, and complete artifact. Two
+more are emitted per selected skill, for that skill's own input and included source, so the total
+tracks the selected inventory rather than being a fixed count. Independent golden examples pin both
+canonical-JSON and file-tree framing.
 
 The important identities are:
 

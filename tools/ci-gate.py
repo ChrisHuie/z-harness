@@ -22,7 +22,7 @@ WORKFLOW = ROOT / ".github/workflows/check.yml"
 # literal rather than the contract.
 SUITE_FLOORS = {
     "harness_check": 52,
-    "render-packages": 178,
+    "render-packages": 185,
     "bash_command_guard": 111,
     "git_grep_engine_guard": 66,
     "zsh_rev_modifier_guard": 31,

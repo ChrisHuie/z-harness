@@ -640,6 +640,16 @@ class SkillDocument(NamedTuple):
     body: bytes
 
 
+def require_portable_text(text: str, label: str) -> None:
+    """Refuse a host construct anywhere it would reach a rendered target."""
+    for code, pattern in HOST_BODY_CONSTRUCTS:
+        match = pattern.search(text)
+        if match:
+            raise RenderError(
+                code, f"{label} uses unclassified host construct {match.group(0)!r}"
+            )
+
+
 def parse_skill_document(path: Path, expected_name: str) -> SkillDocument:
     try:
         raw = path.read_bytes()
@@ -732,13 +742,15 @@ def parse_skill_document(path: Path, expected_name: str) -> SkillDocument:
         )
     if SEMVER.fullmatch(values["version"]) is None:
         raise RenderError(f"skill {expected_name} metadata.version must be semantic versioning")
-    for code, pattern in HOST_BODY_CONSTRUCTS:
-        match = pattern.search(body.decode("utf-8"))
-        if match:
-            raise RenderError(
-                code,
-                f"skill {expected_name} body uses unclassified host construct {match.group(0)!r}",
-            )
+    # The guard covers every field that reaches a target, not just the body. `description`
+    # is re-emitted into all five projections and is the one field hosts read for routing,
+    # so a host construct placed there previously travelled everywhere unexamined.
+    scanned = [("body", body.decode("utf-8"))]
+    scanned += [(field, values[field]) for field in ("name", "description")]
+    if argument_hint is not None:
+        scanned.append(("argument-hint", argument_hint))
+    for where, text in scanned:
+        require_portable_text(text, f"skill {expected_name} {where}")
     return SkillDocument(values, argument_hint, body)
 
 
@@ -841,9 +853,13 @@ def scan_skill(
         relative = path.relative_to(skill_dir).as_posix()
         record = file_record(path, relative)
         all_records.append(record)
+        # Exclusion is by name at ANY depth, not just the skill root. Matching only the
+        # first path component shipped skills/<name>/references/evals/*.json and a nested
+        # CONTRACT.md into all five targets while every check stayed green, because the
+        # artifact faithfully matched a projection that had already included them. An
+        # eval fixture is an eval fixture wherever it sits.
         parts = Path(relative).parts
-        immediate_file = len(parts) == 1 and parts[0] in excluded_files
-        if parts[0] in excluded_directories or immediate_file:
+        if set(parts[:-1]) & set(excluded_directories) or parts[-1] in excluded_files:
             excluded.append(relative)
         else:
             included.append(record)
@@ -1283,6 +1299,8 @@ def verify_target_manifest(
     artifact_root: Path,
     target: str,
     artifact_manifest: Dict[str, Any],
+    package: Optional[Dict[str, Any]] = None,
+    package_version: Optional[str] = None,
 ) -> None:
     manifest_relative = EXPECTED_MANIFEST_PATHS[target]
     golden = golden_native_manifests()[target]
@@ -1294,6 +1312,19 @@ def verify_target_manifest(
         return
     manifest_path = artifact_root / manifest_relative
     manifest = read_json_object(manifest_path, f"{target} package manifest")
+    # Re-derive from the declared inputs as well as comparing the golden. The golden is a
+    # second, independent derivation -- but the two were only ever reconciled during
+    # --output. A verify-only consumer saw one derivation, so an edited golden made
+    # --verify accept package metadata (description, homepage, repository, author, the
+    # marketplace interface block) that release/render.json does not declare.
+    if package is not None and package_version is not None:
+        derived = target_manifest(target, package, package_version)
+        if manifest_relative is not None and derived != golden:
+            raise RenderError(
+                "manifest.golden_underived",
+                f"{target} native manifest golden does not match what the render inputs "
+                f"produce; the golden and release/render.json disagree",
+            )
     if manifest != golden or manifest_path.read_bytes() != json_bytes(golden):
         raise RenderError(
             "manifest.golden_mismatch",
@@ -1736,7 +1767,11 @@ def verify_artifact(
         if not is_sha256(build[digest_field]):
             raise RenderError(f"artifact build {digest_field} must be a sha256 value")
     assert_isolated_manifest(artifact_root, expected_target)
-    verify_target_manifest(artifact_root, expected_target, manifest)
+    verify_target_manifest(
+        artifact_root, expected_target, manifest,
+        package=render_config["package"],
+        package_version=adapter["packageVersion"],
+    )
     if expected_target == "agent-plugins":
         conform_to_schema(
             read_json_object(artifact_root / "plugin.json", "portable manifest"),
@@ -2111,6 +2146,104 @@ def selftest(
             all(
                 "CONTRACT.md" in manifest["source"]["skills"][0]["excludedPaths"]
                 for manifest in verified.values()
+            ),
+        )
+
+        # Exclusion used to match only the first path component, so a nested evals/ and a
+        # nested CONTRACT.md shipped into all five targets with every check green. The
+        # fixture carries both at depth; a depth-0 matcher fails these.
+        nested_fixture = temp / "nested-exclusion-repo"
+        (nested_fixture / "skills").mkdir(parents=True)
+        shutil.copytree(ROOT / "skills/ground-claims",
+                        nested_fixture / "skills/ground-claims")
+        nested_dir = nested_fixture / "skills/ground-claims/references/evals"
+        nested_dir.mkdir(parents=True)
+        (nested_dir / "fixture.json").write_text("{}\n", encoding="utf-8")
+        (nested_fixture / "skills/ground-claims/references/CONTRACT.md").write_text(
+            "nested authoring metadata\n", encoding="utf-8"
+        )
+        nested_out = temp / "nested-exclusion"
+        nested_results = render_all(nested_fixture, nested_out, render_config, adapter_config)
+        expect(
+            "an excluded directory is excluded at any depth, not only at the skill root",
+            all(
+                not (nested_out / target / "skills/ground-claims/references/evals").exists()
+                for target in render_config["targets"]
+            ),
+        )
+        expect(
+            "an excluded file is excluded at any depth, not only at the skill root",
+            all(
+                not (nested_out / target
+                     / "skills/ground-claims/references/CONTRACT.md").exists()
+                for target in render_config["targets"]
+            ),
+        )
+        expect(
+            "every nested exclusion is still recorded as provenance",
+            all(
+                "references/evals/fixture.json"
+                in manifest["source"]["skills"][0]["excludedPaths"]
+                and "references/CONTRACT.md"
+                in manifest["source"]["skills"][0]["excludedPaths"]
+                for manifest in nested_results.values()
+            ),
+        )
+
+        # The description is re-emitted into every projection, so a host construct there
+        # travelled to all five targets while the guard scanned only the body.
+        construct_fixture = temp / "construct-repo"
+        (construct_fixture / "skills").mkdir(parents=True)
+        shutil.copytree(ROOT / "skills/ground-claims",
+                        construct_fixture / "skills/ground-claims")
+        construct_skill = construct_fixture / "skills/ground-claims/SKILL.md"
+        construct_original = construct_skill.read_text(encoding="utf-8")
+        for label, injected in (
+            ("description", "Ground a claim using ${CLAUDE_PLUGIN_ROOT}/x.sh here."),
+            ("name-adjacent description", "Ground a claim with $ARGUMENTS supplied."),
+        ):
+            import re as _re
+            construct_skill.write_text(
+                _re.sub(r"(?m)^description:.*$",
+                        "description: " + json.dumps(injected), construct_original, count=1),
+                encoding="utf-8",
+            )
+            expect_error(
+                f"a host construct in the {label} is refused, not projected to five targets",
+                lambda: render_all(
+                    construct_fixture, temp / f"construct-{label.split()[0]}",
+                    render_config, adapter_config
+                ),
+            )
+        construct_skill.write_text(construct_original, encoding="utf-8")
+
+        # The golden is a second derivation, but the two were reconciled only during
+        # --output. Editing the golden alone made a verify-only consumer accept package
+        # metadata the render inputs never declared.
+        drifted_golden = json.loads(json.dumps(golden_native_manifests()))
+        drifted_golden["codex"]["description"] = "undeclared by release/render.json"
+        real_golden_loader = globals()["golden_native_manifests"]
+        globals()["golden_native_manifests"] = lambda: drifted_golden
+        try:
+            expect_code(
+                "a native-manifest golden that disagrees with the render inputs is refused",
+                "manifest.golden_underived",
+                lambda: verify_target_manifest(
+                    first / "codex", "codex",
+                    read_json_object(first / f"codex/{ARTIFACT_MANIFEST}", "codex manifest"),
+                    package=render_config["package"],
+                    package_version=adapter_config["targets"]["codex"]["packageVersion"],
+                ),
+            )
+        finally:
+            globals()["golden_native_manifests"] = real_golden_loader
+        expect(
+            "golden control: the committed golden agrees with the render inputs",
+            all(
+                golden_native_manifests()[target]
+                == target_manifest(target, render_config["package"],
+                                   adapter_config["targets"][target]["packageVersion"])
+                for target in render_config["targets"]
             ),
         )
         expect(

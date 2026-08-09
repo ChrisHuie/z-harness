@@ -94,7 +94,7 @@ SELFTEST_SUITES = [
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 165),
     ("ci-gate", ["tools/ci-gate.py", "--selftest"], 16),
-    ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 45),
+    ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 50),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
     ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 16),
     ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 66),

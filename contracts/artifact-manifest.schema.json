@@ -17,27 +17,51 @@
     "adapterRevision",
     "build",
     "source",
-    "payload"
+    "payload",
+    "claims"
   ],
   "properties": {
     "$schema": {
       "const": "https://github.com/ChrisHuie/z-harness/blob/v0.4.0-alpha.2/contracts/artifact-manifest.schema.json"
     },
-    "schemaVersion": {"const": 2},
-    "artifactId": {"type": "string", "minLength": 1},
+    "schemaVersion": {
+      "const": 3
+    },
+    "artifactId": {
+      "type": "string",
+      "minLength": 1
+    },
     "packageName": {
       "type": "string",
       "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
     },
-    "coreVersion": {"type": "string", "minLength": 1},
-    "packageVersion": {"type": "string", "minLength": 1},
+    "coreVersion": {
+      "type": "string",
+      "minLength": 1
+    },
+    "packageVersion": {
+      "type": "string",
+      "minLength": 1
+    },
     "licenses": {
       "type": "array",
-      "items": {"type": "string", "minLength": 1}
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
     },
-    "target": {"type": "string", "minLength": 1},
-    "format": {"type": "string", "minLength": 1},
-    "adapterRevision": {"type": "integer", "minimum": 1},
+    "target": {
+      "type": "string",
+      "minLength": 1
+    },
+    "format": {
+      "type": "string",
+      "minLength": 1
+    },
+    "adapterRevision": {
+      "type": "integer",
+      "minimum": 1
+    },
     "build": {
       "type": "object",
       "additionalProperties": false,
@@ -52,14 +76,31 @@
         "adapterConfigSha256"
       ],
       "properties": {
-        "renderer": {"const": "z-harness/render-packages"},
-        "rendererVersion": {"type": "string", "minLength": 1},
-        "digestAlgorithm": {"const": "z-harness-framed-sha256-v2"},
-        "filesystemProfile": {"const": "z-harness-posix-tree-v1"},
-        "rendererSha256": {"$ref": "#/$defs/sha256"},
-        "contractsSha256": {"$ref": "#/$defs/sha256"},
-        "renderConfigSha256": {"$ref": "#/$defs/sha256"},
-        "adapterConfigSha256": {"$ref": "#/$defs/sha256"}
+        "renderer": {
+          "const": "z-harness/render-packages"
+        },
+        "rendererVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "digestAlgorithm": {
+          "const": "z-harness-framed-sha256-v2"
+        },
+        "filesystemProfile": {
+          "const": "z-harness-posix-tree-v1"
+        },
+        "rendererSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "contractsSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "renderConfigSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "adapterConfigSha256": {
+          "$ref": "#/$defs/sha256"
+        }
       }
     },
     "source": {
@@ -73,23 +114,45 @@
         "skills"
       ],
       "properties": {
-        "kind": {"const": "canonical-tree"},
-        "inputTreeSha256": {"$ref": "#/$defs/sha256"},
-        "includedTreeSha256": {"$ref": "#/$defs/sha256"},
+        "kind": {
+          "const": "canonical-tree"
+        },
+        "inputTreeSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "includedTreeSha256": {
+          "$ref": "#/$defs/sha256"
+        },
         "upstreamLocks": {
           "type": "array",
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["id", "revision", "sha256", "licenses"],
+            "required": [
+              "id",
+              "revision",
+              "sha256",
+              "licenses"
+            ],
             "properties": {
-              "id": {"type": "string", "minLength": 1},
-              "revision": {"type": "string", "minLength": 1},
-              "sha256": {"$ref": "#/$defs/sha256"},
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "revision": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sha256": {
+                "$ref": "#/$defs/sha256"
+              },
               "licenses": {
                 "type": "array",
                 "minItems": 1,
-                "items": {"type": "string", "minLength": 1}
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
               }
             }
           }
@@ -108,13 +171,26 @@
               "excludedPaths"
             ],
             "properties": {
-              "id": {"type": "string", "minLength": 1},
-              "inputTreeSha256": {"$ref": "#/$defs/sha256"},
-              "includedTreeSha256": {"$ref": "#/$defs/sha256"},
-              "includedFiles": {"type": "integer", "minimum": 1},
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "inputTreeSha256": {
+                "$ref": "#/$defs/sha256"
+              },
+              "includedTreeSha256": {
+                "$ref": "#/$defs/sha256"
+              },
+              "includedFiles": {
+                "type": "integer",
+                "minimum": 1
+              },
               "excludedPaths": {
                 "type": "array",
-                "items": {"type": "string", "minLength": 1}
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
               }
             }
           }
@@ -124,13 +200,58 @@
     "payload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sha256", "files"],
+      "required": [
+        "sha256",
+        "files"
+      ],
       "properties": {
-        "sha256": {"$ref": "#/$defs/sha256"},
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
         "files": {
           "type": "array",
           "minItems": 1,
-          "items": {"$ref": "#/$defs/file"}
+          "items": {
+            "$ref": "#/$defs/file"
+          }
+        }
+      }
+    },
+    "claims": {
+      "description": "Compatibility claims derived from the adapter entry. There is no `authority` field: authority belongs to a guarded fact named with its mechanism, host version and scope, not to a package.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "targetLevel",
+        "earnedLevel",
+        "validationStatus",
+        "evidence"
+      ],
+      "properties": {
+        "targetLevel": {
+          "enum": [
+            "portable-core",
+            "adapter-functional",
+            "host-integrated",
+            "governed-parity"
+          ]
+        },
+        "earnedLevel": {
+          "const": "unverified"
+        },
+        "validationStatus": {
+          "enum": [
+            "fixture-only",
+            "candidate",
+            "promoted"
+          ]
+        },
+        "evidence": {
+          "description": "Target-host validation records. Empty for fixture-only; any other status requires at least one complete record and a non-empty license set.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/hostEvidence"
+          }
         }
       }
     }
@@ -143,12 +264,77 @@
     "file": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "mode", "size", "sha256"],
+      "required": [
+        "path",
+        "mode",
+        "size",
+        "sha256"
+      ],
       "properties": {
-        "path": {"type": "string", "minLength": 1},
-        "mode": {"enum": ["0644", "0755"]},
-        "size": {"type": "integer", "minimum": 0},
-        "sha256": {"$ref": "#/$defs/sha256"}
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mode": {
+          "enum": [
+            "0644",
+            "0755"
+          ]
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "hostEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "hostVersion",
+        "installedArtifactSha256",
+        "scenarios"
+      ],
+      "properties": {
+        "host": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hostVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "installedArtifactSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "scenarios": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "result"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "result": {
+                "enum": [
+                  "pass",
+                  "fail"
+                ]
+              }
+            }
+          }
+        }
       }
     }
   }

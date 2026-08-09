@@ -79,6 +79,17 @@ SKILL_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 SKILL_NAME_MAX = 64
 SKILL_DESCRIPTION_MAX = 1024
 PACKAGE_NAME = re.compile(r"^[a-z0-9]+(?:[.-][a-z0-9]+)*$")
+TARGET_LEVELS = {
+    "portable-core",
+    "adapter-functional",
+    "host-integrated",
+    "governed-parity",
+}
+VALIDATION_STATUSES = {"fixture-only", "candidate", "promoted"}
+# `authority` is deliberately not an artifact field. Authority belongs to a guarded fact
+# -- mechanism, host version, scope -- so a package-wide scalar would assert something no
+# package can hold. contracts/compatibility-levels.md carries that reasoning.
+
 KIMI_PLUGIN_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 # YAML indicators that change a scalar's meaning. The renderer reads frontmatter without
 # a YAML dependency, so any form it cannot faithfully decode is refused by name rather
@@ -331,6 +342,73 @@ def require_string_list(value: Any, label: str, *, nonempty: bool = False) -> Li
     return list(value)
 
 
+def require_validation_evidence(
+    validation_status: str,
+    licenses: Sequence[str],
+    evidence: Any,
+    label: str,
+) -> None:
+    """Gate every compatibility status on the evidence its contract names.
+
+    `contracts/compatibility-levels.md` requires a promoted release to record tested host
+    versions, validation results, the fresh-session installed artifact digest, and a
+    license set. This is the single encoding of that rule; `load_inputs` applies it to the
+    adapter config and `verify_artifact` applies it to the rendered artifact, so neither
+    end can claim a status the other would refuse. It checks that a claim carries its
+    evidence, not that the evidence is true -- only a target-host run establishes that.
+    """
+    if not isinstance(evidence, list):
+        raise RenderError("claims.evidence_shape", f"{label} evidence must be an array")
+    if validation_status == "fixture-only":
+        if evidence:
+            raise RenderError("claims.evidence_unearned",
+                              f"{label} fixture-only must record no host evidence")
+        return
+    if not evidence:
+        raise RenderError(
+            "claims.evidence_missing",
+            f"{label} validationStatus {validation_status!r} requires host evidence records",
+        )
+    if not licenses:
+        raise RenderError(
+            "claims.license_missing",
+            f"{label} validationStatus {validation_status!r} requires a non-empty license set",
+        )
+    seen: List[Tuple[str, str]] = []
+    for index, record in enumerate(evidence):
+        where = f"{label} evidence[{index}]"
+        if not isinstance(record, dict):
+            raise RenderError(f"{where} must be an object")
+        require_exact_keys(
+            record, {"host", "hostVersion", "installedArtifactSha256", "scenarios"}, where
+        )
+        host = require_nonempty_string(record["host"], f"{where} host")
+        host_version = require_nonempty_string(record["hostVersion"], f"{where} hostVersion")
+        if not is_sha256(record["installedArtifactSha256"]):
+            raise RenderError(f"{where} installedArtifactSha256 must be a sha256 value")
+        scenarios = record["scenarios"]
+        if not isinstance(scenarios, list) or not scenarios:
+            raise RenderError(f"{where} scenarios must be a non-empty array")
+        scenario_ids: List[str] = []
+        for position, scenario in enumerate(scenarios):
+            spot = f"{where} scenarios[{position}]"
+            if not isinstance(scenario, dict):
+                raise RenderError(f"{spot} must be an object")
+            require_exact_keys(scenario, {"id", "result"}, spot)
+            scenario_ids.append(require_nonempty_string(scenario["id"], f"{spot} id"))
+            if scenario["result"] != "pass":
+                raise RenderError(
+                    "claims.scenario_failed",
+                    f"{spot} result {scenario['result']!r} does not support a "
+                    f"{validation_status!r} status",
+                )
+        if len(scenario_ids) != len(set(scenario_ids)):
+            raise RenderError(f"{where} scenario ids must be unique")
+        seen.append((host, host_version))
+    if len(seen) != len(set(seen)):
+        raise RenderError(f"{label} evidence host/version pairs must be unique")
+
+
 def load_inputs(
     render_path: Path = DEFAULT_RENDER_CONFIG,
     adapter_path: Path = DEFAULT_ADAPTER_CONFIG,
@@ -478,7 +556,20 @@ def load_inputs(
                 "packageVersion",
                 "format",
                 "manifestPath",
+                "targetLevel",
+                "validationStatus",
+                "evidence",
             },
+            f"adapter {target}",
+        )
+        if adapter["targetLevel"] not in TARGET_LEVELS:
+            raise RenderError(f"adapter {target} has an unknown targetLevel")
+        if adapter["validationStatus"] not in VALIDATION_STATUSES:
+            raise RenderError(f"adapter {target} has an unknown validationStatus")
+        require_validation_evidence(
+            adapter["validationStatus"],
+            package["licenses"],
+            adapter["evidence"],
             f"adapter {target}",
         )
         revision = adapter["adapterRevision"]
@@ -1206,7 +1297,11 @@ def verify_target_manifest(
     if manifest != golden or manifest_path.read_bytes() != json_bytes(golden):
         raise RenderError(
             "manifest.golden_mismatch",
-            f"{target} native manifest differs from the hand-authored byte golden",
+            f"{target} native manifest differs from the hand-authored byte golden in "
+            f"{NATIVE_MANIFEST_GOLDEN.name}. If the artifact was edited, this is the "
+            f"rejection. If release/render.json was edited on purpose, hand-update the "
+            f"golden to the new bytes in the same commit and review that diff — the "
+            f"golden is authored rather than generated so the change is read by a person",
         )
     if target == "kimi":
         require_exact_keys(
@@ -1312,6 +1407,23 @@ def derived_build(render_config: Dict[str, Any], adapter: Dict[str, Any]) -> Dic
     }
 
 
+def derived_claims(adapter: Dict[str, Any]) -> Dict[str, Any]:
+    """The claims block an artifact must carry for this adapter entry.
+
+    `earnedLevel` is pinned: rendering and static inspection earn nothing, so it is never
+    read from configuration and only a target-host promotion run may advance it. There is
+    deliberately no `authority` field -- authority belongs to a guarded fact, named with
+    its mechanism, host version and scope, so a package-wide scalar would assert something
+    no package can hold.
+    """
+    return {
+        "targetLevel": adapter["targetLevel"],
+        "earnedLevel": "unverified",
+        "validationStatus": adapter["validationStatus"],
+        "evidence": adapter["evidence"],
+    }
+
+
 def derived_upstream_locks(render_config: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Upstream locks the render inputs authorise. Nothing declares an upstream yet."""
     return []
@@ -1394,7 +1506,7 @@ def render_target(
     payload = payload_records(target_root)
     artifact_manifest = {
         "$schema": ARTIFACT_SCHEMA,
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "artifactId": f"{package['name']}/{target}",
         "packageName": package["name"],
         "coreVersion": package["coreVersion"],
@@ -1415,6 +1527,7 @@ def render_target(
             "sha256": tree_digest(payload, "payload"),
             "files": payload,
         },
+        "claims": derived_claims(adapter),
     }
     write_json(target_root / ARTIFACT_MANIFEST, artifact_manifest)
     verify_artifact(repo_root, target_root, target, render_config, adapter_config)
@@ -1533,10 +1646,11 @@ def verify_artifact(
             "build",
             "source",
             "payload",
+            "claims",
         },
         "artifact manifest",
     )
-    if manifest["$schema"] != ARTIFACT_SCHEMA or manifest["schemaVersion"] != 2:
+    if manifest["$schema"] != ARTIFACT_SCHEMA or manifest["schemaVersion"] != 3:
         raise RenderError("artifact manifest schema identity is invalid")
     if manifest["target"] != expected_target:
         raise RenderError(
@@ -1577,6 +1691,27 @@ def verify_artifact(
                 f"artifact {field} does not match the render inputs: "
                 f"artifact={manifest[field]!r} configured={expected!r}"
             )
+    expected_claims = derived_claims(adapter)
+    if manifest["claims"] != expected_claims:
+        drifted = sorted(
+            key for key in expected_claims
+            if not isinstance(manifest["claims"], dict)
+            or manifest["claims"].get(key) != expected_claims[key]
+        )
+        raise RenderError(
+            "claims.underived",
+            f"artifact claims were not derived from the adapter configuration: {drifted}",
+        )
+    claims = manifest["claims"]
+    if claims["targetLevel"] not in TARGET_LEVELS:
+        raise RenderError("artifact targetLevel is unknown")
+    if claims["validationStatus"] not in VALIDATION_STATUSES:
+        raise RenderError("artifact validationStatus is unknown")
+    if claims["earnedLevel"] != "unverified":
+        raise RenderError("renderer may emit only unverified earnedLevel")
+    require_validation_evidence(
+        claims["validationStatus"], manifest["licenses"], claims["evidence"], "artifact"
+    )
     expected_build = derived_build(render_config, adapter)
     if manifest["build"] != expected_build:
         drifted = sorted(
@@ -2039,14 +2174,26 @@ def selftest(
             and not (first / "hermes/plugin.yaml").exists()
             and not (first / "hermes/__init__.py").exists(),
         )
-        forbidden_fact_keys = {
-            "claims", "authority", "targetLevel", "earnedLevel", "validationStatus",
-            "evidence", "installedArtifactSha256",
-        }
-        expect("artifact manifests contain no host authority or promotion fields", all(
-            not forbidden_fact_keys.intersection(json.dumps(manifest).split('"'))
+        expect("no artifact asserts a package-wide authority", all(
+            "authority" not in json.dumps(manifest).split('"')
             for manifest in verified.values()
         ))
+        expect(
+            "every artifact carries claims derived from its own adapter entry",
+            all(
+                manifest["claims"] == derived_claims(adapter_config["targets"][target])
+                for target, manifest in verified.items()
+            ),
+        )
+        expect(
+            "the pilot earns nothing and claims no validated host",
+            all(
+                manifest["claims"]["earnedLevel"] == "unverified"
+                and manifest["claims"]["validationStatus"] == "fixture-only"
+                and manifest["claims"]["evidence"] == []
+                for manifest in verified.values()
+            ),
+        )
         expect(
             "every artifact records the exact renderer and canonical config inputs",
             all(
@@ -2394,6 +2541,124 @@ def selftest(
             "verification rejects a well-formed authority claim injected into immutable facts",
             "codex",
             edit_manifest(lambda m: m.__setitem__("authority", "instruction-only")),
+        )
+        planted(
+            "verification rejects an authority field smuggled into the claims block",
+            "codex",
+            edit_manifest(
+                lambda m: m["claims"].__setitem__("authority", "external-boundary")
+            ),
+        )
+        planted(
+            "verification rejects a self-promoted claims.earnedLevel",
+            "agent-plugins",
+            edit_manifest(lambda m: m["claims"].__setitem__("earnedLevel", "governed-parity")),
+        )
+        # Schema-valid values, so the identity binding is the only thing that can reject
+        # them: these two are what prove it, and they name its code.
+        for field, value in (
+            ("targetLevel", "governed-parity"),
+            ("validationStatus", "promoted"),
+        ):
+            planted(
+                f"verification rejects a self-promoted claims.{field}",
+                "agent-plugins",
+                edit_manifest(lambda m, f=field, v=value: m["claims"].__setitem__(f, v)),
+                "claims.underived",
+            )
+        planted(
+            "verification rejects host evidence a fixture-only artifact cannot have",
+            "agent-plugins",
+            edit_manifest(lambda m: m["claims"].__setitem__("evidence", [{
+                "host": "claude-code",
+                "hostVersion": "2.1.0",
+                "installedArtifactSha256": "0" * 64,
+                "scenarios": [{"id": "fresh-session", "result": "pass"}],
+            }])),
+            "claims.underived",
+        )
+
+        # The evidence rule is one predicate applied at both ends, so the adapter side
+        # needs its own proofs: a status above fixture-only is unreachable while nothing
+        # produces host receipts and the package declares no license.
+        complete_evidence = {
+            "host": "claude-code",
+            "hostVersion": "2.1.0",
+            "installedArtifactSha256": "0" * 64,
+            "scenarios": [{"id": "fresh-session-invocation", "result": "pass"}],
+        }
+
+        def adapter_with(**fields: Any) -> Dict[str, Any]:
+            copy = json.loads(json.dumps(adapter_config))
+            copy["targets"]["claude"].update(fields)
+            return copy
+
+        def licensed_config() -> Dict[str, Any]:
+            copy = json.loads(json.dumps(render_config))
+            copy["package"]["licenses"] = ["MIT"]
+            return copy
+
+        expect_code(
+            "a status above fixture-only without host evidence is refused at input",
+            "claims.evidence_missing",
+            lambda: load_inputs_from(
+                render_config, adapter_with(validationStatus="promoted")
+            ),
+        )
+        expect_code(
+            "host evidence without a license set cannot support a promoted status",
+            "claims.license_missing",
+            lambda: load_inputs_from(
+                render_config,
+                adapter_with(validationStatus="promoted", evidence=[complete_evidence]),
+            ),
+        )
+        expect_code(
+            "a failed scenario cannot support a promoted status",
+            "claims.scenario_failed",
+            lambda: load_inputs_from(
+                licensed_config(),
+                adapter_with(validationStatus="promoted", evidence=[{
+                    **complete_evidence,
+                    "scenarios": [{"id": "fresh-session", "result": "fail"}],
+                }]),
+            ),
+        )
+        expect_code(
+            "a fixture-only adapter cannot carry host evidence",
+            "claims.evidence_unearned",
+            lambda: load_inputs_from(
+                licensed_config(), adapter_with(evidence=[complete_evidence])
+            ),
+        )
+        expect(
+            "complete evidence plus a license set is accepted, so the gate is not vacuous",
+            load_inputs_from(
+                licensed_config(),
+                adapter_with(validationStatus="promoted", evidence=[complete_evidence]),
+            ) is not None,
+        )
+
+        # verify_artifact re-applies the evidence predicate as well as re-deriving claims.
+        # Every tamper reachable through a rendered tree is caught by the derivation first,
+        # so the predicate's arm at this end only executes for a caller that did not come
+        # through load_inputs. Drive that caller directly, or the guard is unexercised.
+        unchecked_adapter = json.loads(json.dumps(adapter_config))
+        unchecked_adapter["targets"]["claude"]["validationStatus"] = "promoted"
+        unchecked_root = temp / "unchecked-adapter"
+        shutil.copytree(tamper_base / "claude", unchecked_root)
+        unchecked_manifest = read_json_object(
+            unchecked_root / ARTIFACT_MANIFEST, "unchecked artifact manifest"
+        )
+        unchecked_manifest["claims"]["validationStatus"] = "promoted"
+        write_json(unchecked_root / ARTIFACT_MANIFEST, unchecked_manifest)
+        normalize_physical_tree(unchecked_root)
+        expect_code(
+            "verification re-applies the evidence rule for an adapter that skipped input validation",
+            "claims.evidence_missing",
+            lambda: verify_artifact(
+                fixture_root, unchecked_root, "claude", render_config, unchecked_adapter
+            ),
         )
 
         index_injection = temp / "index-injection"

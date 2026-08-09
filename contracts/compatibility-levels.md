@@ -5,9 +5,9 @@ promotion authority, publication, and rollback are separate records and state tr
 
 ## Compatibility vocabulary
 
-The following levels are planning vocabulary for a future host-validation and promotion system.
-They are deliberately absent from render configuration, `z-harness-artifact.json`, and
-`render-index.json`.
+An adapter declares the level it targets, and the artifact records that alongside the level it has
+earned. `earnedLevel` is not read from configuration: it is pinned to `unverified`, because
+rendering and static inspection earn nothing and only a target-host promotion run may advance it.
 
 | level | evidence a future promotion decision would require |
 |---|---|
@@ -19,6 +19,39 @@ They are deliberately absent from render configuration, `z-harness-artifact.json
 The current renderer earns none of these levels. It emits reproducible package candidates and
 immutable render-time facts only. No host receipt producer, promotion decision maker, publication
 ledger, or rollback controller exists in this pilot.
+
+## Evidence required by a claim
+
+`validationStatus` is gated on the evidence this contract names, at both ends: the adapter
+configuration is refused at input time and the rendered artifact is refused at verification time,
+through one predicate, so neither end can claim a status the other would reject.
+
+| `validationStatus` | required |
+|---|---|
+| `fixture-only` | no host evidence records at all |
+| `candidate`, `promoted` | at least one evidence record, and a non-empty license set |
+
+Each evidence record names a host, that host's version, the artifact digest observed after a
+fresh-session install, and the scenario results behind the claim. A scenario that did not pass
+cannot support a status above `fixture-only`.
+
+This checks that a claim carries evidence of the required shape, not that the evidence is true;
+only a target-host run establishes the latter. Because no producer of host receipts exists and the
+pilot declares no license, every status above `fixture-only` is currently unreachable by
+construction rather than by convention, and the absent license set is a mechanical promotion
+blocker rather than a note.
+
+## Why authority is not an artifact field
+
+`authority` is deliberately absent from render configuration and from every rendered artifact, and
+it is the one field of this family that stays absent. Authority is a property of a guarded fact —
+its mechanism, the host version enforcing it, and the scope over which it holds — so a
+package-wide scalar would assert something no package can hold. An adapter that set
+`authority: external-boundary` while carrying no evidence would be making exactly the claim the
+authority vocabulary below exists to discipline.
+
+Recording authority therefore requires a target-owned overlay keyed per guarded fact, with
+denial-path evidence, not a field on the package manifest.
 
 ## Authority vocabulary
 
@@ -39,6 +72,18 @@ invoking turn rather than restriction to the named tools, but those documentatio
 version-bound to the tested CLI. The conservative omission does not claim that runtime behavior.
 Adding permission metadata later requires a target-owned authority overlay and denial-path tests.
 
+## Changing a native manifest
+
+`contracts/goldens/native-manifests.json` holds the expected bytes of every target-native
+manifest. Rendering builds the manifest from `release/render.json`; verification compares it to
+that golden. The two derivations are independent, which is what makes a rethreaded edit to a
+rendered artifact detectable.
+
+There is deliberately no command that rewrites the golden from a render. A detector whose
+documented remedy clears the detection proves nothing, and the point of an authored golden is that
+a person reads the bytes. Editing package metadata therefore means updating the golden by hand in
+the same commit, so the manifest change appears in review as a diff rather than as a digest.
+
 ## Package isolation
 
 Each installable artifact has one package format and one intended target family. A target root must
@@ -58,7 +103,8 @@ repository, but a client must receive exactly one target root.
 
 ## Render identity
 
-Artifact schema v2 contains only facts derivable during rendering:
+Artifact schema v3 contains facts derivable during rendering, plus the claims block derived from
+the target's adapter entry and gated on the evidence above:
 
 - package, target, version, format, and adapter revision;
 - exact renderer, closed render schema/golden set, render-config, and selected adapter-config

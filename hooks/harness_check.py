@@ -61,6 +61,14 @@ BANNED_VOCAB_ANCHOR = "banned outright:"
 # error, so a meaning-preserving reword that split the sentence halved the ban list in
 # silence. Lower it only in the commit that retires a phrase.
 BANNED_VOCAB_FLOOR = 5
+# A floor on cardinality does not floor content: swapping one phrase for an invented word
+# keeps the count at five while retiring a real term, and the verdict line is byte-identical.
+# These phrases must appear in whatever the anchor yields. Prose may add to the ban list; it
+# cannot silently drop one of these, and removing one deliberately means editing here too,
+# where it is reviewed.
+REQUIRED_BANNED_TERMS = frozenset(
+    {"looks good", "should work", "solid", "perfect", "all set"}
+)
 C11_SCOPE_DECLARATION = (
     "C11 claim-vocabulary scope: AGENTS.md, CLAUDE.md, every skills/*/SKILL.md, "
     "and .md/.yaml/.yml files under skills/*/references/."
@@ -78,7 +86,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 68
+SELFTEST_FLOOR = 71
 
 AUTHORING_SKILLS = {"craft-prompt", "craft-skill", "craft-context-file", "review-prompt"}
 BODY_CHAR_CAP = 5000          # chars after frontmatter — the builders' instrument
@@ -98,7 +106,7 @@ SELFTEST_SUITES = [
     ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 42),
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 8),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
-    ("render-packages", ["tools/render-packages.py", "--selftest"], 187),
+    ("render-packages", ["tools/render-packages.py", "--selftest"], 189),
     ("ci-gate", ["tools/ci-gate.py", "--selftest"], 17),
     ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 63),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
@@ -164,21 +172,29 @@ SUITE_SOURCE_GOLDEN = "contracts/goldens/suite-sources.json"
 
 
 def suite_source_golden(root=None):
-    """Recorded source digest per aggregated suite, or None when the file is absent.
+    """Recorded source digest per aggregated suite. Absence is a failure, not a skip.
 
-    Absent is tolerated so an installed package without contracts/ still runs; a suite
-    listed in the registry but missing from a PRESENT golden is a failure, not a skip.
+    Tolerating an absent file made the binding removable by deleting one file that no
+    check required, which fully restored the stub attack this exists to stop and produced
+    a receipt byte-identical to a pristine run. A guard that any single deletion disables
+    is not a guard, so a missing or malformed golden yields an empty mapping and every
+    registered suite then reports its digest as unrecorded.
     """
     path = os.path.join(root or ROOT, SUITE_SOURCE_GOLDEN)
     if not os.path.isfile(path):
-        return None
-    return json.load(open(path, encoding="utf-8")).get("suites", {})
+        return {}
+    try:
+        value = json.load(open(path, encoding="utf-8")).get("suites")
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 # C6/C8 scan set: everything tracked EXCEPT these. Written down rather than implied by a
 # directory list, so a surface added later is scanned by default and an omission is a
 # reviewable line instead of a forgotten tuple entry.
 SCAN_EXCLUSIONS = (
+    "hooks/harness_check.py",   # this file names every tripwire; it cannot sweep itself
     "*.pyc",                    # build output
     "*.jsonl",                  # recorded transcript fixtures, not authored prose
     "**/__pycache__/**",
@@ -188,9 +204,16 @@ ROUTING_SKILLS = ["git-workflow", "pr-review-method", "testing-ci", "agent-dispa
                   "ground-claims", "prebid-adcp", "system-design", "outbound-drafts",
                   "craft-prompt", "craft-skill", "craft-context-file", "review-prompt"]
 
-# Claude events that must stay registered in settings.json; the Codex counterpart is
-# REQUIRED_CODEX_HANDLERS. Without this, deleting the hooks block was a silent pass.
-REQUIRED_CLAUDE_EVENTS = ('PostToolUse', 'PreToolUse')
+# Which guard must be registered on which Claude event, mirroring REQUIRED_CODEX_HANDLERS.
+# Asserting a handler COUNT and a set of event keys was satisfiable by two handlers running
+# `true`: the events existed, the count matched, and all three guards were unregistered --
+# the same end state as the deleted hooks block it was written to catch. Bind the script to
+# the event instead.
+REQUIRED_CLAUDE_HANDLERS = [
+    ("PostToolUse", "AskUserQuestion", "hooks/askq_timeout_guard.py"),
+    ("PreToolUse", "Bash", "hooks/bash_command_guard.py"),
+    ("PreToolUse", "Agent|Task", "hooks/spawn_preflight_guard.py"),
+]
 
 RESERVED_BASENAMES = {"claude.md", "agents.md", "gemini.md"}
 CODEX_HOOK_TOP_LEVEL_KEYS = {"description", "hooks"}
@@ -431,7 +454,9 @@ class Run:
                 self.result("C1", False,
                             f"selftest {name}: floor {floor} is not positive")
                 continue
-            if sources is not None:
+            if sources is None:
+                sources = {}
+            if True:
                 expected = sources.get(name)
                 path = os.path.join(self.root, cmd[0])
                 actual = (
@@ -623,7 +648,7 @@ class Run:
                 excluded += 1
                 continue
             absolute = os.path.join(self.root, rel)
-            if os.path.abspath(absolute) == me or not os.path.isfile(absolute):
+            if not os.path.isfile(absolute):
                 continue
             targets.append(absolute)
         if not targets:
@@ -648,17 +673,16 @@ class Run:
         # and zero failures -- a silent pass over an empty scan set, which this file's own
         # exit-code contract calls an error. The Codex side is bound by
         # REQUIRED_CODEX_HANDLERS; this is its Claude counterpart.
-        claude_handlers = sum(
-            len(entry.get("hooks", []))
-            for entries in st.get("hooks", {}).values()
-            for entry in entries
-        )
-        self.result("C7", claude_handlers >= len(REQUIRED_CLAUDE_EVENTS),
-                    f"settings.json registers {claude_handlers} Claude hook handler(s) "
-                    f"across {len(st.get('hooks', {}))} event(s)")
-        for event in REQUIRED_CLAUDE_EVENTS:
-            self.result("C7", event in st.get("hooks", {}),
-                        f"settings.json registers required Claude event {event}")
+        for event, matcher, script in REQUIRED_CLAUDE_HANDLERS:
+            matches = [
+                h for entry in st.get("hooks", {}).get(event, [])
+                if entry.get("matcher") == matcher
+                for h in entry.get("hooks", [])
+                if script in h.get("command", "")
+            ]
+            self.result("C7", len(matches) == 1,
+                        f"settings.json {event} matcher={matcher!r} -> {script}: "
+                        f"{len(matches)} match(es)")
         for event, entries in st.get("hooks", {}).items():
             for entry in entries:
                 for h in entry.get("hooks", []):
@@ -937,6 +961,16 @@ class Run:
         # silently halved the list from five phrases to two, and three banned phrases then
         # sat in a governed file with the whole gate green. This is the same shrink the
         # suite floors exist to catch, so the term count carries its own floor.
+        missing_required = sorted(
+            REQUIRED_BANNED_TERMS - {term.casefold() for term in terms}
+        )
+        if missing_required:
+            self.result(
+                "C11", False,
+                f"cannot enforce: anchor no longer bans {missing_required}; retiring a "
+                f"phrase means removing it from REQUIRED_BANNED_TERMS in the same commit",
+            )
+            return
         if len(terms) < BANNED_VOCAB_FLOOR:
             self.result(
                 "C11", False,
@@ -1159,6 +1193,14 @@ def selftest():
         expect_red("every registered suite floor is positive",
                    lambda: all(floor >= 1 for _n, _c, floor in SELFTEST_SUITES))
 
+        # Tolerating an absent golden made the binding removable by deleting one file.
+        c1_no_golden = Run(td, ci=True)
+        c1_no_golden.c1_selftests([("planted-stub", [at_floor_suite], 1)],
+                                  sources=suite_source_golden(td))
+        expect_red("C1 treats an absent suite golden as unrecorded, never as permission",
+                   lambda: any(c == "C1" and "no source digest recorded" in d
+                               for c, d in c1_no_golden.failures))
+
         c1_stub = Run(td, ci=True)
         c1_stub.c1_selftests([("planted-stub", [stub_suite], 8)],
                              sources={"planted-stub": "0" * 64})
@@ -1332,9 +1374,27 @@ def selftest():
         open(os.path.join(vocab_root, "AGENTS.md"), "w").write(shrunk_contract)
         c11_shrunk = Run(vocab_root, ci=True)
         c11_shrunk.c11_claim_vocabulary()
+        swapped_contract = agents_contract.replace("*perfect*", "*zorblat*", 1)
+        open(os.path.join(vocab_root, "AGENTS.md"), "w").write(swapped_contract)
+        c11_swapped = Run(vocab_root, ci=True)
+        c11_swapped.c11_claim_vocabulary()
+        expect_red(
+            "C11 floors content, not only cardinality: a swapped phrase is caught",
+            lambda: any(c == "C11" and "no longer bans" in d
+                        for c, d in c11_swapped.failures),
+        )
+        open(os.path.join(vocab_root, "AGENTS.md"), "w").write(agents_contract)
+
+        # Either floor may catch this: the content floor names the dropped phrases, the
+        # cardinality floor names the count. Asserting one message made the proof fail when
+        # the other fired first, which says nothing about whether the reword was refused.
         expect_red(
             "C11 fails loud when a reworded anchor silently shrinks the ban list",
-            lambda: any(c == "C11" and "floor is" in d for c, d in c11_shrunk.failures),
+            lambda: any(
+                c == "C11" and "cannot enforce" in d
+                and ("floor is" in d or "no longer bans" in d)
+                for c, d in c11_shrunk.failures
+            ),
         )
         open(os.path.join(vocab_root, "AGENTS.md"), "w").write(agents_contract)
 
@@ -1395,8 +1455,29 @@ def selftest():
             c7_nohooks.c7_anchors()
         except Exception:
             pass
-        expect_red("C7 goes red when settings.json registers no Claude hook handlers",
-                   lambda: any(c == "C7" and "Claude hook handler" in d
+        decoy_root = os.path.join(td, "decoy-hooks")
+        os.makedirs(decoy_root, exist_ok=True)
+        open(os.path.join(decoy_root, "settings.json"), "w").write(json.dumps({"hooks": {
+            "PreToolUse": [{"matcher": "Bash", "hooks": [
+                {"type": "command", "command": "true", "timeout": 5}]}],
+            "PostToolUse": [{"matcher": "AskUserQuestion", "hooks": [
+                {"type": "command", "command": "true", "timeout": 5}]}],
+        }}))
+        for skill in ROUTING_SKILLS:
+            os.makedirs(os.path.join(decoy_root, "skills", skill), exist_ok=True)
+        c7_decoy = Run(decoy_root, ci=True)
+        try:
+            c7_decoy.c7_anchors()
+        except Exception:
+            pass
+        expect_red(
+            "C7 rejects handlers registered on the right events that run the wrong thing",
+            lambda: sum(1 for c, d in c7_decoy.failures
+                        if c == "C7" and d.startswith("settings.json ")
+                        and "0 match(es)" in d) == len(REQUIRED_CLAUDE_HANDLERS),
+        )
+        expect_red("C7 goes red when settings.json registers no Claude guard",
+                   lambda: any(c == "C7" and "0 match(es)" in d
                                for c, d in c7_nohooks.failures))
 
         r = Run(td, ci=True)

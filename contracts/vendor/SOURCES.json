@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "note": "Vendored copies of external normative schemas. The offline gate validates record consistency and local bytes; the separate network-conformance job re-fetches the exact revision's schema and license. Agent Plugins 1.0.0 requires a client to select locally supported validation rules from $schema rather than retrieving a schema while loading a plugin, so runtime artifact verification reads the vendored copy and never the network.",
+  "sources": [
+    {
+      "id": "agent-plugins-1.0.0-plugin-manifest",
+      "file": "agent-plugins-1.0.0.plugin.schema.json",
+      "url": "https://raw.githubusercontent.com/agentplugins/agent-plugins-spec/bd383552095128f6effe895b9257cfd580a6d179/schemas/1.0.0/plugin.schema.json",
+      "publishedUrl": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+      "upstreamRepository": "https://github.com/agentplugins/agent-plugins-spec",
+      "revision": "bd383552095128f6effe895b9257cfd580a6d179",
+      "sourcePath": "schemas/1.0.0/plugin.schema.json",
+      "sha256": "0a4aad95ce337878ad38802ebf0daa3fde76abe3f65400c86bcbb1ec0b3ab883",
+      "license": "Apache-2.0",
+      "licensePath": "LICENSES/Apache-2.0.txt",
+      "licenseSha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "retrieved": "2026-08-08",
+      "governs": "plugin.json emitted for the agent-plugins target"
+    }
+  ]
+}

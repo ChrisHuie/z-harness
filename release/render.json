@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 2,
+  "package": {
+    "name": "z-harness",
+    "coreVersion": "0.4.0-alpha.2",
+    "description": "Portable operating methods for coding agents.",
+    "author": {
+      "name": "Chris Huie",
+      "url": "https://github.com/ChrisHuie"
+    },
+    "homepage": "https://github.com/ChrisHuie/z-harness",
+    "repository": "https://github.com/ChrisHuie/z-harness",
+    "keywords": [
+      "agents",
+      "coding-agents",
+      "skills"
+    ],
+    "licenses": [],
+    "interface": {
+      "displayName": "z-harness",
+      "shortDescription": "Portable operating methods for coding agents",
+      "longDescription": "Use evidence-based operating methods for planning, implementation, review, and verification across coding-agent harnesses.",
+      "developerName": "Chris Huie",
+      "category": "Productivity",
+      "capabilities": [
+        "Read"
+      ],
+      "websiteURL": "https://github.com/ChrisHuie/z-harness",
+      "brandColor": "#10A37F",
+      "defaultPrompt": [
+        "Ground this claim in the authoritative artifact.",
+        "Verify whether this source supports the stated conclusion.",
+        "Audit the load-bearing claims in this document."
+      ]
+    }
+  },
+  "sourceSkillsPath": "skills",
+  "selectedSkills": [
+    "ground-claims"
+  ],
+  "runtimeExcludeDirectories": [
+    "evals"
+  ],
+  "runtimeExcludeFiles": [
+    "CONTRACT.md"
+  ],
+  "targets": [
+    "agent-plugins",
+    "codex",
+    "claude",
+    "kimi",
+    "hermes"
+  ]
+}

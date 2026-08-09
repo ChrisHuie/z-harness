@@ -26,6 +26,12 @@
 !.agents/**
 !docs/
 !docs/**
+!adapters/
+!adapters/**
+!contracts/
+!contracts/**
+!release/
+!release/**
 !tools/
 !tools/**
 

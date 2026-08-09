@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 2,
+  "targets": {
+    "agent-plugins": {
+      "adapterRevision": 2,
+      "packageVersion": "0.4.0-alpha.2",
+      "format": "agent-plugins/1.0.0",
+      "manifestPath": "plugin.json",
+      "targetLevel": "portable-core",
+      "validationStatus": "fixture-only",
+      "evidence": []
+    },
+    "claude": {
+      "adapterRevision": 2,
+      "packageVersion": "0.4.0-alpha.2",
+      "format": "claude-plugin/native",
+      "manifestPath": ".claude-plugin/plugin.json",
+      "targetLevel": "portable-core",
+      "validationStatus": "fixture-only",
+      "evidence": []
+    },
+    "codex": {
+      "adapterRevision": 2,
+      "packageVersion": "0.4.0-alpha.2",
+      "format": "codex-plugin/native",
+      "manifestPath": ".codex-plugin/plugin.json",
+      "targetLevel": "portable-core",
+      "validationStatus": "fixture-only",
+      "evidence": []
+    },
+    "hermes": {
+      "adapterRevision": 2,
+      "packageVersion": "0.4.0-alpha.2",
+      "format": "hermes-skill-tap/github",
+      "manifestPath": null,
+      "targetLevel": "portable-core",
+      "validationStatus": "fixture-only",
+      "evidence": []
+    },
+    "kimi": {
+      "adapterRevision": 2,
+      "packageVersion": "0.4.0-alpha.2",
+      "format": "kimi-code-plugin/native",
+      "manifestPath": "kimi.plugin.json",
+      "targetLevel": "portable-core",
+      "validationStatus": "fixture-only",
+      "evidence": []
+    }
+  }
+}

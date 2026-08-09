@@ -1,0 +1,5 @@
+{
+  "canonicalBodySha256": "86387493077e477daa825701c6a6b3596263c7ea6350288095fc17e2e997f7a2",
+  "claudeFrontmatter": "---\nname: \"ground-claims\"\ndescription: \"Grounding a claim about an external artifact — spec, schema, API, config, or another system's source. Use when asked to check, confirm, or verify what one says, whether it supports X, or before writing that something does or lacks X or quoting a file. Not for judging a test or green check (testing-ci) or an agent's report (agent-dispatch).\"\nargument-hint: \"<claim or question about an external artifact> [artifact=<path|url|package>] [scope=claim|doc]\"\nmetadata:\n  version: \"0.2.0\"\n---\n",
+  "portableFrontmatter": "---\nname: \"ground-claims\"\ndescription: \"Grounding a claim about an external artifact — spec, schema, API, config, or another system's source. Use when asked to check, confirm, or verify what one says, whether it supports X, or before writing that something does or lacks X or quoting a file. Not for judging a test or green check (testing-ci) or an agent's report (agent-dispatch).\"\nmetadata:\n  version: \"0.2.0\"\n---\n"
+}

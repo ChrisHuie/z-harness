@@ -440,7 +440,7 @@ def selftest():
           rc == 0 and len(stopped["stopReason"]) <= MAX_REASON_CHARS
           and "truncated by z-harness" in stopped["stopReason"])
     print(f"\n  {checks} checks, {failures} failures")
-    print(f"SELFTEST-SUMMARY checks={checks} failures={failures}")
+    print(f"SELFTEST-SUMMARY suite=codex_session_start checks={checks} failures={failures}")
     return 1 if failures else 0
 
 

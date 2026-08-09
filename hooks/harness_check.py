@@ -3,7 +3,8 @@
 
 Runs from either clone (repo root auto-detected from this file's location). Checks:
 
-  C1  guard/report/accounting selftests exit 0 and emit a complete terminal receipt
+  C1  guard/report/accounting selftests exit 0, emit a complete terminal receipt,
+      and report at least as many checks as the floor recorded for that suite
   C2  shared-corpus reference copies are byte-identical across skills, and any
       basename appearing in >=2 skills is either SHARED or explicitly PER_SKILL —
       an unknown multi-skill basename fails loud
@@ -13,13 +14,13 @@ Runs from either clone (repo root auto-detected from this file's location). Chec
   C4  every description <= 400 chars (house cap inside the 1024 spec ceiling)
   C5  method-skill bodies <= 5,000 chars after frontmatter; authoring-skill
       bodies <= 500 lines
-  C6  stale-claim tripwires: patterns that once shipped false stay at zero in
-      live channels (skills/, hooks/, tools/, AGENTS.md, CLAUDE.md)
+  C6  stale-claim tripwires: patterns that once shipped false stay at zero across
+      every tracked file except the declared SCAN_EXCLUSIONS
   C7  anchors: routing-table skills exist; Claude and Codex hook commands resolve;
       [local] original audit paths exist, `timeout` still absent, askq binary
       anchors hold
   C8  reserved context basenames (CLAUDE.md/AGENTS.md/GEMINI.md) exist nowhere
-      but the repo root
+      but the repo root, .git excluded as a path component (not a substring)
   C9  Codex package contract: manifest, marketplace, hook config, context bridges,
       and their size budgets are internally consistent
   C10 PR delivery contract: scoped publication authority, state-proof command,
@@ -34,6 +35,8 @@ zero inputs (an empty scan set is an error, never a clean verdict).
   harness_check.py --selftest  prove each check can go RED on a planted-defect
                                tree, then exit
 """
+import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -42,7 +45,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "2.6.0"
+VERSION = "3.0.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 AUTHORING_SKILLS = {"craft-prompt", "craft-skill", "craft-context-file", "review-prompt"}
@@ -50,23 +53,30 @@ BODY_CHAR_CAP = 5000          # chars after frontmatter — the builders' instru
 BODY_LINE_CAP = 500           # authoring skills (spec cap)
 DESC_CAP = 400                # house cap (spec ceiling is 1024)
 
+# (name, command, floor). The floor is a shrink-only ratchet: a suite reporting fewer
+# checks than its floor goes red. Without it a receipt of checks=1 reads the same as
+# checks=111, so a suite can be gutted with nothing failing. Raise a floor in the same
+# commit that adds the checks; lowering one is a deliberate, reviewable edit.
 SELFTEST_SUITES = [
-    ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"]),
-    ("askq_timeout_guard", ["hooks/askq_timeout_guard.py", "--selftest"]),
-    ("harness_report", ["hooks/harness_report.py", "--selftest"]),
-    ("cc-cost", ["tools/cc-cost.py", "--selftest"]),
-    ("codex-cost", ["tools/codex-cost.py", "--selftest"]),
-    ("claim-provenance", ["tools/claim-provenance.py", "--selftest"]),
-    ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"]),
-    ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"]),
-    ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"]),
-    ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"]),
+    ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"], 111),
+    ("askq_timeout_guard", ["hooks/askq_timeout_guard.py", "--selftest"], 13),
+    ("harness_report", ["hooks/harness_report.py", "--selftest"], 12),
+    ("cc-cost", ["tools/cc-cost.py", "--selftest"], 8),
+    ("codex-cost", ["tools/codex-cost.py", "--selftest"], 28),
+    ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 42),
+    ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 8),
+    ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
+    ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
+    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 17),
+    ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 63),
+    ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
+    ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 16),
+    ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 66),
+    ("zsh_rev_modifier_guard", ["hooks/guards/zsh_rev_modifier_guard.py", "--selftest"], 31),
 ]
-# Recursive meta-suite, plus predicates exercised through bash_command_guard.
-SELFTEST_COMPONENTS = {
-    "hooks/harness_check.py",
-    "hooks/guards/git_grep_engine_guard.py",
-    "hooks/guards/zsh_rev_modifier_guard.py",
+# The only non-aggregated selftest is this recursive meta-suite itself.
+SELFTEST_EXEMPTIONS = {
+    "hooks/harness_check.py": "recursive meta-suite",
 }
 
 # C2: basenames shared verbatim across skills. A same-basename file NOT listed in
@@ -98,11 +108,63 @@ STALE_PATTERNS = [
     "ph-lint",                  # linter that never existed here
     "Each push is its own action needing its own confirmation",  # retired consent loop
     "committed to the PR",      # local commit falsely described as published
+    "contain no `targetLevel`", # artifacts carry the claims block; denied in two docs
+    "no validation status",     # same denial, README wording
 ]
+
+# C1: source digest per aggregated suite. A receipt's check count is self-reported, so a
+# stub can satisfy any floor; binding the source is what makes a receipt evidence.
+SUITE_SOURCE_GOLDEN = "contracts/goldens/suite-sources.json"
+
+
+def suite_source_golden(root=None):
+    """Recorded source digest per aggregated suite. Absence is a failure, not a skip.
+
+    Tolerating an absent file made the binding removable by deleting one file that no
+    check required, which fully restored the stub attack this exists to stop and produced
+    a receipt byte-identical to a pristine run. A guard that any single deletion disables
+    is not a guard, so a missing or malformed golden yields an empty mapping and every
+    registered suite then reports its digest as unrecorded.
+    """
+    path = os.path.join(root or ROOT, SUITE_SOURCE_GOLDEN)
+    if not os.path.isfile(path):
+        return {}
+    try:
+        value = json.load(open(path, encoding="utf-8")).get("suites")
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+# C6/C8 scan set: everything tracked EXCEPT these. Written down rather than implied by a
+# directory list, so a surface added later is scanned by default and an omission is a
+# reviewable line instead of a forgotten tuple entry.
+# Printing the resolved set size is not a floor on it: adding one filename to
+# SCAN_EXCLUSIONS removed a file from the sweep and the verdict stayed green with a
+# smaller number nobody compares. Lower this only in the commit that removes the files.
+C6_SCAN_FLOOR = 162
+
+SCAN_EXCLUSIONS = (
+    "hooks/harness_check.py",   # this file names every tripwire; it cannot sweep itself
+    "*.pyc",                    # build output
+    "*.jsonl",                  # recorded transcript fixtures, not authored prose
+    "**/__pycache__/**",
+)
 
 ROUTING_SKILLS = ["git-workflow", "pr-review-method", "testing-ci", "agent-dispatch",
                   "ground-claims", "prebid-adcp", "system-design", "outbound-drafts",
                   "craft-prompt", "craft-skill", "craft-context-file", "review-prompt"]
+
+# Which guard must be registered on which Claude event, mirroring REQUIRED_CODEX_HANDLERS.
+# Asserting a handler COUNT and a set of event keys was satisfiable by two handlers running
+# `true`: the events existed, the count matched, and all three guards were unregistered --
+# the same end state as the deleted hooks block it was written to catch. Bind the script to
+# the event instead.
+REQUIRED_CLAUDE_HANDLERS = [
+    ("PostToolUse", "AskUserQuestion", "hooks/askq_timeout_guard.py"),
+    ("PreToolUse", "Bash", "hooks/bash_command_guard.py"),
+    ("PreToolUse", "Agent|Task", "hooks/spawn_preflight_guard.py"),
+]
 
 RESERVED_BASENAMES = {"claude.md", "agents.md", "gemini.md"}
 CODEX_HOOK_TOP_LEVEL_KEYS = {"description", "hooks"}
@@ -322,10 +384,48 @@ class Run:
             self.failures.append((check, detail))
 
     # ---- C1 ----------------------------------------------------------------
-    def c1_selftests(self, suites=None):
+    def c1_selftests(self, suites=None, sources=None):
+        """Aggregate every suite, and bind what produced each receipt.
+
+        A receipt's check count is self-reported. An eight-line stub printing
+        `SELFTEST-SUMMARY suite=<name> checks=<floor> failures=0` satisfied the floor and
+        took the whole gate green, including for the tool that proves PR delivery state.
+        The floor only ever defended against a suite that reported honestly, so the source
+        of each suite is pinned: a suite cannot be replaced by something that merely
+        claims to have run.
+        """
         if suites is None:
             suites = SELFTEST_SUITES
-        for name, cmd in suites:
+        if sources is None:
+            sources = suite_source_golden()
+        for name, cmd, floor in suites:
+            # README calls these positive floors. A floor of zero accepted a receipt of
+            # checks=0, so the word was doing no work.
+            if floor < 1:
+                self.result("C1", False,
+                            f"selftest {name}: floor {floor} is not positive")
+                continue
+            if sources is None:
+                sources = {}
+            if True:
+                expected = sources.get(name)
+                path = os.path.join(self.root, cmd[0])
+                actual = (
+                    hashlib.sha256(open(path, "rb").read()).hexdigest()
+                    if os.path.isfile(path) else None
+                )
+                if expected is None:
+                    self.result("C1", False,
+                                f"selftest {name}: no source digest recorded in "
+                                f"{os.path.basename(SUITE_SOURCE_GOLDEN)}")
+                    continue
+                if actual != expected:
+                    self.result("C1", False,
+                                f"selftest {name}: {cmd[0]} does not match its recorded "
+                                f"source digest; if the tool changed on purpose, update "
+                                f"its entry in {os.path.basename(SUITE_SOURCE_GOLDEN)} in "
+                                f"the same commit and review that diff")
+                    continue
             try:
                 p = subprocess.run(
                     [sys.executable, os.path.join(self.root, cmd[0])] + cmd[1:],
@@ -335,20 +435,37 @@ class Run:
                 self.result("C1", False, f"selftest {name}: exceeded 15s")
                 continue
             receipts = re.findall(
-                rb"^SELFTEST-SUMMARY checks=(\d+) failures=(\d+)$", p.stdout, re.M
+                rb"^SELFTEST-SUMMARY suite=([a-z0-9_-]+) checks=(\d+) failures=(\d+)$",
+                p.stdout,
+                re.M,
             )
-            receipt_ok = (len(receipts) == 1 and int(receipts[0][0]) > 0
-                          and int(receipts[0][1]) == 0)
+            final_line = p.stdout.rstrip().splitlines()[-1] if p.stdout.rstrip() else b""
+            receipt_ok = (
+                len(receipts) == 1
+                and receipts[0][0].decode("ascii") == name
+                and int(receipts[0][1]) >= floor
+                and int(receipts[0][2]) == 0
+                and final_line == (
+                    b"SELFTEST-SUMMARY suite=" + receipts[0][0]
+                    + b" checks=" + receipts[0][1]
+                    + b" failures=" + receipts[0][2]
+                )
+            )
             detail = f"selftest {name}: exit {p.returncode}; terminal receipts={len(receipts)}"
             if len(receipts) == 1:
-                detail += f" checks={int(receipts[0][0])} failures={int(receipts[0][1])}"
+                detail += (f" suite={receipts[0][0].decode('ascii')} "
+                           f"checks={int(receipts[0][1])} floor={floor} "
+                           f"failures={int(receipts[0][2])} "
+                           f"final={final_line.startswith(b'SELFTEST-SUMMARY ')}")
+                if int(receipts[0][1]) < floor:
+                    detail += " below-floor"
             self.result("C1", p.returncode == 0 and receipt_ok, detail)
 
-    def c1_selftest_inventory(self, suites=None, components=None):
+    def c1_selftest_inventory(self, suites=None, exemptions=None):
         """Every script exposing --selftest is aggregated or explicitly classified."""
         suites = SELFTEST_SUITES if suites is None else suites
-        components = SELFTEST_COMPONENTS if components is None else components
-        aggregated = {cmd[0] for _name, cmd in suites}
+        exemptions = SELFTEST_EXEMPTIONS if exemptions is None else exemptions
+        aggregated = {cmd[0] for _name, cmd, _floor in suites}
         actual = set()
         for rel_root in ("hooks", "tools"):
             base = os.path.join(self.root, rel_root)
@@ -363,13 +480,13 @@ class Run:
                     if (re.search(r"^def selftest\(", text, re.M)
                             or re.search(r"['\"]--selftest['\"]", text)):
                         actual.add(os.path.relpath(path, self.root))
-        declared = aggregated | set(components)
+        declared = aggregated | set(exemptions)
         unknown = sorted(actual - declared)
         stale = sorted(declared - actual)
         self.result(
             "C1", bool(actual) and not unknown and not stale,
             f"selftest inventory: discovered={len(actual)} aggregated={len(aggregated)} "
-            f"components={len(components)}"
+            f"exemptions={len(exemptions)}"
             + (f" unclassified={unknown}" if unknown else "")
             + (f" stale={stale}" if stale else ""),
         )
@@ -462,28 +579,45 @@ class Run:
                             f"{skill}: body {n} chars (cap {BODY_CHAR_CAP})")
 
     # ---- C6 ----------------------------------------------------------------
-    def c6_stale_patterns(self):
+    def c6_stale_patterns(self, scan_floor=None):
+        """Tripwires over the whole shipped surface, not a remembered directory list.
+
+        The scan set is every tracked file minus SCAN_EXCLUSIONS. A hardcoded directory
+        tuple silently omitted settings.json, statusline.sh, .gitignore, and the whole of
+        .github/, so a false claim could live in a shipped file the guard never opened.
+        Deriving the set means a new directory is covered by default and an omission has
+        to be written down.
+        """
         me = os.path.abspath(__file__)
-        targets = []
-        for rel in ("skills", "hooks", "tools", "docs", ".codex-plugin", ".agents"):
-            for dirpath, _dirs, files in os.walk(os.path.join(self.root, rel)):
-                if "__pycache__" in dirpath:
-                    continue
-                targets += [os.path.join(dirpath, f) for f in files
-                            if not f.endswith((".pyc", ".jsonl"))]
-        targets += [os.path.join(self.root, name)
-                    for name in ("AGENTS.md", "CLAUDE.md", "README.md")
-                    if os.path.isfile(os.path.join(self.root, name))]
-        targets = [t for t in targets if os.path.abspath(t) != me]
-        if not targets:
-            print("  FATAL C6: zero files in scan set")
-            self.failures.append(("C6", "zero files"))
+        surface, paths, error = package_paths(self.root)
+        if error:
+            self.result("C6", False, f"cannot enumerate scan set: {error}")
+            return
+        targets, excluded = [], 0
+        for rel in paths:
+            if any(fnmatch.fnmatch(rel, pattern) for pattern in SCAN_EXCLUSIONS):
+                excluded += 1
+                continue
+            absolute = os.path.join(self.root, rel)
+            if not os.path.isfile(absolute):
+                continue
+            targets.append(absolute)
+        # The floor is a parameter so planted-defect fixture trees, which hold a handful of
+        # files, can assert the tripwire logic instead of tripping a floor sized for the
+        # real repository. Production callers take the default.
+        floor = C6_SCAN_FLOOR if scan_floor is None else scan_floor
+        if len(targets) < floor:
+            print(f"  FATAL C6: {len(targets)} files in scan set, floor is {floor}")
+            self.failures.append(
+                ("C6", f"scan set shrank to {len(targets)}, floor {floor}")
+            )
             return
         for pat in STALE_PATTERNS:
             hits = [t for t in targets
                     if pat in open(t, encoding="utf-8", errors="replace").read()]
             self.result("C6", not hits,
-                        f"tripwire {pat!r}: {len(hits)} hit(s)"
+                        f"tripwire {pat!r}: {len(hits)} hit(s) over {len(targets)} "
+                        f"{surface} files ({excluded} excluded)"
                         + (f" e.g. {os.path.relpath(hits[0], self.root)}" if hits else ""))
 
     # ---- C7 ----------------------------------------------------------------
@@ -492,6 +626,20 @@ class Run:
             p = os.path.join(self.root, "skills", skill)
             self.result("C7", os.path.isdir(p), f"routing-table skill exists: {skill}")
         st = json.load(open(os.path.join(self.root, "settings.json")))
+        # Deleting the hooks block unregistered every Claude guard and produced zero checks
+        # and zero failures -- a silent pass over an empty scan set, which this file's own
+        # exit-code contract calls an error. The Codex side is bound by
+        # REQUIRED_CODEX_HANDLERS; this is its Claude counterpart.
+        for event, matcher, script in REQUIRED_CLAUDE_HANDLERS:
+            matches = [
+                h for entry in st.get("hooks", {}).get(event, [])
+                if entry.get("matcher") == matcher
+                for h in entry.get("hooks", [])
+                if script in h.get("command", "")
+            ]
+            self.result("C7", len(matches) == 1,
+                        f"settings.json {event} matcher={matcher!r} -> {script}: "
+                        f"{len(matches)} match(es)")
         for event, entries in st.get("hooks", {}).items():
             for entry in entries:
                 for h in entry.get("hooks", []):
@@ -558,16 +706,27 @@ class Run:
 
     # ---- C8 ----------------------------------------------------------------
     def c8_reserved_basenames(self):
-        hits = []
+        """A reserved context basename anywhere but the repo root is auto-loaded instructions.
+
+        The exclusion is the `.git` directory itself, matched as a path component. A
+        substring test also excluded `.github/`, where a planted CLAUDE.md passed while the
+        identical bytes under docs/ failed — so the one directory a reviewer is least
+        likely to read was the one place the guard could not see.
+        """
+        hits, scanned = [], 0
         for dirpath, dirs, files in os.walk(self.root):
-            if ".git" in dirpath:
-                continue
+            dirs[:] = [d for d in dirs if d != ".git"]
             for f in files:
+                scanned += 1
                 if f.lower() in RESERVED_BASENAMES:
                     p = os.path.join(dirpath, f)
                     if os.path.dirname(os.path.abspath(p)) != os.path.abspath(self.root):
                         hits.append(os.path.relpath(p, self.root))
-        self.result("C8", not hits, f"reserved basenames outside root: {hits or 'none'}")
+        if not scanned:
+            self.result("C8", False, "zero files in scan set")
+            return
+        self.result("C8", not hits,
+                    f"reserved basenames outside root over {scanned} files: {hits or 'none'}")
 
     # ---- C9 ----------------------------------------------------------------
     def c9_codex_package(self):
@@ -718,12 +877,18 @@ class Run:
         print(f"\n  {self.checks} checks, {len(self.failures)} failure(s)")
         if self.checks == 0:
             print("  ZERO CHECKS RAN — error, not a clean verdict")
-            return 2
-        if self.failures:
+            code = 2
+        elif self.failures:
             for c, d in self.failures:
                 print(f"    - {c}: {d}")
-            return 1
-        return 0
+            code = 1
+        else:
+            code = 0
+        print(
+            f"HARNESS-SUMMARY mode={'ci' if self.ci else 'local'} "
+            f"checks={self.checks} failures={len(self.failures)} exit={code}"
+        )
+        return code
 
 
 # ---- selftest: every check proves it can go red -------------------------------
@@ -767,10 +932,14 @@ def selftest():
         open(os.path.join(td, "sub", "claude.md"), "w").write("collision")
         open(os.path.join(td, "settings.json"), "w").write("{}")
 
+        def planted_sources(name, path):
+            """Digest a synthetic suite so the source binding applies to it too."""
+            return {name: hashlib.sha256(open(path, "rb").read()).hexdigest()}
+
         failing_suite = os.path.join(td, "failing-selftest.py")
         open(failing_suite, "w").write("raise SystemExit(1)\n")
         c1_run = Run(td, ci=True)
-        c1_run.c1_selftests([("planted-failure", [failing_suite])])
+        c1_run.c1_selftests([("planted-failure", [failing_suite], 1)], sources=planted_sources("planted-failure", failing_suite))
         expect_red("C1 goes red when an aggregated selftest fails",
                    lambda: any(c == "C1" and "exit 1" in d
                                for c, d in c1_run.failures))
@@ -778,31 +947,141 @@ def selftest():
         truncated_suite = os.path.join(td, "truncated-selftest.py")
         open(truncated_suite, "w").write("print('PASS first check')\nraise SystemExit(0)\n")
         c1_truncated = Run(td, ci=True)
-        c1_truncated.c1_selftests([("planted-truncation", [truncated_suite])])
+        c1_truncated.c1_selftests([("planted-truncation", [truncated_suite], 1)], sources=planted_sources("planted-truncation", truncated_suite))
         expect_red("C1 rejects exit zero without a terminal selftest receipt",
                    lambda: any(c == "C1" and "terminal receipts=0" in d
                                for c, d in c1_truncated.failures))
 
         duplicate_suite = os.path.join(td, "duplicate-receipt.py")
         open(duplicate_suite, "w").write(
-            "print('SELFTEST-SUMMARY checks=1 failures=0')\n"
-            "print('SELFTEST-SUMMARY checks=1 failures=0')\n"
+            "print('SELFTEST-SUMMARY suite=planted-duplicate checks=1 failures=0')\n"
+            "print('SELFTEST-SUMMARY suite=planted-duplicate checks=1 failures=0')\n"
         )
         c1_duplicate = Run(td, ci=True)
-        c1_duplicate.c1_selftests([("planted-duplicate", [duplicate_suite])])
+        c1_duplicate.c1_selftests([("planted-duplicate", [duplicate_suite], 1)], sources=planted_sources("planted-duplicate", duplicate_suite))
         expect_red("C1 rejects ambiguous duplicate terminal receipts",
                    lambda: any(c == "C1" and "terminal receipts=2" in d
                                for c, d in c1_duplicate.failures))
+
+        shrunk_suite = os.path.join(td, "shrunk-selftest.py")
+        open(shrunk_suite, "w").write(
+            "print('SELFTEST-SUMMARY suite=planted-shrink checks=1 failures=0')\n"
+        )
+        c1_shrunk = Run(td, ci=True)
+        c1_shrunk.c1_selftests([("planted-shrink", [shrunk_suite], 5)], sources=planted_sources("planted-shrink", shrunk_suite))
+        expect_red("C1 goes red when a suite reports fewer checks than its floor",
+                   lambda: any(c == "C1" and "below-floor" in d
+                               for c, d in c1_shrunk.failures))
+        c1_at_floor = Run(td, ci=True)
+        at_floor_suite = os.path.join(td, "at-floor-selftest.py")
+        open(at_floor_suite, "w").write(
+            "print('SELFTEST-SUMMARY suite=planted-at-floor checks=1 failures=0')\n"
+        )
+        c1_at_floor.c1_selftests([("planted-at-floor", [at_floor_suite], 1)], sources=planted_sources("planted-at-floor", at_floor_suite))
+        # The stub that motivated this: an honest-looking receipt over no work. It clears
+        # the floor, so only the source binding can reject it.
+        stub_suite = os.path.join(td, "stub-selftest.py")
+        open(stub_suite, "w").write(
+            "print('SELFTEST-SUMMARY suite=planted-stub checks=99 failures=0')\n"
+        )
+        c1_zero_floor = Run(td, ci=True)
+        c1_zero_floor.c1_selftests([("planted-zero-floor", [at_floor_suite], 0)],
+                                   sources=planted_sources("planted-zero-floor", at_floor_suite))
+        expect_red("C1 rejects a floor of zero, which accepted a suite reporting no checks",
+                   lambda: any(c == "C1" and "not positive" in d
+                               for c, d in c1_zero_floor.failures))
+        expect_red("every registered suite floor is positive",
+                   lambda: all(floor >= 1 for _n, _c, floor in SELFTEST_SUITES))
+
+        # Tolerating an absent golden made the binding removable by deleting one file.
+        c1_no_golden = Run(td, ci=True)
+        c1_no_golden.c1_selftests([("planted-stub", [at_floor_suite], 1)],
+                                  sources=suite_source_golden(td))
+        expect_red("C1 treats an absent suite golden as unrecorded, never as permission",
+                   lambda: any(c == "C1" and "no source digest recorded" in d
+                               for c, d in c1_no_golden.failures))
+
+        c1_stub = Run(td, ci=True)
+        c1_stub.c1_selftests([("planted-stub", [stub_suite], 8)],
+                             sources={"planted-stub": "0" * 64})
+        expect_red("C1 rejects a suite whose source does not match its recorded digest",
+                   lambda: any(c == "C1" and "recorded source digest" in d
+                               for c, d in c1_stub.failures))
+        c1_registered = Run(td, ci=True)
+        c1_registered.c1_selftests([("planted-stub", [stub_suite], 8)],
+                                   sources={"other": "0" * 64})
+        expect_red("C1 rejects a suite absent from a present source golden",
+                   lambda: any(c == "C1" and "no source digest recorded" in d
+                               for c, d in c1_registered.failures))
+        c1_bound = Run(td, ci=True)
+        c1_bound.c1_selftests([("planted-stub", [stub_suite], 8)],
+                              sources=planted_sources("planted-stub", stub_suite))
+        expect_red("C1 source-binding control: a matching digest still runs the suite",
+                   lambda: not any("recorded source digest" in d
+                                   for _c, d in c1_bound.failures))
+        expect_red("C1 floor control: the same suite exactly at its floor stays green",
+                   lambda: not c1_at_floor.failures)
 
         os.makedirs(os.path.join(td, "tools"))
         open(os.path.join(td, "tools", "unregistered.py"), "w").write(
             "def selftest():\n    return 0\n"
         )
         c1_inventory = Run(td, ci=True)
-        c1_inventory.c1_selftest_inventory(suites=[], components=set())
+        c1_inventory.c1_selftest_inventory(suites=[], exemptions={})
         expect_red("C1 rejects an unclassified selftest-capable script",
                    lambda: any(c == "C1" and "unclassified" in d
                                for c, d in c1_inventory.failures))
+
+        callsite = Run(td, ci=True)
+        called = []
+        method_names = [
+            "c1_selftests", "c1_selftest_inventory", "c2_shared_identity",
+            "c3_reference_resolution", "c4_descriptions", "c5_bodies",
+            "c6_stale_patterns", "c7_anchors", "c8_reserved_basenames",
+            "c9_codex_package", "c10_delivery_contract",
+        ]
+        for method_name in method_names:
+            setattr(callsite, method_name, lambda name=method_name: called.append(name))
+        callsite.run()
+        expect_red("Run.run invokes the C1 child-suite call site",
+                   lambda: "c1_selftests" in called)
+        expect_red("Run.run invokes the C1 inventory call site",
+                   lambda: "c1_selftest_inventory" in called)
+
+        hooks_stripped = os.path.join(td, "no-hooks")
+        os.makedirs(hooks_stripped, exist_ok=True)
+        open(os.path.join(hooks_stripped, "settings.json"), "w").write('{"hooks": {}}')
+        for rel in ROUTING_SKILLS:
+            os.makedirs(os.path.join(hooks_stripped, "skills", rel), exist_ok=True)
+        c7_nohooks = Run(hooks_stripped, ci=True)
+        try:
+            c7_nohooks.c7_anchors()
+        except Exception:
+            pass
+        decoy_root = os.path.join(td, "decoy-hooks")
+        os.makedirs(decoy_root, exist_ok=True)
+        open(os.path.join(decoy_root, "settings.json"), "w").write(json.dumps({"hooks": {
+            "PreToolUse": [{"matcher": "Bash", "hooks": [
+                {"type": "command", "command": "true", "timeout": 5}]}],
+            "PostToolUse": [{"matcher": "AskUserQuestion", "hooks": [
+                {"type": "command", "command": "true", "timeout": 5}]}],
+        }}))
+        for skill in ROUTING_SKILLS:
+            os.makedirs(os.path.join(decoy_root, "skills", skill), exist_ok=True)
+        c7_decoy = Run(decoy_root, ci=True)
+        try:
+            c7_decoy.c7_anchors()
+        except Exception:
+            pass
+        expect_red(
+            "C7 rejects handlers registered on the right events that run the wrong thing",
+            lambda: sum(1 for c, d in c7_decoy.failures
+                        if c == "C7" and d.startswith("settings.json ")
+                        and "0 match(es)" in d) == len(REQUIRED_CLAUDE_HANDLERS),
+        )
+        expect_red("C7 goes red when settings.json registers no Claude guard",
+                   lambda: any(c == "C7" and "0 match(es)" in d
+                               for c, d in c7_nohooks.failures))
 
         r = Run(td, ci=True)
         r.c2_shared_identity()
@@ -835,27 +1114,58 @@ def selftest():
         expect_red("C5 goes red on an authoring skill over the line cap",
                    lambda: any(c == "C5" for c, _d in authoring_run.failures))
         r3 = Run(td, ci=True)
-        r3.c6_stale_patterns()
+        r3.c6_stale_patterns(scan_floor=1)
         expect_red("C6 goes red on planted stale pattern",
                    lambda: any(c == "C6" and "NOT INSTALLED" in d for c, d in r3.failures))
         os.makedirs(os.path.join(td, "docs"))
         open(os.path.join(td, "docs", "relocated.md"), "w").write("committed to the PR")
         r3_docs = Run(td, ci=True)
-        r3_docs.c6_stale_patterns()
+        r3_docs.c6_stale_patterns(scan_floor=1)
         expect_red("C6 scans docs and goes red on a relocated stale claim",
                    lambda: any(c == "C6" and "committed to the PR" in d
                                for c, d in r3_docs.failures))
         empty_c6 = os.path.join(td, "empty-c6")
         os.makedirs(empty_c6)
         c6_empty_run = Run(empty_c6, ci=True)
-        c6_empty_run.c6_stale_patterns()
+        c6_empty_run.c6_stale_patterns(scan_floor=1)
         expect_red("C6 goes red on a zero-file scan",
-                   lambda: any(c == "C6" and d == "zero files"
+                   lambda: any(c == "C6" and "scan set shrank to 0" in d
                                for c, d in c6_empty_run.failures))
+        c6_shrunk = Run(td, ci=True)
+        c6_shrunk.c6_stale_patterns(scan_floor=99)
+        expect_red("C6 goes red when its scan set shrinks below its floor",
+                   lambda: any(c == "C6" and "floor 99" in d
+                               for c, d in c6_shrunk.failures))
+        # The scan set used to be a hardcoded directory tuple, so a stale claim in a
+        # tracked root file was invisible. Prove the derived set reaches one.
+        open(os.path.join(td, "statusline.sh"), "w").write("#!/bin/sh\n# ph-lint\n")
+        r3_root = Run(td, ci=True)
+        r3_root.c6_stale_patterns(scan_floor=1)
+        expect_red("C6 reaches a tracked root file outside any scanned directory",
+                   lambda: any(c == "C6" and "ph-lint" in d for c, d in r3_root.failures))
+        os.remove(os.path.join(td, "statusline.sh"))
+
         r4 = Run(td, ci=True)
         r4.c8_reserved_basenames()
         expect_red("C8 goes red on nested claude.md",
                    lambda: any(c == "C8" for c, d in r4.failures))
+        # `.git` was matched as a substring, which also excluded `.github/` — the one
+        # directory whose CLAUDE.md a runtime would auto-load and a reviewer least expects.
+        os.makedirs(os.path.join(td, ".github", "workflows"), exist_ok=True)
+        open(os.path.join(td, ".github", "CLAUDE.md"), "w").write("planted")
+        r4_github = Run(td, ci=True)
+        r4_github.c8_reserved_basenames()
+        expect_red("C8 sees .github/, which a .git substring filter excluded",
+                   lambda: any(c == "C8" and ".github/CLAUDE.md" in d
+                               for c, d in r4_github.failures))
+        os.remove(os.path.join(td, ".github", "CLAUDE.md"))
+        c8_empty = os.path.join(td, "empty-c8")
+        os.makedirs(c8_empty, exist_ok=True)
+        c8_empty_run = Run(c8_empty, ci=True)
+        c8_empty_run.c8_reserved_basenames()
+        expect_red("C8 goes red on a zero-file scan",
+                   lambda: any(c == "C8" and "zero files" in d
+                               for c, d in c8_empty_run.failures))
         r5 = Run(td, ci=True)
         r5.c9_codex_package()
         expect_red("C9 goes red on absent plugin package",
@@ -1075,7 +1385,7 @@ def selftest():
                    lambda: any(c == "C10" for c, d in r7.failures))
 
     print(f"\n  selftest: {bad} failure(s)")
-    print(f"SELFTEST-SUMMARY checks={checks} failures={bad}")
+    print(f"SELFTEST-SUMMARY suite=harness_check checks={checks} failures={bad}")
     return 1 if bad else 0
 
 

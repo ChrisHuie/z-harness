@@ -243,7 +243,7 @@ def selftest():
     check("wrong-head workflow run is an evidence error", code == 2)
 
     print(f"\n  {checks} checks, {failures} failure(s)")
-    print(f"SELFTEST-SUMMARY checks={checks} failures={failures}")
+    print(f"SELFTEST-SUMMARY suite=pr-delivery-state checks={checks} failures={failures}")
     return 1 if failures else 0
 
 

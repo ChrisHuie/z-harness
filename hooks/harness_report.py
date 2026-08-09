@@ -265,7 +265,7 @@ def selftest():
     chk("zero contexts exits 2, not 0", rc, 2)
     chk("zero contexts says so out loud", "ZERO CONTEXTS" in buf.getvalue(), True)
     print(f"\n  {checks} checks, {bad} failures")
-    print(f"SELFTEST-SUMMARY checks={checks} failures={bad}")
+    print(f"SELFTEST-SUMMARY suite=harness_report checks={checks} failures={bad}")
     return 1 if bad else 0
 
 

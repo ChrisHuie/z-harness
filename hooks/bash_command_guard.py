@@ -188,7 +188,7 @@ def selftest():
     if total == 0:
         print("  ZERO CHECKS RAN — treating as failure")
         return 2
-    print(f"SELFTEST-SUMMARY checks={total} failures={failures}")
+    print(f"SELFTEST-SUMMARY suite=bash_command_guard checks={total} failures={failures}")
     return 1 if failures else 0
 
 

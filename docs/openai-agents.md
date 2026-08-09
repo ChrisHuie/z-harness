@@ -4,6 +4,11 @@ This integration gives Codex the same portable policy and skill bodies as Claude
 preserving runtime-specific safety contracts. It promises equivalent operating intent, not
 identical wire events, configuration files, transcript schemas, or user interfaces.
 
+This document describes the installed v0.3 compatibility package. The v0.4 render pilot leaves
+that package unchanged while producing an isolated skills-only Codex candidate from explicit
+release inputs. See [Cross-harness packaging architecture](cross-harness-architecture.md). Static
+rendering does not establish installed-runtime compatibility.
+
 The supported OpenAI runtime in this package is Codex CLI and Codex desktop's local plugin layer.
 The OpenAI Agents SDK is an application framework rather than a Codex context/plugin host; using
 these policies in an SDK application requires an explicit runner adapter and is not claimed here.
@@ -218,16 +223,17 @@ table.
 
 ## Validation
 
-Run the shared mechanical gate and its planted-defect proof:
+Run the complete offline `check`-job entry point:
 
 ```text
-python3 hooks/harness_check.py --ci
-python3 hooks/harness_check.py --selftest
+python3 tools/ci-gate.py
 ```
 
-The aggregate gate accepts a selftest only when it exits zero and emits exactly one terminal
-`SELFTEST-SUMMARY checks=<positive> failures=0` line. Missing, duplicate, or failing receipts are
-red even when the child process exits zero.
+It runs the ordinary mechanical gate, the recursive meta-selftest, registered renderer and guard
+selftests, skill-eval validation, and a fresh render/verify pair. Each child must exit consistently
+with exactly one terminal, suite-qualified receipt and a positive assertion or target count.
+`tools/ci-gate.py --selftest` uses an injected runner, so C1 can test the orchestrator without
+recursing into `harness_check.py`.
 
 Run focused adapter and evidence selftests:
 
@@ -239,10 +245,17 @@ python3 tools/codex-cost.py --selftest
 python3 tools/claim-provenance.py --selftest
 python3 tools/pr-delivery-state.py --selftest
 python3 tools/run-skill-evals.py --selftest
+python3 tools/render-packages.py --selftest
+python3 tools/ci-gate.py --selftest
 ```
 
-The aggregate gate runs these receipts in CI. Actual document provenance scans and headless model
-scenarios remain manual because they require a selected document/transcript or spend API budget.
+The workflow runs the offline gate on fixed Ubuntu and macOS runner labels with an exact Python patch
+version; GitHub manages the image contents behind those labels. It also declares a separate Ubuntu
+job running `tools/portable-conformance.py` with a hash-pinned Agent Skills reference-validator
+closure and signature- and hash-pinned Claude Code binary. Network or upstream failure is red. The
+workflow alone does not prove either job is a branch-protection required check. Actual document
+provenance scans and headless model scenarios remain manual because they require a selected
+document/transcript or spend API budget.
 
 For an active PR, run the live publication gate after the push:
 

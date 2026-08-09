@@ -24,7 +24,7 @@ import urllib.request
 import zipfile
 
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 ROOT = Path(__file__).resolve().parent.parent
 LOCK_PATH = ROOT / "contracts/portable-conformance.lock.json"
 VENDOR_SOURCES_PATH = ROOT / "contracts/vendor/SOURCES.json"
@@ -355,18 +355,44 @@ def load_lock(path: Path = LOCK_PATH) -> Dict[str, Any]:
     return value
 
 
-def safe_extract_tar(archive: Path, destination: Path) -> None:
+def safe_extract_tar(
+    archive: Path,
+    destination: Path,
+    *,
+    omitted_symlinks: Dict[str, str] | None = None,
+) -> None:
+    expected_omissions = omitted_symlinks or {}
     with tarfile.open(archive, "r:gz") as bundle:
         members = bundle.getmembers()
         if not members:
             raise ConformanceError("Agent Skills archive is empty")
+        extractable = []
+        observed_omissions = set()
+        observed_destinations: Dict[Path, str] = {}
         for member in members:
             candidate = (destination / member.name).resolve()
             if destination.resolve() not in candidate.parents and candidate != destination.resolve():
                 raise ConformanceError(f"archive path escapes extraction root: {member.name}")
-            if member.issym() or member.islnk() or member.isdev():
+            if candidate in observed_destinations:
+                raise ConformanceError(
+                    f"archive entries collide at one destination: "
+                    f"{observed_destinations[candidate]!r} and {member.name!r}"
+                )
+            observed_destinations[candidate] = member.name
+            if member.issym():
+                if expected_omissions.get(member.name) != member.linkname:
+                    raise ConformanceError(f"archive contains unsupported entry: {member.name}")
+                observed_omissions.add(member.name)
+                continue
+            if not (member.isreg() or member.isdir()):
                 raise ConformanceError(f"archive contains unsupported entry: {member.name}")
-        bundle.extractall(destination, filter="data")
+            extractable.append(member)
+        missing = set(expected_omissions) - observed_omissions
+        if missing:
+            raise ConformanceError(
+                f"archive omits expected non-materialized symlink(s): {sorted(missing)}"
+            )
+        bundle.extractall(destination, members=extractable, filter="data")
 
 
 def safe_extract_wheel(wheel: Path, destination: Path) -> None:
@@ -474,6 +500,32 @@ def verify_upstream_dependency_lock(skills_ref: Path) -> None:
         raise ConformanceError(
             f"skills-ref uv.lock runtime closure changed: {sorted(closure)}"
         )
+
+
+def prepare_agent_skills_source(
+    archive: Path,
+    source_root: Path,
+    agent_lock: Dict[str, Any],
+    *,
+    dependency_verifier: Callable[[Path], None] = verify_upstream_dependency_lock,
+) -> Path:
+    archive_root = f"agentskills-{agent_lock['commit']}"
+    safe_extract_tar(
+        archive,
+        source_root,
+        omitted_symlinks={f"{archive_root}/CLAUDE.md": "AGENTS.md"},
+    )
+    checkout = source_root / archive_root
+    skills_ref = checkout / "skills-ref"
+    if sha256(skills_ref / "pyproject.toml") != agent_lock["pyprojectSha256"]:
+        raise ConformanceError("pinned skills-ref pyproject digest does not match")
+    if sha256(skills_ref / "uv.lock") != agent_lock["uvLockSha256"]:
+        raise ConformanceError("pinned skills-ref uv.lock digest does not match")
+    dependency_verifier(skills_ref)
+    readme = (skills_ref / "README.md").read_text(encoding="utf-8")
+    if "intended for demonstration purposes only" not in readme:
+        raise ConformanceError("skills-ref README no longer carries the demo-only warning")
+    return skills_ref
 
 
 def fetch_pypi_metadata(metadata_url: str) -> Any:
@@ -678,17 +730,7 @@ def conformance() -> int:
             agent_lock = lock["agentSkills"]
             archive = downloads / "agent-skills.tar.gz"
             download(agent_lock["archiveUrl"], archive, agent_lock["archiveSha256"])
-            safe_extract_tar(archive, source_root)
-            checkout = source_root / f"agentskills-{agent_lock['commit']}"
-            skills_ref = checkout / "skills-ref"
-            if sha256(skills_ref / "pyproject.toml") != agent_lock["pyprojectSha256"]:
-                raise ConformanceError("pinned skills-ref pyproject digest does not match")
-            if sha256(skills_ref / "uv.lock") != agent_lock["uvLockSha256"]:
-                raise ConformanceError("pinned skills-ref uv.lock digest does not match")
-            verify_upstream_dependency_lock(skills_ref)
-            readme = (skills_ref / "README.md").read_text(encoding="utf-8")
-            if "intended for demonstration purposes only" not in readme:
-                raise ConformanceError("skills-ref README no longer carries the demo-only warning")
+            skills_ref = prepare_agent_skills_source(archive, source_root, agent_lock)
             completed.append("agent-skills-source")
 
             download_wheels(lock, downloads, site)
@@ -1049,6 +1091,73 @@ def selftest() -> int:
             )),
         )
 
+        fixture_commit = "f" * 40
+        fixture_root = f"agentskills-{fixture_commit}"
+        fixture_pyproject = b"[project]\nname = 'fixture'\n"
+        fixture_uv_lock = b"version = 1\n"
+        fixture_readme = b"intended for demonstration purposes only\n"
+        source_archive = temp / "agent-skills-source.tar.gz"
+        with tarfile.open(source_archive, "w:gz") as bundle:
+            for relative, data in (
+                ("skills-ref/pyproject.toml", fixture_pyproject),
+                ("skills-ref/uv.lock", fixture_uv_lock),
+                ("skills-ref/README.md", fixture_readme),
+                ("AGENTS.md", b"fixture policy\n"),
+            ):
+                member = tarfile.TarInfo(f"{fixture_root}/{relative}")
+                member.size = len(data)
+                bundle.addfile(member, io.BytesIO(data))
+            claude_link = tarfile.TarInfo(f"{fixture_root}/CLAUDE.md")
+            claude_link.type = tarfile.SYMTYPE
+            claude_link.linkname = "AGENTS.md"
+            bundle.addfile(claude_link)
+        fixture_lock = {
+            "commit": fixture_commit,
+            "pyprojectSha256": hashlib.sha256(fixture_pyproject).hexdigest(),
+            "uvLockSha256": hashlib.sha256(fixture_uv_lock).hexdigest(),
+        }
+        dependency_calls: List[Path] = []
+        prepared_root = temp / "prepared-agent-skills"
+        prepared_root.mkdir()
+        try:
+            prepared_skills = prepare_agent_skills_source(
+                source_archive,
+                prepared_root,
+                fixture_lock,
+                dependency_verifier=lambda path: dependency_calls.append(path),
+            )
+            pinned_source_ok = (
+                prepared_skills == prepared_root / fixture_root / "skills-ref"
+                and dependency_calls == [prepared_skills]
+                and not (prepared_root / fixture_root / "CLAUDE.md").exists()
+                and (prepared_skills / "README.md").read_bytes() == fixture_readme
+            )
+        except (ConformanceError, OSError):
+            pinned_source_ok = False
+        expect(
+            "Agent Skills source preparation omits only the pinned CLAUDE symlink",
+            pinned_source_ok,
+        )
+        expect(
+            "tar extraction rejects the pinned symlink path with a changed target",
+            rejects(lambda: safe_extract_tar(
+                source_archive,
+                temp / "wrong-agent-skills-link-target",
+                omitted_symlinks={f"{fixture_root}/CLAUDE.md": "README.md"},
+            )),
+        )
+        expect(
+            "tar extraction rejects an allowlisted symlink absent from the archive",
+            rejects(lambda: safe_extract_tar(
+                source_archive,
+                temp / "missing-agent-skills-link",
+                omitted_symlinks={f"{fixture_root}/missing-link": "AGENTS.md"},
+            )),
+        )
+
+        duplicate_member = tarfile.TarInfo("root/file.txt")
+        duplicate_tar = temp / "duplicate-destination.tar.gz"
+
         def write_tar_case(
             path: Path, member: tarfile.TarInfo, data: bytes = b""
         ) -> None:
@@ -1058,6 +1167,25 @@ def selftest() -> int:
                 bundle.addfile(regular, io.BytesIO(b"x"))
                 member.size = len(data)
                 bundle.addfile(member, io.BytesIO(data) if data else None)
+
+        write_tar_case(duplicate_tar, duplicate_member, b"second")
+        expect(
+            "tar extraction rejects duplicate members targeting one destination",
+            rejects(lambda: safe_extract_tar(
+                duplicate_tar, temp / "duplicate-destination-output"
+            )),
+        )
+
+        unknown_member = tarfile.TarInfo("root/unknown")
+        unknown_member.type = b"V"
+        unknown_tar = temp / "unknown-entry.tar.gz"
+        write_tar_case(unknown_tar, unknown_member, b"unknown")
+        expect(
+            "tar extraction rejects entry types outside files and directories",
+            rejects(lambda: safe_extract_tar(
+                unknown_tar, temp / "unknown-entry-output"
+            )),
+        )
 
         symlink_member = tarfile.TarInfo("root/link")
         symlink_member.type = tarfile.SYMTYPE

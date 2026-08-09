@@ -57,6 +57,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # every per-file check. Terms are read from AGENTS.md rather than restated here, so the
 # prose and the gate cannot drift apart.
 BANNED_VOCAB_ANCHOR = "banned outright:"
+# Floor on how many phrases the anchor sentence must yield. Without it, only zero was an
+# error, so a meaning-preserving reword that split the sentence halved the ban list in
+# silence. Lower it only in the commit that retires a phrase.
+BANNED_VOCAB_FLOOR = 5
 C11_SCOPE_DECLARATION = (
     "C11 claim-vocabulary scope: AGENTS.md, CLAUDE.md, every skills/*/SKILL.md, "
     "and .md/.yaml/.yml files under skills/*/references/."
@@ -74,7 +78,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 57
+SELFTEST_FLOOR = 68
 
 AUTHORING_SKILLS = {"craft-prompt", "craft-skill", "craft-context-file", "review-prompt"}
 BODY_CHAR_CAP = 5000          # chars after frontmatter — the builders' instrument
@@ -928,6 +932,19 @@ class Run:
                 "cannot enforce: anchor phrases must be non-empty, unique ASCII word phrases",
             )
             return
+        # The sentence regex stops at the first period, and only zero terms was an error.
+        # Rewriting the anchor into two sentences -- meaning preserved, one extra period --
+        # silently halved the list from five phrases to two, and three banned phrases then
+        # sat in a governed file with the whole gate green. This is the same shrink the
+        # suite floors exist to catch, so the term count carries its own floor.
+        if len(terms) < BANNED_VOCAB_FLOOR:
+            self.result(
+                "C11", False,
+                f"cannot enforce: anchor lists {len(terms)} phrase(s), floor is "
+                f"{BANNED_VOCAB_FLOOR}; if a phrase was retired, lower the floor in the "
+                f"same commit so the reduction is reviewed",
+            )
+            return
         # Exempt only the emphasized declaration tokens. Removing the whole sentence would
         # hide an additional use of a banned phrase later in that same sentence.
         governed_agents = list(agents_text)
@@ -1301,6 +1318,26 @@ def selftest():
                                for c, d in c11_anchor.failures))
         open(os.path.join(vocab_root, "AGENTS.md"), "w").write(agents_contract)
 
+        # Splitting the anchor into two sentences preserves the meaning and halves the
+        # list, because the sentence regex stops at the first period. This is the attack
+        # that put three banned phrases in a governed file with the gate fully green.
+        shrunk_contract = re.sub(
+            re.escape(BANNED_VOCAB_ANCHOR) + r"([^.]*)\.",
+            lambda m: (BANNED_VOCAB_ANCHOR
+                       + m.group(1).split(",")[0] + ". Also banned outright are"
+                       + ",".join(m.group(1).split(",")[1:]) + "."),
+            agents_contract,
+            count=1,
+        )
+        open(os.path.join(vocab_root, "AGENTS.md"), "w").write(shrunk_contract)
+        c11_shrunk = Run(vocab_root, ci=True)
+        c11_shrunk.c11_claim_vocabulary()
+        expect_red(
+            "C11 fails loud when a reworded anchor silently shrinks the ban list",
+            lambda: any(c == "C11" and "floor is" in d for c, d in c11_shrunk.failures),
+        )
+        open(os.path.join(vocab_root, "AGENTS.md"), "w").write(agents_contract)
+
         open(os.path.join(vocab_root, "AGENTS.md"), "w").write(
             agents_contract.replace(
                 "*all set*.", "*all set*; nevertheless, say looks good.", 1
@@ -1658,10 +1695,13 @@ def selftest():
         expect_red("C10 goes red on absent PR delivery contract",
                    lambda: any(c == "C10" for c, d in r7.failures))
 
-    observed = checks
+    # +1 for this assertion's own increment, so SELFTEST_FLOOR is the number the receipt
+    # prints. Comparing the pre-increment count made the floor one less than the reported
+    # total, which reads as a wrong floor every time either number is updated.
+    observed = checks + 1
     expect_red(
         f"meta-suite runs at least its recorded floor of {SELFTEST_FLOOR} proofs "
-        f"(observed {observed})",
+        f"(receipt will report {observed})",
         lambda: observed >= SELFTEST_FLOOR,
     )
 

@@ -5,7 +5,7 @@ verified: 2026-07-14 · sources: skill-catalog §2; policy-blocks/uncertainty; g
 | Level | Contract | Prompt fragment |
 |---|---|---|
 | C0 direct | single best answer, no hedging | `Give your best single answer; skip caveats unless one is decision-critical.` |
-| C1 flag-uncertainty | mark what's uncertain inline | `Flag genuinely uncertain points inline; do not hedge what is solid.` |
+| C1 flag-uncertainty | mark what's uncertain inline | `Flag genuinely uncertain points inline; do not hedge what the evidence supports.` |
 | C2 trade-offs | material choices show alternatives + edge cases | `For material choices, name the alternatives considered, the trade-off that decided it, and the edge cases that could break it.` |
 | C3 confidence-qualified | load-bearing claims carry confidence labels | `Label load-bearing claims: verified / likely / speculative — and what would change your mind.` |
 

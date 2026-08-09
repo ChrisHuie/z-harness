@@ -25,6 +25,8 @@ Runs from either clone (repo root auto-detected from this file's location). Chec
       and their size budgets are internally consistent
   C10 PR delivery contract: scoped publication authority, state-proof command,
       and the ban on conflating local commits with the GitHub PR remain present
+  C11 claim-vocabulary coherence: the phrases AGENTS.md bans outright appear
+      nowhere in the instruction corpus it governs
 
 Exit codes: 0 all checks pass · 1 one or more checks failed · 2 usage error or
 zero inputs (an empty scan set is an error, never a clean verdict).
@@ -45,8 +47,46 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "3.0.0"
+VERSION = "3.1.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# C11 anchor. AGENTS.md bans self-assessment carrying no technical sense and keeps words
+# like `clean` and `verified` usable, because the corpus needs them for a tree or a head.
+# That split holds only while the banned side stays absent from the files telling an agent
+# what to emit, and one canonical file mandating a phrase another one bans is invisible to
+# every per-file check. Terms are read from AGENTS.md rather than restated here, so the
+# prose and the gate cannot drift apart.
+BANNED_VOCAB_ANCHOR = "banned outright:"
+# Floor on how many phrases the anchor sentence must yield. Without it, only zero was an
+# error, so a meaning-preserving reword that split the sentence halved the ban list in
+# silence. Lower it only in the commit that retires a phrase.
+BANNED_VOCAB_FLOOR = 5
+# A floor on cardinality does not floor content: swapping one phrase for an invented word
+# keeps the count at five while retiring a real term, and the verdict line is byte-identical.
+# These phrases must appear in whatever the anchor yields. Prose may add to the ban list; it
+# cannot silently drop one of these, and removing one deliberately means editing here too,
+# where it is reviewed.
+REQUIRED_BANNED_TERMS = frozenset(
+    {"looks good", "should work", "solid", "perfect", "all set"}
+)
+C11_SCOPE_DECLARATION = (
+    "C11 claim-vocabulary scope: AGENTS.md, CLAUDE.md, every skills/*/SKILL.md, "
+    "and .md/.yaml/.yml files under skills/*/references/."
+)
+C11_EXCLUSION_DECLARATION = (
+    "C11 excludes evals/, scripts/, assets/, and other source files; it proves "
+    "vocabulary coherence only, not factual grounding or output behavior."
+)
+C11_MATCH_DECLARATION = (
+    "C11 is source-lexical: it matches ASCII-case-insensitive phrases separated by "
+    "ASCII spaces/tabs or one physical line break; inline markup and paraphrases "
+    "are out of scope."
+)
+
+# The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
+# that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
+# the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
+SELFTEST_FLOOR = 72
 
 AUTHORING_SKILLS = {"craft-prompt", "craft-skill", "craft-context-file", "review-prompt"}
 BODY_CHAR_CAP = 5000          # chars after frontmatter — the builders' instrument
@@ -78,6 +118,20 @@ SELFTEST_SUITES = [
 SELFTEST_EXEMPTIONS = {
     "hooks/harness_check.py": "recursive meta-suite",
 }
+PRODUCTION_CHECKS = (
+    ("C1", "c1_selftests"),
+    ("C1", "c1_selftest_inventory"),
+    ("C2", "c2_shared_identity"),
+    ("C3", "c3_reference_resolution"),
+    ("C4", "c4_descriptions"),
+    ("C5", "c5_bodies"),
+    ("C6", "c6_stale_patterns"),
+    ("C7", "c7_anchors"),
+    ("C8", "c8_reserved_basenames"),
+    ("C9", "c9_codex_package"),
+    ("C10", "c10_delivery_contract"),
+    ("C11", "c11_claim_vocabulary"),
+)
 
 # C2: basenames shared verbatim across skills. A same-basename file NOT listed in
 # either set is a loud failure — decide SHARED vs PER_SKILL and add it here.
@@ -861,19 +915,176 @@ class Run:
         self.result("C10", os.path.isfile(tool),
                     "tools/pr-delivery-state.py exists")
 
+    # ---- C11 ---------------------------------------------------------------
+    def c11_claim_vocabulary(self):
+        """Corpus-level: no phrase AGENTS.md bans outright survives in the files it governs.
+
+        Loads the whole instruction corpus in one pass, because a contradiction between two
+        canonical files is invisible to any check that judges one file at a time. Fails loud
+        when its own anchor is missing rather than reporting a clean sweep over nothing.
+        """
+        source = os.path.join(self.root, "AGENTS.md")
+        try:
+            if os.path.islink(source) or not os.path.isfile(source):
+                raise OSError("absent or symlinked outside the governed regular-file profile")
+            agents_text = open(source, encoding="utf-8").read()
+        except OSError as exc:
+            self.result("C11", False, f"cannot enforce: AGENTS.md unreadable: {exc}")
+            return
+        missing_declarations = [
+            declaration for declaration in (
+                C11_SCOPE_DECLARATION, C11_EXCLUSION_DECLARATION,
+                C11_MATCH_DECLARATION,
+            )
+            if declaration not in agents_text
+        ]
+        if missing_declarations:
+            self.result(
+                "C11", False,
+                f"cannot enforce: missing scope declaration(s) {missing_declarations!r}",
+            )
+            return
+        sentences = list(re.finditer(
+            re.escape(BANNED_VOCAB_ANCHOR) + r"([^.]*)\.", agents_text
+        ))
+        if len(sentences) != 1:
+            self.result("C11", False,
+                        f"cannot enforce: expected one {BANNED_VOCAB_ANCHOR!r} "
+                        f"anchor in AGENTS.md, found {len(sentences)}")
+            return
+        sentence = sentences[0]
+        term_matches = list(re.finditer(r"\*([^*\n]+)\*", sentence.group(1)))
+        terms = [match.group(1).strip() for match in term_matches]
+        normalized_terms = [term.casefold() for term in terms]
+        if (
+            not terms
+            or len(normalized_terms) != len(set(normalized_terms))
+            or any(re.fullmatch(r"[A-Za-z]+(?: [A-Za-z]+)*", term) is None
+                   for term in terms)
+        ):
+            self.result(
+                "C11", False,
+                "cannot enforce: anchor phrases must be non-empty, unique ASCII word phrases",
+            )
+            return
+        # The sentence regex stops at the first period, and only zero terms was an error.
+        # Rewriting the anchor into two sentences -- meaning preserved, one extra period --
+        # silently halved the list from five phrases to two, and three banned phrases then
+        # sat in a governed file with the whole gate green. This is the same shrink the
+        # suite floors exist to catch, so the term count carries its own floor.
+        missing_required = sorted(
+            REQUIRED_BANNED_TERMS - {term.casefold() for term in terms}
+        )
+        if missing_required:
+            self.result(
+                "C11", False,
+                f"cannot enforce: anchor no longer bans {missing_required}; retiring a "
+                f"phrase means removing it from REQUIRED_BANNED_TERMS in the same commit",
+            )
+            return
+        if len(terms) < BANNED_VOCAB_FLOOR:
+            self.result(
+                "C11", False,
+                f"cannot enforce: anchor lists {len(terms)} phrase(s), floor is "
+                f"{BANNED_VOCAB_FLOOR}; if a phrase was retired, lower the floor in the "
+                f"same commit so the reduction is reviewed",
+            )
+            return
+        # Exempt only the emphasized declaration tokens. Removing the whole sentence would
+        # hide an additional use of a banned phrase later in that same sentence.
+        governed_agents = list(agents_text)
+        for match in term_matches:
+            start = sentence.start(1) + match.start()
+            end = sentence.start(1) + match.end()
+            governed_agents[start:end] = " " * (end - start)
+        governed = {"AGENTS.md": "".join(governed_agents)}
+        claude_path = os.path.join(self.root, "CLAUDE.md")
+        try:
+            if os.path.islink(claude_path):
+                raise OSError("symlink is outside the governed regular-file profile")
+            governed["CLAUDE.md"] = open(claude_path, encoding="utf-8").read()
+        except (OSError, UnicodeError) as exc:
+            self.result("C11", False, f"cannot enforce: CLAUDE.md unreadable: {exc}")
+            return
+        skills_dir = os.path.join(self.root, "skills")
+        if not os.path.isdir(skills_dir) or os.path.islink(skills_dir):
+            self.result("C11", False, "cannot enforce: skills directory absent or symlinked")
+            return
+        skill_manifests = 0
+        reference_files = 0
+        try:
+            for skill in sorted(os.listdir(skills_dir)):
+                skill_root = os.path.join(skills_dir, skill)
+                if not os.path.isdir(skill_root):
+                    continue
+                if os.path.islink(skill_root):
+                    raise OSError(f"skills/{skill} is a symlink")
+                body = os.path.join(skill_root, "SKILL.md")
+                if not os.path.isfile(body) or os.path.islink(body):
+                    raise OSError(f"skills/{skill}/SKILL.md absent or symlinked")
+                governed[f"skills/{skill}/SKILL.md"] = open(
+                    body, encoding="utf-8"
+                ).read()
+                skill_manifests += 1
+                references = os.path.join(skill_root, "references")
+                if not os.path.exists(references):
+                    continue
+                if not os.path.isdir(references) or os.path.islink(references):
+                    raise OSError(f"skills/{skill}/references absent or symlinked")
+                for current, directories, files in os.walk(references):
+                    directories[:] = sorted(
+                        directory for directory in directories
+                        if directory not in {"evals", "scripts", "assets"}
+                    )
+                    for directory in directories:
+                        if os.path.islink(os.path.join(current, directory)):
+                            raise OSError(
+                                f"reference directory symlink: "
+                                f"{os.path.relpath(os.path.join(current, directory), self.root)}"
+                            )
+                    for filename in sorted(files):
+                        if os.path.splitext(filename)[1].lower() not in {
+                            ".md", ".yaml", ".yml",
+                        }:
+                            continue
+                        path = os.path.join(current, filename)
+                        relative = os.path.relpath(path, self.root).replace(os.sep, "/")
+                        if os.path.islink(path) or not os.path.isfile(path):
+                            raise OSError(f"reference file absent or symlinked: {relative}")
+                        governed[relative] = open(path, encoding="utf-8").read()
+                        reference_files += 1
+        except (OSError, UnicodeError) as exc:
+            self.result("C11", False, f"cannot enforce: governed corpus unreadable: {exc}")
+            return
+        if skill_manifests == 0:
+            self.result("C11", False, "cannot enforce: zero skill manifests in scan set")
+            return
+        hits = []
+        for term in terms:
+            gap = r"(?:[ \t]+|[ \t]*\r?\n[ \t]*)"
+            phrase = gap.join(re.escape(word) for word in term.split(" "))
+            pattern = re.compile(
+                r"(?<![A-Za-z0-9_])" + phrase + r"(?![A-Za-z0-9_])",
+                re.I | re.ASCII,
+            )
+            for rel, text in sorted(governed.items()):
+                if pattern.search(text):
+                    hits.append(f"{rel}:{term!r}")
+        self.result(
+            "C11", not hits,
+            f"claim vocabulary: {len(terms)} banned phrase(s) absent from "
+            f"{len(governed)} governed file(s) "
+            f"[{skill_manifests} SKILL.md, {reference_files} reference md/yaml; "
+            f"evals/scripts/assets and other sources excluded; source lexical, ASCII "
+            f"case, spaces/tabs or one line break; inline markup/paraphrases "
+            f"excluded; vocabulary only]"
+            + (f" — present: {hits}" if hits else ""),
+        )
+
     def run(self):
         print(f"harness_check {VERSION}  root={self.root}  mode={'ci' if self.ci else 'local'}")
-        self.c1_selftests()
-        self.c1_selftest_inventory()
-        self.c2_shared_identity()
-        self.c3_reference_resolution()
-        self.c4_descriptions()
-        self.c5_bodies()
-        self.c6_stale_patterns()
-        self.c7_anchors()
-        self.c8_reserved_basenames()
-        self.c9_codex_package()
-        self.c10_delivery_contract()
+        for _check_id, method_name in PRODUCTION_CHECKS:
+            getattr(self, method_name)()
         print(f"\n  {self.checks} checks, {len(self.failures)} failure(s)")
         if self.checks == 0:
             print("  ZERO CHECKS RAN — error, not a clean verdict")
@@ -1032,21 +1243,218 @@ def selftest():
                    lambda: any(c == "C1" and "unclassified" in d
                                for c, d in c1_inventory.failures))
 
+        vocab_root = os.path.join(td, "vocab")
+        skill_root = os.path.join(vocab_root, "skills", "gamma")
+        reference_root = os.path.join(skill_root, "references", "nested")
+        for relative in (reference_root, os.path.join(skill_root, "evals"),
+                         os.path.join(skill_root, "scripts"),
+                         os.path.join(skill_root, "assets")):
+            os.makedirs(relative)
+        anchor = ("Self-assessment carrying no technical sense is banned outright: "
+                  "*looks good*, *should work*, *solid*, *perfect*, *all set*. "
+                  "Clean and verified stay usable.\n")
+        agents_contract = (
+            anchor + C11_SCOPE_DECLARATION + "\n" + C11_EXCLUSION_DECLARATION + "\n"
+            + C11_MATCH_DECLARATION + "\n"
+        )
+        open(os.path.join(vocab_root, "AGENTS.md"), "w").write(agents_contract)
+        open(os.path.join(vocab_root, "CLAUDE.md"), "w").write("@AGENTS.md\n")
+        skill_manifest = os.path.join(skill_root, "SKILL.md")
+        safe_skill = (
+            "---\nname: gamma\ndescription: ok\n---\n\nThe tree is clean, the head is "
+            "verified, and the scoped deliverable is ready and done.\n"
+        )
+        open(skill_manifest, "w").write(safe_skill)
+        near_miss = os.path.join(reference_root, "near-miss.md")
+        open(near_miss, "w").write(
+            "solidarity perfectly all setter\n"
+            "This looks **good**.\n"
+            "This process looks\n\nGood evidence remains necessary.\n"
+            "Unicode near-miss: ſolid.\n"
+            "Unicode separator near-miss: looks\u00a0good.\n"
+        )
+        for relative in ("evals/case.md", "scripts/case.yaml", "assets/case.yml"):
+            open(os.path.join(skill_root, relative), "w").write("looks good\n")
+        c11_clean = Run(vocab_root, ci=True)
+        c11_clean.c11_claim_vocabulary()
+        expect_red(
+            "C11 control: declared lexical near-misses and excluded trees stay green",
+            lambda: not c11_clean.failures,
+        )
+
+        nested_yaml = os.path.join(reference_root, "policy.yaml")
+        open(nested_yaml, "w").write("message: SHOULD WORK\n")
+        c11_reference_hit = Run(vocab_root, ci=True)
+        c11_reference_hit.c11_claim_vocabulary()
+        expect_red(
+            "C11 discovers a nested YAML reference and matches phrases case-insensitively",
+            lambda: any(c == "C11" and "should work" in d and "policy.yaml" in d
+                        for c, d in c11_reference_hit.failures),
+        )
+        open(nested_yaml, "w").write("message: evidence required\n")
+
+        open(nested_yaml, "w").write("message: looks\n  good\n")
+        c11_soft_wrap = Run(vocab_root, ci=True)
+        c11_soft_wrap.c11_claim_vocabulary()
+        expect_red(
+            "C11 matches a multiword banned phrase across Markdown-style whitespace",
+            lambda: any(c == "C11" and "looks good" in d and "policy.yaml" in d
+                        for c, d in c11_soft_wrap.failures),
+        )
+        open(nested_yaml, "w").write("message: evidence required\n")
+
+        open(skill_manifest, "w").write(safe_skill + "\nThis looks good to me.\n")
+        c11_skill_hit = Run(vocab_root, ci=True)
+        c11_skill_hit.c11_claim_vocabulary()
+        expect_red(
+            "C11 goes red when a skill manifest uses an exact banned phrase",
+            lambda: any(c == "C11" and "looks good" in d
+                        for c, d in c11_skill_hit.failures),
+        )
+        open(skill_manifest, "w").write(safe_skill)
+
+        os.remove(os.path.join(vocab_root, "CLAUDE.md"))
+        c11_missing_root = Run(vocab_root, ci=True)
+        c11_missing_root.c11_claim_vocabulary()
+        expect_red(
+            "C11 fails loud when a required root file disappears",
+            lambda: any(c == "C11" and "CLAUDE.md unreadable" in d
+                        for c, d in c11_missing_root.failures),
+        )
+        open(os.path.join(vocab_root, "CLAUDE.md"), "w").write("@AGENTS.md\n")
+
+        agents_fixture = os.path.join(vocab_root, "AGENTS.md")
+        external_agents = os.path.join(td, "external-AGENTS.md")
+        open(external_agents, "w").write(agents_contract)
+        os.remove(agents_fixture)
+        os.symlink(external_agents, agents_fixture)
+        c11_symlinked_agents = Run(vocab_root, ci=True)
+        c11_symlinked_agents.c11_claim_vocabulary()
+        expect_red(
+            "C11 fails loud when AGENTS.md escapes the repo through a symlink",
+            lambda: any(c == "C11" and "AGENTS.md unreadable" in d and "symlinked" in d
+                        for c, d in c11_symlinked_agents.failures),
+        )
+        os.unlink(agents_fixture)
+        open(agents_fixture, "w").write(agents_contract)
+
+        open(os.path.join(vocab_root, "AGENTS.md"), "w").write(
+            anchor + C11_EXCLUSION_DECLARATION + "\n" + C11_MATCH_DECLARATION + "\n"
+        )
+        c11_scope = Run(vocab_root, ci=True)
+        c11_scope.c11_claim_vocabulary()
+        expect_red(
+            "C11 fails loud when its governed-scope declaration is missing",
+            lambda: any(c == "C11" and "missing scope declaration" in d
+                        for c, d in c11_scope.failures),
+        )
+
+        open(os.path.join(vocab_root, "AGENTS.md"), "w").write(
+            anchor + C11_SCOPE_DECLARATION + "\n" + C11_EXCLUSION_DECLARATION + "\n"
+        )
+        c11_match_scope = Run(vocab_root, ci=True)
+        c11_match_scope.c11_claim_vocabulary()
+        expect_red(
+            "C11 fails loud when its lexical matcher declaration is missing",
+            lambda: any(c == "C11" and "missing scope declaration" in d
+                        and "source-lexical" in d for c, d in c11_match_scope.failures),
+        )
+
+        open(os.path.join(vocab_root, "AGENTS.md"), "w").write(
+            C11_SCOPE_DECLARATION + "\n" + C11_EXCLUSION_DECLARATION + "\n"
+            + C11_MATCH_DECLARATION + "\n"
+        )
+        c11_anchor = Run(vocab_root, ci=True)
+        c11_anchor.c11_claim_vocabulary()
+        expect_red("C11 fails loud when its own anchor is missing, never silently clean",
+                   lambda: any(c == "C11" and "cannot enforce" in d
+                               for c, d in c11_anchor.failures))
+        open(os.path.join(vocab_root, "AGENTS.md"), "w").write(agents_contract)
+
+        # Splitting the anchor into two sentences preserves the meaning and halves the
+        # list, because the sentence regex stops at the first period. This is the attack
+        # that put three banned phrases in a governed file with the gate fully green.
+        shrunk_contract = re.sub(
+            re.escape(BANNED_VOCAB_ANCHOR) + r"([^.]*)\.",
+            lambda m: (BANNED_VOCAB_ANCHOR
+                       + m.group(1).split(",")[0] + ". Also banned outright are"
+                       + ",".join(m.group(1).split(",")[1:]) + "."),
+            agents_contract,
+            count=1,
+        )
+        open(os.path.join(vocab_root, "AGENTS.md"), "w").write(shrunk_contract)
+        c11_shrunk = Run(vocab_root, ci=True)
+        c11_shrunk.c11_claim_vocabulary()
+        swapped_contract = agents_contract.replace("*perfect*", "*zorblat*", 1)
+        open(os.path.join(vocab_root, "AGENTS.md"), "w").write(swapped_contract)
+        c11_swapped = Run(vocab_root, ci=True)
+        c11_swapped.c11_claim_vocabulary()
+        expect_red(
+            "C11 floors content, not only cardinality: a swapped phrase is caught",
+            lambda: any(c == "C11" and "no longer bans" in d
+                        for c, d in c11_swapped.failures),
+        )
+        open(os.path.join(vocab_root, "AGENTS.md"), "w").write(agents_contract)
+
+        # Either floor may catch this: the content floor names the dropped phrases, the
+        # cardinality floor names the count. Asserting one message made the proof fail when
+        # the other fired first, which says nothing about whether the reword was refused.
+        expect_red(
+            "C11 fails loud when a reworded anchor silently shrinks the ban list",
+            lambda: any(
+                c == "C11" and "cannot enforce" in d
+                and ("floor is" in d or "no longer bans" in d)
+                for c, d in c11_shrunk.failures
+            ),
+        )
+        open(os.path.join(vocab_root, "AGENTS.md"), "w").write(agents_contract)
+
+        open(os.path.join(vocab_root, "AGENTS.md"), "w").write(
+            agents_contract.replace(
+                "*all set*.", "*all set*; nevertheless, say looks good.", 1
+            )
+        )
+        c11_same_sentence = Run(vocab_root, ci=True)
+        c11_same_sentence.c11_claim_vocabulary()
+        expect_red(
+            "C11 scans non-declaration text inside the banned-list sentence",
+            lambda: any(c == "C11" and "looks good" in d
+                        for c, d in c11_same_sentence.failures),
+        )
+        open(os.path.join(vocab_root, "AGENTS.md"), "w").write(agents_contract)
+
         callsite = Run(td, ci=True)
         called = []
-        method_names = [
-            "c1_selftests", "c1_selftest_inventory", "c2_shared_identity",
-            "c3_reference_resolution", "c4_descriptions", "c5_bodies",
-            "c6_stale_patterns", "c7_anchors", "c8_reserved_basenames",
-            "c9_codex_package", "c10_delivery_contract",
-        ]
+        expected_registry = (
+            ("C1", "c1_selftests"), ("C1", "c1_selftest_inventory"),
+            ("C2", "c2_shared_identity"), ("C3", "c3_reference_resolution"),
+            ("C4", "c4_descriptions"), ("C5", "c5_bodies"),
+            ("C6", "c6_stale_patterns"), ("C7", "c7_anchors"),
+            ("C8", "c8_reserved_basenames"), ("C9", "c9_codex_package"),
+            ("C10", "c10_delivery_contract"), ("C11", "c11_claim_vocabulary"),
+        )
+        expect_red("production check registry is exact through C11",
+                   lambda: PRODUCTION_CHECKS == expected_registry)
+        method_names = [method_name for _check_id, method_name in expected_registry]
         for method_name in method_names:
             setattr(callsite, method_name, lambda name=method_name: called.append(name))
         callsite.run()
-        expect_red("Run.run invokes the C1 child-suite call site",
-                   lambda: "c1_selftests" in called)
-        expect_red("Run.run invokes the C1 inventory call site",
-                   lambda: "c1_selftest_inventory" in called)
+        expect_red("Run.run invokes the exact production check registry",
+                   lambda: called == method_names)
+
+        open(nested_yaml, "w").write("message: all set\n")
+        production_c11 = Run(vocab_root, ci=True)
+        for _check_id, method_name in PRODUCTION_CHECKS:
+            if method_name != "c11_claim_vocabulary":
+                setattr(production_c11, method_name, lambda: None)
+        production_code = production_c11.run()
+        expect_red(
+            "Run.run reaches C11 and rejects a planted reference defect",
+            lambda: production_code == 1
+            and any(c == "C11" and "all set" in d
+                    for c, d in production_c11.failures),
+        )
+        open(nested_yaml, "w").write("message: evidence required\n")
 
         hooks_stripped = os.path.join(td, "no-hooks")
         os.makedirs(hooks_stripped, exist_ok=True)
@@ -1383,6 +1791,16 @@ def selftest():
         r7.c10_delivery_contract()
         expect_red("C10 goes red on absent PR delivery contract",
                    lambda: any(c == "C10" for c, d in r7.failures))
+
+    # +1 for this assertion's own increment, so SELFTEST_FLOOR is the number the receipt
+    # prints. Comparing the pre-increment count made the floor one less than the reported
+    # total, which reads as a wrong floor every time either number is updated.
+    observed = checks + 1
+    expect_red(
+        f"meta-suite runs at least its recorded floor of {SELFTEST_FLOOR} proofs "
+        f"(receipt will report {observed})",
+        lambda: observed >= SELFTEST_FLOOR,
+    )
 
     print(f"\n  selftest: {bad} failure(s)")
     print(f"SELFTEST-SUMMARY suite=harness_check checks={checks} failures={bad}")

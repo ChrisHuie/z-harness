@@ -32,7 +32,7 @@ EVAL_SKILL_FLOOR = 6
 # 165 here and 178 in harness_check -- and a fake that hardcodes its own number tests the
 # literal rather than the contract.
 SUITE_FLOORS = {
-    "harness_check": 58,
+    "harness_check": 72,
     "render-packages": 192,
     "bash_command_guard": 111,
     "git_grep_engine_guard": 66,

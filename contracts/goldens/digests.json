@@ -1,0 +1,30 @@
+{
+  "canonicalJson": {
+    "domain": "golden.json",
+    "expected": "abbe46426ed7f909230851b7e8c244683f2f6f08b99c91108e60b26a468aa61f",
+    "value": {
+      "a": "x",
+      "b": [
+        2
+      ]
+    }
+  },
+  "tree": {
+    "domain": "golden.tree",
+    "expected": "da440ae78b866cab574cc5f8e3c021eac216c83c37d9fc81fb889ded65bb796b",
+    "records": [
+      {
+        "mode": "0644",
+        "path": "a.txt",
+        "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        "size": 3
+      },
+      {
+        "mode": "0755",
+        "path": "bin/x",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size": 0
+      }
+    ]
+  }
+}

@@ -704,7 +704,7 @@ def selftest():
         check("zero accounted turns is stated", "ZERO ACCOUNTED TURNS" in buffer.getvalue())
 
     print(f"\n  {checks} checks, {failures} failures")
-    print(f"SELFTEST-SUMMARY checks={checks} failures={failures}")
+    print(f"SELFTEST-SUMMARY suite=codex-cost checks={checks} failures={failures}")
     return 1 if failures else 0
 
 

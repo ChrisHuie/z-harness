@@ -16,6 +16,7 @@ An output path must not already exist. Publication and installation are separate
 from __future__ import annotations
 
 import argparse
+from datetime import date
 import hashlib
 import json
 import os
@@ -25,28 +26,46 @@ import shutil
 import stat
 import sys
 import tempfile
+import unicodedata
 from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Sequence, Tuple
 
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RENDER_CONFIG = ROOT / "release" / "render.json"
 DEFAULT_ADAPTER_CONFIG = ROOT / "adapters" / "targets.json"
 CONTRACTS = ROOT / "contracts"
 VENDORED_SCHEMAS = CONTRACTS / "vendor"
+GOLDENS = CONTRACTS / "goldens"
 ARTIFACT_MANIFEST = "z-harness-artifact.json"
 RENDER_INDEX = "render-index.json"
 ARTIFACT_SCHEMA = (
-    "https://github.com/ChrisHuie/z-harness/blob/main/"
+    "https://github.com/ChrisHuie/z-harness/blob/v0.4.0-alpha.2/"
     "contracts/artifact-manifest.schema.json"
 )
 RENDER_INDEX_SCHEMA = (
-    "https://github.com/ChrisHuie/z-harness/blob/main/contracts/render-index.schema.json"
+    "https://github.com/ChrisHuie/z-harness/blob/v0.4.0-alpha.2/"
+    "contracts/render-index.schema.json"
 )
 AGENT_PLUGIN_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
 ARTIFACT_SCHEMA_FILE = CONTRACTS / "artifact-manifest.schema.json"
 RENDER_INDEX_SCHEMA_FILE = CONTRACTS / "render-index.schema.json"
 AGENT_PLUGIN_SCHEMA_FILE = VENDORED_SCHEMAS / "agent-plugins-1.0.0.plugin.schema.json"
+VENDOR_SOURCES_FILE = VENDORED_SCHEMAS / "SOURCES.json"
+NATIVE_MANIFEST_GOLDEN = GOLDENS / "native-manifests.json"
+PROJECTION_GOLDEN = GOLDENS / "ground-claims-projection.json"
+DIGEST_GOLDEN = GOLDENS / "digests.json"
+DIGEST_ALGORITHM = "z-harness-framed-sha256-v2"
+FILESYSTEM_PROFILE = "z-harness-posix-tree-v1"
+CONTRACT_FILES = (
+    Path(__file__).resolve(),
+    ARTIFACT_SCHEMA_FILE,
+    RENDER_INDEX_SCHEMA_FILE,
+    AGENT_PLUGIN_SCHEMA_FILE,
+    NATIVE_MANIFEST_GOLDEN,
+    PROJECTION_GOLDEN,
+    DIGEST_GOLDEN,
+)
 SEMVER = re.compile(
     r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
     r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
@@ -64,13 +83,20 @@ KIMI_PLUGIN_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 # YAML indicators that change a scalar's meaning. The renderer reads frontmatter without
 # a YAML dependency, so any form it cannot faithfully decode is refused by name rather
 # than mis-decoded: "description: >-" would otherwise validate as the 2-char string ">-".
-YAML_UNSUPPORTED_LEADERS = ">|&*!{["
+YAML_UNSUPPORTED_LEADERS = ">|&*!{[]},%@`"
 EXPECTED_MANIFEST_PATHS = {
     "agent-plugins": "plugin.json",
     "codex": ".codex-plugin/plugin.json",
     "claude": ".claude-plugin/plugin.json",
     "kimi": "kimi.plugin.json",
     "hermes": None,
+}
+EXPECTED_FORMATS = {
+    "agent-plugins": "agent-plugins/1.0.0",
+    "codex": "codex-plugin/native",
+    "claude": "claude-plugin/native",
+    "kimi": "kimi-code-plugin/native",
+    "hermes": "hermes-skill-tap/github",
 }
 COMPETING_MANIFESTS = {
     "plugin.json",
@@ -80,23 +106,66 @@ COMPETING_MANIFESTS = {
     ".kimi-plugin/plugin.json",
     "plugin.yaml",
 }
-TARGET_LEVELS = {
-    "portable-core",
-    "adapter-functional",
-    "host-integrated",
-    "governed-parity",
+WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
+    *(f"COM{suffix}" for suffix in "123456789\u00b9\u00b2\u00b3"),
+    *(f"LPT{suffix}" for suffix in "123456789\u00b9\u00b2\u00b3"),
 }
-AUTHORITIES = {"instruction-only", "host-enforced", "external-boundary"}
-VALIDATION_STATUSES = {"fixture-only", "candidate", "promoted"}
+VENDOR_SOURCE_KEYS = {
+    "id", "file", "url", "publishedUrl", "upstreamRepository", "revision",
+    "sourcePath", "sha256", "license", "licensePath", "licenseSha256",
+    "retrieved", "governs",
+}
+HOST_BODY_CONSTRUCTS = (
+    ("skill.body.arguments", re.compile(r"\$ARGUMENTS(?:\[[^\]]+\]|\.[A-Za-z_][\w-]*)?|\$[0-9]+")),
+    ("skill.body.claude_variable", re.compile(
+        r"\$(?:\{CLAUDE_[^}\r\n]+\}|CLAUDE_[A-Za-z0-9_]+)"
+    )),
+    ("skill.body.dynamic_command", re.compile(r"!`|^```!", re.M)),
+    ("skill.body.frontmatter_directive", re.compile(
+        r"(?im)^(?:context\s*:\s*fork|agent|model|background|hooks|shell|"
+        r"allowed-tools|argument-hint|disable-model-invocation|user-invocable)\s*:"
+    )),
+    ("skill.body.ultrathink", re.compile(r"(?i)\bultrathink\b")),
+)
 
 
 class RenderError(Exception):
-    """A deterministic input, rendering, or verification failure."""
+    """A deterministic failure with a stable machine code and human detail."""
+
+    def __init__(self, code: str, detail: Optional[str] = None):
+        if detail is None:
+            detail = code
+            code = "render.invalid"
+        self.code = code
+        self.detail = detail
+        super().__init__(f"{code}: {detail}")
 
 
 def read_json_object(path: Path, label: str) -> Dict[str, Any]:
+    def reject_duplicate_keys(pairs: Sequence[Tuple[str, Any]]) -> Dict[str, Any]:
+        value: Dict[str, Any] = {}
+        for key, member in pairs:
+            if key in value:
+                raise RenderError(
+                    "json.duplicate_key",
+                    f"{label} repeats JSON key {key!r}: {path}",
+                )
+            value[key] = member
+        return value
+
+    def reject_nonfinite(token: str) -> Any:
+        raise RenderError(
+            "json.nonfinite",
+            f"{label} contains non-finite JSON number {token}: {path}",
+        )
+
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=reject_duplicate_keys,
+            parse_constant=reject_nonfinite,
+        )
     except OSError as exc:
         raise RenderError(f"cannot read {label} {path}: {exc}") from exc
     except json.JSONDecodeError as exc:
@@ -104,6 +173,135 @@ def read_json_object(path: Path, label: str) -> Dict[str, Any]:
     if not isinstance(value, dict):
         raise RenderError(f"{label} must contain a JSON object: {path}")
     return value
+
+
+def load_vendor_sources(path: Path = VENDOR_SOURCES_FILE) -> List[Dict[str, Any]]:
+    value = read_json_object(path, "vendored sources")
+    if set(value) != {"schemaVersion", "note", "sources"}:
+        raise RenderError(
+            "vendor.sources_shape", "vendored sources has missing or unknown fields"
+        )
+    if value["schemaVersion"] != 1 or not isinstance(value["note"], str):
+        raise RenderError(
+            "vendor.sources_shape", "vendored sources must be a schemaVersion 1 record"
+        )
+    sources = value["sources"]
+    if not isinstance(sources, list) or not sources:
+        raise RenderError("vendor.sources_shape", "vendored source inventory is empty")
+    root = path.parent.resolve()
+    observed_ids: set[str] = set()
+    observed_files: set[str] = set()
+    validated: List[Dict[str, Any]] = []
+    for position, source in enumerate(sources):
+        if not isinstance(source, dict) or set(source) != VENDOR_SOURCE_KEYS:
+            raise RenderError(
+                "vendor.source_shape",
+                f"vendored source {position} has missing or unknown fields",
+            )
+        source_id = source["id"]
+        relative_file = source["file"]
+        if (
+            not isinstance(source_id, str)
+            or not source_id
+            or source_id in observed_ids
+            or not isinstance(relative_file, str)
+            or not relative_file
+            or relative_file in observed_files
+        ):
+            raise RenderError(
+                "vendor.source_identity", "vendored source ids and files must be unique"
+            )
+        repository = source["upstreamRepository"]
+        revision = source["revision"]
+        source_path = source["sourcePath"]
+        license_path = source["licensePath"]
+        repository_match = re.fullmatch(
+            r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)",
+            str(repository),
+        )
+        if (
+            repository_match is None
+            or re.fullmatch(r"[0-9a-f]{40}", str(revision)) is None
+            or any(
+                not isinstance(relative, str)
+                or not relative
+                or "\\" in relative
+                or any(part in ("", ".", "..") for part in relative.split("/"))
+                or any(
+                    re.fullmatch(r"[A-Za-z0-9_.-]+", part) is None
+                    for part in relative.split("/")
+                )
+                for relative in (source_path, license_path)
+            )
+        ):
+            raise RenderError(
+                "vendor.source_identity", f"invalid upstream identity for {source_id!r}"
+            )
+        owner, repository_name = repository_match.groups()
+        expected_url = (
+            f"https://raw.githubusercontent.com/{owner}/{repository_name}/"
+            f"{revision}/{source_path}"
+        )
+        if source["url"] != expected_url:
+            raise RenderError(
+                "vendor.source_url",
+                f"vendored source URL does not derive from its identity: {source_id!r}",
+            )
+        if not str(source["publishedUrl"]).startswith("https://"):
+            raise RenderError(
+                "vendor.source_identity", f"invalid published URL for {source_id!r}"
+            )
+        if any(
+            re.fullmatch(r"[0-9a-f]{64}", str(source[field])) is None
+            for field in ("sha256", "licenseSha256")
+        ):
+            raise RenderError(
+                "vendor.source_identity", f"invalid digest for {source_id!r}"
+            )
+        try:
+            retrieved = date.fromisoformat(source["retrieved"])
+        except (TypeError, ValueError):
+            raise RenderError(
+                "vendor.source_identity", f"invalid retrieval date for {source_id!r}"
+            )
+        if retrieved.isoformat() != source["retrieved"]:
+            raise RenderError(
+                "vendor.source_identity", f"non-canonical retrieval date for {source_id!r}"
+            )
+        if (
+            not isinstance(relative_file, str)
+            or not relative_file
+            or "\\" in relative_file
+            or any(part in ("", ".", "..") for part in relative_file.split("/"))
+        ):
+            raise RenderError(
+                "vendor.source_identity", f"invalid file for {source_id!r}"
+            )
+        candidate = path.parent / relative_file
+        local = candidate.resolve()
+        if (
+            root not in local.parents
+            or candidate.is_symlink()
+            or not local.is_file()
+        ):
+            raise RenderError(
+                "vendor.source_file", f"absent or escaped file for {source_id!r}"
+            )
+        if sha256_bytes(local.read_bytes()) != source["sha256"]:
+            raise RenderError(
+                "vendor.source_digest", f"vendored source digest mismatch for {source_id!r}"
+            )
+        if not all(
+            isinstance(source[field], str) and source[field]
+            for field in ("license", "governs")
+        ):
+            raise RenderError(
+                "vendor.source_identity", f"empty license or scope for {source_id!r}"
+            )
+        observed_ids.add(source_id)
+        observed_files.add(relative_file)
+        validated.append(source)
+    return validated
 
 
 def require_exact_keys(value: Dict[str, Any], expected: Iterable[str], label: str) -> None:
@@ -133,69 +331,6 @@ def require_string_list(value: Any, label: str, *, nonempty: bool = False) -> Li
     return list(value)
 
 
-def require_validation_evidence(
-    validation_status: str,
-    licenses: Sequence[str],
-    evidence: Any,
-    label: str,
-) -> None:
-    """Gate every compatibility status on the evidence its contract names.
-
-    `contracts/compatibility-levels.md` requires a promoted release to record tested host
-    versions, validation results, the fresh-session installed artifact digest, and a
-    license set. This is the single encoding of that rule; `load_inputs` applies it to the
-    adapter config and `verify_artifact` applies it to the rendered artifact, so neither
-    end can claim a status the other would refuse. It checks that a claim carries its
-    evidence, not that the evidence is true -- only a target-host run establishes that.
-    """
-    if not isinstance(evidence, list):
-        raise RenderError(f"{label} evidence must be an array")
-    if validation_status == "fixture-only":
-        if evidence:
-            raise RenderError(f"{label} fixture-only must record no host evidence")
-        return
-    if not evidence:
-        raise RenderError(
-            f"{label} validationStatus {validation_status!r} requires host evidence records"
-        )
-    if not licenses:
-        raise RenderError(
-            f"{label} validationStatus {validation_status!r} requires a non-empty license set"
-        )
-    seen: List[Tuple[str, str]] = []
-    for index, record in enumerate(evidence):
-        where = f"{label} evidence[{index}]"
-        if not isinstance(record, dict):
-            raise RenderError(f"{where} must be an object")
-        require_exact_keys(
-            record, {"host", "hostVersion", "installedArtifactSha256", "scenarios"}, where
-        )
-        host = require_nonempty_string(record["host"], f"{where} host")
-        host_version = require_nonempty_string(record["hostVersion"], f"{where} hostVersion")
-        if not is_sha256(record["installedArtifactSha256"]):
-            raise RenderError(f"{where} installedArtifactSha256 must be a sha256 value")
-        scenarios = record["scenarios"]
-        if not isinstance(scenarios, list) or not scenarios:
-            raise RenderError(f"{where} scenarios must be a non-empty array")
-        scenario_ids: List[str] = []
-        for position, scenario in enumerate(scenarios):
-            spot = f"{where} scenarios[{position}]"
-            if not isinstance(scenario, dict):
-                raise RenderError(f"{spot} must be an object")
-            require_exact_keys(scenario, {"id", "result"}, spot)
-            scenario_ids.append(require_nonempty_string(scenario["id"], f"{spot} id"))
-            if scenario["result"] != "pass":
-                raise RenderError(
-                    f"{spot} result {scenario['result']!r} does not support a "
-                    f"{validation_status!r} status"
-                )
-        if len(scenario_ids) != len(set(scenario_ids)):
-            raise RenderError(f"{where} scenario ids must be unique")
-        seen.append((host, host_version))
-    if len(seen) != len(set(seen)):
-        raise RenderError(f"{label} evidence host/version pairs must be unique")
-
-
 def load_inputs(
     render_path: Path = DEFAULT_RENDER_CONFIG,
     adapter_path: Path = DEFAULT_ADAPTER_CONFIG,
@@ -216,8 +351,8 @@ def load_inputs(
         },
         "render config",
     )
-    if render_config["schemaVersion"] != 1:
-        raise RenderError("render config schemaVersion must be 1")
+    if render_config["schemaVersion"] != 2:
+        raise RenderError("config.schema_version", "render config schemaVersion must be 2")
     package = render_config["package"]
     if not isinstance(package, dict):
         raise RenderError("render config package must be an object")
@@ -319,11 +454,17 @@ def load_inputs(
     targets = require_string_list(render_config["targets"], "targets", nonempty=True)
 
     require_exact_keys(adapter_config, {"schemaVersion", "targets"}, "adapter config")
-    if adapter_config["schemaVersion"] != 1:
-        raise RenderError("adapter config schemaVersion must be 1")
+    if adapter_config["schemaVersion"] != 2:
+        raise RenderError("adapter.schema_version", "adapter config schemaVersion must be 2")
     adapters = adapter_config["targets"]
     if not isinstance(adapters, dict) or not adapters:
         raise RenderError("adapter config targets must be a non-empty object")
+    if sorted(adapters) != sorted(targets):
+        raise RenderError(
+            "adapter.target_inventory",
+            f"adapter target inventory must exactly equal render targets: "
+            f"adapters={sorted(adapters)} render={sorted(targets)}",
+        )
     for target in targets:
         if target not in EXPECTED_MANIFEST_PATHS:
             raise RenderError(f"renderer has no implementation for target {target!r}")
@@ -337,10 +478,6 @@ def load_inputs(
                 "packageVersion",
                 "format",
                 "manifestPath",
-                "targetLevel",
-                "authority",
-                "validationStatus",
-                "evidence",
             },
             f"adapter {target}",
         )
@@ -352,22 +489,13 @@ def load_inputs(
         )
         if SEMVER.fullmatch(package_version) is None:
             raise RenderError(f"adapter {target} packageVersion must be strict semantic versioning")
-        require_nonempty_string(adapter["format"], f"adapter {target} format")
+        if adapter["format"] != EXPECTED_FORMATS[target]:
+            raise RenderError(
+                "adapter.format",
+                f"adapter {target} format must be {EXPECTED_FORMATS[target]!r}",
+            )
         if adapter["manifestPath"] != EXPECTED_MANIFEST_PATHS[target]:
             raise RenderError(f"adapter {target} manifestPath is not the implemented path")
-        if adapter["targetLevel"] not in TARGET_LEVELS:
-            raise RenderError(f"adapter {target} has an unknown targetLevel")
-        if adapter["authority"] not in AUTHORITIES:
-            raise RenderError(f"adapter {target} has an unknown authority")
-        if adapter["validationStatus"] not in VALIDATION_STATUSES:
-            raise RenderError(f"adapter {target} has an unknown validationStatus")
-        require_validation_evidence(
-            adapter["validationStatus"],
-            package["licenses"],
-            adapter["evidence"],
-            f"adapter {target}",
-        )
-
     return render_config, adapter_config
 
 
@@ -380,6 +508,11 @@ def decode_scalar(raw: str, label: str) -> str:
             f"{label} uses YAML syntax this reader does not decode ({value[0]!r}): "
             f"write it as a single-line plain, single-quoted, or double-quoted scalar"
         )
+    if value[0] in "-?:" and (len(value) == 1 or value[1].isspace()):
+        raise RenderError(
+            "skill.frontmatter_ambiguous_plain_scalar",
+            f"{label} uses a YAML indicator: quote the scalar",
+        )
     if value.startswith('"'):
         try:
             decoded = json.loads(value)
@@ -389,31 +522,107 @@ def decode_scalar(raw: str, label: str) -> str:
     if value.startswith("'"):
         if not value.endswith("'") or len(value) < 2:
             raise RenderError(f"{label} has invalid quoted text")
-        return require_nonempty_string(value[1:-1].replace("''", "'"), label)
+        interior = value[1:-1]
+        if "'" in interior.replace("''", ""):
+            raise RenderError(f"{label} has an unpaired single quote")
+        return require_nonempty_string(interior.replace("''", "'"), label)
+    if re.search(r"(^|[ \t])#", value) or re.search(r":[ \t]", value):
+        raise RenderError(
+            "skill.frontmatter_ambiguous_plain_scalar",
+            f"{label} uses YAML comment or mapping syntax: quote the scalar",
+        )
+    if (
+        value.casefold() in {"null", "~", "true", "false", ".nan", ".inf", "+.inf", "-.inf"}
+        or re.fullmatch(r"[-+]?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][-+]?\d+)?", value)
+        or re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[Tt ].*)?", value)
+    ):
+        raise RenderError(
+            "skill.frontmatter_ambiguous_plain_scalar",
+            f"{label} has a YAML implicit type: quote the scalar",
+        )
     return value
 
 
-def parse_skill_frontmatter(path: Path, expected_name: str) -> Dict[str, str]:
+class SkillDocument(NamedTuple):
+    values: Dict[str, str]
+    argument_hint: Optional[str]
+    body: bytes
+
+
+def parse_skill_document(path: Path, expected_name: str) -> SkillDocument:
     try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as exc:
+        raw = path.read_bytes()
+        text = raw.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
         raise RenderError(f"cannot read skill manifest {path}: {exc}") from exc
-    lines = text.splitlines()
-    if not lines or lines[0] != "---":
+    if not raw.startswith(b"---\n"):
         raise RenderError(f"skill {expected_name} has no opening YAML frontmatter delimiter")
-    try:
-        end = lines.index("---", 1)
-    except ValueError as exc:
-        raise RenderError(f"skill {expected_name} has no closing frontmatter delimiter") from exc
+    closing = raw.find(b"\n---\n", 4)
+    if closing < 0:
+        raise RenderError(f"skill {expected_name} has no closing frontmatter delimiter")
+    frontmatter = raw[4:closing].decode("utf-8")
+    body = raw[closing + 5:]
     values: Dict[str, str] = {}
-    for line in lines[1:end]:
-        if not line or line[0].isspace() or ":" not in line:
+    argument_hint: Optional[str] = None
+    top_keys: List[str] = []
+    metadata_keys: List[str] = []
+    current = ""
+    for line in frontmatter.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
             continue
-        key, raw = line.split(":", 1)
+        if line[0].isspace():
+            if current != "metadata" or not line.startswith("  ") or ":" not in line:
+                raise RenderError(
+                    "skill.frontmatter_unknown",
+                    f"skill {expected_name} has unsupported nested frontmatter: {line!r}",
+                )
+            key, scalar = line.strip().split(":", 1)
+            metadata_keys.append(key)
+            if key != "version":
+                raise RenderError(
+                    "skill.frontmatter_unknown",
+                    f"skill {expected_name} metadata key {key!r} is not portable",
+                )
+            values["version"] = decode_scalar(
+                scalar, f"skill {expected_name} metadata.version"
+            )
+            continue
+        if ":" not in line:
+            raise RenderError(
+                "skill.frontmatter_unknown",
+                f"skill {expected_name} has unsupported frontmatter line: {line!r}",
+            )
+        key, scalar = line.split(":", 1)
+        if key in top_keys:
+            raise RenderError(
+                "skill.frontmatter_duplicate",
+                f"skill {expected_name} repeats frontmatter key {key!r}",
+            )
+        top_keys.append(key)
+        current = key
         if key in ("name", "description"):
-            values[key] = decode_scalar(raw, f"skill {expected_name} {key}")
-    if set(values) != {"name", "description"}:
-        raise RenderError(f"skill {expected_name} requires top-level name and description")
+            values[key] = decode_scalar(scalar, f"skill {expected_name} {key}")
+        elif key == "argument-hint":
+            argument_hint = decode_scalar(scalar, f"skill {expected_name} argument-hint")
+        elif key == "allowed-tools":
+            decode_scalar(scalar, f"skill {expected_name} allowed-tools")
+        elif key == "metadata":
+            if scalar.strip():
+                raise RenderError(
+                    "skill.frontmatter_unknown",
+                    f"skill {expected_name} metadata must be a mapping",
+                )
+        else:
+            raise RenderError(
+                "skill.frontmatter_unknown",
+                f"skill {expected_name} top-level key {key!r} has no target classification",
+            )
+    if set(values) != {"name", "description", "version"}:
+        raise RenderError(
+            f"skill {expected_name} requires name, description, and metadata.version"
+        )
+    if metadata_keys != ["version"]:
+        raise RenderError(f"skill {expected_name} metadata must contain only version")
     if values["name"] != expected_name:
         raise RenderError(
             f"skill directory/name mismatch: directory={expected_name!r} "
@@ -430,7 +639,40 @@ def parse_skill_frontmatter(path: Path, expected_name: str) -> Dict[str, str]:
         raise RenderError(
             f"skill {expected_name} description must be 1-{SKILL_DESCRIPTION_MAX} characters"
         )
-    return values
+    if SEMVER.fullmatch(values["version"]) is None:
+        raise RenderError(f"skill {expected_name} metadata.version must be semantic versioning")
+    for code, pattern in HOST_BODY_CONSTRUCTS:
+        match = pattern.search(body.decode("utf-8"))
+        if match:
+            raise RenderError(
+                code,
+                f"skill {expected_name} body uses unclassified host construct {match.group(0)!r}",
+            )
+    return SkillDocument(values, argument_hint, body)
+
+
+def parse_skill_frontmatter(path: Path, expected_name: str) -> Dict[str, str]:
+    return parse_skill_document(path, expected_name).values
+
+
+def projected_skill_bytes(path: Path, expected_name: str, target: str) -> bytes:
+    document = parse_skill_document(path, expected_name)
+    values = document.values
+    lines = [
+        "---",
+        f"name: {json.dumps(values['name'], ensure_ascii=False)}",
+        f"description: {json.dumps(values['description'], ensure_ascii=False)}",
+    ]
+    if target == "claude" and document.argument_hint is not None:
+        lines.append(
+            f"argument-hint: {json.dumps(document.argument_hint, ensure_ascii=False)}"
+        )
+    lines += [
+        "metadata:",
+        f"  version: {json.dumps(values['version'], ensure_ascii=False)}",
+        "---",
+    ]
+    return ("\n".join(lines) + "\n").encode("utf-8") + document.body
 
 
 def normalized_mode(path: Path) -> str:
@@ -442,28 +684,46 @@ def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def canonical_json_digest(value: Any) -> str:
+def _frame(digest: Any, value: bytes) -> None:
+    digest.update(len(value).to_bytes(8, "big"))
+    digest.update(value)
+
+
+def framed_digest(domain: str, values: Sequence[bytes]) -> str:
+    digest = hashlib.sha256()
+    _frame(digest, DIGEST_ALGORITHM.encode("ascii"))
+    _frame(digest, domain.encode("utf-8"))
+    for value in values:
+        _frame(digest, value)
+    return digest.hexdigest()
+
+
+def canonical_json_digest(value: Any, domain: str) -> str:
     data = json.dumps(
-        value, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        value, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+        allow_nan=False,
     ).encode("utf-8")
-    return sha256_bytes(data)
+    return framed_digest(domain, [data])
 
 
-def file_record(path: Path, relative: str) -> Dict[str, str]:
+def file_record(path: Path, relative: str) -> Dict[str, Any]:
+    data = path.read_bytes()
     return {
         "path": relative,
         "mode": normalized_mode(path),
-        "sha256": sha256_bytes(path.read_bytes()),
+        "size": len(data),
+        "sha256": sha256_bytes(data),
     }
 
 
-def tree_digest(records: Sequence[Dict[str, str]]) -> str:
-    digest = hashlib.sha256()
+def tree_digest(records: Sequence[Dict[str, Any]], domain: str) -> str:
+    values: List[bytes] = []
     for record in sorted(records, key=lambda item: item["path"]):
-        for key in ("path", "mode", "sha256"):
-            digest.update(record[key].encode("utf-8"))
-            digest.update(b"\0")
-    return digest.hexdigest()
+        values.extend(
+            str(record[key]).encode("utf-8")
+            for key in ("path", "mode", "size", "sha256")
+        )
+    return framed_digest(domain, values)
 
 
 def scan_skill(
@@ -471,14 +731,14 @@ def scan_skill(
     skill_name: str,
     excluded_directories: Sequence[str],
     excluded_files: Sequence[str] = (),
-) -> Tuple[List[Dict[str, str]], List[Dict[str, str]], List[str]]:
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
     if not skill_dir.is_dir():
         raise RenderError(f"selected skill directory is absent: {skill_dir}")
     if skill_dir.is_symlink():
         raise RenderError(f"selected skill directory must not be a symlink: {skill_dir}")
     parse_skill_frontmatter(skill_dir / "SKILL.md", skill_name)
-    all_records: List[Dict[str, str]] = []
-    included: List[Dict[str, str]] = []
+    all_records: List[Dict[str, Any]] = []
+    included: List[Dict[str, Any]] = []
     excluded: List[str] = []
     for path in sorted(skill_dir.rglob("*"), key=lambda item: item.as_posix()):
         if path.is_symlink():
@@ -529,19 +789,157 @@ def write_bytes(path: Path, data: bytes, mode: str = "0644") -> None:
 
 
 def write_json(path: Path, value: Dict[str, Any]) -> None:
-    data = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    write_bytes(path, data)
+    write_bytes(path, json_bytes(value))
+
+
+def json_bytes(value: Any) -> bytes:
+    return (
+        json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    ).encode("utf-8")
+
+
+def record_for_bytes(relative: str, data: bytes, mode: str = "0644") -> Dict[str, Any]:
+    return {"path": relative, "mode": mode, "size": len(data), "sha256": sha256_bytes(data)}
 
 
 def copy_skill_payload(
     source_dir: Path,
     target_dir: Path,
-    included: Sequence[Dict[str, str]],
+    included: Sequence[Dict[str, Any]],
+    target: str,
 ) -> None:
     for record in sorted(included, key=lambda item: item["path"]):
         source = source_dir / record["path"]
         destination = target_dir / record["path"]
-        write_bytes(destination, source.read_bytes(), record["mode"])
+        data = (
+            projected_skill_bytes(source, source_dir.name, target)
+            if record["path"] == "SKILL.md"
+            else source.read_bytes()
+        )
+        write_bytes(destination, data, record["mode"])
+
+
+def portable_path_key(relative: str) -> str:
+    if not relative or relative.startswith("/") or "\\" in relative or "\0" in relative:
+        raise RenderError("tree.path_nonportable", f"non-portable path {relative!r}")
+    parts = relative.split("/")
+    for part in parts:
+        # Win32 also reserves device names with an extension, spaces immediately
+        # before that extension, and the superscript 1/2/3 COM/LPT aliases.
+        base = part.partition(".")[0].rstrip(" ").upper()
+        if (
+            part in ("", ".", "..")
+            or part.endswith((" ", "."))
+            or any(char in '<>:"|?*' for char in part)
+            or any(ord(char) < 32 for char in part)
+            or base in WINDOWS_RESERVED_NAMES
+        ):
+            raise RenderError("tree.path_nonportable", f"non-portable path {relative!r}")
+    normalized = unicodedata.normalize("NFC", relative)
+    if normalized != relative:
+        raise RenderError(
+            "tree.path_nonportable",
+            f"non-portable non-NFC path {relative!r}",
+        )
+    return normalized.casefold()
+
+
+def verify_path_aliases(paths: Sequence[str]) -> None:
+    aliases: Dict[str, str] = {}
+    for path in paths:
+        prefixes = ["/".join(path.split("/")[:index]) for index in range(1, len(path.split("/")) + 1)]
+        for prefix in prefixes:
+            key = portable_path_key(prefix)
+            prior = aliases.get(key)
+            if prior is not None and prior != prefix:
+                raise RenderError(
+                    "tree.path_alias",
+                    f"portable path alias collision: {prior!r} and {prefix!r}",
+                )
+            aliases[key] = prefix
+
+
+def inspect_physical_tree(root: Path, *, normalized: bool) -> List[str]:
+    try:
+        root_stat = root.lstat()
+    except OSError as exc:
+        raise RenderError("tree.root_absent", f"cannot inspect render root {root}: {exc}") from exc
+    if not stat.S_ISDIR(root_stat.st_mode):
+        raise RenderError("tree.root_type", f"render root is not a directory: {root}")
+    paths: List[str] = []
+    seen_inodes: Dict[Tuple[int, int], str] = {}
+    directories: List[Tuple[str, os.stat_result]] = [(".", root_stat)]
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+        directory = Path(dirpath)
+        names = sorted(dirnames + filenames)
+        if not names:
+            raise RenderError(
+                "tree.empty_directory",
+                f"rendered tree contains an empty directory: {directory}",
+            )
+        for name in names:
+            path = directory / name
+            relative = path.relative_to(root).as_posix()
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                raise RenderError("tree.symlink", f"rendered tree contains a symlink: {path}")
+            if stat.S_ISDIR(info.st_mode):
+                directories.append((relative, info))
+                paths.append(relative)
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                raise RenderError(
+                    "tree.non_regular",
+                    f"rendered tree contains a non-regular file: {path}",
+                )
+            if info.st_nlink != 1:
+                raise RenderError(
+                    "tree.hardlink",
+                    f"rendered file has link count {info.st_nlink}, expected 1: {path}",
+                )
+            inode = (info.st_dev, info.st_ino)
+            prior = seen_inodes.get(inode)
+            if prior is not None:
+                raise RenderError(
+                    "tree.hardlink",
+                    f"rendered files share an inode: {prior!r} and {relative!r}",
+                )
+            seen_inodes[inode] = relative
+            paths.append(relative)
+            if normalized:
+                expected_mode = 0o755 if info.st_mode & 0o111 else 0o644
+                if stat.S_IMODE(info.st_mode) != expected_mode or info.st_mtime_ns != 0:
+                    raise RenderError(
+                        "tree.file_profile",
+                        f"rendered file violates mode/mtime profile: {path}",
+                    )
+    if normalized:
+        for relative, info in directories:
+            if stat.S_IMODE(info.st_mode) != 0o755 or info.st_mtime_ns != 0:
+                raise RenderError(
+                    "tree.directory_profile",
+                    f"rendered directory violates 0755/epoch profile: {relative}",
+                )
+    verify_path_aliases(paths)
+    return paths
+
+
+def normalize_physical_tree(root: Path) -> None:
+    inspect_physical_tree(root, normalized=False)
+    directories: List[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+        directory = Path(dirpath)
+        directories.append(directory)
+        for filename in filenames:
+            path = directory / filename
+            info = path.lstat()
+            mode = 0o755 if info.st_mode & 0o111 else 0o644
+            path.chmod(mode)
+            os.utime(path, ns=(0, 0), follow_symlinks=False)
+    for directory in reversed(directories):
+        directory.chmod(0o755)
+        os.utime(directory, ns=(0, 0), follow_symlinks=False)
+    inspect_physical_tree(root, normalized=True)
 
 
 def target_manifest(
@@ -586,6 +984,46 @@ def target_manifest(
     raise RenderError(f"no manifest builder for target {target!r}")
 
 
+def golden_native_manifests() -> Dict[str, Any]:
+    value = read_json_object(NATIVE_MANIFEST_GOLDEN, "native manifest golden")
+    require_exact_keys(value, EXPECTED_MANIFEST_PATHS, "native manifest golden")
+    return value
+
+
+def expected_payload_records(
+    scan: "SourceScan",
+    target: str,
+) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+    for skill_name, included in sorted(scan.included_by_skill.items()):
+        for source_record in sorted(included, key=lambda item: item["path"]):
+            source = scan.source_root / skill_name / source_record["path"]
+            data = (
+                projected_skill_bytes(source, skill_name, target)
+                if source_record["path"] == "SKILL.md"
+                else source.read_bytes()
+            )
+            records.append(record_for_bytes(
+                f"skills/{skill_name}/{source_record['path']}",
+                data,
+                source_record["mode"],
+            ))
+    manifest_path = EXPECTED_MANIFEST_PATHS[target]
+    native = golden_native_manifests()[target]
+    if manifest_path is None:
+        if native is not None:
+            raise RenderError(
+                "manifest.golden_invalid", f"{target} absence golden must be null"
+            )
+    else:
+        if not isinstance(native, dict):
+            raise RenderError(
+                "manifest.golden_invalid", f"{target} native manifest golden must be an object"
+            )
+        records.append(record_for_bytes(manifest_path, json_bytes(native)))
+    return sorted(records, key=lambda item: item["path"])
+
+
 def artifact_records(
     artifact_root: Path,
     *,
@@ -596,7 +1034,8 @@ def artifact_records(
     The payload inventory omits the artifact manifest because a manifest cannot contain a
     digest of itself; the render index hashes the complete directory instead.
     """
-    records: List[Dict[str, str]] = []
+    inspect_physical_tree(artifact_root, normalized=False)
+    records: List[Dict[str, Any]] = []
     for path in sorted(artifact_root.rglob("*"), key=lambda item: item.as_posix()):
         if path.is_symlink():
             raise RenderError(f"rendered artifact contains a symlink: {path}")
@@ -614,11 +1053,11 @@ def artifact_records(
     return records
 
 
-def payload_records(artifact_root: Path) -> List[Dict[str, str]]:
+def payload_records(artifact_root: Path) -> List[Dict[str, Any]]:
     return artifact_records(artifact_root, include_manifest=False)
 
 
-def complete_artifact_records(artifact_root: Path) -> List[Dict[str, str]]:
+def complete_artifact_records(artifact_root: Path) -> List[Dict[str, Any]]:
     return artifact_records(artifact_root, include_manifest=True)
 
 
@@ -755,12 +1194,20 @@ def verify_target_manifest(
     artifact_manifest: Dict[str, Any],
 ) -> None:
     manifest_relative = EXPECTED_MANIFEST_PATHS[target]
+    golden = golden_native_manifests()[target]
     if manifest_relative is None:
         if target != "hermes":
             raise RenderError(f"target {target} unexpectedly has no native manifest")
+        if golden is not None:
+            raise RenderError("manifest.golden_invalid", "Hermes absence golden is not null")
         return
     manifest_path = artifact_root / manifest_relative
     manifest = read_json_object(manifest_path, f"{target} package manifest")
+    if manifest != golden or manifest_path.read_bytes() != json_bytes(golden):
+        raise RenderError(
+            "manifest.golden_mismatch",
+            f"{target} native manifest differs from the hand-authored byte golden",
+        )
     if target == "kimi":
         require_exact_keys(
             manifest,
@@ -850,9 +1297,18 @@ def derived_build(render_config: Dict[str, Any], adapter: Dict[str, Any]) -> Dic
     return {
         "renderer": "z-harness/render-packages",
         "rendererVersion": VERSION,
+        "digestAlgorithm": DIGEST_ALGORITHM,
+        "filesystemProfile": FILESYSTEM_PROFILE,
         "rendererSha256": renderer_digest(),
-        "renderConfigSha256": canonical_json_digest(render_config),
-        "adapterConfigSha256": canonical_json_digest(adapter),
+        "contractsSha256": tree_digest(
+            [
+                file_record(path, path.relative_to(ROOT).as_posix())
+                for path in CONTRACT_FILES
+            ],
+            "build.contracts",
+        ),
+        "renderConfigSha256": canonical_json_digest(render_config, "config.render"),
+        "adapterConfigSha256": canonical_json_digest(adapter, "config.adapter-entry"),
     }
 
 
@@ -861,29 +1317,14 @@ def derived_upstream_locks(render_config: Dict[str, Any]) -> List[Dict[str, Any]
     return []
 
 
-def derived_claims(adapter: Dict[str, Any]) -> Dict[str, Any]:
-    """The claims block an artifact must carry for this adapter entry.
-
-    `earnedLevel` is pinned: rendering and static inspection earn nothing, so only a
-    target-host promotion run may raise it, and it is not read from configuration.
-    """
-    return {
-        "targetLevel": adapter["targetLevel"],
-        "earnedLevel": "unverified",
-        "authority": adapter["authority"],
-        "validationStatus": adapter["validationStatus"],
-        "evidence": adapter["evidence"],
-    }
-
-
 class SourceScan(NamedTuple):
     """One reading of the selected skill sources, shared by rendering and verification."""
 
     source_root: Path
     skills: List[Dict[str, Any]]
-    aggregate_input: List[Dict[str, str]]
-    aggregate_included: List[Dict[str, str]]
-    included_by_skill: Dict[str, List[Dict[str, str]]]
+    aggregate_input: List[Dict[str, Any]]
+    aggregate_included: List[Dict[str, Any]]
+    included_by_skill: Dict[str, List[Dict[str, Any]]]
 
 
 def scan_selected_skills(repo_root: Path, render_config: Dict[str, Any]) -> SourceScan:
@@ -891,17 +1332,19 @@ def scan_selected_skills(repo_root: Path, render_config: Dict[str, Any]) -> Sour
     excluded_directories = render_config["runtimeExcludeDirectories"]
     excluded_files = render_config["runtimeExcludeFiles"]
     skills: List[Dict[str, Any]] = []
-    aggregate_input: List[Dict[str, str]] = []
-    aggregate_included: List[Dict[str, str]] = []
-    included_by_skill: Dict[str, List[Dict[str, str]]] = {}
+    aggregate_input: List[Dict[str, Any]] = []
+    aggregate_included: List[Dict[str, Any]] = []
+    included_by_skill: Dict[str, List[Dict[str, Any]]] = {}
     for skill_name in sorted(render_config["selectedSkills"]):
         all_records, included, excluded = scan_skill(
             source_root / skill_name, skill_name, excluded_directories, excluded_files
         )
         skills.append({
             "id": skill_name,
-            "inputTreeSha256": tree_digest(all_records),
-            "includedTreeSha256": tree_digest(included),
+            "inputTreeSha256": tree_digest(all_records, f"source.skill.{skill_name}.input"),
+            "includedTreeSha256": tree_digest(
+                included, f"source.skill.{skill_name}.selected"
+            ),
             "includedFiles": len(included),
             "excludedPaths": sorted(excluded),
         })
@@ -935,6 +1378,7 @@ def render_target(
             scan.source_root / skill_name,
             target_root / "skills" / skill_name,
             included,
+            target,
         )
 
     manifest_relative = adapter["manifestPath"]
@@ -950,7 +1394,7 @@ def render_target(
     payload = payload_records(target_root)
     artifact_manifest = {
         "$schema": ARTIFACT_SCHEMA,
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "artifactId": f"{package['name']}/{target}",
         "packageName": package["name"],
         "coreVersion": package["coreVersion"],
@@ -962,16 +1406,15 @@ def render_target(
         "build": derived_build(render_config, adapter),
         "source": {
             "kind": "canonical-tree",
-            "inputTreeSha256": tree_digest(aggregate_input),
-            "includedTreeSha256": tree_digest(aggregate_included),
+            "inputTreeSha256": tree_digest(aggregate_input, "source.input"),
+            "includedTreeSha256": tree_digest(aggregate_included, "source.selected"),
             "upstreamLocks": derived_upstream_locks(render_config),
             "skills": skill_manifests,
         },
         "payload": {
-            "sha256": tree_digest(payload),
+            "sha256": tree_digest(payload, "payload"),
             "files": payload,
         },
-        "claims": derived_claims(adapter),
     }
     write_json(target_root / ARTIFACT_MANIFEST, artifact_manifest)
     verify_artifact(repo_root, target_root, target, render_config, adapter_config)
@@ -985,8 +1428,12 @@ def render_all(
     adapter_config: Dict[str, Any],
 ) -> Dict[str, Dict[str, Any]]:
     repo_root = repo_root.resolve()
-    output_root = output_root.resolve()
-    if output_root.exists():
+    requested_root = Path(os.path.abspath(output_root))
+    if os.path.lexists(requested_root):
+        raise RenderError("output.exists", f"output path already exists: {requested_root}")
+    requested_root.parent.mkdir(parents=True, exist_ok=True)
+    output_root = requested_root.parent.resolve() / requested_root.name
+    if os.path.lexists(output_root):
         raise RenderError(f"output path already exists: {output_root}")
     source_skills = resolve_source_skills_root(repo_root, render_config)
     for skill_name in render_config["selectedSkills"]:
@@ -996,7 +1443,6 @@ def render_all(
                 f"output path must not overlap selected skill source {skill_name!r}: "
                 f"{output_root}"
             )
-    output_root.parent.mkdir(parents=True, exist_ok=True)
     temp_root = Path(tempfile.mkdtemp(prefix=f".{output_root.name}.", dir=output_root.parent))
     results: Dict[str, Dict[str, Any]] = {}
     try:
@@ -1010,7 +1456,7 @@ def render_all(
             )
         render_index = {
             "$schema": RENDER_INDEX_SCHEMA,
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "coreVersion": render_config["package"]["coreVersion"],
             "targets": {
                 target: {
@@ -1018,7 +1464,7 @@ def render_all(
                     "packageVersion": results[target]["packageVersion"],
                     "adapterRevision": results[target]["adapterRevision"],
                     "artifactSha256": tree_digest(
-                        complete_artifact_records(temp_root / target)
+                        complete_artifact_records(temp_root / target), "artifact"
                     ),
                     "payloadSha256": results[target]["payload"]["sha256"],
                 }
@@ -1026,6 +1472,13 @@ def render_all(
             },
         }
         write_json(temp_root / RENDER_INDEX, render_index)
+        normalize_physical_tree(temp_root)
+        verify_render_root(repo_root, temp_root, render_config, adapter_config)
+        if os.path.lexists(output_root):
+            raise RenderError(
+                "output.raced",
+                f"output path appeared before publication: {output_root}",
+            )
         temp_root.rename(output_root)
     except Exception:
         shutil.rmtree(temp_root, ignore_errors=True)
@@ -1046,7 +1499,8 @@ def verify_artifact(
     schema conformance against the committed contract, internal consistency between the
     recorded inventory and the bytes on disk, and identity against the render config,
     adapter entry, renderer digest, and current source tree. The third is why a manifest
-    field cannot be edited after rendering: every value is recomputed, not shape-checked.
+    field cannot be edited after rendering: every immutable build fact is recomputed, not
+    shape-checked. Host authority and promotion are deliberately absent from this artifact.
 
     Binding to the live source means an artifact rendered from an older tree fails once
     the source moves. That verdict is correct -- the artifact is stale -- and is the
@@ -1055,6 +1509,11 @@ def verify_artifact(
     artifact_root = artifact_root.resolve()
     manifest_path = artifact_root / ARTIFACT_MANIFEST
     manifest = read_json_object(manifest_path, "artifact manifest")
+    if manifest_path.read_bytes() != json_bytes(manifest):
+        raise RenderError(
+            "json.noncanonical",
+            f"artifact manifest is not canonical renderer JSON: {manifest_path}",
+        )
     conform_to_schema(
         manifest, load_schema(ARTIFACT_SCHEMA_FILE), "artifact manifest"
     )
@@ -1074,11 +1533,10 @@ def verify_artifact(
             "build",
             "source",
             "payload",
-            "claims",
         },
         "artifact manifest",
     )
-    if manifest["$schema"] != ARTIFACT_SCHEMA or manifest["schemaVersion"] != 1:
+    if manifest["$schema"] != ARTIFACT_SCHEMA or manifest["schemaVersion"] != 2:
         raise RenderError("artifact manifest schema identity is invalid")
     if manifest["target"] != expected_target:
         raise RenderError(
@@ -1136,6 +1594,7 @@ def verify_artifact(
         raise RenderError("artifact build rendererVersion must be strict semantic versioning")
     for digest_field in (
         "rendererSha256",
+        "contractsSha256",
         "renderConfigSha256",
         "adapterConfigSha256",
     ):
@@ -1228,33 +1687,19 @@ def verify_artifact(
     actual_files = payload_records(artifact_root)
     if payload["files"] != actual_files:
         raise RenderError(f"artifact payload inventory or file digest mismatch: {artifact_root}")
-    if not is_sha256(payload["sha256"]) or payload["sha256"] != tree_digest(actual_files):
+    if not is_sha256(payload["sha256"]) or payload["sha256"] != tree_digest(
+        actual_files, "payload"
+    ):
         raise RenderError(f"artifact aggregate payload digest mismatch: {artifact_root}")
-    aggregate_included: List[Dict[str, str]] = []
-    for skill in skills:
-        skill_id = skill["id"]
-        prefix = f"skills/{skill_id}/"
-        included = [
-            {**record, "path": record["path"][len(prefix):]}
-            for record in actual_files
-            if record["path"].startswith(prefix)
-        ]
-        if skill["includedFiles"] != len(included):
-            raise RenderError(f"artifact skill {skill_id} includedFiles does not match payload")
-        if skill["includedTreeSha256"] != tree_digest(included):
-            raise RenderError(
-                f"artifact skill {skill_id} includedTreeSha256 does not match payload"
-            )
-        aggregate_included.extend(
-            {**record, "path": f"{skill_id}/{record['path']}"}
-            for record in included
-        )
-    if source["includedTreeSha256"] != tree_digest(aggregate_included):
-        raise RenderError("artifact aggregate includedTreeSha256 does not match payload")
 
     # --- source provenance against the tree that is claimed to have produced it ----
     scan = scan_selected_skills(repo_root, render_config)
-    if source["inputTreeSha256"] != tree_digest(scan.aggregate_input):
+    if actual_files != expected_payload_records(scan, expected_target):
+        raise RenderError(
+            "artifact.payload_projection",
+            "artifact payload does not equal the independently inventoried source projection",
+        )
+    if source["inputTreeSha256"] != tree_digest(scan.aggregate_input, "source.input"):
         raise RenderError(
             "artifact source inputTreeSha256 does not match the current source tree: "
             "the artifact is stale, or its recorded provenance was edited"
@@ -1273,27 +1718,10 @@ def verify_artifact(
                 f"input digest, included digest, file count, or excluded-path record differs"
             )
 
-    # --- claims against the adapter entry that authorised them --------------------
-    claims = manifest["claims"]
-    expected_claims = derived_claims(adapter)
-    if claims != expected_claims:
-        drifted = sorted(
-            key for key in expected_claims if claims.get(key) != expected_claims[key]
-        )
-        raise RenderError(
-            f"artifact claims were not derived from the adapter configuration: {drifted}"
-        )
-    if claims["targetLevel"] not in TARGET_LEVELS:
-        raise RenderError("artifact targetLevel is unknown")
-    if claims["authority"] not in AUTHORITIES:
-        raise RenderError("artifact authority is unknown")
-    if claims["validationStatus"] not in VALIDATION_STATUSES:
-        raise RenderError("artifact validationStatus is unknown")
-    if claims["earnedLevel"] != "unverified":
-        raise RenderError("renderer may emit only unverified earnedLevel")
-    require_validation_evidence(
-        claims["validationStatus"], manifest["licenses"], claims["evidence"], "artifact"
-    )
+    if source["includedTreeSha256"] != tree_digest(
+        scan.aggregate_included, "source.selected"
+    ):
+        raise RenderError("artifact selected source digest does not match the current source tree")
     skill_root = artifact_root / "skills"
     discovered = sorted(
         path.parent.name for path in skill_root.glob("*/SKILL.md") if path.is_file()
@@ -1306,7 +1734,15 @@ def verify_artifact(
             f"payload={discovered}"
         )
     for skill in discovered:
-        parse_skill_frontmatter(skill_root / skill / "SKILL.md", skill)
+        rendered = skill_root / skill / "SKILL.md"
+        parse_skill_frontmatter(rendered, skill)
+        if rendered.read_bytes() != projected_skill_bytes(
+            scan.source_root / skill / "SKILL.md", skill, expected_target
+        ):
+            raise RenderError(
+                "skill.projection_mismatch",
+                f"rendered {skill} frontmatter/body is not the target projection",
+            )
     return manifest
 
 
@@ -1318,6 +1754,7 @@ def verify_render_root(
 ) -> Dict[str, Dict[str, Any]]:
     if not output_root.is_dir():
         raise RenderError(f"rendered output directory is absent: {output_root}")
+    inspect_physical_tree(output_root, normalized=True)
     expected = sorted(render_config["targets"])
     actual = sorted(path.name for path in output_root.iterdir() if path.is_dir())
     root_files = sorted(path.name for path in output_root.iterdir() if not path.is_dir())
@@ -1327,11 +1764,16 @@ def verify_render_root(
             f"expected={expected}"
         )
     index = read_json_object(output_root / RENDER_INDEX, "render index")
+    if (output_root / RENDER_INDEX).read_bytes() != json_bytes(index):
+        raise RenderError(
+            "json.noncanonical",
+            f"render index is not canonical renderer JSON: {output_root / RENDER_INDEX}",
+        )
     conform_to_schema(index, load_schema(RENDER_INDEX_SCHEMA_FILE), "render index")
     require_exact_keys(
         index, {"$schema", "schemaVersion", "coreVersion", "targets"}, "render index"
     )
-    if index["$schema"] != RENDER_INDEX_SCHEMA or index["schemaVersion"] != 1:
+    if index["$schema"] != RENDER_INDEX_SCHEMA or index["schemaVersion"] != 2:
         raise RenderError("render index schema identity is invalid")
     if index["coreVersion"] != render_config["package"]["coreVersion"]:
         raise RenderError("render index coreVersion does not match render config")
@@ -1358,7 +1800,9 @@ def verify_render_root(
             "artifactId": manifests[target]["artifactId"],
             "packageVersion": manifests[target]["packageVersion"],
             "adapterRevision": manifests[target]["adapterRevision"],
-            "artifactSha256": tree_digest(complete_artifact_records(output_root / target)),
+            "artifactSha256": tree_digest(
+                complete_artifact_records(output_root / target), "artifact"
+            ),
             "payloadSha256": manifests[target]["payload"]["sha256"],
         }
         if entry != expected_entry:
@@ -1425,14 +1869,6 @@ def shape_preserving_variant(value: Any) -> Any:
     return "injected"
 
 
-COMPLETE_EVIDENCE = {
-    "host": "claude-code",
-    "hostVersion": "2.1.0",
-    "installedArtifactSha256": "0" * 64,
-    "scenarios": [{"id": "fresh-session-invocation", "result": "pass"}],
-}
-
-
 def load_inputs_from(
     render_config: Dict[str, Any],
     adapter_config: Dict[str, Any],
@@ -1445,25 +1881,17 @@ def load_inputs_from(
         return load_inputs(temp / "render.json", temp / "targets.json")
 
 
-def licensed(render_config: Dict[str, Any]) -> Dict[str, Any]:
-    copy = json.loads(json.dumps(render_config))
-    copy["package"]["licenses"] = ["MIT"]
-    return copy
-
-
-def claim_override(adapter_config: Dict[str, Any], target: str, **fields: Any) -> Dict[str, Any]:
-    copy = json.loads(json.dumps(adapter_config))
-    copy["targets"][target].update(fields)
-    return copy
-
-
-def snapshot_tree(root: Path) -> List[Tuple[str, str, bytes]]:
-    snapshot: List[Tuple[str, str, bytes]] = []
-    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
-        if path.is_file():
-            snapshot.append(
-                (path.relative_to(root).as_posix(), normalized_mode(path), path.read_bytes())
-            )
+def snapshot_tree(root: Path) -> List[Tuple[str, str, int, bytes]]:
+    snapshot: List[Tuple[str, str, int, bytes]] = []
+    for path in [root] + sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+        info = path.lstat()
+        relative = "." if path == root else path.relative_to(root).as_posix()
+        if stat.S_ISDIR(info.st_mode):
+            snapshot.append((relative, "d" + oct(stat.S_IMODE(info.st_mode)), info.st_mtime_ns, b""))
+        elif stat.S_ISREG(info.st_mode):
+            snapshot.append((relative, "f" + oct(stat.S_IMODE(info.st_mode)), info.st_mtime_ns, path.read_bytes()))
+        else:
+            snapshot.append((relative, "other", info.st_mtime_ns, b""))
     return snapshot
 
 
@@ -1481,6 +1909,25 @@ def selftest(
         if not predicate:
             failures += 1
 
+    def expect_code(label: str, code: str, call: Any) -> None:
+        nonlocal checks, failures
+        checks += 1
+        try:
+            call()
+        except RenderError as exc:
+            if exc.code == code:
+                print(f"  PASS {label}")
+                return
+            print(f"  FAIL {label}: code={exc.code!r} expected={code!r}")
+            failures += 1
+            return
+        except Exception as exc:
+            print(f"  FAIL {label}: wrong exception {exc!r}")
+            failures += 1
+            return
+        print(f"  FAIL {label}: no error")
+        failures += 1
+
     def expect_error(label: str, call: Any) -> None:
         nonlocal checks, failures
         checks += 1
@@ -1496,25 +1943,6 @@ def selftest(
         print(f"  FAIL {label}: no error")
         failures += 1
 
-    def expect_error_containing(label: str, expected: str, call: Any) -> None:
-        nonlocal checks, failures
-        checks += 1
-        try:
-            call()
-        except RenderError as exc:
-            if expected in str(exc):
-                print(f"  PASS {label}")
-                return
-            print(f"  FAIL {label}: wrong error {exc!r}")
-            failures += 1
-            return
-        except Exception as exc:
-            print(f"  FAIL {label}: wrong exception {exc!r}")
-            failures += 1
-            return
-        print(f"  FAIL {label}: no error")
-        failures += 1
-
     render_config, adapter_config = load_inputs(render_path, adapter_path)
     with tempfile.TemporaryDirectory(prefix="z-harness-render-selftest-") as raw_temp:
         temp = Path(raw_temp)
@@ -1522,10 +1950,16 @@ def selftest(
         second = temp / "second"
         render_all(ROOT, first, render_config, adapter_config)
         render_all(ROOT, second, render_config, adapter_config)
-        expect(
-            "same declared inputs produce byte-and-mode-identical trees",
-            snapshot_tree(first) == snapshot_tree(second),
-        )
+        expect("same inputs produce identical physical trees", snapshot_tree(first) == snapshot_tree(second))
+        expect("all file and directory mtimes are epoch", all(row[2] == 0 for row in snapshot_tree(first)))
+        expect("all rendered directories are 0755", all(
+            not row[1].startswith("d") or row[1] == "d0o755"
+            for row in snapshot_tree(first)
+        ))
+        expect("all rendered files use canonical 0644/0755 modes", all(
+            not row[1].startswith("f") or row[1] in {"f0o644", "f0o755"}
+            for row in snapshot_tree(first)
+        ))
         verified = verify_render_root(ROOT, first, render_config, adapter_config)
         expect(
             "all configured targets verify",
@@ -1548,6 +1982,22 @@ def selftest(
             "pilot target inventory is pinned to all five supported package surfaces",
             set(render_config["targets"])
             == {"agent-plugins", "codex", "claude", "kimi", "hermes"},
+        )
+        wrong_format = json.loads(json.dumps(adapter_config))
+        wrong_format["targets"]["claude"]["format"] = "agent-plugins/1.0.0"
+        expect_code(
+            "input validation rejects a target format substituted across adapters",
+            "adapter.format",
+            lambda: load_inputs_from(render_config, wrong_format),
+        )
+        extra_adapter = json.loads(json.dumps(adapter_config))
+        extra_adapter["targets"]["ghost"] = json.loads(
+            json.dumps(extra_adapter["targets"]["claude"])
+        )
+        expect_code(
+            "input validation rejects an undeclared extra adapter target",
+            "adapter.target_inventory",
+            lambda: load_inputs_from(render_config, extra_adapter),
         )
         expect(
             "every artifact discovers the real ground-claims skill",
@@ -1589,13 +2039,14 @@ def selftest(
             and not (first / "hermes/plugin.yaml").exists()
             and not (first / "hermes/__init__.py").exists(),
         )
-        expect(
-            "rendered claims cannot self-promote runtime evidence",
-            all(manifest["claims"]["earnedLevel"] == "unverified"
-                and manifest["claims"]["validationStatus"] == "fixture-only"
-                and manifest["claims"]["evidence"] == []
-                for manifest in verified.values()),
-        )
+        forbidden_fact_keys = {
+            "claims", "authority", "targetLevel", "earnedLevel", "validationStatus",
+            "evidence", "installedArtifactSha256",
+        }
+        expect("artifact manifests contain no host authority or promotion fields", all(
+            not forbidden_fact_keys.intersection(json.dumps(manifest).split('"'))
+            for manifest in verified.values()
+        ))
         expect(
             "every artifact records the exact renderer and canonical config inputs",
             all(
@@ -1622,15 +2073,37 @@ def selftest(
                 "agent-plugins plugin.json",
             ) is None,
         )
+        vendor_sources = load_vendor_sources()
         expect(
-            "the vendored schema matches the digest recorded for its upstream source",
-            sha256_bytes(AGENT_PLUGIN_SCHEMA_FILE.read_bytes())
-            == next(
-                entry["sha256"]
-                for entry in read_json_object(
-                    VENDORED_SCHEMAS / "SOURCES.json", "vendored sources"
-                )["sources"]
-                if entry["file"] == AGENT_PLUGIN_SCHEMA_FILE.name
+            "vendored schema provenance has one internally consistent pinned source",
+            [entry["file"] for entry in vendor_sources]
+            == [AGENT_PLUGIN_SCHEMA_FILE.name],
+        )
+        vendor_fixture = temp / "vendor-provenance"
+        vendor_fixture.mkdir(parents=True)
+        shutil.copy2(AGENT_PLUGIN_SCHEMA_FILE, vendor_fixture / AGENT_PLUGIN_SCHEMA_FILE.name)
+        contradictory_sources = read_json_object(
+            VENDOR_SOURCES_FILE, "vendored source fixture"
+        )
+        contradictory_sources["sources"][0]["revision"] = (
+            "a" + contradictory_sources["sources"][0]["revision"][1:]
+        )
+        write_json(vendor_fixture / "SOURCES.json", contradictory_sources)
+        expect_code(
+            "vendored source provenance rejects a revision and raw-URL contradiction",
+            "vendor.source_url",
+            lambda: load_vendor_sources(vendor_fixture / "SOURCES.json"),
+        )
+        invalid_date_sources = read_json_object(
+            VENDOR_SOURCES_FILE, "vendored source invalid-date fixture"
+        )
+        invalid_date_sources["sources"][0]["retrieved"] = "2026-99-99"
+        write_json(vendor_fixture / "invalid-date-SOURCES.json", invalid_date_sources)
+        expect_code(
+            "vendored source provenance rejects an impossible calendar date",
+            "vendor.source_identity",
+            lambda: load_vendor_sources(
+                vendor_fixture / "invalid-date-SOURCES.json"
             ),
         )
         index = read_json_object(first / RENDER_INDEX, "render index")
@@ -1638,35 +2111,64 @@ def selftest(
             "render index binds each complete artifact including its manifest",
             all(
                 index["targets"][target]["artifactSha256"]
-                == tree_digest(complete_artifact_records(first / target))
+                == tree_digest(complete_artifact_records(first / target), "artifact")
                 for target in render_config["targets"]
             ),
         )
-        split_adapters = json.loads(json.dumps(adapter_config))
-        split_adapters["targets"]["codex"]["packageVersion"] = "0.4.0-alpha.2"
-        split_output = temp / "split-version"
-        split_results = render_all(ROOT, split_output, render_config, split_adapters)
-        split_index = read_json_object(split_output / RENDER_INDEX, "split render index")
-        expect(
-            "target package versions can advance without changing the core version",
-            split_results["codex"]["packageVersion"] == "0.4.0-alpha.2"
-            and split_results["agent-plugins"]["packageVersion"] == "0.4.0-alpha.1"
-            and split_results["codex"]["coreVersion"]
-            == split_results["agent-plugins"]["coreVersion"],
-        )
-        expect(
-            "target-only manifest version changes only that target's payload and artifact",
-            split_index["targets"]["codex"]["artifactSha256"]
-            != index["targets"]["codex"]["artifactSha256"]
-            and split_index["targets"]["codex"]["payloadSha256"]
-            != index["targets"]["codex"]["payloadSha256"]
-            and split_index["targets"]["agent-plugins"]["artifactSha256"]
-            == index["targets"]["agent-plugins"]["artifactSha256"],
-        )
-        expect_error(
+        expect_code(
             "renderer refuses to overwrite an existing output root",
+            "output.exists",
             lambda: render_all(ROOT, second, render_config, adapter_config),
         )
+
+        broken_output = temp / "broken-output"
+        broken_output.symlink_to(temp / "absent-target", target_is_directory=True)
+        expect_code(
+            "lexists rejects a broken output symlink",
+            "output.exists",
+            lambda: render_all(ROOT, broken_output, render_config, adapter_config),
+        )
+
+        projection = read_json_object(PROJECTION_GOLDEN, "projection golden")
+        canonical = parse_skill_document(ROOT / "skills/ground-claims/SKILL.md", "ground-claims")
+        expect("projection golden binds canonical body bytes", sha256_bytes(canonical.body) == projection["canonicalBodySha256"])
+        for target in render_config["targets"]:
+            rendered_skill = first / target / "skills/ground-claims/SKILL.md"
+            raw = rendered_skill.read_bytes()
+            closing = raw.find(b"\n---\n", 4)
+            frontmatter = raw[:closing + 5].decode("utf-8")
+            expected_frontmatter = projection[
+                "claudeFrontmatter" if target == "claude" else "portableFrontmatter"
+            ]
+            expect(f"{target} frontmatter equals its byte golden", frontmatter == expected_frontmatter)
+            expect(f"{target} body is byte-identical to canonical", raw[closing + 5:] == canonical.body)
+            expect(f"{target} omits allowed-tools", b"allowed-tools:" not in raw[:closing + 5])
+        expect("only Claude retains argument-hint", all(
+            ((b"argument-hint:" in (first / target / "skills/ground-claims/SKILL.md").read_bytes()) == (target == "claude"))
+            for target in render_config["targets"]
+        ))
+        reference_bytes = {
+            (first / target / "skills/ground-claims/references/evidence-method.md").read_bytes()
+            for target in render_config["targets"]
+        }
+        expect("included references are byte-identical across targets", len(reference_bytes) == 1)
+        native_goldens = golden_native_manifests()
+        for target, path in EXPECTED_MANIFEST_PATHS.items():
+            if path is None:
+                expect("Hermes has an explicit no-native-manifest golden", native_goldens[target] is None)
+            else:
+                expect(f"{target} native manifest bytes equal the hand-authored golden", (first / target / path).read_bytes() == json_bytes(native_goldens[target]))
+
+        digest_goldens = read_json_object(DIGEST_GOLDEN, "digest golden")
+        expect("canonical JSON digest equals independent fixed golden", canonical_json_digest(
+            digest_goldens["canonicalJson"]["value"], digest_goldens["canonicalJson"]["domain"]
+        ) == digest_goldens["canonicalJson"]["expected"])
+        expect("tree digest equals independent fixed golden", tree_digest(
+            digest_goldens["tree"]["records"], digest_goldens["tree"]["domain"]
+        ) == digest_goldens["tree"]["expected"])
+        expect("digest domains cannot be re-aimed", tree_digest(
+            digest_goldens["tree"]["records"], "golden.tree.other"
+        ) != digest_goldens["tree"]["expected"])
 
         fixture_root = temp / "fixture-repo"
         (fixture_root / "skills").mkdir(parents=True)
@@ -1718,13 +2220,11 @@ def selftest(
             contract.read_text(encoding="utf-8").replace("\nmutation\n", ""), encoding="utf-8"
         )
 
-        # Every manifest field is recomputed at verification, so plant a defect in each
-        # one. A guard proved on a single field says nothing about its four neighbours.
         tamper_base = temp / "tamper-base"
         render_all(fixture_root, tamper_base, render_config, adapter_config)
         case_index = 0
 
-        def planted(label: str, target: str, mutate: Any, contains: str = "") -> None:
+        def planted(label: str, target: str, mutate: Any, code: Optional[str] = None) -> None:
             nonlocal case_index
             case_index += 1
             case_root = temp / f"tamper-{case_index:02d}"
@@ -1733,8 +2233,8 @@ def selftest(
             call = lambda: verify_artifact(  # noqa: E731
                 fixture_root, case_root, target, render_config, adapter_config
             )
-            if contains:
-                expect_error_containing(label, contains, call)
+            if code:
+                expect_code(label, code, call)
             else:
                 expect_error(label, call)
 
@@ -1767,41 +2267,19 @@ def selftest(
             "kimi verification rejects competing native manifest locations",
             "kimi",
             lambda root: write_json(root / ".kimi-plugin/plugin.json", {"name": "shadow"}),
-            "manifest isolation failed",
+            "render.invalid",
         )
         planted(
             "hermes tap verification rejects executable plugin conversion",
             "hermes",
             lambda root: write_bytes(root / "plugin.yaml", b"name: executable-shadow\n"),
-            "manifest isolation failed",
+            "render.invalid",
         )
-        for field, value in (
-            ("earnedLevel", "governed-parity"),
-            ("targetLevel", "governed-parity"),
-            ("authority", "host-enforced"),
-            ("validationStatus", "promoted"),
-        ):
-            planted(
-                f"verification rejects a self-promoted claims.{field}",
-                "agent-plugins",
-                edit_manifest(lambda m, f=field, v=value: m["claims"].__setitem__(f, v)),
-            )
-        planted(
-            "verification rejects host evidence a fixture-only artifact cannot have",
-            "agent-plugins",
-            edit_manifest(lambda m: m["claims"].__setitem__("evidence", [{
-                "host": "claude-code",
-                "hostVersion": "2.1.0",
-                "installedArtifactSha256": "0" * 64,
-                "scenarios": [{"id": "fresh-session", "result": "pass"}],
-            }])),
-        )
-        for field in ("rendererSha256", "renderConfigSha256", "adapterConfigSha256"):
+        for field in ("rendererSha256", "contractsSha256", "renderConfigSha256", "adapterConfigSha256"):
             planted(
                 f"verification rejects a substituted build.{field}",
                 "codex",
                 edit_manifest(lambda m, f=field: m["build"].__setitem__(f, "a" * 64)),
-                "not produced by this renderer",
             )
         planted(
             "verification rejects a substituted build.rendererVersion",
@@ -1819,7 +2297,6 @@ def selftest(
                 f"verification rejects a manifest {field} the configuration did not authorise",
                 "codex",
                 edit_manifest(lambda m, f=field, v=value: m.__setitem__(f, v)),
-                "does not match the render inputs",
             )
         planted(
             "verification binds included-source provenance to payload bytes",
@@ -1834,7 +2311,6 @@ def selftest(
             edit_manifest(
                 lambda m: m["source"].__setitem__("inputTreeSha256", "0" * 64)
             ),
-            "does not match the current source tree",
         )
         planted(
             "verification rejects an emptied excluded-path record",
@@ -1842,18 +2318,8 @@ def selftest(
             edit_manifest(
                 lambda m: m["source"]["skills"][0].__setitem__("excludedPaths", [])
             ),
-            "provenance does not match the source tree",
         )
 
-        # Hand-picked cases only cover the fields someone thought of. This sweep is
-        # generated from the rendered documents, so a field added later is swept without
-        # anyone remembering to add a case.
-        #
-        # It proves coverage, not attribution: a leaf can be rejected by some check other
-        # than the one meant to bind it, and removing a binding can leave the sweep green
-        # because a redundant mechanism catches the same mutation. The cases above assert
-        # the error text, which is what pins each rejection to its intended guard. Both
-        # layers are needed and neither substitutes for the other.
         base_manifest = read_json_object(
             tamper_base / f"claude/{ARTIFACT_MANIFEST}", "sweep manifest"
         )
@@ -1902,8 +2368,6 @@ def selftest(
             bool(index_paths) and not index_survivors,
         )
 
-        # A generated mutator only produces shape-invalid values, so structural claims
-        # that are individually well-formed need their own cases.
         planted(
             "verification rejects a well-formed but undeclared upstream lock",
             "codex",
@@ -1913,7 +2377,6 @@ def selftest(
                 "sha256": "b" * 64,
                 "licenses": ["Apache-2.0"],
             })),
-            "upstream locks no render input declares",
         )
         planted(
             "verification rejects a well-formed but absent extra skill record",
@@ -1926,12 +2389,268 @@ def selftest(
                 "excludedPaths": [],
             })),
         )
+
+        planted(
+            "verification rejects a well-formed authority claim injected into immutable facts",
+            "codex",
+            edit_manifest(lambda m: m.__setitem__("authority", "instruction-only")),
+        )
+
+        index_injection = temp / "index-injection"
+        shutil.copytree(tamper_base, index_injection)
+        injected_index = read_json_object(index_injection / RENDER_INDEX, "injected index")
+        injected_index["targets"]["ghost"] = json.loads(json.dumps(next(iter(injected_index["targets"].values()))))
+        write_json(index_injection / RENDER_INDEX, injected_index)
+        normalize_physical_tree(index_injection)
+        expect_error("verification rejects a well-formed extra index target", lambda: verify_render_root(
+            fixture_root, index_injection, render_config, adapter_config
+        ))
+
+        duplicate_index = temp / "duplicate-index-key"
+        shutil.copytree(tamper_base, duplicate_index)
+        duplicate_index_path = duplicate_index / RENDER_INDEX
+        duplicate_index_path.write_bytes(
+            duplicate_index_path.read_bytes().replace(
+                b'  "schemaVersion": 2,\n',
+                b'  "schemaVersion": 999,\n  "schemaVersion": 2,\n',
+                1,
+            )
+        )
+        normalize_physical_tree(duplicate_index)
+        expect_code(
+            "public verification rejects a duplicate top-level JSON key",
+            "json.duplicate_key",
+            lambda: verify_render_root(
+                fixture_root, duplicate_index, render_config, adapter_config
+            ),
+        )
+
+        duplicate_nested = temp / "duplicate-nested-key"
+        shutil.copytree(tamper_base, duplicate_nested)
+        duplicate_manifest_path = duplicate_nested / f"codex/{ARTIFACT_MANIFEST}"
+        duplicate_manifest_path.write_bytes(
+            duplicate_manifest_path.read_bytes().replace(
+                b'    "renderer": "z-harness/render-packages",\n',
+                b'    "renderer": "shadow/renderer",\n'
+                b'    "renderer": "z-harness/render-packages",\n',
+                1,
+            )
+        )
+        normalize_physical_tree(duplicate_nested)
+        expect_code(
+            "public verification rejects a duplicate nested JSON key",
+            "json.duplicate_key",
+            lambda: verify_render_root(
+                fixture_root, duplicate_nested, render_config, adapter_config
+            ),
+        )
+        nonfinite_json = temp / "nonfinite.json"
+        nonfinite_json.write_text('{"value": NaN}\n', encoding="utf-8")
+        expect_code(
+            "JSON reader rejects non-finite numeric constants",
+            "json.nonfinite",
+            lambda: read_json_object(nonfinite_json, "non-finite fixture"),
+        )
+        try:
+            json_bytes({"value": float("nan")})
+            nonfinite_writer_rejected = False
+        except ValueError:
+            nonfinite_writer_rejected = True
+        expect(
+            "canonical JSON writer rejects non-finite numeric values",
+            nonfinite_writer_rejected,
+        )
+
+        noncanonical_index = temp / "noncanonical-index"
+        shutil.copytree(tamper_base, noncanonical_index)
+        noncanonical_index_path = noncanonical_index / RENDER_INDEX
+        noncanonical_index_path.write_bytes(noncanonical_index_path.read_bytes() + b"\n")
+        normalize_physical_tree(noncanonical_index)
+        expect_code(
+            "public verification rejects semantically equal noncanonical index bytes",
+            "json.noncanonical",
+            lambda: verify_render_root(
+                fixture_root, noncanonical_index, render_config, adapter_config
+            ),
+        )
+
+        noncanonical_artifact = temp / "noncanonical-artifact"
+        shutil.copytree(tamper_base, noncanonical_artifact)
+        noncanonical_artifact_path = noncanonical_artifact / f"codex/{ARTIFACT_MANIFEST}"
+        noncanonical_artifact_path.write_bytes(
+            noncanonical_artifact_path.read_bytes() + b"\n"
+        )
+        rethreaded_index = read_json_object(
+            noncanonical_artifact / RENDER_INDEX, "rethreaded index"
+        )
+        rethreaded_index["targets"]["codex"]["artifactSha256"] = tree_digest(
+            complete_artifact_records(noncanonical_artifact / "codex"), "artifact"
+        )
+        write_json(noncanonical_artifact / RENDER_INDEX, rethreaded_index)
+        normalize_physical_tree(noncanonical_artifact)
+        expect_code(
+            "public verification rejects a rethreaded noncanonical artifact manifest",
+            "json.noncanonical",
+            lambda: verify_render_root(
+                fixture_root, noncanonical_artifact, render_config, adapter_config
+            ),
+        )
+
+        rethreaded_payload = temp / "rethreaded-payload"
+        shutil.copytree(tamper_base, rethreaded_payload)
+        rethreaded_reference = (
+            rethreaded_payload
+            / "codex/skills/ground-claims/references/evidence-method.md"
+        )
+        rethreaded_reference.write_bytes(
+            rethreaded_reference.read_bytes() + b"\ncoherently rethreaded tamper\n"
+        )
+        rethreaded_manifest_path = rethreaded_payload / f"codex/{ARTIFACT_MANIFEST}"
+        rethreaded_manifest = read_json_object(
+            rethreaded_manifest_path, "rethreaded artifact manifest"
+        )
+        rethreaded_records = payload_records(rethreaded_payload / "codex")
+        rethreaded_manifest["payload"] = {
+            "sha256": tree_digest(rethreaded_records, "payload"),
+            "files": rethreaded_records,
+        }
+        write_json(rethreaded_manifest_path, rethreaded_manifest)
+        rethreaded_payload_index = read_json_object(
+            rethreaded_payload / RENDER_INDEX, "rethreaded payload index"
+        )
+        rethreaded_payload_index["targets"]["codex"]["payloadSha256"] = (
+            rethreaded_manifest["payload"]["sha256"]
+        )
+        rethreaded_payload_index["targets"]["codex"]["artifactSha256"] = tree_digest(
+            complete_artifact_records(rethreaded_payload / "codex"), "artifact"
+        )
+        write_json(rethreaded_payload / RENDER_INDEX, rethreaded_payload_index)
+        normalize_physical_tree(rethreaded_payload)
+        expect_code(
+            "public verification rejects coherently rethreaded projected support-file bytes",
+            "artifact.payload_projection",
+            lambda: verify_render_root(
+                fixture_root, rethreaded_payload, render_config, adapter_config
+            ),
+        )
+
+        physical_cases: List[Tuple[str, str, Any]] = [
+            ("empty directory", "tree.empty_directory", lambda root: (root / "codex/EMPTY").mkdir()),
+            ("symlink", "tree.symlink", lambda root: (root / "codex/link").symlink_to("skills")),
+            ("hardlink", "tree.hardlink", lambda root: os.link(root / "codex/skills/ground-claims/SKILL.md", root / "codex/HARDLINK")),
+            ("file mode drift", "tree.file_profile", lambda root: (root / "codex/skills/ground-claims/SKILL.md").chmod(0o600)),
+            ("directory mode drift", "tree.directory_profile", lambda root: (root / "codex/skills").chmod(0o700)),
+            ("file mtime drift", "tree.file_profile", lambda root: os.utime(root / "codex/skills/ground-claims/SKILL.md", ns=(1, 1))),
+            ("directory mtime drift", "tree.directory_profile", lambda root: os.utime(root / "codex/skills", ns=(1, 1))),
+        ]
+        for position, (label, code, mutate) in enumerate(physical_cases):
+            case_root = temp / f"physical-{position:02d}"
+            shutil.copytree(tamper_base, case_root)
+            mutate(case_root)
+            expect_code(f"physical verification rejects {label}", code, lambda root=case_root: verify_render_root(
+                fixture_root, root, render_config, adapter_config
+            ))
+
+        fifo_root = temp / "physical-fifo"
+        shutil.copytree(tamper_base, fifo_root)
+        os.mkfifo(fifo_root / "codex/FIFO")
+        expect_code("physical verification rejects a FIFO", "tree.non_regular", lambda: verify_render_root(
+            fixture_root, fifo_root, render_config, adapter_config
+        ))
+        expect_code(
+            "portable path preflight rejects a casefold alias even on a case-insensitive host",
+            "tree.path_alias",
+            lambda: verify_path_aliases(["README", "readme"]),
+        )
+        expect_code(
+            "portable path preflight rejects a standalone non-NFC path",
+            "tree.path_nonportable",
+            lambda: portable_path_key("re\u0301ference.md"),
+        )
+        for forbidden_character in '<>"|?*':
+            expect_code(
+                f"portable path preflight rejects Windows-forbidden {forbidden_character!r}",
+                "tree.path_nonportable",
+                lambda character=forbidden_character: portable_path_key(
+                    f"references/bad{character}.md"
+                ),
+            )
+        for reserved_name in ("COM\u00b9.txt", "LPT\u00b2.doc", "CONIN$", "AUX  .txt"):
+            expect_code(
+                f"portable path preflight rejects Windows device alias {reserved_name!r}",
+                "tree.path_nonportable",
+                lambda name=reserved_name: portable_path_key(
+                    f"references/{name}"
+                ),
+            )
+        forbidden_source = fixture_root / "skills/ground-claims/references/bad?.md"
+        def render_forbidden_source() -> None:
+            forbidden_source.write_text("forbidden path fixture\n", encoding="utf-8")
+            try:
+                render_all(
+                    fixture_root,
+                    temp / "forbidden-path-render",
+                    render_config,
+                    adapter_config,
+                )
+            finally:
+                forbidden_source.unlink(missing_ok=True)
+        expect_code(
+            "production render rejects a Windows-forbidden included source path",
+            "tree.path_nonportable",
+            render_forbidden_source,
+        )
+        reserved_source = fixture_root / "skills/ground-claims/references/AUX  .txt"
+        def render_reserved_source() -> None:
+            reserved_source.write_text("reserved path fixture\n", encoding="utf-8")
+            try:
+                render_all(
+                    fixture_root,
+                    temp / "reserved-path-render",
+                    render_config,
+                    adapter_config,
+                )
+            finally:
+                reserved_source.unlink(missing_ok=True)
+        expect_code(
+            "production render rejects an extended Windows device alias",
+            "tree.path_nonportable",
+            render_reserved_source,
+        )
+        nfd_root = temp / "physical-nfd"
+        shutil.copytree(tamper_base, nfd_root)
+        nfd_file = nfd_root / "codex/re\u0301ference.md"
+        write_bytes(nfd_file, b"non-NFC\n")
+        os.utime(nfd_file.parent, ns=(0, 0))
+        expect_code(
+            "public physical verification rejects a standalone non-NFC filename",
+            "tree.path_nonportable",
+            lambda: verify_render_root(
+                fixture_root, nfd_root, render_config, adapter_config
+            ),
+        )
+        original_alias_verifier = globals()["verify_path_aliases"]
+        def planted_alias_verifier(_paths: Sequence[str]) -> None:
+            raise RenderError(
+                "selftest.path_alias_callsite",
+                "planted physical-scanner alias verifier",
+            )
+        globals()["verify_path_aliases"] = planted_alias_verifier
+        try:
+            expect_code(
+                "physical scanner invokes the path-alias verifier call site",
+                "selftest.path_alias_callsite",
+                lambda: inspect_physical_tree(tamper_base, normalized=True),
+            )
+        finally:
+            globals()["verify_path_aliases"] = original_alias_verifier
         planted(
             "verification rejects a well-formed but absent extra payload record",
             "codex",
             edit_manifest(lambda m: m["payload"]["files"].append({
                 "path": "skills/ground-claims/GHOST.md",
                 "mode": "0644",
+                "size": 0,
                 "sha256": "e" * 64,
             })),
         )
@@ -1950,9 +2669,7 @@ def selftest(
         )
         skill_manifest.write_text(original_skill, encoding="utf-8")
 
-        # The frontmatter reader has no YAML parser, so every form it cannot decode has to
-        # fail by name. Mis-decoding "description: >-" as the 2-character string ">-" would
-        # otherwise satisfy the Agent Skills 1-1024 length rule.
+        # The frontmatter reader has no YAML parser, so every form it cannot decode fails.
         for leader, shape in ((">-", "folded block"), ("|", "literal block"), ("&a", "anchor")):
             skill_manifest.write_text(
                 original_skill.replace(
@@ -1960,67 +2677,98 @@ def selftest(
                 ),
                 encoding="utf-8",
             )
-            expect_error_containing(
+            expect_error(
                 f"renderer refuses a {shape} scalar instead of mis-decoding it",
-                "YAML syntax this reader does not decode",
                 lambda: render_all(
                     fixture_root, temp / f"yaml-{shape.split()[0]}", render_config, adapter_config
                 ),
             )
         skill_manifest.write_text(original_skill, encoding="utf-8")
 
-        expect_error_containing(
-            "a status above fixture-only without host evidence is refused at input",
-            "requires host evidence records",
-            lambda: load_inputs_from(
-                render_config,
-                claim_override(adapter_config, "claude", validationStatus="promoted"),
-            ),
+        for position, (code, construct) in enumerate((
+            ("skill.body.arguments", "$ARGUMENTS"),
+            ("skill.body.claude_variable", "${CLAUDE_SKILL_DIR}"),
+            ("skill.body.claude_variable", "${CLAUDE_SESSION_ID}"),
+            ("skill.body.claude_variable", "${CLAUDE_PLUGIN_ROOT}"),
+            ("skill.body.claude_variable", "${CLAUDE_EFFORT}"),
+            ("skill.body.dynamic_command", "!`date`"),
+            ("skill.body.dynamic_command", "- PR diff: !`gh pr diff`"),
+            ("skill.body.frontmatter_directive", "model: sonnet"),
+            ("skill.body.ultrathink", "ultrathink"),
+        )):
+            isolated = temp / f"host-body-{position}"
+            shutil.copytree(ROOT / "skills/ground-claims", isolated / "skills/ground-claims")
+            path = isolated / "skills/ground-claims/SKILL.md"
+            path.write_text(path.read_text(encoding="utf-8") + f"\n{construct}\n", encoding="utf-8")
+            expect_code(f"projection refuses host body construct {construct}", code, lambda path=path: parse_skill_document(path, "ground-claims"))
+
+        near_miss_host_body = temp / "host-body-near-miss.md"
+        near_miss_host_body.write_text(
+            original_skill + "\n$CLAUDEX_PLUGIN_ROOT\n", encoding="utf-8"
         )
-        expect_error_containing(
-            "host evidence without a license set cannot support a promoted status",
-            "requires a non-empty license set",
-            lambda: load_inputs_from(
-                render_config,
-                claim_override(
-                    adapter_config, "claude", validationStatus="promoted",
-                    evidence=[COMPLETE_EVIDENCE],
-                ),
-            ),
+        try:
+            parse_skill_document(near_miss_host_body, "ground-claims")
+            near_miss_ok = True
+        except RenderError:
+            near_miss_ok = False
+        expect("host-variable detector permits a non-Claude namespace near miss", near_miss_ok)
+
+        image_near_miss = temp / "host-body-image-near-miss.md"
+        image_near_miss.write_text(
+            original_skill + "\n![portable image](assets/example.png)\n",
+            encoding="utf-8",
         )
-        expect_error_containing(
-            "a failed scenario cannot support a promoted status",
-            "does not support a 'promoted' status",
-            lambda: load_inputs_from(
-                licensed(render_config),
-                claim_override(
-                    adapter_config, "claude", validationStatus="promoted",
-                    evidence=[{**COMPLETE_EVIDENCE,
-                               "scenarios": [{"id": "fresh-session", "result": "fail"}]}],
-                ),
-            ),
+        try:
+            parse_skill_document(image_near_miss, "ground-claims")
+            image_near_miss_ok = True
+        except RenderError:
+            image_near_miss_ok = False
+        expect("dynamic-command detector permits a portable Markdown image", image_near_miss_ok)
+
+        expect_code(
+            "frontmatter reader rejects a plain scalar YAML comment",
+            "skill.frontmatter_ambiguous_plain_scalar",
+            lambda: decode_scalar("visible # hidden comment", "probe"),
         )
-        expect_error_containing(
-            "a fixture-only adapter cannot carry host evidence",
-            "fixture-only must record no host evidence",
-            lambda: load_inputs_from(
-                licensed(render_config),
-                claim_override(adapter_config, "claude", evidence=[COMPLETE_EVIDENCE]),
-            ),
+        expect_code(
+            "frontmatter reader rejects a plain scalar YAML implicit type",
+            "skill.frontmatter_ambiguous_plain_scalar",
+            lambda: decode_scalar("true", "probe"),
         )
         expect(
-            "complete evidence plus a license set is accepted, so the gate is not vacuous",
-            load_inputs_from(
-                licensed(render_config),
-                claim_override(
-                    adapter_config, "claude", validationStatus="promoted",
-                    evidence=[COMPLETE_EVIDENCE],
-                ),
-            ) is not None,
+            "frontmatter reader preserves a quoted comment marker literally",
+            decode_scalar('"visible # literal"', "probe") == "visible # literal",
         )
-        expect_error_containing(
+        yaml_leader_cases = ("- item", "? key", "@host", "`code`", "]", "}", ",")
+        for value in yaml_leader_cases:
+            expect_error(
+                f"frontmatter reader rejects YAML indicator plain scalar {value!r}",
+                lambda value=value: decode_scalar(value, "probe"),
+            )
+        expect(
+            "frontmatter reader preserves YAML indicators when quoted",
+            all(
+                decode_scalar(json.dumps(value), "probe") == value
+                for value in yaml_leader_cases
+            ),
+        )
+        for value in ("'foo' junk'", "'foo'bar'"):
+            expect_error(
+                f"frontmatter reader rejects unpaired quote in {value!r}",
+                lambda value=value: decode_scalar(value, "probe"),
+            )
+        expect(
+            "frontmatter reader decodes paired YAML single quotes literally",
+            decode_scalar("'it''s literal # text'", "probe")
+            == "it's literal # text",
+        )
+
+        unknown_frontmatter = temp / "unknown-frontmatter.md"
+        unknown_frontmatter.write_text(original_skill.replace("metadata:\n", "invented-host-key: yes\nmetadata:\n", 1), encoding="utf-8")
+        expect_code("projection refuses an unknown target extension", "skill.frontmatter_unknown", lambda: parse_skill_document(unknown_frontmatter, "ground-claims"))
+
+        expect_error(
             "the schema reader refuses a keyword it cannot evaluate",
-            "unsupported keywords",
             lambda: conform_to_schema(1, {"type": "integer", "multipleOf": 2}, "probe"),
         )
         # Every keyword the reader claims to support must reject a violating value. A
@@ -2055,9 +2803,8 @@ def selftest(
                 f"schema keyword {keyword} rejects a violating value",
                 lambda s=schema_fragment, v=bad_value: conform_to_schema(v, s, "probe"),
             )
-        expect_error_containing(
+        expect_error(
             "the schema reader enforces the vendored Agent Plugins name limit",
-            "exceeds maxLength",
             lambda: conform_to_schema(
                 {"$schema": AGENT_PLUGIN_SCHEMA, "name": "z-" + "a" * 70},
                 load_schema(AGENT_PLUGIN_SCHEMA_FILE),
@@ -2086,8 +2833,34 @@ def selftest(
             lambda: render_all(fixture_root, temp / "symlink", render_config, adapter_config),
         )
 
+        domains: List[str] = []
+        original_tree_digest = globals()["tree_digest"]
+        def recording_tree_digest(records: Sequence[Dict[str, Any]], domain: str) -> str:
+            domains.append(domain)
+            return original_tree_digest(records, domain)
+        globals()["tree_digest"] = recording_tree_digest
+        try:
+            render_all(ROOT, temp / "domain-callsite", render_config, adapter_config)
+        finally:
+            globals()["tree_digest"] = original_tree_digest
+        required_domains = {"build.contracts", "source.input", "source.selected", "payload", "artifact"}
+        expect("production call sites exercise every required digest domain", required_domains <= set(domains))
+
+        original_verify_root = globals()["verify_render_root"]
+        def planted_stage_verify(*_args: Any, **_kwargs: Any) -> Any:
+            raise RenderError("selftest.staging_verify", "planted staging verifier")
+        globals()["verify_render_root"] = planted_stage_verify
+        staged_output = temp / "staging-callsite"
+        try:
+            expect_code("render_all invokes full staging-root verification before exposure", "selftest.staging_verify", lambda: render_all(
+                ROOT, staged_output, render_config, adapter_config
+            ))
+        finally:
+            globals()["verify_render_root"] = original_verify_root
+        expect("failed staging verification exposes no output root", not os.path.lexists(staged_output))
+
     print(f"\n  selftest: {failures} failure(s)")
-    print(f"SELFTEST-SUMMARY checks={checks} failures={failures}")
+    print(f"SELFTEST-SUMMARY suite=render-packages checks={checks} failures={failures}")
     return 1 if failures else 0
 
 
@@ -2105,6 +2878,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str]) -> int:
     args = build_parser().parse_args(argv[1:])
+    action = "selftest" if args.selftest else ("render" if args.output is not None else "verify")
     try:
         if args.selftest:
             return selftest(args.config, args.adapters)
@@ -2117,6 +2891,7 @@ def main(argv: Sequence[str]) -> int:
                     f"{target} artifact_sha256={index['targets'][target]['artifactSha256']} "
                     f"payload_sha256={results[target]['payload']['sha256']}"
                 )
+            print(f"RENDER-SUMMARY action=render targets={len(results)} failures=0 exit=0")
             return 0
         results = verify_render_root(ROOT, args.verify, render_config, adapter_config)
         index = read_json_object(args.verify / RENDER_INDEX, "render index")
@@ -2125,9 +2900,13 @@ def main(argv: Sequence[str]) -> int:
                 f"{target} artifact_sha256={index['targets'][target]['artifactSha256']} "
                 f"payload_sha256={results[target]['payload']['sha256']}"
             )
+        print(f"RENDER-SUMMARY action=verify targets={len(results)} failures=0 exit=0")
         return 0
     except RenderError as exc:
         sys.stderr.write(f"render-packages: {exc}\n")
+        print(
+            f"RENDER-SUMMARY action={action} targets=0 failures=1 exit=1 code={exc.code}"
+        )
         return 1
 
 

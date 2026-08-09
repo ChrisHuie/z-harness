@@ -16,8 +16,8 @@ authority.
 
 ## Cross-harness render pilot
 
-Render into a new disposable directory, then verify the exact bytes and modes recorded in each
-artifact manifest:
+Render into a new disposable directory, then verify the logical file identities and the renderer's
+strict physical-output profile:
 
 ```text
 python3 tools/render-packages.py --output /tmp/z-harness-render
@@ -34,26 +34,31 @@ The output contains five physically isolated package roots:
 | `kimi/` | Kimi Code native skills-only | `kimi.plugin.json` |
 | `hermes/` | Hermes Agent GitHub skill tap | no native manifest; `skills/` is the tap root |
 
-`release/render.json` selects source skills and package metadata.
-`adapters/targets.json` declares target format, adapter revision, target compatibility level, and
-evidence status. Every target writes `z-harness-artifact.json`, whose inventory and digest exclude
-the manifest itself to avoid a self-referential hash and whose build record binds the renderer and
-canonicalized configuration inputs. The non-installable parent
-`render-index.json` hashes every complete target directory, including its artifact manifest.
+`release/render.json` selects source skills and package metadata. `adapters/targets.json` declares
+only immutable render policy: target format, package version, manifest path, and adapter revision.
+Every target writes `z-harness-artifact.json`; its payload inventory excludes that manifest to avoid
+a self-reference, while the non-installable parent `render-index.json` records a domain-separated
+digest of every complete target directory, including its artifact manifest.
 
-`--verify` recomputes every manifest value rather than checking its shape. It validates the manifest
-and index against the committed schemas in `contracts/`, validates the portable manifest against the
-vendored Agent Plugins 1.0.0 schema in `contracts/vendor/`, re-derives the build record and claims
-from the render config and adapter entry, and re-reads the source tree to confirm the recorded source
-digests. An artifact whose configuration, renderer, or source has moved fails, which is the point:
-that artifact is stale.
+`--verify` validates the manifests against committed schemas, compares native manifests with
+hand-authored goldens, re-projects the selected source into the expected target payload, and
+recomputes every immutable build, source, payload, and complete-artifact value. It also rejects
+unknown physical entries before reading a manifest. An artifact whose configuration, renderer,
+closed render schema/golden set, or selected source has moved fails as stale. Compatibility prose,
+the network-conformance lock, and vendored-source metadata are CI/review inputs rather than artifact
+digest inputs.
 
 The renderer does not read Git state, clocks, environment variables, networks, runtime homes, or
-installed harness settings. It refuses existing output paths, source symlinks, empty skill sets,
-skill name/directory mismatches, frontmatter syntax it cannot decode, packages containing competing
-target manifests, and any compatibility status whose evidence is absent. See
-[`contracts/compatibility-levels.md`](contracts/compatibility-levels.md) for the compatibility and
-authority vocabulary.
+installed harness settings. It refuses existing output paths, source or output symlinks, hardlinks,
+special files, empty directories, non-portable path aliases, empty skill sets, skill name/directory
+mismatches, unclassified host-specific constructs, and competing target manifests. Renderer-owned
+output files are exactly `0644` or `0755`; directories are `0755`; all mtimes are the Unix epoch.
+Ownership, ACLs, xattrs, birth times, and Git-clone directory metadata are outside this profile.
+
+Canonical `argument-hint` metadata is retained only in the Claude projection. `allowed-tools` is
+omitted from every rendered target because hosts do not give it one portable authority meaning.
+Rendered artifacts contain no validation status, earned compatibility, or runtime evidence. See
+[`contracts/compatibility-levels.md`](contracts/compatibility-levels.md) for that separation.
 
 ## Install in Codex
 
@@ -137,14 +142,27 @@ python3 tools/pr-delivery-state.py --selftest
 python3 tools/run-skill-evals.py --selftest
 python3 tools/run-skill-evals.py --validate
 python3 tools/render-packages.py --selftest
+python3 tools/ci-gate.py --selftest
+python3 tools/ci-gate.py
 ```
 
-CI runs `python3 hooks/harness_check.py --ci` on every push and pull request. Local mode adds
-machine-specific Claude anchors. `--selftest` plants defects and proves each check family can turn
-red; a zero-input scan is an error, not a clean verdict. C1 also requires each aggregated suite to
-finish with exactly one `SELFTEST-SUMMARY` receipt, so an early exit 0 cannot impersonate a complete
-test run. It also fails when a script exposing `--selftest` is neither aggregated nor explicitly
-classified as a component/meta-suite.
+`python3 tools/ci-gate.py` is the offline CI-equivalent entry point. It runs the ordinary gate, its
+meta-selftest, the renderer and guard selftests, eval validation, and a fresh render/verify pair. It
+accepts each child only when the process result and one terminal, suite-qualified receipt agree.
+The workflow pins its action commits and Python patch version, grants only read access to contents,
+does not persist checkout credentials, and runs that gate using fixed Ubuntu and macOS runner labels;
+GitHub still manages the image contents behind those labels. A separate
+declared Ubuntu job runs `tools/portable-conformance.py`. It resolves locked wheel filenames through
+live PyPI metadata, requires the published digest to equal the lock, hash-verifies every downloaded
+artifact, derives the vendored Agent Plugins schema and license URLs from their pinned repository
+revision and paths, and verifies a signed, hash-pinned Claude Code release before validating a fresh render.
+Network failure is red, never skipped. The repository workflow does not itself prove that either job
+is a branch-protection required check.
+
+Local `harness_check.py` mode adds machine-specific Claude anchors. `--selftest` plants defects and
+proves each check family can turn red; a zero-input scan is an error, not a clean verdict. C1 requires
+every direct selftest to be registered with a positive floor and a unique terminal suite receipt;
+`harness_check.py` is the sole recursive meta-suite exemption.
 
 Skill contract eval validation is free and offline. `tools/run-skill-evals.py --run` executes
 headless model scenarios and spends API budget, so it remains manual.

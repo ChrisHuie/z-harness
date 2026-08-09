@@ -229,6 +229,8 @@ def selftest():
         if not ok:
             print("        cmd: %s" % cmd)
     print("failures: %d" % bad)
+    print("SELFTEST-SUMMARY suite=zsh_rev_modifier_guard checks=%d failures=%d" % (
+        len(FIXTURES), bad))
     return 0 if bad == 0 else 1
 
 

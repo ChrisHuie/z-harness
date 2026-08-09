@@ -43,7 +43,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "2.8.0"
+VERSION = "3.0.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 AUTHORING_SKILLS = {"craft-prompt", "craft-skill", "craft-context-file", "review-prompt"}
@@ -64,15 +64,17 @@ SELFTEST_SUITES = [
     ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 42),
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 8),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
-    ("render-packages", ["tools/render-packages.py", "--selftest"], 80),
+    ("render-packages", ["tools/render-packages.py", "--selftest"], 165),
+    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 16),
+    ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 45),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
     ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 16),
+    ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 66),
+    ("zsh_rev_modifier_guard", ["hooks/guards/zsh_rev_modifier_guard.py", "--selftest"], 31),
 ]
-# Recursive meta-suite, plus predicates exercised through bash_command_guard.
-SELFTEST_COMPONENTS = {
-    "hooks/harness_check.py",
-    "hooks/guards/git_grep_engine_guard.py",
-    "hooks/guards/zsh_rev_modifier_guard.py",
+# The only non-aggregated selftest is this recursive meta-suite itself.
+SELFTEST_EXEMPTIONS = {
+    "hooks/harness_check.py": "recursive meta-suite",
 }
 
 # C2: basenames shared verbatim across skills. A same-basename file NOT listed in
@@ -341,22 +343,36 @@ class Run:
                 self.result("C1", False, f"selftest {name}: exceeded 15s")
                 continue
             receipts = re.findall(
-                rb"^SELFTEST-SUMMARY checks=(\d+) failures=(\d+)$", p.stdout, re.M
+                rb"^SELFTEST-SUMMARY suite=([a-z0-9_-]+) checks=(\d+) failures=(\d+)$",
+                p.stdout,
+                re.M,
             )
-            receipt_ok = (len(receipts) == 1 and int(receipts[0][0]) >= floor
-                          and int(receipts[0][1]) == 0)
+            final_line = p.stdout.rstrip().splitlines()[-1] if p.stdout.rstrip() else b""
+            receipt_ok = (
+                len(receipts) == 1
+                and receipts[0][0].decode("ascii") == name
+                and int(receipts[0][1]) >= floor
+                and int(receipts[0][2]) == 0
+                and final_line == (
+                    b"SELFTEST-SUMMARY suite=" + receipts[0][0]
+                    + b" checks=" + receipts[0][1]
+                    + b" failures=" + receipts[0][2]
+                )
+            )
             detail = f"selftest {name}: exit {p.returncode}; terminal receipts={len(receipts)}"
             if len(receipts) == 1:
-                detail += (f" checks={int(receipts[0][0])} floor={floor} "
-                           f"failures={int(receipts[0][1])}")
-                if int(receipts[0][0]) < floor:
+                detail += (f" suite={receipts[0][0].decode('ascii')} "
+                           f"checks={int(receipts[0][1])} floor={floor} "
+                           f"failures={int(receipts[0][2])} "
+                           f"final={final_line.startswith(b'SELFTEST-SUMMARY ')}")
+                if int(receipts[0][1]) < floor:
                     detail += " below-floor"
             self.result("C1", p.returncode == 0 and receipt_ok, detail)
 
-    def c1_selftest_inventory(self, suites=None, components=None):
+    def c1_selftest_inventory(self, suites=None, exemptions=None):
         """Every script exposing --selftest is aggregated or explicitly classified."""
         suites = SELFTEST_SUITES if suites is None else suites
-        components = SELFTEST_COMPONENTS if components is None else components
+        exemptions = SELFTEST_EXEMPTIONS if exemptions is None else exemptions
         aggregated = {cmd[0] for _name, cmd, _floor in suites}
         actual = set()
         for rel_root in ("hooks", "tools"):
@@ -372,13 +388,13 @@ class Run:
                     if (re.search(r"^def selftest\(", text, re.M)
                             or re.search(r"['\"]--selftest['\"]", text)):
                         actual.add(os.path.relpath(path, self.root))
-        declared = aggregated | set(components)
+        declared = aggregated | set(exemptions)
         unknown = sorted(actual - declared)
         stale = sorted(declared - actual)
         self.result(
             "C1", bool(actual) and not unknown and not stale,
             f"selftest inventory: discovered={len(actual)} aggregated={len(aggregated)} "
-            f"components={len(components)}"
+            f"exemptions={len(exemptions)}"
             + (f" unclassified={unknown}" if unknown else "")
             + (f" stale={stale}" if stale else ""),
         )
@@ -730,12 +746,18 @@ class Run:
         print(f"\n  {self.checks} checks, {len(self.failures)} failure(s)")
         if self.checks == 0:
             print("  ZERO CHECKS RAN — error, not a clean verdict")
-            return 2
-        if self.failures:
+            code = 2
+        elif self.failures:
             for c, d in self.failures:
                 print(f"    - {c}: {d}")
-            return 1
-        return 0
+            code = 1
+        else:
+            code = 0
+        print(
+            f"HARNESS-SUMMARY mode={'ci' if self.ci else 'local'} "
+            f"checks={self.checks} failures={len(self.failures)} exit={code}"
+        )
+        return code
 
 
 # ---- selftest: every check proves it can go red -------------------------------
@@ -797,8 +819,8 @@ def selftest():
 
         duplicate_suite = os.path.join(td, "duplicate-receipt.py")
         open(duplicate_suite, "w").write(
-            "print('SELFTEST-SUMMARY checks=1 failures=0')\n"
-            "print('SELFTEST-SUMMARY checks=1 failures=0')\n"
+            "print('SELFTEST-SUMMARY suite=planted-duplicate checks=1 failures=0')\n"
+            "print('SELFTEST-SUMMARY suite=planted-duplicate checks=1 failures=0')\n"
         )
         c1_duplicate = Run(td, ci=True)
         c1_duplicate.c1_selftests([("planted-duplicate", [duplicate_suite], 1)])
@@ -807,14 +829,20 @@ def selftest():
                                for c, d in c1_duplicate.failures))
 
         shrunk_suite = os.path.join(td, "shrunk-selftest.py")
-        open(shrunk_suite, "w").write("print('SELFTEST-SUMMARY checks=1 failures=0')\n")
+        open(shrunk_suite, "w").write(
+            "print('SELFTEST-SUMMARY suite=planted-shrink checks=1 failures=0')\n"
+        )
         c1_shrunk = Run(td, ci=True)
         c1_shrunk.c1_selftests([("planted-shrink", [shrunk_suite], 5)])
         expect_red("C1 goes red when a suite reports fewer checks than its floor",
                    lambda: any(c == "C1" and "below-floor" in d
                                for c, d in c1_shrunk.failures))
         c1_at_floor = Run(td, ci=True)
-        c1_at_floor.c1_selftests([("planted-at-floor", [shrunk_suite], 1)])
+        at_floor_suite = os.path.join(td, "at-floor-selftest.py")
+        open(at_floor_suite, "w").write(
+            "print('SELFTEST-SUMMARY suite=planted-at-floor checks=1 failures=0')\n"
+        )
+        c1_at_floor.c1_selftests([("planted-at-floor", [at_floor_suite], 1)])
         expect_red("C1 floor control: the same suite exactly at its floor stays green",
                    lambda: not c1_at_floor.failures)
 
@@ -823,10 +851,26 @@ def selftest():
             "def selftest():\n    return 0\n"
         )
         c1_inventory = Run(td, ci=True)
-        c1_inventory.c1_selftest_inventory(suites=[], components=set())
+        c1_inventory.c1_selftest_inventory(suites=[], exemptions={})
         expect_red("C1 rejects an unclassified selftest-capable script",
                    lambda: any(c == "C1" and "unclassified" in d
                                for c, d in c1_inventory.failures))
+
+        callsite = Run(td, ci=True)
+        called = []
+        method_names = [
+            "c1_selftests", "c1_selftest_inventory", "c2_shared_identity",
+            "c3_reference_resolution", "c4_descriptions", "c5_bodies",
+            "c6_stale_patterns", "c7_anchors", "c8_reserved_basenames",
+            "c9_codex_package", "c10_delivery_contract",
+        ]
+        for method_name in method_names:
+            setattr(callsite, method_name, lambda name=method_name: called.append(name))
+        callsite.run()
+        expect_red("Run.run invokes the C1 child-suite call site",
+                   lambda: "c1_selftests" in called)
+        expect_red("Run.run invokes the C1 inventory call site",
+                   lambda: "c1_selftest_inventory" in called)
 
         r = Run(td, ci=True)
         r.c2_shared_identity()
@@ -1099,7 +1143,7 @@ def selftest():
                    lambda: any(c == "C10" for c, d in r7.failures))
 
     print(f"\n  selftest: {bad} failure(s)")
-    print(f"SELFTEST-SUMMARY checks={checks} failures={bad}")
+    print(f"SELFTEST-SUMMARY suite=harness_check checks={checks} failures={bad}")
     return 1 if bad else 0
 
 

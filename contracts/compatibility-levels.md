@@ -1,51 +1,43 @@
 # Cross-harness compatibility contract
 
-This contract separates shared instruction content from host-enforced behavior. Sharing source
-bytes does not establish runtime parity.
+Shared instruction content does not establish runtime parity. Render identity, host observation,
+promotion authority, publication, and rollback are separate records and state transitions.
 
-## Compatibility levels
+## Compatibility vocabulary
 
-| level | required evidence |
+The following levels are planning vocabulary for a future host-validation and promotion system.
+They are deliberately absent from render configuration, `z-harness-artifact.json`, and
+`render-index.json`.
+
+| level | evidence a future promotion decision would require |
 |---|---|
-| `portable-core` | The selected Agent Skills package is structurally valid, installs without hidden dependencies, and passes positive and negative invocation scenarios on the named host. No hook, permission, trust, or side-effect guarantee is implied. |
+| `portable-core` | The selected Agent Skill is structurally valid and passes a closed positive and negative invocation catalog on the named host. No hook, permission, trust, or side-effect guarantee is implied. |
 | `adapter-functional` | The target-native package additionally passes invocation identity, argument handling, workflow-output, and expected-side-effect scenarios. |
-| `host-integrated` | Installation scope, project binding, cache activation, fresh-session behavior, update, collision detection, and rollback pass on the named host version. |
-| `governed-parity` | Every authority-bearing invariant has one named host enforcement mechanism, and its allow, deny, crash, timeout, malformed-output, and non-interactive cases pass. |
+| `host-integrated` | Installation scope, project binding, cache activation, fresh-session behavior, update, collision detection, and rollback pass for the exact host version and profile. |
+| `governed-parity` | Every authority-bearing invariant has a named host enforcement mechanism, and its allow, deny, crash, timeout, malformed-output, and non-interactive cases pass. |
 
-An artifact records `targetLevel` separately from `earnedLevel`. A renderer may set a target, but
-only target-host evidence may advance the earned level. `unverified` is the required earned level
-for an artifact that has only been rendered or statically inspected.
+The current renderer earns none of these levels. It emits reproducible package candidates and
+immutable render-time facts only. No host receipt producer, promotion decision maker, publication
+ledger, or rollback controller exists in this pilot.
 
-## Evidence required by a claim
+## Authority vocabulary
 
-`validationStatus` is gated on the evidence this contract names, at both ends: the adapter
-configuration is refused at input time and the rendered artifact is refused at verification time,
-through one predicate.
-
-| `validationStatus` | required |
-|---|---|
-| `fixture-only` | no host evidence records at all |
-| `candidate`, `promoted` | at least one evidence record, and a non-empty license set |
-
-Each evidence record names a host, that host's version, the artifact digest observed after a
-fresh-session install, and the scenario results behind the claim. A scenario that did not pass
-cannot support a status above `fixture-only`.
-
-This checks that a claim carries its evidence, not that the evidence is true. Only a target-host
-run establishes the latter, and no such runner exists yet, so every status above `fixture-only` is
-currently unreachable: the pilot has no license set and no producer of installed-artifact digests.
-The license set is therefore a mechanical promotion blocker rather than a note.
-
-## Authority classes
-
-- `instruction-only`: model-visible text asks for behavior. It is not an authorization boundary.
-- `host-enforced`: a named host mechanism disposes of the action and has failure-path evidence.
+- `instruction-only`: model-visible text requests behavior. It is not an authorization boundary.
+- `host-enforced`: a named host mechanism disposes of an action and has scoped failure-path
+  evidence.
 - `external-boundary`: enforcement occurs outside the harness process and survives arbitrary
   behavior by the harness and model.
 
-Portable Agent Skill fields, including tool hints, are `instruction-only` unless a target adapter
-names and tests a stronger mechanism. A hook is not automatically `host-enforced`: its registration,
-event coverage, decision envelope, timeout behavior, and crash behavior are part of the claim.
+These are also future decision vocabulary, not artifact-wide scalar fields. Authority must be
+recorded per guarded fact, mechanism, host version, and scope. Portable skill text is
+instruction-only. A hook is not automatically host-enforced: registration, event coverage,
+decision envelopes, timeout behavior, and crash behavior are part of the claim.
+
+`allowed-tools` is omitted from every rendered target. Its meaning is not portable. Current
+[Claude Code documentation](https://code.claude.com/docs/en/skills) describes preapproval for the
+invoking turn rather than restriction to the named tools, but those documentation bytes are not
+version-bound to the tested CLI. The conservative omission does not claim that runtime behavior.
+Adding permission metadata later requires a target-owned authority overlay and denial-path tests.
 
 ## Package isolation
 
@@ -55,43 +47,79 @@ not contain a competing root or native manifest:
 - Agent Plugins: `plugin.json`
 - Codex: `.codex-plugin/plugin.json`
 - Claude Code: `.claude-plugin/plugin.json`
-- Kimi Code: `kimi.plugin.json` (the alternative `.kimi-plugin/plugin.json` must be absent)
-- Hermes skill tap: no native plugin manifest; `skills/<name>/SKILL.md` is required and
-  `plugin.yaml` is forbidden
+- Kimi Code: `kimi.plugin.json`; `.kimi-plugin/plugin.json` is absent
+- Hermes skill tap: no plugin manifest; `skills/<name>/SKILL.md` is required. Hermes also supports
+  a separate portable `plugin.json` route, represented by the Agent Plugins target rather than this
+  tap artifact; `plugin.json`, `plugin.yaml`, and Python entrypoints are forbidden in the tap target
 
-The canonical authoring repository is not an installation unit. Generated artifacts may be exposed
-through a marketplace subdirectory, immutable archive, or generated publisher repository, but the
-package root presented to a client must contain only its intended format.
+The canonical authoring repository is not the five-target installation unit. Generated artifacts
+may later be exposed through a marketplace subdirectory, immutable archive, or generated publisher
+repository, but a client must receive exactly one target root.
 
-## Release identity
+## Render identity
 
-A promoted target release records all of:
+Artifact schema v2 contains only facts derivable during rendering:
 
-- canonical package and skill identifiers;
-- core package version and target adapter revision;
-- target package version and tested host versions;
-- canonical source-tree digest and upstream lock digest, when an upstream contributed content;
-- payload file inventory, modes, per-file digests, and aggregate digest;
-- license set;
-- validation results and the fresh-session installed artifact digest.
+- package, target, version, format, and adapter revision;
+- exact renderer, closed render schema/golden set, render-config, and selected adapter-config
+  digests;
+- canonical input and included-source identities;
+- target payload inventory and identity; and
+- the filesystem and digest algorithm identifiers.
 
-The render-time artifact manifest intentionally omits wall-clock time and ambient environment data.
-Publication provenance binds the artifact digest to a Git commit after rendering; Git state is not an
-implicit renderer input.
+`z-harness-framed-sha256-v2` frames its algorithm identifier and domain, then preserves the sequence
+supplied by the caller. Tree digests sort records by path and frame path, canonical file mode, size,
+and content digest in that fixed order. JSON digests frame one UTF-8 canonical JSON value with sorted
+object keys; array order is retained. The domains distinguish build contracts, source input,
+included source, target payload, and complete artifact identities. Empty directories are forbidden,
+so directory topology is derived from file paths.
 
-Verification recomputes every one of those values rather than checking its shape, so a manifest
-field cannot be edited after rendering. That includes binding the recorded source digests to the
-current source tree: an artifact rendered from an older tree fails verification once the source
-moves, and that verdict is correct, because a stale artifact is what the digest exists to detect.
+The cross-transport logical digest does not claim ownership, ACLs, xattrs, birth time, or directory
+metadata: Git does not preserve those properties. Renderer-owned output separately conforms to
+`z-harness-posix-tree-v1`: files are exactly `0644` or `0755`, directories are `0755`, all mtimes are
+the Unix epoch, symlinks and hardlinks are absent, and every directory is non-empty. `--verify`
+applies that strict profile to renderer output; a Git clone is not expected to pass it until it has
+been normalized as an output artifact.
+
+Verification binds an artifact to the current selected source, renderer, contracts, and
+configuration. An older artifact correctly fails after those inputs move. A future rollback or
+publication verifier must therefore use the exact source commit and build inputs recorded at
+publication rather than the current authoring checkout.
+
+## Future evidence and promotion
+
+Host observations must not be written back into an already rendered artifact. Doing so would change
+the complete artifact identity after the tested bytes were installed.
+
+A future host receipt should at minimum identify the exact artifact and publication subject,
+runner, target host/version, project/workspace/profile scope, installed inventory, cache/session
+activation, complete required scenario catalog, and evidence-log digests. It records observations;
+it does not grant a level.
+
+A separate promotion decision must bind those receipts to a versioned closed policy and scenario
+catalog, reject omissions, failures, and infrastructure errors, and derive any earned level for the
+specific artifact × host version × profile. The promotion authority must be outside the component
+whose claim it disposes.
+
+## Publication and rollback
+
+Publication is not implemented. A future publisher must re-verify the exact subject at its commit
+or upload fence and record both the logical artifact digest and an immutable transport identity such
+as a Git commit/tree or canonical archive SHA. Reusing `(target, packageVersion)` for different bytes
+must fail.
+
+Rollback is a new, forward-recorded channel transition, not an edit to an old artifact. It needs the
+previous channel identity, restored artifact and transport identities, causal link, policy and actor,
+provider compare-and-swap result, and a fresh install/session check of the restored subject.
 
 ## Current migration boundary
 
-The repository-root Claude/Codex package remains the v0.3 compatibility surface while the renderer
-is introduced. The pilot reads the existing canonical `skills/` tree and renders only
-`ground-claims` into isolated skills-only Agent Plugins, Codex, Claude, Kimi, and Hermes artifacts.
-Kimi uses its native plugin manifest. Hermes uses a non-executable skill tap instead of a Python
-plugin. The pilot does not migrate a runtime home, publish packages, add MCP servers, translate
-hooks, or claim runtime compatibility.
+The repository-root Claude/Codex package remains the v0.3 compatibility surface. The v0.4 pilot
+reads the existing `skills/` tree and renders only `ground-claims` into isolated skills-only Agent
+Plugins, Codex, Claude, Kimi, and Hermes candidates. Claude alone retains `argument-hint`; every
+target omits `allowed-tools`; all retain the same Markdown body. Kimi uses its native manifest.
+Hermes uses a non-executable GitHub skill tap.
 
-The next cutover moves canonical authoring away from the installable root only after protective
-tests prove every supported target artifact contains the expected skill inventory and behavior.
+The pilot does not migrate a runtime home, publish or install packages, add MCP servers, translate
+hooks, produce host receipts, promote compatibility, or implement rollback. Issues #5 and #6 remain
+separate recorded deferrals.

@@ -135,6 +135,22 @@ def selftest():
         ("optional-pcre", "git grep --color -P 'harness\\b' -- README.md", None),
         ("terminator-ere", "git grep -E -- 'harness\\b' README.md", "deny"),
         ("terminator-pcre", "git grep -P -- 'harness\\b' README.md", None),
+        ("digit-run-ere", "git grep -12Ee'harness\\b' -- README.md", "deny"),
+        ("digit-run-pcre", "git grep -12Pe'harness\\b' -- README.md", None),
+        ("digit-last-pcre", "git grep -E1Pe'harness\\b' -- README.md", None),
+        ("digit-last-ere", "git grep -P1Ee'harness\\b' -- README.md", "deny"),
+        ("negated-ere", "git grep -E --no-extended-regexp 'harness\\b' -- README.md", None),
+        ("unrelated-negation",
+         "git grep -E --no-perl-regexp 'harness\\b' -- README.md", None),
+        ("engine-after-reset",
+         "git grep --no-perl-regexp -E 'harness\\b' -- README.md", "deny"),
+        ("unknown-arch", "arch git grep -E 'harness\\b' -- README.md", "ask"),
+        ("unknown-xcrun", "xcrun git grep -E 'harness\\b' -- README.md", "ask"),
+        ("eval-ere", "eval \"git grep -E 'harness\\b' -- README.md\"", "deny"),
+        ("eval-pcre", "eval \"git grep -P 'harness\\b' -- README.md\"", None),
+        ("eval-zsh", "SHA=x; eval 'git show $SHA:src/f.py'", "deny"),
+        ("safe-echo", "echo git grep -E 'harness\\b' -- README.md", None),
+        ("safe-printf", "printf '%s\\n' git grep -E 'harness\\b' -- README.md", None),
     )
     for label, command, want in hook_cases:
         raw = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})

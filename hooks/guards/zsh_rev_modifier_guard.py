@@ -169,7 +169,7 @@ def decide(command, _depth=0, _shell="zsh"):
                     "whether a `rev:path` argument survives shell expansion. Run Git "
                     "directly with a literal executable.")
         direct_git = is_rev_path_git(tokens, resolution)
-        invocation = nested_shell_invocation(resolution)
+        invocation = nested_shell_invocation(resolution, _shell)
         descendant_git = (invocation is not None
                           and source_has_git_hazard_hint(invocation.command))
         if _shell == "zsh" and (direct_git or descendant_git):
@@ -309,6 +309,26 @@ FIXTURES = [
      "SHA=x; xargs git show $SHA:src/f.py", "ask"),
     ("ASK WRAPPER: ssh is unmodelled and conceals git",
      "SHA=x; ssh host git show $SHA:src/f.py", "ask"),
+    ("ASK WRAPPER: unknown arch prefix with a guarded Git tail fails closed",
+     "SHA=x; arch git show $SHA:src/f.py", "ask"),
+    ("ASK WRAPPER: unknown xcrun prefix with a guarded Git tail fails closed",
+     "SHA=x; xcrun git show $SHA:src/f.py", "ask"),
+    ("ASK WRAPPER: unmodelled time options with a guarded Git tail fail closed",
+     "SHA=x; time -p git show $SHA:src/f.py", "ask"),
+    ("RED WRAPPER: bare time is a modelled shell keyword",
+     "SHA=x; time git show $SHA:src/f.py", "deny"),
+    ("RED WRAPPER: eval single-quoted body runs in the current zsh",
+     "SHA=x; eval 'git show $SHA:src/f.py'", "deny"),
+    ("RED WRAPPER: eval double-quoted body expands in the outer zsh",
+     "SHA=x; eval \"git show $SHA:src/f.py\"", "deny"),
+    ("RED WRAPPER: builtin eval body runs in the current zsh",
+     "SHA=x; builtin eval 'git show $SHA:src/f.py'", "deny"),
+    ("GREEN WRAPPER: eval of a non-Git body is outside this guard",
+     "eval 'printf safe'", "allow"),
+    ("GREEN WRAPPER: echo is proven not to forward the literal Git tail",
+     "SHA=x; echo git show $SHA:src/f.py", "allow"),
+    ("GREEN WRAPPER: printf is proven not to forward the literal Git tail",
+     "SHA=x; printf '%s\\n' git show $SHA:src/f.py", "allow"),
     ("GREEN WRAPPER: an unmodelled launcher with no git in it is not this guard's business",
      "xargs ls -la", "allow"),
     # A nested shell mangles at a different moment depending on which shell it is.

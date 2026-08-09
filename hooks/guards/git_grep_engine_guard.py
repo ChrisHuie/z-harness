@@ -98,6 +98,10 @@ GREP_LONG_ENGINE = {
     "--fixed-strings": "F",
     "--perl-regexp": "P",
 }
+GREP_LONG_NEGATED_ENGINE = {
+    "--no-basic-regexp", "--no-extended-regexp",
+    "--no-fixed-strings", "--no-perl-regexp",
+}
 GREP_LONG_PATTERN_ARG = {"--regexp": "e", "--file": "f"}
 GREP_LONG_REQUIRED_VALUE = {
     "--max-depth", "--threads", "--max-count", "--after-context",
@@ -113,9 +117,9 @@ def short_option_cluster(text):
 
     -> (engine letters in order, kind, terminating letter, attached argument), where kind
     is "pattern" for -e/-f, "value" for a numeric option, "optional" for -O, or
-    "plain" when the cluster is all no-argument flags. The attached argument is populated
-    for `-ePATTERN`, `-m1`, `-A3`, `-3`, and `-Opager`. Returns None when the cluster is
-    invalid or contains a letter this guard does not model.
+    "plain" when the cluster has only no-argument flags and `-NUM` runs. The attached
+    argument is populated for `-ePATTERN`, `-m1`, `-A3`, and `-Opager`. Returns None when
+    the cluster is invalid or contains a letter this guard does not model.
 
     Engines are returned in order because git applies last-one-wins: `-EG` greps as BRE
     and is harmless, `-GE` greps as ERE and is the hazard.
@@ -123,7 +127,9 @@ def short_option_cluster(text):
     if len(text) < 2 or not text.startswith("-") or text.startswith("--"):
         return None
     engines = []
-    for index, char in enumerate(text[1:], start=1):
+    index = 1
+    while index < len(text):
+        char = text[index]
         suffix = text[index + 1:]
         if char in GREP_SHORT_PATTERN_ARG:
             return (engines, "pattern", char, suffix or None)
@@ -132,16 +138,21 @@ def short_option_cluster(text):
                 return None
             return (engines, "value", char, suffix or None)
         if char.isdecimal():
-            numeric = text[index:]
-            if not numeric.isdecimal():
-                return None
-            return (engines, "value", "NUM", numeric)
+            # Git's -NUM context shorthand consumes the maximal digit run, not the
+            # cluster remainder. `-12EePATTERN` is -12, -E, -ePATTERN; stopping at the
+            # first digits hid both the later engine and the attached pattern.
+            index += 1
+            while index < len(text) and text[index].isdecimal():
+                index += 1
+            continue
         if char in GREP_SHORT_OPTIONAL_VALUE:
             return (engines, "optional", char, suffix or None)
         if char in GREP_SHORT_ENGINE:
             engines.append(GREP_SHORT_ENGINE[char])
+            index += 1
             continue
         if char in GREP_SHORT_NOARG:
+            index += 1
             continue
         return None
     return (engines, "plain", None, None)
@@ -270,6 +281,7 @@ GIT_HAZARD_SUBCOMMANDS = {
     "grep", "show", "diff", "cat-file", "log", "ls-tree", "archive", "checkout",
     "restore", "rev-parse", "blame",
 }
+PROVEN_NON_FORWARDING_COMMANDS = {"echo", "printf"}
 EXEC_WRAPPERS = {
     # option flags, options consuming the next argv, attached value prefixes,
     # bundled short flags, positional operands before the command
@@ -333,6 +345,18 @@ UNMODELLED_EXEC_WRAPPERS = {"xargs", "script", "strace", "dtruss", "ltrace", "wa
 def _literal_git_word(word):
     return (os.path.basename(word) == "git"
             or bool(re.search(r"(?:^|\s)(?:/[^\s]*/)?git(?:\s|$)", word)))
+
+
+def has_literal_guarded_git_tail(tokens):
+    """Whether argv visibly contains `git` followed by a guarded subcommand."""
+    words = [text for text, _quoting in tokens]
+    for index, word in enumerate(words):
+        if os.path.basename(word) != "git":
+            continue
+        if any(os.path.basename(tail) in GIT_HAZARD_SUBCOMMANDS
+               for tail in words[index + 1:]):
+            return True
+    return False
 
 
 def command_has_git_hazard_hint(tokens):
@@ -410,6 +434,8 @@ def unwrap_command_prefix(tokens):
                     break
             if items[0][0] in {"command", "exec"}:
                 continue
+            if items[0][0] == "eval":
+                break
             if items[0][0].startswith("-"):
                 errors.append(f"unmodelled builtin option {items[0][0]!r}")
             else:
@@ -610,6 +636,17 @@ def unwrap_command_prefix(tokens):
                 f"not model how it rewrites argv")
             break
 
+        if executable == "eval":
+            break
+
+        if (executable != "git"
+                and executable not in PROVEN_NON_FORWARDING_COMMANDS
+                and has_literal_guarded_git_tail(items)):
+            errors.append(
+                f"unknown leading command {executable!r} precedes a literal Git "
+                "invocation; this guard cannot prove whether it forwards argv")
+            break
+
         break
     if wrapper_depth > MAX_PREFIX_DEPTH:
         errors.append(f"more than {MAX_PREFIX_DEPTH} nested command wrappers")
@@ -617,11 +654,16 @@ def unwrap_command_prefix(tokens):
         items, command_env, tuple(errors), command_has_git_hazard_hint(original))
 
 
-def nested_shell_invocation(resolution):
+def nested_shell_invocation(resolution, current_shell="sh"):
     """Return the resolved shell and its `-c` body, if this command invokes one."""
     if resolution.errors or not resolution.items:
         return None
     shell = os.path.basename(resolution.items[0][0])
+    if shell == "eval":
+        args = resolution.items[1:]
+        if args and args[0][0] == "--":
+            args = args[1:]
+        return ShellInvocation(current_shell, " ".join(word for word, _quoting in args))
     if shell not in SHELLS:
         return None
     args = resolution.items[1:]
@@ -815,6 +857,14 @@ def decide(command, _shell_depth=0):
             long_name = text.partition("=")[0] if text.startswith("--") else ""
             if long_name in GREP_LONG_ENGINE:
                 engine = GREP_LONG_ENGINE[long_name]
+                engine_src = "flag"
+                k += 1
+                continue
+            if long_name in GREP_LONG_NEGATED_ENGINE:
+                # The installed Git stores all regex modes in one shared option. Every
+                # --no-<engine> spelling resets that mode to the default, even if another
+                # engine was active. A later positive engine option may select it again.
+                engine = "B"
                 engine_src = "flag"
                 k += 1
                 continue
@@ -1032,6 +1082,16 @@ FIXTURES = [
      """git grep -E3 'harness\\b' -- README.md""", "deny"),
     ("GREEN NUMERIC: attached context preserves an explicit PCRE engine",
      """git grep -PA3 'harness\\b' -- README.md""", "allow"),
+    ("RED  NUMERIC: leading -NUM continues into an ERE engine and attached pattern",
+     """git grep -1Ee'harness\\b' -- README.md""", "deny"),
+    ("RED  NUMERIC: a maximal multi-digit run continues into later flags",
+     """git grep -12Ee'harness\\b' -- README.md""", "deny"),
+    ("GREEN NUMERIC: leading -NUM continues into a PCRE engine",
+     """git grep -1Pe'harness\\b' -- README.md""", "allow"),
+    ("GREEN NUMERIC: embedded digits preserve later last-wins PCRE",
+     """git grep -E1Pe'harness\\b' -- README.md""", "allow"),
+    ("RED  NUMERIC: embedded digits preserve later last-wins ERE",
+     """git grep -P1Ee'harness\\b' -- README.md""", "deny"),
     ("RED  OPTIONAL: bare --color does not consume the following engine",
      """git grep --color -E 'harness\\b' -- README.md""", "deny"),
     ("RED  OPTIONAL: --color=value remains one complete option",
@@ -1054,6 +1114,34 @@ FIXTURES = [
      """git grep -EG -e 'harness\\b' -- README.md""", "allow"),
     ("GREEN ENGINE ORDER: -EPe is last-wins PCRE",
      """git grep -EPe'harness\\b' -- README.md""", "allow"),
+    ("GREEN ENGINE NEGATION: matching --no-extended-regexp resets ERE to default",
+     """git grep --extended-regexp --no-extended-regexp 'harness\\b' -- README.md""",
+     "allow"),
+    ("GREEN ENGINE NEGATION: --no-extended-regexp resets active PCRE to default",
+     """git grep --perl-regexp --no-extended-regexp 'harness\\b' -- README.md""",
+     "allow"),
+    ("GREEN ENGINE NEGATION: --no-perl-regexp resets active ERE to default",
+     """git grep --extended-regexp --no-perl-regexp 'harness\\b' -- README.md""",
+     "allow"),
+    ("GREEN ENGINE NEGATION: matching --no-perl-regexp resets PCRE to default",
+     """git grep --perl-regexp --no-perl-regexp 'harness\\b' -- README.md""",
+     "allow"),
+    ("GREEN ENGINE NEGATION: a reset does not restore an earlier engine",
+     """git grep -E --perl-regexp --no-perl-regexp 'harness\\b' -- README.md""",
+     "allow"),
+    ("GREEN ENGINE NEGATION: every negative option resets the shared active engine",
+     """git grep -P --extended-regexp --no-perl-regexp 'harness\\b' -- README.md""",
+     "allow"),
+    ("GREEN ENGINE NEGATION: --no-basic-regexp resets the shared active engine",
+     """git grep -E --no-basic-regexp 'harness\\b' -- README.md""", "allow"),
+    ("GREEN ENGINE NEGATION: --no-fixed-strings resets the shared active engine",
+     """git grep -E --no-fixed-strings 'harness\\b' -- README.md""", "allow"),
+    ("RED  ENGINE NEGATION: a later positive ERE selection wins after reset",
+     """git grep --no-perl-regexp --extended-regexp 'harness\\b' -- README.md""",
+     "deny"),
+    ("GREEN ENGINE NEGATION: a later positive PCRE selection wins after reset",
+     """git grep --no-extended-regexp --perl-regexp 'harness\\b' -- README.md""",
+     "allow"),
     ("GREEN CLUSTER: -O takes the attached remainder as its optional value",
      """git grep -EOe'harness\\b' -- README.md""", "allow"),
     ("GREEN CLUSTER: a letter this git rejects outright is not the guard's business",
@@ -1084,6 +1172,26 @@ FIXTURES = [
      "builtin git grep -nE 'harness\\b' -- README.md", "allow"),
     ("ASK WRAPPER: xargs is unmodelled and conceals git",
      """xargs git grep -nE 'harness\\b' -- README.md""", "ask"),
+    ("ASK WRAPPER: unknown arch prefix with a guarded Git tail fails closed",
+     """arch git grep -nE 'harness\\b' -- README.md""", "ask"),
+    ("ASK WRAPPER: unknown xcrun prefix with a guarded Git tail fails closed",
+     """xcrun git grep -nE 'harness\\b' -- README.md""", "ask"),
+    ("ASK WRAPPER: unmodelled time options with a guarded Git tail fail closed",
+     """time -p git grep -nE 'harness\\b' -- README.md""", "ask"),
+    ("RED WRAPPER: bare time is a modelled shell keyword",
+     """time git grep -nE 'harness\\b' -- README.md""", "deny"),
+    ("RED WRAPPER: eval body is recursively inspected",
+     """eval \"git grep -nE 'harness\\b' -- README.md\"""", "deny"),
+    ("RED WRAPPER: builtin eval body is recursively inspected",
+     """builtin eval \"git grep -nE 'harness\\b' -- README.md\"""", "deny"),
+    ("GREEN WRAPPER: eval preserves an explicit PCRE engine",
+     """eval \"git grep -nP 'harness\\b' -- README.md\"""", "allow"),
+    ("GREEN WRAPPER: arch without a guarded Git tail is outside this guard",
+     """arch uname -m""", "allow"),
+    ("GREEN WRAPPER: echo is proven not to forward the literal Git tail",
+     """echo git grep -nE 'harness\\b' -- README.md""", "allow"),
+    ("GREEN WRAPPER: printf is proven not to forward the literal Git tail",
+     """printf '%s\\n' git grep -nE 'harness\\b' -- README.md""", "allow"),
     ("GREEN patternType=perl via config - the intended engine",
      """git -c grep.patternType=perl grep 'x\\b' -- src/""", "allow"),
     ("GREEN -P with a -f pattern file",
@@ -1254,21 +1362,59 @@ def check_option_grammar_against_git():
                 return ["cannot index the temporary Git grammar fixture: "
                         + (indexed.stderr or "no diagnostic").strip()]
             cases = (
-                ("attached -m", ["-Em1", r"harness\b", "--", "fixture.txt"]),
-                ("attached -A", ["-EA3", r"harness\b", "--", "fixture.txt"]),
-                ("attached -B", ["-EB3", r"harness\b", "--", "fixture.txt"]),
-                ("attached -C", ["-EC3", r"harness\b", "--", "fixture.txt"]),
-                ("-NUM shorthand", ["-E3", r"harness\b", "--", "fixture.txt"]),
+                ("attached -m", ["-Em1", r"harness\b", "--", "fixture.txt"],
+                 "harnessb"),
+                ("attached -A", ["-EA3", r"harness\b", "--", "fixture.txt"],
+                 "harnessb"),
+                ("attached -B", ["-EB3", r"harness\b", "--", "fixture.txt"],
+                 "harnessb"),
+                ("attached -C", ["-EC3", r"harness\b", "--", "fixture.txt"],
+                 "harnessb"),
+                ("-NUM shorthand", ["-E3", r"harness\b", "--", "fixture.txt"],
+                 "harnessb"),
+                ("-NUM before E and e", ["-12Ee" + r"harness\b", "--", "fixture.txt"],
+                 "harnessb"),
+                ("-NUM between E and P", ["-E1Pe" + r"harness\b", "--", "fixture.txt"],
+                 "harness"),
+                ("-NUM between P and E", ["-P1Ee" + r"harness\b", "--", "fixture.txt"],
+                 "harnessb"),
                 ("bare optional --color",
-                 ["--color", "--no-color", "-E", r"harness\b", "--", "fixture.txt"]),
-                ("-- pattern state", ["-E", "--", r"harness\b", "fixture.txt"]),
+                 ["--color", "--no-color", "-E", r"harness\b", "--", "fixture.txt"],
+                 "harnessb"),
+                ("-- pattern state", ["-E", "--", r"harness\b", "fixture.txt"],
+                 "harnessb"),
+                ("matching E negation",
+                 ["--extended-regexp", "--no-extended-regexp", r"harness\b", "--",
+                  "fixture.txt"], "fixture.txt:harness\n"),
+                ("unrelated E negation",
+                 ["--perl-regexp", "--no-extended-regexp", r"harness\b", "--",
+                  "fixture.txt"], "fixture.txt:harness\n"),
+                ("unrelated P negation",
+                 ["--extended-regexp", "--no-perl-regexp", r"harness\b", "--",
+                  "fixture.txt"], "fixture.txt:harness\n"),
+                ("matching P negation",
+                 ["--perl-regexp", "--no-perl-regexp", r"harness\b", "--",
+                  "fixture.txt"], "fixture.txt:harness\n"),
+                ("basic negation resets shared engine",
+                 ["--extended-regexp", "--no-basic-regexp", r"harness\b", "--",
+                  "fixture.txt"], "fixture.txt:harness\n"),
+                ("fixed negation resets shared engine",
+                 ["--extended-regexp", "--no-fixed-strings", r"harness\b", "--",
+                  "fixture.txt"], "fixture.txt:harness\n"),
+                ("positive E after reset",
+                 ["--no-perl-regexp", "--extended-regexp", r"harness\b", "--",
+                  "fixture.txt"], "fixture.txt:harnessb\n"),
+                ("positive P after reset",
+                 ["--no-extended-regexp", "--perl-regexp", r"harness\b", "--",
+                  "fixture.txt"], "fixture.txt:harness\n"),
             )
-            for label, args in cases:
+            for label, args, expected_fragment in cases:
                 observed = subprocess.run(
                     ["git", "grep", *args], cwd=repo,
                     capture_output=True, text=True, timeout=10,
                 )
-                if observed.returncode != 0 or "harnessb" not in observed.stdout:
+                if (observed.returncode != 0
+                        or expected_fragment not in observed.stdout):
                     failures.append(
                         f"installed Git did not accept {label} with the measured ERE "
                         f"behavior (rc={observed.returncode}, stdout={observed.stdout!r}, "
@@ -1312,7 +1458,7 @@ def selftest():
         for failure in grammar_failures:
             print("  FAIL option grammar vs installed git: %s" % failure)
     else:
-        print("  PASS attached-value, optional-value, and -- grammar matches installed git")
+        print("  PASS numeric, optional-value, negated-engine, and -- grammar matches installed git")
     checks = len(FIXTURES) + 2
     print("failures: %d" % bad)
     print("SELFTEST-SUMMARY suite=git_grep_engine_guard checks=%d failures=%d" % (

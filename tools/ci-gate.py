@@ -34,9 +34,9 @@ EVAL_SKILL_FLOOR = 6
 SUITE_FLOORS = {
     "harness_check": 72,
     "render-packages": 192,
-    "bash_command_guard": 211,
-    "git_grep_engine_guard": 118,
-    "zsh_rev_modifier_guard": 68,
+    "bash_command_guard": 260,
+    "git_grep_engine_guard": 143,
+    "zsh_rev_modifier_guard": 78,
 }
 EXPECTED_WORKFLOW = """name: harness-check
 on:
@@ -236,6 +236,29 @@ def command_specs(render_root: Path) -> List[Tuple[List[str], ReceiptSpec]]:
     ]
 
 
+def floor_registry_error() -> str:
+    """Return drift between this gate and the imported harness registry."""
+    import importlib.util as _il
+    try:
+        spec = _il.spec_from_file_location("_ci_gate_harness", ROOT / "hooks/harness_check.py")
+        if spec is None or spec.loader is None:
+            return "cannot load hooks/harness_check.py for floor comparison"
+        harness = _il.module_from_spec(spec)
+        spec.loader.exec_module(harness)
+        harness_floors = {
+            name: floor for name, _command, floor in harness.SELFTEST_SUITES
+        }
+        harness_floors["harness_check"] = harness.SELFTEST_FLOOR
+    except Exception as exc:
+        return f"cannot import harness floor registry: {exc!r}"
+    drift = {
+        suite: (floor, harness_floors.get(suite))
+        for suite, floor in SUITE_FLOORS.items()
+        if harness_floors.get(suite) != floor
+    }
+    return f"suite floor registry drift: {drift}" if drift else ""
+
+
 def gate(
     runner: Callable[[Sequence[str]], Result] = run_command,
     *,
@@ -261,6 +284,10 @@ def gate(
           f"({len(present)} file(s))")
     if inventory_problem:
         failures.append(inventory_problem)
+    floor_problem = floor_registry_error()
+    print(f"  {'FAIL' if floor_problem else 'PASS'} floor-registry")
+    if floor_problem:
+        failures.append(floor_problem)
     completed = 1
     with tempfile.TemporaryDirectory(prefix="z-harness-ci-gate-") as raw:
         render_root = Path(raw) / "rendered"
@@ -325,21 +352,9 @@ def selftest() -> int:
         ) is not None,
     )
 
-    # SUITE_FLOORS and harness_check's SELFTEST_SUITES are two tables describing one
-    # contract. They had already drifted before this assertion existed, so bind them.
-    import importlib.util as _il
-    _spec = _il.spec_from_file_location("_hc", ROOT / "hooks/harness_check.py")
-    _hc = _il.module_from_spec(_spec)
-    _spec.loader.exec_module(_hc)
-    _harness_floors = {name: floor for name, _cmd, floor in _hc.SELFTEST_SUITES}
-    _drift = {
-        suite: (floor, _harness_floors.get(suite))
-        for suite, floor in SUITE_FLOORS.items()
-        if suite != "harness_check" and _harness_floors.get(suite) != floor
-    }
     expect(
-        f"gate floors agree with harness_check's registry (drift: {_drift or 'none'})",
-        not _drift,
+        "gate floors agree with harness_check's imported registry",
+        floor_registry_error() == "",
     )
 
     fake_calls: List[Sequence[str]] = []
@@ -370,6 +385,15 @@ def selftest() -> int:
         gate(fake_runner, emit_child_output=False) == 0,
     )
     expect("production registry is non-empty", len(fake_calls) == 9)
+    recorded_harness_floor = SUITE_FLOORS["harness_check"]
+    SUITE_FLOORS["harness_check"] = recorded_harness_floor - 1
+    try:
+        expect(
+            "production gate turns red when its harness floor drifts",
+            gate(fake_runner, emit_child_output=False) != 0,
+        )
+    finally:
+        SUITE_FLOORS["harness_check"] = recorded_harness_floor
     def invalid_child_runner(argv: Sequence[str]) -> Result:
         result = fake_runner(argv)
         if "harness_check.py --ci" in " ".join(argv):

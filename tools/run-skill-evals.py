@@ -50,6 +50,7 @@ def validate(root, out=sys.stdout):
     corpus = load_corpus(root)
     if not corpus:
         p("ZERO SCENARIOS FOUND — error, not a clean validation")
+        p("EVAL-VALIDATE-SUMMARY scenarios=0 skills=0 failures=1 exit=2")
         return 2
     bad = 0
     for skill, scenarios in sorted(corpus.items()):
@@ -79,8 +80,14 @@ def validate(root, out=sys.stdout):
         if missing:
             bad += 1
             p(f"  {skill}: FAIL missing scenario shape(s) {sorted(missing)}")
-    p(f"\n  {sum(len(v) for v in corpus.values())} scenarios, {bad} failure(s)")
-    return 1 if bad else 0
+    scenario_count = sum(len(v) for v in corpus.values())
+    p(f"\n  {scenario_count} scenarios, {bad} failure(s)")
+    code = 1 if bad else 0
+    p(
+        f"EVAL-VALIDATE-SUMMARY scenarios={scenario_count} skills={len(corpus)} "
+        f"failures={bad} exit={code}"
+    )
+    return code
 
 
 def run(root, budget_note=True):
@@ -144,7 +151,7 @@ def selftest():
         bad += (not ok)
         print(f"  {'PASS' if ok else 'FAIL'} zero scenarios exits 2 (exit {rc})")
     print(f"\n  selftest: {bad} failure(s)")
-    print(f"SELFTEST-SUMMARY checks={checks} failures={bad}")
+    print(f"SELFTEST-SUMMARY suite=run-skill-evals checks={checks} failures={bad}")
     return 1 if bad else 0
 
 

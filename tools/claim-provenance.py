@@ -1018,7 +1018,7 @@ def selftest():
     print("selftest")
     for label, ok in results:
         print(f"  {'PASS' if ok else 'FAIL'}  {label}")
-    print(f"SELFTEST-SUMMARY checks={len(results)} failures={failed}")
+    print(f"SELFTEST-SUMMARY suite=claim-provenance checks={len(results)} failures={failed}")
     return 1 if failed else 0
 
 

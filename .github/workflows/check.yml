@@ -3,15 +3,34 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   check:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - name: harness_check (ci mode — skips local-machine and binary anchors)
-        run: python3 hooks/harness_check.py --ci
-      # The meta-suite proves each check can still go red on a planted defect. Running
-      # only --ci leaves that unexercised, so a check that had stopped detecting anything
-      # would report the same green as one that works.
-      - name: harness_check (meta-suite — every check proves it can go red)
-        run: python3 hooks/harness_check.py --selftest
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: 3.13.14
+      - name: complete offline gate
+        run: python3 tools/ci-gate.py
+
+  portable-conformance:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: 3.13.14
+      - name: pinned upstream conformance
+        run: python3 tools/portable-conformance.py

@@ -1,55 +1,35 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "targets": {
     "agent-plugins": {
-      "adapterRevision": 1,
-      "packageVersion": "0.4.0-alpha.1",
+      "adapterRevision": 2,
+      "packageVersion": "0.4.0-alpha.2",
       "format": "agent-plugins/1.0.0",
-      "manifestPath": "plugin.json",
-      "targetLevel": "portable-core",
-      "authority": "instruction-only",
-      "validationStatus": "fixture-only",
-      "evidence": []
+      "manifestPath": "plugin.json"
     },
     "claude": {
-      "adapterRevision": 1,
-      "packageVersion": "0.4.0-alpha.1",
+      "adapterRevision": 2,
+      "packageVersion": "0.4.0-alpha.2",
       "format": "claude-plugin/native",
-      "manifestPath": ".claude-plugin/plugin.json",
-      "targetLevel": "portable-core",
-      "authority": "instruction-only",
-      "validationStatus": "fixture-only",
-      "evidence": []
+      "manifestPath": ".claude-plugin/plugin.json"
     },
     "codex": {
-      "adapterRevision": 1,
-      "packageVersion": "0.4.0-alpha.1",
+      "adapterRevision": 2,
+      "packageVersion": "0.4.0-alpha.2",
       "format": "codex-plugin/native",
-      "manifestPath": ".codex-plugin/plugin.json",
-      "targetLevel": "portable-core",
-      "authority": "instruction-only",
-      "validationStatus": "fixture-only",
-      "evidence": []
+      "manifestPath": ".codex-plugin/plugin.json"
     },
     "hermes": {
-      "adapterRevision": 1,
-      "packageVersion": "0.4.0-alpha.1",
+      "adapterRevision": 2,
+      "packageVersion": "0.4.0-alpha.2",
       "format": "hermes-skill-tap/github",
-      "manifestPath": null,
-      "targetLevel": "portable-core",
-      "authority": "instruction-only",
-      "validationStatus": "fixture-only",
-      "evidence": []
+      "manifestPath": null
     },
     "kimi": {
-      "adapterRevision": 1,
-      "packageVersion": "0.4.0-alpha.1",
+      "adapterRevision": 2,
+      "packageVersion": "0.4.0-alpha.2",
       "format": "kimi-code-plugin/native",
-      "manifestPath": "kimi.plugin.json",
-      "targetLevel": "portable-core",
-      "authority": "instruction-only",
-      "validationStatus": "fixture-only",
-      "evidence": []
+      "manifestPath": "kimi.plugin.json"
     }
   }
 }

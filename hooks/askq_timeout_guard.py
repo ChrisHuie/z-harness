@@ -495,10 +495,10 @@ def run_selftest():
         print(f"\n  {len(failures)} FAILURE(S):")
         for f, why in failures:
             print(f"    - {f}: {why}")
-        print(f"SELFTEST-SUMMARY checks={len(files) + len(missing)} failures={len(failures)}")
+        print(f"SELFTEST-SUMMARY suite=askq_timeout_guard checks={len(files) + len(missing)} failures={len(failures)}")
         return 1
     print("\n  all fixtures pass, both arms exercised")
-    print(f"SELFTEST-SUMMARY checks={len(files)} failures=0")
+    print(f"SELFTEST-SUMMARY suite=askq_timeout_guard checks={len(files)} failures=0")
     return 0
 
 

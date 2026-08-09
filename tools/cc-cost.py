@@ -193,7 +193,7 @@ def selftest():
             "ZERO TRANSCRIPTS" in buf.getvalue(), True)
 
     print(f"\n  selftest: {bad} failure(s)")
-    print(f"SELFTEST-SUMMARY checks={checks} failures={bad}")
+    print(f"SELFTEST-SUMMARY suite=cc-cost checks={checks} failures={bad}")
     return 1 if bad else 0
 
 

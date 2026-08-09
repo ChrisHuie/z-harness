@@ -85,6 +85,10 @@ hook, or build work is in flight, avoid *reverted*, *lost*, *gone*, and *broke*:
 temporarily stashed work. Report the observed state and exact scope of each command. "I don't know"
 is valid. Name optimism bias out loud when felt—confident-wrong spends trust irrecoverably.
 
+C11 claim-vocabulary scope: AGENTS.md, CLAUDE.md, every skills/*/SKILL.md, and .md/.yaml/.yml files under skills/*/references/.
+C11 excludes evals/, scripts/, assets/, and other source files; it proves vocabulary coherence only, not factual grounding or output behavior.
+C11 is source-lexical: it matches ASCII-case-insensitive phrases separated by ASCII spaces/tabs or one physical line break; inline markup and paraphrases are out of scope.
+
 Verification authority lives outside the model. A local passing test is one observation; the
 mechanical gate, CI verdict, and Chris's diff review are separate evidence. Report origin head,
 local-only commits, remote PR head, and live CI state as separate facts. `git commit` means local

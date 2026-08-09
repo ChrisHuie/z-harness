@@ -165,7 +165,7 @@ def selftest():
     checks += 1
     print(f"  {'PASS' if ok else 'FAIL'} stdin decode failure has a blocking reason")
     print(f"\n  selftest: {bad} failure(s)")
-    print(f"SELFTEST-SUMMARY checks={checks} failures={bad}")
+    print(f"SELFTEST-SUMMARY suite=spawn_preflight_guard checks={checks} failures={bad}")
     return 1 if bad else 0
 
 

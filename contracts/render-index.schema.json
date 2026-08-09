@@ -1,21 +1,16 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/ChrisHuie/z-harness/blob/main/contracts/render-index.schema.json",
-  "title": "z-harness deterministic render index",
+  "$id": "https://github.com/ChrisHuie/z-harness/blob/v0.4.0-alpha.2/contracts/render-index.schema.json",
+  "title": "z-harness deterministic render index v2",
   "type": "object",
   "additionalProperties": false,
   "required": ["$schema", "schemaVersion", "coreVersion", "targets"],
   "properties": {
     "$schema": {
-      "const": "https://github.com/ChrisHuie/z-harness/blob/main/contracts/render-index.schema.json"
+      "const": "https://github.com/ChrisHuie/z-harness/blob/v0.4.0-alpha.2/contracts/render-index.schema.json"
     },
-    "schemaVersion": {
-      "const": 1
-    },
-    "coreVersion": {
-      "type": "string",
-      "minLength": 1
-    },
+    "schemaVersion": {"const": 2},
+    "coreVersion": {"type": "string", "minLength": 1},
     "targets": {
       "type": "object",
       "minProperties": 1,
@@ -30,24 +25,11 @@
           "payloadSha256"
         ],
         "properties": {
-          "artifactId": {
-            "type": "string",
-            "minLength": 1
-          },
-          "packageVersion": {
-            "type": "string",
-            "minLength": 1
-          },
-          "adapterRevision": {
-            "type": "integer",
-            "minimum": 1
-          },
-          "artifactSha256": {
-            "$ref": "#/$defs/sha256"
-          },
-          "payloadSha256": {
-            "$ref": "#/$defs/sha256"
-          }
+          "artifactId": {"type": "string", "minLength": 1},
+          "packageVersion": {"type": "string", "minLength": 1},
+          "adapterRevision": {"type": "integer", "minimum": 1},
+          "artifactSha256": {"$ref": "#/$defs/sha256"},
+          "payloadSha256": {"$ref": "#/$defs/sha256"}
         }
       }
     }

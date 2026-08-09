@@ -15,13 +15,24 @@ from typing import Callable, List, Optional, Sequence, Tuple
 VERSION = "1.0.0"
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github/workflows/check.yml"
+WORKFLOW_DIR = ROOT / ".github/workflows"
+# The contract pinned one file byte-for-byte and nothing enumerated the directory, so a
+# SECOND workflow -- `permissions: write-all`, `pull_request_target`, arbitrary steps --
+# ran on every push with the gate reporting the workflow contract satisfied. A CI
+# configuration is the set of files, not the one file we happen to name.
+EXPECTED_WORKFLOW_FILES = ("check.yml",)
+# Every selftest suite carries a numeric floor; the eval corpus was floored only at zero,
+# so cutting 22 scenarios across 6 skills down to a single semantically empty one left the
+# whole gate green. Lower these in the commit that removes the scenarios.
+EVAL_SCENARIO_FLOOR = 22
+EVAL_SKILL_FLOOR = 6
 
 # One floor per suite, read by both the production spec table and the selftest's fake
 # runner. Two hand-maintained copies had already drifted -- render-packages was floored at
 # 165 here and 178 in harness_check -- and a fake that hardcodes its own number tests the
 # literal rather than the contract.
 SUITE_FLOORS = {
-    "harness_check": 71,
+    "harness_check": 72,
     "render-packages": 189,
     "bash_command_guard": 111,
     "git_grep_engine_guard": 66,
@@ -183,8 +194,11 @@ def command_specs(render_root: Path) -> List[Tuple[List[str], ReceiptSpec]]:
                     r"exit=(?P<exit>\d+)$"
                 ),
                 lambda match, code: (
-                    "empty eval input"
-                    if int(match.group("scenarios")) == 0 or int(match.group("skills")) == 0
+                    f"eval corpus shrank: scenarios={match.group('scenarios')} "
+                    f"skills={match.group('skills')}, floors are "
+                    f"{EVAL_SCENARIO_FLOOR}/{EVAL_SKILL_FLOOR}"
+                    if int(match.group("scenarios")) < EVAL_SCENARIO_FLOOR
+                    or int(match.group("skills")) < EVAL_SKILL_FLOOR
                     else _success_receipt(match, code)
                 ),
             ),
@@ -233,6 +247,20 @@ def gate(
     print(f"  {'FAIL' if problem else 'PASS'} workflow-contract")
     if problem:
         failures.append(problem)
+    present = (
+        tuple(sorted(p.name for p in WORKFLOW_DIR.iterdir() if p.is_file()))
+        if WORKFLOW_DIR.is_dir() else ()
+    )
+    extra = [name for name in present if name not in EXPECTED_WORKFLOW_FILES]
+    missing = [name for name in EXPECTED_WORKFLOW_FILES if name not in present]
+    inventory_problem = (
+        f"workflow directory inventory: unexpected={extra} missing={missing}"
+        if extra or missing else ""
+    )
+    print(f"  {'FAIL' if inventory_problem else 'PASS'} workflow-inventory "
+          f"({len(present)} file(s))")
+    if inventory_problem:
+        failures.append(inventory_problem)
     completed = 1
     with tempfile.TemporaryDirectory(prefix="z-harness-ci-gate-") as raw:
         render_root = Path(raw) / "rendered"
@@ -331,7 +359,8 @@ def selftest() -> int:
         if "zsh_rev_modifier_guard.py" in joined:
             return Result(0, f"SELFTEST-SUMMARY suite=zsh_rev_modifier_guard checks={SUITE_FLOORS['zsh_rev_modifier_guard']} failures=0\n")
         if "run-skill-evals.py" in joined:
-            return Result(0, "EVAL-VALIDATE-SUMMARY scenarios=1 skills=1 failures=0 exit=0\n")
+            return Result(0, f"EVAL-VALIDATE-SUMMARY scenarios={EVAL_SCENARIO_FLOOR} "
+                          f"skills={EVAL_SKILL_FLOOR} failures=0 exit=0\n")
         if "--output" in argv:
             return Result(0, "RENDER-SUMMARY action=render targets=5 failures=0 exit=0\n")
         return Result(0, "RENDER-SUMMARY action=verify targets=5 failures=0 exit=0\n")

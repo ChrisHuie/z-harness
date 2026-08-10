@@ -97,6 +97,15 @@ EXPANSION_BRACED = re.compile(
     r"\$\{(?:\([^}]*\))?"
     r"(?:[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]+\])?|[0-9]+|[#?*@!$-])"
     r":[" + MOD_PREFIXES + r"]*([" + MODS + r"])(?=\}[A-Za-z0-9]|[/:0-9])")
+# The guard's own advice, applied one word too wide. Its deny text says "Brace the NAME
+# only"; bracing the whole rev:path instead puts a path where zsh expects a modifier list,
+# and zsh refuses the whole command -- `${SHA:tests/x.py}` is `unrecognized modifier`,
+# `${SHA:src/f.py}` is `bad substitution`. A modifier letter followed by another letter
+# inside the braces is that shape and nothing else: every POSIX form (`:-` `:=` `:?` `:+`
+# `:0:2`) and every real modifier use (`:t}` `:s/a/b/`) was checked and none collide.
+EXPANSION_BRACED_INVALID = re.compile(
+    r"\$\{(?:[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]+\])?|[0-9]+|[#?*@!$-])"
+    r":[" + MOD_PREFIXES + r"]*([" + MODS + r"])[A-Za-z]")
 
 # git subcommands that take a `rev:path` / `rev:./path` argument
 # How many `<shell> -c` layers this guard will unwrap. Reaching it returns `ask`, never
@@ -165,7 +174,7 @@ def _zsh_expansion_hits(tokens):
         else:
             code = {"": "U", "'": "S", '"': "D"}.get(quoting, "U")
             modes = code * len(text)
-        for rx in (EXPANSION, EXPANSION_BRACED):
+        for rx in (EXPANSION, EXPANSION_BRACED, EXPANSION_BRACED_INVALID):
             for match in rx.finditer(text):
                 matched_modes = modes[match.start():match.end(1)]
                 if (matched_modes and len(set(matched_modes)) == 1
@@ -539,6 +548,24 @@ FIXTURES += [
     ("ASK NESTED: the executable itself comes from an expansion",
      'sh -c "$CMD"', "ask"),
     ("ASK NESTED: an empty -c body", 'sh -c ""', "ask"),
+]
+
+
+# The guard's own remedy applied one word too wide. zsh refuses these outright, so the
+# command dies rather than addressing the wrong object -- and with `2>/dev/null` that
+# death reads as "the file is absent", which is the failure this guard exists to stop.
+FIXTURES += [
+    ("RED BRACEWIDE: whole rev:path braced - zsh says unrecognized modifier",
+     "git show ${SHA:tests/x.py}", "deny"),
+    ("RED BRACEWIDE: whole rev:path braced - zsh says bad substitution",
+     "git show ${SHA:src/f.py}", "deny"),
+    ("RED BRACEWIDE: same with an archive path", "git show ${SHA:archive/x}", "deny"),
+    ("GREEN BRACEWIDE: the advice done right, NAME only",
+     "git show ${SHA}:tests/x.py", "allow"),
+    ("GREEN BRACEWIDE: POSIX default form is not a modifier",
+     "git show ${VAR:-default}", "allow"),
+    ("GREEN BRACEWIDE: POSIX substring form is not a modifier",
+     "git show HEAD:${VAR:0:2}", "allow"),
 ]
 
 

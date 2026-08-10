@@ -742,10 +742,17 @@ def unwrap_command_prefix(tokens):
             continue
 
         if executable in UNMODELLED_EXEC_WRAPPERS:
-            # Do not guess where the command starts; say so and let the caller ask.
-            errors.append(
-                f"{executable!r} launches the command that follows, and this guard does "
-                f"not model how it rewrites argv")
+            # Do not guess where the command starts -- but only say so when a GUARDED Git
+            # operation is actually in the tail. This asked on the name alone, so
+            # `git diff --name-only | xargs git add` was questioned although `add` is not
+            # a subcommand either guard reasons about. The generic identity path below
+            # already required a guarded subcommand; this arm was strictly coarser than
+            # the code beside it, which is why `arch git status` was allowed and
+            # `xargs git add` was not.
+            if has_literal_guarded_git_tail(items) or has_dynamic_guarded_command_tail(items):
+                errors.append(
+                    f"{executable!r} launches the command that follows, and this guard "
+                    f"does not model how it rewrites argv")
             break
 
         if executable == "eval":
@@ -1888,6 +1895,23 @@ FIXTURES += [
     ("GREEN ENV: patternType=perl is the safe engine",
      r"""GIT_CONFIG_PARAMETERS="'grep.patternType=perl'" git grep -n 'harness\b' -- README.md""",
      "allow"),
+]
+
+# Unmodelled launchers. This arm asked on the launcher's NAME, so ordinary pipelines were
+# questioned although the subcommand after them is one neither guard reasons about. The
+# generic identity path already required a guarded subcommand, which is why `arch git
+# status` was allowed while `xargs git add` was not.
+FIXTURES += [
+    ("GREEN LAUNCHER: xargs feeding git add, not a guarded subcommand",
+     "git diff --name-only | xargs git add", "allow"),
+    ("GREEN LAUNCHER: xargs feeding git branch -d",
+     "git branch --merged | grep -v main | xargs git branch -d", "allow"),
+    ("GREEN LAUNCHER: ssh running git status", "ssh host git status", "allow"),
+    ("GREEN LAUNCHER: watch running git status", "watch -n 10 git status", "allow"),
+    ("ASK LAUNCHER: xargs ahead of a guarded subcommand", "xargs git show", "ask"),
+    ("ASK LAUNCHER: ssh ahead of a guarded subcommand",
+     "ssh host git log --oneline", "ask"),
+    ("ASK LAUNCHER: xargs ahead of git grep", "xargs git grep -E 'x'", "ask"),
 ]
 
 def selftest():

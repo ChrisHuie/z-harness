@@ -606,6 +606,10 @@ def check_modifier_sets_against_zsh():
     absent -- the claim is about zsh, so on a host without it the claim is inapplicable
     rather than unproven.
     """
+    # One probe GROUP either way. A conditionally-sized contribution made `checks` vary
+    # by host, so the shrink-only floor read a zsh-less runner as a gutted suite; the
+    # skip is reported in the printed line instead, where it is visible without moving
+    # the number the floor compares against.
     if shutil.which("zsh") is None:
         return [], 0, 1
 
@@ -640,7 +644,7 @@ def check_modifier_sets_against_zsh():
             failures.append(
                 f"MOD_PREFIXES expects `:{prefix}` to consume ahead of a base modifier, "
                 f"but this zsh left `:{prefix}{MODS[0]}-x` literal")
-    return failures, 1 + len(MOD_PREFIXES), 0
+    return failures, 1, 0
 
 
 def selftest():
@@ -675,12 +679,26 @@ def selftest():
     for failure in modifier_failures:
         print("  FAIL modifier set vs installed zsh: %s" % failure)
     if modifier_skips:
-        print("  SKIP modifier set vs installed zsh: no zsh on this host (%d probe group)"
-              % modifier_skips)
+        print("  SKIP modifier set vs installed zsh: no zsh on this host; "
+              "the letters are unverified here")
     elif not modifier_failures:
-        print("  PASS MODS and MOD_PREFIXES match the installed zsh (%d probe groups)"
-              % modifier_checks)
-    checks = len(FIXTURES) + modifier_checks + modifier_skips
+        print("  PASS MODS and MOD_PREFIXES match the installed zsh "
+              "(%d letters, %d prefixes probed)" % (len(string.ascii_letters),
+                                                    len(MOD_PREFIXES)))
+    # Exercise the skip path itself, so "zsh absent" cannot drift into a silent pass and
+    # cannot change the number the floor compares against.
+    original_which = shutil.which
+    shutil.which = lambda name: None if name == "zsh" else original_which(name)
+    try:
+        absent_failures, absent_executed, absent_skipped = (
+            check_modifier_sets_against_zsh())
+    finally:
+        shutil.which = original_which
+    absent_ok = (not absent_failures and absent_executed == 0 and absent_skipped == 1)
+    bad += 0 if absent_ok else 1
+    print("  %-4s a zsh-less host skips the probe and reports the same check count"
+          % ("PASS" if absent_ok else "FAIL"))
+    checks = len(FIXTURES) + 2
     print("failures: %d" % bad)
     print("SELFTEST-SUMMARY suite=zsh_rev_modifier_guard checks=%d failures=%d" % (
         checks, bad))

@@ -36,7 +36,7 @@ SUITE_FLOORS = {
     "render-packages": 192,
     "bash_command_guard": 412,
     "git_grep_engine_guard": 198,
-    "zsh_rev_modifier_guard": 152,
+    "zsh_rev_modifier_guard": 149,
 }
 EXPECTED_WORKFLOW = """name: harness-check
 on:

@@ -50,8 +50,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from git_grep_engine_guard import (  # noqa: E402
     CommandParseError, MAX_PREFIX_DEPTH, nested_shell_invocation,
-    shadowed_non_forwarding_commands, source_has_git_hazard_hint, split_commands,
-    unwrap_command_prefix,
+    source_has_git_hazard_hint, split_commands, unwrap_command_prefix,
 )
 
 MODS = "aAcehlPqQrstu"
@@ -154,18 +153,15 @@ def _deny_hits(hits):
             % (tok, MOD_MEANING.get(mod, mod), mod, arg[:80], braced, len(hits)))
 
 
-def decide(command, _depth=0, _shell="zsh", _shadowed_commands=frozenset()):
+def decide(command, _depth=0, _shell="zsh"):
     """-> (decision, reason), tracking the shell that expands each source layer."""
     try:
         commands = split_commands(command)
     except CommandParseError as exc:
         return ("ask", f"the Bash command cannot be parsed safely ({exc}); rewrite it "
                 "as a direct command before proceeding.")
-    shadowed_commands = frozenset(
-        set(_shadowed_commands) | set(shadowed_non_forwarding_commands(command))
-    )
     for tokens in commands:
-        resolution = unwrap_command_prefix(tokens, shadowed_commands)
+        resolution = unwrap_command_prefix(tokens)
         if resolution.errors and resolution.hazard_hint:
             return ("ask",
                     "this command may launch Git through a prefix the guard cannot "
@@ -190,8 +186,7 @@ def decide(command, _depth=0, _shell="zsh", _shadowed_commands=frozenset()):
         if not invocation.command or invocation.dynamic:
             return ("ask", "a shell -c command string is empty or dynamic, so its Git "
                     "arguments cannot be inspected before execution")
-        decision, reason = decide(
-            invocation.command, _depth + 1, invocation.shell, shadowed_commands)
+        decision, reason = decide(invocation.command, _depth + 1, invocation.shell)
         if decision != "allow":
             return (decision, reason)
     return ("allow", "")
@@ -328,32 +323,42 @@ FIXTURES = [
      "SHA=x; launcher $TOOL show $SHA:src/f.py", "ask"),
     ("RED WRAPPER: bare time is a modelled shell keyword",
      "SHA=x; time git show $SHA:src/f.py", "deny"),
-    ("RED WRAPPER: eval single-quoted body runs in the current zsh",
-     "SHA=x; eval 'git show $SHA:src/f.py'", "deny"),
+    ("ASK WRAPPER: eval single-quoted body is dynamic to eval",
+     "SHA=x; eval 'git show $SHA:src/f.py'", "ask"),
     ("RED WRAPPER: eval double-quoted body expands in the outer zsh",
      "SHA=x; eval \"git show $SHA:src/f.py\"", "deny"),
-    ("RED WRAPPER: builtin eval body runs in the current zsh",
-     "SHA=x; builtin eval 'git show $SHA:src/f.py'", "deny"),
+    ("ASK WRAPPER: builtin eval single-quoted body is dynamic to eval",
+     "SHA=x; builtin eval 'git show $SHA:src/f.py'", "ask"),
     ("GREEN WRAPPER: eval of a non-Git body is outside this guard",
      "eval 'printf safe'", "allow"),
     ("ASK WRAPPER: partially dynamic eval source is not static",
      "eval \"git grep -P $PATTERN -- README.md\"", "ask"),
     ("ASK WRAPPER: partially dynamic builtin eval source is not static",
      "builtin eval \"git grep -P $PATTERN -- README.md\"", "ask"),
+    ("ASK WRAPPER: single-quoted eval source is dynamic to eval",
+     "eval '$CMD; git grep -P harness -- README.md'", "ask"),
+    ("ASK WRAPPER: single-quoted builtin eval source is dynamic to eval",
+     "builtin eval '$CMD; git grep -P harness -- README.md'", "ask"),
     ("ASK NESTED: partially dynamic sh -c source is not static",
      "sh -c \"git grep -P $PATTERN -- README.md\"", "ask"),
     ("ASK NESTED: partially dynamic zsh -c source is not static",
      "zsh -c \"git grep -P $PATTERN -- README.md\"", "ask"),
+    ("ASK NESTED: single-quoted sh -c source expands in sh",
+     "sh -c '$CMD; git grep -P harness -- README.md'", "ask"),
+    ("ASK NESTED: single-quoted bash -c source expands in bash",
+     "bash -c '$CMD; git grep -P harness -- README.md'", "ask"),
+    ("ASK NESTED: single-quoted zsh -c source expands in zsh",
+     "zsh -c '$CMD; git grep -P harness -- README.md'", "ask"),
     ("GREEN NESTED: fully static eval source retains PCRE",
      "eval \"git grep -P 'harness\\b' -- README.md\"", "allow"),
     ("GREEN NESTED: fully static sh -c source retains PCRE",
      "sh -c \"git grep -P 'harness\\b' -- README.md\"", "allow"),
     ("GREEN NESTED: fully static zsh -c source retains PCRE",
      "zsh -c \"git grep -P 'harness\\b' -- README.md\"", "allow"),
-    ("GREEN WRAPPER: echo is proven not to forward the literal Git tail",
-     "SHA=x; echo git show $SHA:src/f.py", "allow"),
-    ("GREEN WRAPPER: printf is proven not to forward the literal Git tail",
-     "SHA=x; printf '%s\\n' git show $SHA:src/f.py", "allow"),
+    ("ASK WRAPPER: bare echo identity is not mechanically fixed",
+     "SHA=x; echo git show $SHA:src/f.py", "ask"),
+    ("ASK WRAPPER: bare printf identity is not mechanically fixed",
+     "SHA=x; printf '%s\\n' git show $SHA:src/f.py", "ask"),
     ("ASK WRAPPER: a function-shadowed echo may forward literal Git argv",
      "echo() { command \"$@\"; }; SHA=x; echo git show $SHA:src/f.py", "ask"),
     ("ASK WRAPPER: an echo alias may supply Git",
@@ -364,8 +369,21 @@ FIXTURES = [
      "alias printf=git; SHA=x; printf show $SHA:src/f.py", "ask"),
     ("GREEN WRAPPER: builtin echo bypasses a same-source function",
      "echo() { git \"$@\"; }; SHA=x; builtin echo git show $SHA:src/f.py", "allow"),
-    ("GREEN WRAPPER: quoted function text does not shadow printf",
-     "printf '%s\\n' 'printf() { git \"$@\"; }' git show HEAD:README.md", "allow"),
+    ("GREEN WRAPPER: exact /usr/bin/printf identity is explicit",
+     "/usr/bin/printf '%s\\n' 'printf() { git \"$@\"; }' git show HEAD:README.md",
+     "allow"),
+    ("GREEN WRAPPER: exact /bin/echo identity is explicit",
+     "/bin/echo git show HEAD:README.md", "allow"),
+    ("GREEN WRAPPER: command structurally bypasses an echo function",
+     "echo() { git \"$@\"; }; command echo git show HEAD:README.md", "allow"),
+    ("GREEN WRAPPER: builtin printf bypasses shell identity mutation",
+     "alias printf=git; builtin printf '%s\\n' git show HEAD:README.md", "allow"),
+    ("ASK WRAPPER: brace-body function leaves bare echo identity unresolved",
+     "{ echo() { git \"$@\"; }; echo show HEAD:README.md; }", "ask"),
+    ("ASK WRAPPER: subshell-body function leaves bare echo identity unresolved",
+     "( echo() { git \"$@\"; }; echo show HEAD:README.md )", "ask"),
+    ("ASK WRAPPER: eval-defined alias leaves bare echo identity unresolved",
+     "eval 'alias echo=git'\necho show HEAD:README.md", "ask"),
     ("ASK WRAPPER: basename alone does not trust an arbitrary echo path",
      "SHA=x; /tmp/echo git show $SHA:src/f.py", "ask"),
     ("GREEN WRAPPER: an unmodelled launcher with no git in it is not this guard's business",
@@ -373,16 +391,16 @@ FIXTURES = [
     # A nested shell mangles at a different moment depending on which shell it is.
     ("RED NESTED: sh -c body in double quotes - the OUTER zsh expands it first",
      'sh -c "SHA=x; git show $SHA:src/f.py"', "deny"),
-    ("RED NESTED: zsh -c body in single quotes - the INNER zsh applies the modifier",
-     "zsh -c 'SHA=x; git show $SHA:src/f.py'", "deny"),
-    ("GREEN NESTED: sh -c body in single quotes - sh has no history modifiers",
-     "sh -c 'SHA=x; git show $SHA:src/f.py'", "allow"),
-    ("GREEN NESTED: bash -c body in single quotes - same reason",
-     "bash -c 'SHA=x; git show $SHA:src/f.py'", "allow"),
+    ("ASK NESTED: zsh -c source contains a downstream expansion",
+     "zsh -c 'SHA=x; git show $SHA:src/f.py'", "ask"),
+    ("ASK NESTED: sh -c source contains a downstream expansion",
+     "sh -c 'SHA=x; git show $SHA:src/f.py'", "ask"),
+    ("ASK NESTED: bash -c source contains a downstream expansion",
+     "bash -c 'SHA=x; git show $SHA:src/f.py'", "ask"),
     ("ASK NESTED: sh composes a zsh command source from an unresolved expansion",
      "sh -c 'zsh -c \"git show $SHA:src/f.py\"'", "ask"),
-    ("RED NESTED: zsh expands a double-quoted body before entering sh",
-     "zsh -c 'sh -c \"git show $SHA:src/f.py\"'", "deny"),
+    ("ASK NESTED: zsh source contains a downstream expansion before sh",
+     "zsh -c 'sh -c \"git show $SHA:src/f.py\"'", "ask"),
     ("ASK NESTED: bash composes a zsh command source from an unresolved expansion",
      "bash -c 'zsh -c \"git show $SHA:src/f.py\"'", "ask"),
     ("ASK NESTED: sh composes a bash command source from an unresolved expansion",
@@ -405,8 +423,8 @@ def _nest(payload, layers):
 # and a typo in it would silently test a different command.
 _HAZARD = "SHA=x; git show $SHA:src/f.py"
 FIXTURES += [
-    (f"RED NESTED: hazard at depth {NEST_DEPTH_LIMIT}, the last modelled layer",
-     _nest(_HAZARD, NEST_DEPTH_LIMIT), "deny"),
+    (f"ASK NESTED: downstream expansion is unresolved within depth {NEST_DEPTH_LIMIT}",
+     _nest(_HAZARD, NEST_DEPTH_LIMIT), "ask"),
     (f"ASK NESTED: hazard at depth {NEST_DEPTH_LIMIT + 1} cannot be proven either way",
      _nest(_HAZARD, NEST_DEPTH_LIMIT + 1), "ask"),
     (f"ASK NESTED: a benign command past the limit is also unprovable, not clean",

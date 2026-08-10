@@ -320,7 +320,11 @@ GIT_HAZARD_SUBCOMMANDS = {
     "grep", "show", "diff", "cat-file", "log", "ls-tree", "archive", "checkout",
     "restore", "rev-parse", "blame",
 }
-PROVEN_NON_FORWARDING_COMMANDS = {"echo", "printf"}
+# A bare name is not an identity: aliases and functions can replace it before execution.
+# Only `builtin`/structurally parsed `command` or these exact system paths may carry a
+# guarded-looking argv without becoming `ask`; selftest executes every accepted identity.
+SHELL_NON_FORWARDING_COMMANDS = {"echo", "printf"}
+TRUSTED_EXTERNAL_NON_FORWARDING_COMMANDS = {"/bin/echo", "/usr/bin/printf"}
 EXEC_WRAPPERS = {
     # option flags, options consuming the next argv, attached value prefixes,
     # bundled short flags, positional operands before the command
@@ -435,6 +439,16 @@ def _token_has_live_unresolved(token):
                for match in UNRESOLVED.finditer(text))
 
 
+def source_has_live_unresolved(source):
+    """Inspect command source as the downstream shell or eval will parse it."""
+    try:
+        commands = split_commands(source)
+    except CommandParseError:
+        return True
+    return any(_token_has_live_unresolved(token) for tokens in commands
+               for token in tokens)
+
+
 def has_dynamic_guarded_command_tail(tokens):
     """Whether a live expansion may choose an executable before a guarded operation."""
     words = [text for text, _quoting in tokens]
@@ -445,74 +459,6 @@ def has_dynamic_guarded_command_tail(tokens):
                for word in words[index + 1:]):
             return True
     return False
-
-
-def _mask_quoted_shell_source(source):
-    """Preserve shell structure while blanking quoted strings, escapes, and comments."""
-    masked = list(source)
-    quote = ""
-    comment = False
-    index = 0
-    while index < len(source):
-        char = source[index]
-        if comment:
-            if char == "\n":
-                comment = False
-            else:
-                masked[index] = " "
-            index += 1
-            continue
-        if quote:
-            masked[index] = " "
-            if char == quote:
-                quote = ""
-            elif quote == '"' and char == "\\" and index + 1 < len(source):
-                index += 1
-                masked[index] = " "
-            index += 1
-            continue
-        if char in ("'", '"'):
-            quote = char
-            masked[index] = " "
-        elif char == "\\" and index + 1 < len(source):
-            masked[index] = " "
-            index += 1
-            masked[index] = " "
-        elif char == "#" and (index == 0 or source[index - 1].isspace()
-                               or source[index - 1] in ";|&(){}"):
-            comment = True
-            masked[index] = " "
-        index += 1
-    return "".join(masked)
-
-
-def shadowed_non_forwarding_commands(source):
-    """Return harmless command names redefined or aliased in this shell source."""
-    shadowed = set()
-    structural = _mask_quoted_shell_source(source)
-    function_pattern = re.compile(
-        r"\bfunction\s+(echo|printf)(?:\s*\(\s*\))?\s*\{"
-        r"|(?<![A-Za-z0-9_])(echo|printf)\s*\(\s*\)\s*\{"
-    )
-    for match in function_pattern.finditer(structural):
-        shadowed.add(match.group(1) or match.group(2))
-    try:
-        commands = split_commands(source)
-    except CommandParseError:
-        return frozenset(PROVEN_NON_FORWARDING_COMMANDS)
-    for tokens in commands:
-        words = [text for text, _quoting in tokens]
-        while words and (words[0] in CONTROL_KEYWORDS or ASSIGNMENT.match(words[0])):
-            words.pop(0)
-        if words[:1] == ["builtin"]:
-            words.pop(0)
-        if words[:1] != ["alias"]:
-            continue
-        for assignment in words[1:]:
-            name, separator, _value = assignment.partition("=")
-            if separator and name in PROVEN_NON_FORWARDING_COMMANDS:
-                shadowed.add(name)
-    return frozenset(shadowed)
 
 
 def _split_env_string(value):
@@ -529,7 +475,7 @@ def _split_env_string(value):
     return [(word, "") for word in words]
 
 
-def unwrap_command_prefix(tokens, shadowed_commands=frozenset()):
+def unwrap_command_prefix(tokens):
     """Resolve the executable boundary shared by both guards.
 
     The result retains uncertainty instead of guessing through a dynamic executable,
@@ -543,6 +489,7 @@ def unwrap_command_prefix(tokens, shadowed_commands=frozenset()):
     guarded_prefix_hazard = False
     wrapper_depth = 0
     env_splits = 0
+    command_bypass_next = False
     while items:
         while items and items[0][0] in CONTROL_KEYWORDS:
             items.pop(0)
@@ -552,6 +499,8 @@ def unwrap_command_prefix(tokens, shadowed_commands=frozenset()):
         if not items:
             break
 
+        bypasses_shell_identity = command_bypass_next
+        command_bypass_next = False
         executable_text = items[0][0]
         if UNRESOLVED.search(executable_text):
             errors.append(f"dynamic executable {executable_text!r} cannot be resolved")
@@ -600,6 +549,7 @@ def unwrap_command_prefix(tokens, shadowed_commands=frozenset()):
                 break
             if terminal or errors:
                 break
+            command_bypass_next = True
             continue
 
         if executable == "exec":
@@ -774,26 +724,25 @@ def unwrap_command_prefix(tokens, shadowed_commands=frozenset()):
         if executable == "eval":
             break
 
-        harmless = (executable_text == executable
-                    and executable in PROVEN_NON_FORWARDING_COMMANDS
-                    and executable not in shadowed_commands)
-        shadowed_hazard = (
-            executable in shadowed_commands
-            and any(os.path.basename(word) in GIT_HAZARD_SUBCOMMANDS
-                    for word, _quoting in items[1:])
+        explicit_harmless = (
+            executable_text in TRUSTED_EXTERNAL_NON_FORWARDING_COMMANDS
+            or (bypasses_shell_identity and executable_text == executable
+                and executable in SHELL_NON_FORWARDING_COMMANDS)
         )
-        if (executable != "git" and not harmless
+        bare_identity_hazard = (
+            executable_text == executable
+            and executable in SHELL_NON_FORWARDING_COMMANDS
+            and (command_has_git_hazard_hint(items)
+                 or any(os.path.basename(word) in GIT_HAZARD_SUBCOMMANDS
+                        for word, _quoting in items[1:]))
+        )
+        if (executable != "git" and not explicit_harmless
                 and (has_literal_guarded_git_tail(items)
                      or has_dynamic_guarded_command_tail(items)
-                     or shadowed_hazard)):
-            if shadowed_hazard:
-                errors.append(
-                    f"command {executable!r} is redefined or aliased in this shell "
-                    "source, so its guarded argv cannot be treated as harmless output")
-            else:
-                errors.append(
-                    f"unknown leading command {executable!r} precedes a guarded Git "
-                    "operation; this guard cannot prove whether it forwards argv")
+                     or bare_identity_hazard)):
+            errors.append(
+                f"command identity {executable_text!r} is not an explicit builtin or "
+                "verified external harmless command before a guarded Git operation")
             guarded_prefix_hazard = True
             break
 
@@ -817,7 +766,8 @@ def nested_shell_invocation(resolution, current_shell="sh"):
         return ShellInvocation(
             current_shell,
             " ".join(word for word, _quoting in args),
-            any(_token_has_live_unresolved(arg) for arg in args),
+            source_has_live_unresolved(
+                " ".join(word for word, _quoting in args)),
         )
     if shell not in SHELLS:
         return None
@@ -829,7 +779,7 @@ def nested_shell_invocation(resolution, current_shell="sh"):
                              and "c" in word[1:]):
             command_arg = args[index + 1] if index + 1 < len(args) else ("", "")
             return ShellInvocation(
-                shell, command_arg[0], _token_has_live_unresolved(command_arg))
+                shell, command_arg[0], source_has_live_unresolved(command_arg[0]))
     return None
 
 def git_grep_argv(tokens, resolution=None):
@@ -939,7 +889,7 @@ def git_config_bool_is_false(value):
     return number == 0
 
 
-def decide(command, _shell_depth=0, _shadowed_commands=frozenset()):
+def decide(command, _shell_depth=0):
     """-> (decision, reason). decision in {allow, deny, ask}."""
     if _shell_depth > 4:
         return ("ask", "nested shell -c depth exceeds the git-grep guard's model; "
@@ -949,11 +899,8 @@ def decide(command, _shell_depth=0, _shadowed_commands=frozenset()):
     except CommandParseError as exc:
         return ("ask", f"the Bash command cannot be parsed safely ({exc}); "
                 "rewrite it as a direct command before proceeding.")
-    shadowed_commands = frozenset(
-        set(_shadowed_commands) | set(shadowed_non_forwarding_commands(command))
-    )
     for tokens in commands:
-        resolution = unwrap_command_prefix(tokens, shadowed_commands)
+        resolution = unwrap_command_prefix(tokens)
         if resolution.errors and resolution.hazard_hint:
             return ("ask", "a possible Git invocation crosses an unresolved command "
                     "prefix (" + "; ".join(resolution.errors) + "); invoke Git directly "
@@ -966,7 +913,7 @@ def decide(command, _shell_depth=0, _shadowed_commands=frozenset()):
                 return ("ask", "a shell -c command string is dynamic, so the Git grep "
                         "engine cannot be inspected before execution")
             nested_decision, nested_reason = decide(
-                invocation.command, _shell_depth + 1, shadowed_commands)
+                invocation.command, _shell_depth + 1)
             if nested_decision != "allow":
                 return nested_decision, nested_reason
         got = git_grep_argv(tokens, resolution)
@@ -1173,8 +1120,8 @@ FIXTURES = [
      """git grep -nE '^(def|class) [A-Za-z_]+\\(' -- src/""", "allow"),
     ("GREEN -F fixed strings",
      """git grep -nF 'a\\sb' -- src/""", "allow"),
-    ("GREEN the string 'git grep -E ... \\s' inside an echo, not an invocation",
-     '''echo "=== git grep -E lacks \\s support ===" ''', "allow"),
+    ("ASK bare echo identity is not proven even for quoted Git text",
+     '''echo "=== git grep -E lacks \\s support ===" ''', "ask"),
     ("GREEN plain grep, not git grep",
      """grep -rnE 'foo\\s+bar' src/""", "allow"),
     ("GREEN -E pattern where the atom is in the PATHSPEC not the pattern",
@@ -1377,20 +1324,30 @@ FIXTURES = [
      """eval \"git grep -nP $PATTERN -- README.md\"""", "ask"),
     ("ASK WRAPPER: partially dynamic builtin eval source is not static",
      """builtin eval \"git grep -nP $PATTERN -- README.md\"""", "ask"),
+    ("ASK WRAPPER: single-quoted eval source is dynamic to eval",
+     """eval '$CMD; git grep -nP harness -- README.md'""", "ask"),
+    ("ASK WRAPPER: single-quoted builtin eval source is dynamic to eval",
+     """builtin eval '$CMD; git grep -nP harness -- README.md'""", "ask"),
     ("ASK NESTED: partially dynamic sh -c source is not static",
      """sh -c \"git grep -nP $PATTERN -- README.md\"""", "ask"),
     ("ASK NESTED: partially dynamic zsh -c source is not static",
      """zsh -c \"git grep -nP $PATTERN -- README.md\"""", "ask"),
+    ("ASK NESTED: single-quoted sh -c source expands in sh",
+     """sh -c '$CMD; git grep -nP harness -- README.md'""", "ask"),
+    ("ASK NESTED: single-quoted bash -c source expands in bash",
+     """bash -c '$CMD; git grep -nP harness -- README.md'""", "ask"),
+    ("ASK NESTED: single-quoted zsh -c source expands in zsh",
+     """zsh -c '$CMD; git grep -nP harness -- README.md'""", "ask"),
     ("GREEN NESTED: fully static sh -c source retains PCRE",
      """sh -c \"git grep -nP 'harness\\b' -- README.md\"""", "allow"),
     ("GREEN NESTED: fully static zsh -c source retains PCRE",
      """zsh -c \"git grep -nP 'harness\\b' -- README.md\"""", "allow"),
     ("GREEN WRAPPER: arch without a guarded Git tail is outside this guard",
      """arch uname -m""", "allow"),
-    ("GREEN WRAPPER: echo is proven not to forward the literal Git tail",
-     """echo git grep -nE 'harness\\b' -- README.md""", "allow"),
-    ("GREEN WRAPPER: printf is proven not to forward the literal Git tail",
-     """printf '%s\\n' git grep -nE 'harness\\b' -- README.md""", "allow"),
+    ("ASK WRAPPER: bare echo identity is not mechanically fixed",
+     """echo git grep -nE 'harness\\b' -- README.md""", "ask"),
+    ("ASK WRAPPER: bare printf identity is not mechanically fixed",
+     """printf '%s\\n' git grep -nE 'harness\\b' -- README.md""", "ask"),
     ("ASK WRAPPER: a function-shadowed echo may forward literal Git argv",
      """echo() { command \"$@\"; }; echo git grep -nE 'harness\\b' -- README.md""",
      "ask"),
@@ -1406,9 +1363,25 @@ FIXTURES = [
     ("GREEN WRAPPER: builtin echo bypasses a same-source function",
      """echo() { git \"$@\"; }; builtin echo git grep -nE 'harness\\b' -- README.md""",
      "allow"),
-    ("GREEN WRAPPER: quoted function text does not shadow printf",
-     """printf '%s\\n' 'printf() { git \"$@\"; }' git grep -nE 'harness\\b' -- README.md""",
+    ("GREEN WRAPPER: exact /usr/bin/printf identity is explicit",
+     """/usr/bin/printf '%s\\n' 'printf() { git \"$@\"; }' git grep -nE 'harness\\b' -- README.md""",
      "allow"),
+    ("GREEN WRAPPER: exact /bin/echo identity is explicit",
+     """/bin/echo git grep -nE 'harness\\b' -- README.md""", "allow"),
+    ("GREEN WRAPPER: command structurally bypasses an echo function",
+     """echo() { git \"$@\"; }; command echo git grep -nE 'harness\\b' -- README.md""",
+     "allow"),
+    ("GREEN WRAPPER: builtin printf bypasses shell identity mutation",
+     """alias printf=git; builtin printf '%s\\n' git grep -nE 'harness\\b' -- README.md""",
+     "allow"),
+    ("ASK WRAPPER: brace-body function does not make bare echo identity provable",
+     """{ echo() { git \"$@\"; }; echo grep -nE 'harness\\b' -- README.md; }""",
+     "ask"),
+    ("ASK WRAPPER: subshell-body function does not make bare echo identity provable",
+     """( echo() { git \"$@\"; }; echo grep -nE 'harness\\b' -- README.md )""",
+     "ask"),
+    ("ASK WRAPPER: eval-defined alias leaves bare echo identity unresolved",
+     "eval 'alias echo=git'\necho grep -nE 'harness\\b' -- README.md", "ask"),
     ("ASK WRAPPER: basename alone does not trust an arbitrary echo path",
      """/tmp/echo git grep -nE 'harness\\b' -- README.md""", "ask"),
     ("GREEN patternType=perl via config - the intended engine",
@@ -1489,8 +1462,8 @@ FIXTURES = [
      """nohup ls -la""", "allow"),
     ("GREEN ROUND 10: wrapper help terminates without executing trailing git tokens",
      """timeout --help git grep -nE 'harness\\b' -- README.md""", "allow"),
-    ("GREEN ROUND 10: an arbitrary non-wrapper is not treated as command forwarding",
-     """echo git grep -nE 'harness\\b' -- README.md""", "allow"),
+    ("ASK ROUND 10: a bare command name is not an explicit harmless identity",
+     """echo git grep -nE 'harness\\b' -- README.md""", "ask"),
 ]
 
 
@@ -1666,10 +1639,10 @@ def check_option_grammar_against_git():
     return failures
 
 
-def check_shadow_forwarding_against_shell():
-    """Prove the shell can replace both names the harmless allowlist contains."""
+def check_shell_boundary_behavior():
+    """Exercise downstream expansion and every explicit harmless identity."""
     failures = []
-    probes = (
+    zsh_probes = (
         (
             "function-shadowed echo",
             'echo() { print -r -- "FORWARDED:$*"; }\n'
@@ -1682,8 +1655,36 @@ def check_shadow_forwarding_against_shell():
             "printf git grep -E pattern\n",
             "FORWARDED git grep -E pattern\n",
         ),
+        (
+            "brace-body function",
+            '{ echo() { print -r -- "BRACE:$*"; }; echo grep -E pattern; }\n',
+            "BRACE:grep -E pattern\n",
+        ),
+        (
+            "subshell-body function",
+            '( echo() { print -r -- "SUBSHELL:$*"; }; echo grep -E pattern )\n',
+            "SUBSHELL:grep -E pattern\n",
+        ),
+        (
+            "eval-defined alias",
+            'eval \'alias echo="print -r -- EVAL"\'\n'
+            "echo grep -E pattern\n",
+            "EVAL grep -E pattern\n",
+        ),
+        (
+            "builtin echo bypass",
+            'echo() { print -r -- "WRONG:$*"; }\n'
+            "builtin echo git grep -E pattern\n",
+            "git grep -E pattern\n",
+        ),
+        (
+            "command echo bypass",
+            'echo() { print -r -- "WRONG:$*"; }\n'
+            "command echo git grep -E pattern\n",
+            "git grep -E pattern\n",
+        ),
     )
-    for label, source, expected in probes:
+    for label, source, expected in zsh_probes:
         try:
             observed = subprocess.run(
                 ["zsh", "-s"], input=source, capture_output=True, text=True, timeout=10,
@@ -1694,6 +1695,41 @@ def check_shadow_forwarding_against_shell():
         if observed.returncode != 0 or observed.stdout != expected:
             failures.append(
                 f"installed zsh did not demonstrate {label} forwarding "
+                f"(rc={observed.returncode}, stdout={observed.stdout!r}, "
+                f"stderr={observed.stderr!r})")
+    for shell in ("sh", "bash", "zsh"):
+        environment = dict(os.environ)
+        environment["CMD"] = "/usr/bin/printf"
+        expected = f"DOWNSTREAM-{shell}\n"
+        try:
+            observed = subprocess.run(
+                [shell, "-c", f"$CMD 'DOWNSTREAM-{shell}\\n'"],
+                env=environment, capture_output=True, text=True, timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            failures.append(f"cannot run downstream {shell} expansion probe: {exc!r}")
+            continue
+        if observed.returncode != 0 or observed.stdout != expected:
+            failures.append(
+                f"installed {shell} did not expand the downstream command source "
+                f"(rc={observed.returncode}, stdout={observed.stdout!r}, "
+                f"stderr={observed.stderr!r})")
+    external_probes = (
+        (["/bin/echo", "git", "grep", "-E", "pattern"], "git grep -E pattern\n"),
+        (["/usr/bin/printf", "%s\\n", "git grep -E pattern"],
+         "git grep -E pattern\n"),
+    )
+    for argv, expected in external_probes:
+        try:
+            observed = subprocess.run(
+                argv, capture_output=True, text=True, timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            failures.append(f"cannot run exact external identity {argv[0]}: {exc!r}")
+            continue
+        if observed.returncode != 0 or observed.stdout != expected:
+            failures.append(
+                f"exact external identity {argv[0]} did not retain literal argv "
                 f"(rc={observed.returncode}, stdout={observed.stdout!r}, "
                 f"stderr={observed.stderr!r})")
     return failures
@@ -1734,13 +1770,13 @@ def selftest():
             print("  FAIL option grammar vs installed git: %s" % failure)
     else:
         print("  PASS numeric, optional-value, negated-engine, and -- grammar matches installed git")
-    shadow_failures = check_shadow_forwarding_against_shell()
-    bad += len(shadow_failures)
-    if shadow_failures:
-        for failure in shadow_failures:
-            print("  FAIL harmless-command shadow probe: %s" % failure)
+    boundary_failures = check_shell_boundary_behavior()
+    bad += len(boundary_failures)
+    if boundary_failures:
+        for failure in boundary_failures:
+            print("  FAIL shell-boundary behavior probe: %s" % failure)
     else:
-        print("  PASS echo/printf shadow forwarding is reproduced by installed zsh")
+        print("  PASS downstream expansion and explicit harmless identities match installed shells")
     checks = len(FIXTURES) + 3
     print("failures: %d" % bad)
     print("SELFTEST-SUMMARY suite=git_grep_engine_guard checks=%d failures=%d" % (

@@ -915,10 +915,59 @@ def git_grep_argv(tokens, resolution=None):
         # --no-pager, -P, --literal-pathspecs and --no-optional-locks all leave
         # the following git subcommand in the next argv slot.
         j += 1
-    if j >= len(words) or words[j] != "grep":
+    if j >= len(words):
         return None
-    return items[j + 1:], configs, unresolved_configs
+    subcommand = words[j]
+    if subcommand == "grep":
+        return items[j + 1:], configs, unresolved_configs
+    # An alias resolves to a real subcommand, and its body is already sitting in the
+    # config this function just parsed. `git -c alias.gg='grep -nE' gg 'harness\b'`
+    # reached git as an ERE grep while the guard read `gg` and stopped.
+    alias_body = None
+    for config in configs:
+        key, separator, value = config.partition("=")
+        if separator and key.strip().lower() == f"alias.{subcommand.lower()}":
+            alias_body = value
+    if alias_body is not None:
+        alias_words = alias_body.split()
+        if alias_words and alias_words[0] == "grep":
+            aliased = [(word, "") for word in alias_words[1:]]
+            return aliased + items[j + 1:], configs, unresolved_configs
+        return None
+    # `git log --grep=<pattern>` runs the pattern through the same engine selection as
+    # `git grep`: measured on git 2.46.1, `-E --grep='foo\b'` returns the commit whose
+    # subject contains `foob` while `-P` returns the intended one. The pattern rides an
+    # option rather than sitting in argv, so it is lifted out here.
+    if subcommand in GIT_LOG_GREP_SUBCOMMANDS:
+        lifted = []
+        rest = items[j + 1:]
+        k = 0
+        while k < len(rest):
+            text, quoting = rest[k]
+            name, separator, value = text.partition("=")
+            if name in GIT_LOG_PATTERN_OPTIONS:
+                if separator:
+                    lifted.append((value, quoting))
+                    k += 1
+                    continue
+                if k + 1 < len(rest):
+                    lifted.append(rest[k + 1])
+                    k += 2
+                    continue
+            lifted.append((text, quoting))
+            k += 1
+        if any(name in GIT_LOG_PATTERN_OPTIONS
+               for text, _q in rest
+               for name in (text.partition("=")[0],)):
+            return lifted, configs, unresolved_configs
+    return None
 
+
+# Subcommands whose --grep/--author/--committer patterns go through the same engine
+# selection as `git grep`. Verified on git 2.46.1: `git log -E --grep='foo\b'` returns
+# the commit whose subject contains `foob`, `-P` returns the intended one.
+GIT_LOG_GREP_SUBCOMMANDS = {"log", "shortlog", "rev-list"}
+GIT_LOG_PATTERN_OPTIONS = {"--grep", "--author", "--committer"}
 
 CONFIG_ENGINE = {"extended": "E", "ere": "E", "perl": "P", "pcre": "P",
                  "fixed": "F", "basic": "B", "default": "B"}
@@ -1912,6 +1961,35 @@ FIXTURES += [
     ("ASK LAUNCHER: ssh ahead of a guarded subcommand",
      "ssh host git log --oneline", "ask"),
     ("ASK LAUNCHER: xargs ahead of git grep", "xargs git grep -E 'x'", "ask"),
+]
+
+# Same hazard, reached through a different subcommand. Verified on git 2.46.1 against a
+# repo whose subjects are "fix foob handling" and "fix foo bar handling": `-E` returns the
+# foob commit, `-P` the intended one. --author behaves identically (authors foob / foo bar).
+# Aliases reach it too: the alias body was already parsed into `configs` and ignored.
+FIXTURES += [
+    ("RED LOG: -E --grep= returns the wrong commit",
+     r"""git log -E --grep='foo\b'""", "deny"),
+    ("RED LOG: separated --grep value",
+     r"""git log -E --grep 'foo\b'""", "deny"),
+    ("RED LOG: long engine spelling",
+     r"""git log --extended-regexp --grep='foo\b'""", "deny"),
+    ("RED LOG: shortlog shares the engine",
+     r"""git shortlog -E --grep='foo\b'""", "deny"),
+    ("RED LOG: --author shares the engine too",
+     r"""git log -E --author='foo\b'""", "deny"),
+    ("GREEN LOG: -P is the intended engine",
+     r"""git log -P --grep='foo\b'""", "allow"),
+    ("GREEN LOG: no engine flag is BRE and fine",
+     r"""git log --grep='foo\b'""", "allow"),
+    ("GREEN LOG: an ordinary log is not this guard's business",
+     "git log --grep=fix --oneline", "allow"),
+    ("RED ALIAS: an alias body carrying -E",
+     r"""git -c alias.gg='grep -nE' gg 'harness\b'""", "deny"),
+    ("GREEN ALIAS: an alias body carrying -P",
+     r"""git -c alias.gg='grep -nP' gg 'harness\b'""", "allow"),
+    ("GREEN ALIAS: an alias to a subcommand with no engine",
+     "git -c alias.st='status --short' st", "allow"),
 ]
 
 def selftest():

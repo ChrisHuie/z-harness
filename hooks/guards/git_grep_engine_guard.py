@@ -1545,7 +1545,7 @@ def check_option_grammar_against_git():
                         + (initialized.stderr or "no diagnostic").strip()]
             fixture = os.path.join(repo, "fixture.txt")
             with open(fixture, "w", encoding="utf-8") as stream:
-                stream.write("harness\nharnessb\n")
+                stream.write("harness\nharnessb\nharnessx\n")
             indexed = subprocess.run(
                 ["git", "add", "fixture.txt"], cwd=repo,
                 capture_output=True, text=True, timeout=10,
@@ -1553,63 +1553,71 @@ def check_option_grammar_against_git():
             if indexed.returncode:
                 return ["cannot index the temporary Git grammar fixture: "
                         + (indexed.stderr or "no diagnostic").strip()]
+            # `\b` is not a portable engine oracle: Git's regex backend treats it as a
+            # word boundary under ERE on some Linux builds and as a literal `b` on this
+            # macOS build. These patterns instead select syntax specific to the expected
+            # final engine. The exact matched line proves which grammar ran without
+            # assuming one platform's extension behavior.
+            bre_pattern = r"\(harness\)"
+            ere_pattern = r"harness{1}b"
+            pcre_pattern = r"harness(?=x)"
             cases = (
-                ("attached -m", ["-Em1", r"harness\b", "--", "fixture.txt"],
-                 "harnessb"),
-                ("attached -A", ["-EA3", r"harness\b", "--", "fixture.txt"],
-                 "harnessb"),
-                ("attached -B", ["-EB3", r"harness\b", "--", "fixture.txt"],
-                 "harnessb"),
-                ("attached -C", ["-EC3", r"harness\b", "--", "fixture.txt"],
-                 "harnessb"),
-                ("-NUM shorthand", ["-E3", r"harness\b", "--", "fixture.txt"],
-                 "harnessb"),
-                ("-NUM before E and e", ["-12Ee" + r"harness\b", "--", "fixture.txt"],
-                 "harnessb"),
-                ("-NUM between E and P", ["-E1Pe" + r"harness\b", "--", "fixture.txt"],
-                 "harness"),
-                ("-NUM between P and E", ["-P1Ee" + r"harness\b", "--", "fixture.txt"],
-                 "harnessb"),
+                ("attached -m", ["-Em1", ere_pattern, "--", "fixture.txt"],
+                 "fixture.txt:harnessb\n"),
+                ("attached -A", ["-EA3", ere_pattern, "--", "fixture.txt"],
+                 "fixture.txt:harnessb\n"),
+                ("attached -B", ["-EB3", ere_pattern, "--", "fixture.txt"],
+                 "fixture.txt:harnessb\n"),
+                ("attached -C", ["-EC3", ere_pattern, "--", "fixture.txt"],
+                 "fixture.txt:harnessb\n"),
+                ("-NUM shorthand", ["-E3", ere_pattern, "--", "fixture.txt"],
+                 "fixture.txt:harnessb\n"),
+                ("-NUM before E and e", ["-12Ee" + ere_pattern, "--", "fixture.txt"],
+                 "fixture.txt:harnessb\n"),
+                ("-NUM between E and P", ["-E1Pe" + pcre_pattern, "--", "fixture.txt"],
+                 "fixture.txt:harnessx\n"),
+                ("-NUM between P and E", ["-P1Ee" + ere_pattern, "--", "fixture.txt"],
+                 "fixture.txt:harnessb\n"),
                 ("bare optional --color",
-                 ["--color", "--no-color", "-E", r"harness\b", "--", "fixture.txt"],
-                 "harnessb"),
-                ("-- pattern state", ["-E", "--", r"harness\b", "fixture.txt"],
-                 "harnessb"),
+                 ["--color", "--no-color", "-E", ere_pattern, "--", "fixture.txt"],
+                 "fixture.txt:harnessb\n"),
+                ("-- pattern state", ["-E", "--", ere_pattern, "fixture.txt"],
+                 "fixture.txt:harnessb\n"),
                 ("matching E negation",
-                 ["--extended-regexp", "--no-extended-regexp", r"harness\b", "--",
+                 ["--extended-regexp", "--no-extended-regexp", bre_pattern, "--",
                   "fixture.txt"], "fixture.txt:harness\n"),
                 ("unrelated E negation",
-                 ["--perl-regexp", "--no-extended-regexp", r"harness\b", "--",
+                 ["--perl-regexp", "--no-extended-regexp", bre_pattern, "--",
                   "fixture.txt"], "fixture.txt:harness\n"),
                 ("unrelated P negation",
-                 ["--extended-regexp", "--no-perl-regexp", r"harness\b", "--",
+                 ["--extended-regexp", "--no-perl-regexp", bre_pattern, "--",
                   "fixture.txt"], "fixture.txt:harness\n"),
                 ("matching P negation",
-                 ["--perl-regexp", "--no-perl-regexp", r"harness\b", "--",
+                 ["--perl-regexp", "--no-perl-regexp", bre_pattern, "--",
                   "fixture.txt"], "fixture.txt:harness\n"),
                 ("basic negation resets shared engine",
-                 ["--extended-regexp", "--no-basic-regexp", r"harness\b", "--",
+                 ["--extended-regexp", "--no-basic-regexp", bre_pattern, "--",
                   "fixture.txt"], "fixture.txt:harness\n"),
                 ("fixed negation resets shared engine",
-                 ["--extended-regexp", "--no-fixed-strings", r"harness\b", "--",
+                 ["--extended-regexp", "--no-fixed-strings", bre_pattern, "--",
                   "fixture.txt"], "fixture.txt:harness\n"),
                 ("positive E after reset",
-                 ["--no-perl-regexp", "--extended-regexp", r"harness\b", "--",
+                 ["--no-perl-regexp", "--extended-regexp", ere_pattern, "--",
                   "fixture.txt"], "fixture.txt:harnessb\n"),
                 ("positive P after reset",
-                 ["--no-extended-regexp", "--perl-regexp", r"harness\b", "--",
-                  "fixture.txt"], "fixture.txt:harness\n"),
+                 ["--no-extended-regexp", "--perl-regexp", pcre_pattern, "--",
+                  "fixture.txt"], "fixture.txt:harnessx\n"),
                 ("unique --extended abbreviation",
-                 ["--extended", r"harness\b", "--", "fixture.txt"],
+                 ["--extended", ere_pattern, "--", "fixture.txt"],
                  "fixture.txt:harnessb\n"),
                 ("unique --extended-r abbreviation",
-                 ["--extended-r", r"harness\b", "--", "fixture.txt"],
+                 ["--extended-r", ere_pattern, "--", "fixture.txt"],
                  "fixture.txt:harnessb\n"),
                 ("unique --no-extended abbreviation resets PCRE",
-                 ["--perl-regexp", "--no-extended", r"harness\b", "--", "fixture.txt"],
+                 ["--perl-regexp", "--no-extended", bre_pattern, "--", "fixture.txt"],
                  "fixture.txt:harness\n"),
                 ("later abbreviated extended engine wins",
-                 ["--no-extended", "--extended", r"harness\b", "--", "fixture.txt"],
+                 ["--no-extended", "--extended", ere_pattern, "--", "fixture.txt"],
                  "fixture.txt:harnessb\n"),
             )
             for label, args, expected_fragment in cases:
@@ -1640,8 +1648,14 @@ def check_option_grammar_against_git():
 
 
 def check_shell_boundary_behavior():
-    """Exercise downstream expansion and every explicit harmless identity."""
+    """Exercise downstream expansion and every explicit harmless identity.
+
+    Return (failures, executed, skipped). Only probes requiring an unavailable zsh are
+    skipped; sh, bash, and exact-path probes remain mandatory on every host.
+    """
     failures = []
+    executed = skipped = 0
+    has_zsh = shutil.which("zsh") is not None
     zsh_probes = (
         (
             "function-shadowed echo",
@@ -1685,6 +1699,10 @@ def check_shell_boundary_behavior():
         ),
     )
     for label, source, expected in zsh_probes:
+        if not has_zsh:
+            skipped += 1
+            continue
+        executed += 1
         try:
             observed = subprocess.run(
                 ["zsh", "-s"], input=source, capture_output=True, text=True, timeout=10,
@@ -1698,6 +1716,10 @@ def check_shell_boundary_behavior():
                 f"(rc={observed.returncode}, stdout={observed.stdout!r}, "
                 f"stderr={observed.stderr!r})")
     for shell in ("sh", "bash", "zsh"):
+        if shell == "zsh" and not has_zsh:
+            skipped += 1
+            continue
+        executed += 1
         environment = dict(os.environ)
         environment["CMD"] = "/usr/bin/printf"
         expected = f"DOWNSTREAM-{shell}\n"
@@ -1720,6 +1742,7 @@ def check_shell_boundary_behavior():
          "git grep -E pattern\n"),
     )
     for argv, expected in external_probes:
+        executed += 1
         try:
             observed = subprocess.run(
                 argv, capture_output=True, text=True, timeout=10,
@@ -1732,7 +1755,7 @@ def check_shell_boundary_behavior():
                 f"exact external identity {argv[0]} did not retain literal argv "
                 f"(rc={observed.returncode}, stdout={observed.stdout!r}, "
                 f"stderr={observed.stderr!r})")
-    return failures
+    return failures, executed, skipped
 
 
 def selftest():
@@ -1770,14 +1793,29 @@ def selftest():
             print("  FAIL option grammar vs installed git: %s" % failure)
     else:
         print("  PASS numeric, optional-value, negated-engine, and -- grammar matches installed git")
-    boundary_failures = check_shell_boundary_behavior()
+    boundary_failures, boundary_checks, boundary_skips = check_shell_boundary_behavior()
     bad += len(boundary_failures)
     if boundary_failures:
         for failure in boundary_failures:
             print("  FAIL shell-boundary behavior probe: %s" % failure)
     else:
         print("  PASS downstream expansion and explicit harmless identities match installed shells")
-    checks = len(FIXTURES) + 3
+    print("SHELL-BOUNDARY-SUMMARY checks=%d skips=%d failures=%d" % (
+        boundary_checks, boundary_skips, len(boundary_failures)))
+
+    # Prove the absence branch is narrow: removing the availability check or broadening
+    # it to skip sh/bash/exact-path probes changes these counts and turns this selftest red.
+    original_which = shutil.which
+    shutil.which = lambda name: None if name == "zsh" else original_which(name)
+    try:
+        absent_failures, absent_checks, absent_skips = check_shell_boundary_behavior()
+    finally:
+        shutil.which = original_which
+    absence_ok = not absent_failures and absent_checks == 4 and absent_skips == 8
+    bad += 0 if absence_ok else 1
+    print("  %s absent zsh skips only 8 zsh probes; 4 portable probes still execute" % (
+        "PASS" if absence_ok else "FAIL"))
+    checks = len(FIXTURES) + 4
     print("failures: %d" % bad)
     print("SELFTEST-SUMMARY suite=git_grep_engine_guard checks=%d failures=%d" % (
         checks, bad))

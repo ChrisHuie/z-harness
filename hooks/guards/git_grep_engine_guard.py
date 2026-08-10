@@ -40,7 +40,14 @@ import sys
 import tempfile
 from typing import NamedTuple
 
-PCRE_ONLY = re.compile(r"\\[bBdDsSwWAZzhHvVR]|\(\?[:=!<Pi#'-]")
+# An atom only exists when its backslash is itself unescaped, so the backslashes before
+# it must be counted. `(?<![\\])(?:\\\\)*` anchors the run at its start and consumes
+# escaped pairs, leaving an odd backslash to open the atom. Matching `\b` regardless of
+# what precedes it denied `git grep -nE '\\b'` -- a search for a LITERAL backslash-b,
+# which returns the same correct line under -E, -P and -F alike. That is this repository's
+# own `\b` audit, and the deny text told the author their result was untrustworthy when it
+# was not.
+PCRE_ONLY = re.compile(r"(?<![\\])(?:\\\\)*(\\[bBdDsSwWAZzhHvVR])|(\(\?[:=!<Pi#'-])")
 UNRESOLVED = re.compile(r"\$[A-Za-z_{(]|`")
 
 MAX_COMMAND_CHARS = 1024 * 1024
@@ -447,6 +454,26 @@ def source_has_live_unresolved(source):
         return True
     return any(_token_has_live_unresolved(token) for tokens in commands
                for token in tokens)
+
+
+def source_has_dynamic_command_word(source):
+    """Whether the EXECUTABLE of any subcommand in this source is itself an expansion.
+
+    `sh -c "$CMD"` is genuinely unknowable and must stay a question. `sh -c 'git show
+    $SHA:x'` names its command and expands only an argument, so it can be judged on what
+    is written. Treating both as "dynamic" questioned ordinary commands whose only sin was
+    containing a `$`.
+    """
+    try:
+        commands = split_commands(source)
+    except CommandParseError:
+        return True
+    for tokens in commands:
+        words = [token for token in tokens if token[0] not in CONTROL_KEYWORDS
+                 and not ASSIGNMENT.match(token[0])]
+        if words and _token_has_live_unresolved(words[0]):
+            return True
+    return False
 
 
 def has_dynamic_guarded_command_tail(tokens):
@@ -907,15 +934,24 @@ def decide(command, _shell_depth=0):
                     "so the pattern engine can be verified.")
         invocation = nested_shell_invocation(resolution)
         if invocation is not None:
-            if not invocation.command:
-                return ("ask", "a shell -c wrapper is missing its command string")
-            if invocation.dynamic:
-                return ("ask", "a shell -c command string is dynamic, so the Git grep "
-                        "engine cannot be inspected before execution")
-            nested_decision, nested_reason = decide(
-                invocation.command, _shell_depth + 1)
-            if nested_decision != "allow":
-                return nested_decision, nested_reason
+            # Inspect the body first. Returning `ask` on `dynamic` before recursing meant
+            # a nested body carrying a live ERE hazard was downgraded to a question, and
+            # a body with no Git in it at all -- `sh -c 'echo $PATH'` -- was questioned
+            # too, purely for containing a `$`.
+            if invocation.command:
+                nested_decision, nested_reason = decide(
+                    invocation.command, _shell_depth + 1)
+                if nested_decision != "allow":
+                    return nested_decision, nested_reason
+            # Uncertainty about the body only matters once Git is actually in it.
+            # An unknown EXECUTABLE is the honest question: the body could be anything,
+            # including a git grep. An unknown ARGUMENT to a named command is not -- that
+            # is judged on what is written.
+            if (not invocation.command
+                    or source_has_dynamic_command_word(invocation.command)):
+                return ("ask", "a shell -c command string is empty, or chooses its "
+                        "executable from an expansion, so the Git grep engine cannot be "
+                        "inspected before execution")
         got = git_grep_argv(tokens, resolution)
         if got is None:
             continue
@@ -1063,7 +1099,9 @@ def decide(command, _shell_depth=0):
             if UNRESOLVED.search(pattern):
                 unresolved = unresolved or pattern
                 continue
-            bad_atoms.update(PCRE_ONLY.findall(pattern))
+            # Two alternatives, so findall yields pairs; keep whichever arm matched.
+            bad_atoms.update(atom for match in PCRE_ONLY.findall(pattern)
+                             for atom in match if atom)
         if bad_atoms:
             return ("deny",
                     "git grep with the ERE engine (selected by " + engine_desc + ") "
@@ -1320,18 +1358,18 @@ FIXTURES = [
      """builtin eval \"git grep -nE 'harness\\b' -- README.md\"""", "deny"),
     ("GREEN WRAPPER: eval preserves an explicit PCRE engine",
      """eval \"git grep -nP 'harness\\b' -- README.md\"""", "allow"),
-    ("ASK WRAPPER: partially dynamic eval source is not inspected as static",
-     """eval \"git grep -nP $PATTERN -- README.md\"""", "ask"),
-    ("ASK WRAPPER: partially dynamic builtin eval source is not static",
-     """builtin eval \"git grep -nP $PATTERN -- README.md\"""", "ask"),
+    ("GREEN WRAPPER: dynamic pattern under -P, the safe engine, has no hazard",
+"""eval \"git grep -nP $PATTERN -- README.md\"""", "allow"),
+    ("GREEN WRAPPER: same under builtin eval",
+"""builtin eval \"git grep -nP $PATTERN -- README.md\"""", "allow"),
     ("ASK WRAPPER: single-quoted eval source is dynamic to eval",
      """eval '$CMD; git grep -nP harness -- README.md'""", "ask"),
     ("ASK WRAPPER: single-quoted builtin eval source is dynamic to eval",
      """builtin eval '$CMD; git grep -nP harness -- README.md'""", "ask"),
-    ("ASK NESTED: partially dynamic sh -c source is not static",
-     """sh -c \"git grep -nP $PATTERN -- README.md\"""", "ask"),
-    ("ASK NESTED: partially dynamic zsh -c source is not static",
-     """zsh -c \"git grep -nP $PATTERN -- README.md\"""", "ask"),
+    ("GREEN NESTED: dynamic pattern under -P is already the remedy",
+"""sh -c \"git grep -nP $PATTERN -- README.md\"""", "allow"),
+    ("GREEN NESTED: dynamic pattern under -P is already the remedy",
+"""zsh -c \"git grep -nP $PATTERN -- README.md\"""", "allow"),
     ("ASK NESTED: single-quoted sh -c source expands in sh",
      """sh -c '$CMD; git grep -nP harness -- README.md'""", "ask"),
     ("ASK NESTED: single-quoted bash -c source expands in bash",
@@ -1785,6 +1823,23 @@ def check_shell_boundary_behavior():
                 f"stderr={observed.stderr!r})")
     return failures, executed, skipped
 
+
+# Backslash counting. A PCRE atom exists only when its backslash is unescaped, so an even
+# run of backslashes is a literal and carries no engine hazard: measured on git 2.46.1,
+# `git grep -E '\\b'` and `-P` and `-F` and the default all return the identical line.
+# Denying it blocked this repository's own audit of which patterns use \b.
+FIXTURES += [
+    ("GREEN LITERAL: even backslashes are a literal, same result under every engine",
+     r"""git grep -nE '\\b' -- hooks/""", "allow"),
+    ("GREEN LITERAL: literal \\d likewise",
+     r"""git grep -nE '\\d' -- tools/""", "allow"),
+    ("GREEN LITERAL: four backslashes are still an escaped pair",
+     r"""git grep -nE 'a\\\\b' -- .""", "allow"),
+    ("RED LITERAL: an odd run leaves a live atom",
+     r"""git grep -nE 'a\\\b' -- .""", "deny"),
+    ("RED LITERAL: the bare atom is unaffected by the counting",
+     r"""git grep -nE 'harness\b' -- README.md""", "deny"),
+]
 
 def selftest():
     if not FIXTURES:

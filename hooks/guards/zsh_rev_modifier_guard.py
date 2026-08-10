@@ -64,7 +64,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from git_grep_engine_guard import (  # noqa: E402
     CommandParseError, MAX_PREFIX_DEPTH, nested_shell_invocation,
-    source_has_git_hazard_hint, split_commands, unwrap_command_prefix,
+    source_has_dynamic_command_word, source_has_git_hazard_hint,
+    split_commands, unwrap_command_prefix,
 )
 
 MODS = "aAcehlPqQrstu"
@@ -95,15 +96,24 @@ EXPANSION = re.compile(
 EXPANSION_BRACED = re.compile(
     r"\$\{(?:\([^}]*\))?"
     r"(?:[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]+\])?|[0-9]+|[#?*@!$-])"
-    r":[" + MOD_PREFIXES + r"]*([" + MODS + r"])(?=[}/:0-9])")
+    r":[" + MOD_PREFIXES + r"]*([" + MODS + r"])(?=\}[A-Za-z0-9]|[/:0-9])")
 
 # git subcommands that take a `rev:path` / `rev:./path` argument
 # How many `<shell> -c` layers this guard will unwrap. Reaching it returns `ask`, never
 # `allow`: an input the guard cannot model is not a clean verdict.
 NEST_DEPTH_LIMIT = 4
 
+# Subcommands whose documented argument grammar contains a `X:Y` form, so a mangled colon
+# expression silently changes which object is addressed. The refspec consumers were
+# missing, which mattered most on `push`: it is the one that WRITES, and
+# `$BRANCH:refs/heads/main` with BRANCH=feature/my-work.v2 was observed reaching git as
+# `feature/my-workefs/heads/main` -- a different destination ref, no error.
 REV_PATH_SUBCOMMANDS = {"show", "diff", "cat-file", "log", "ls-tree", "archive",
-                        "checkout", "restore", "grep", "rev-parse", "blame"}
+                        "checkout", "restore", "grep", "rev-parse", "blame",
+                        # refspec `src:dst`
+                        "push", "fetch", "pull",
+                        # rev:path, same grammar as `diff`
+                        "difftool"}
 
 MOD_MEANING = {
     "a": ":a absolute-path", "A": ":A resolved-absolute", "c": ":c command-path",
@@ -210,12 +220,23 @@ def decide(command, _depth=0, _shell="zsh"):
                     f"nested shell invocations exceed this guard's depth limit of "
                     f"{NEST_DEPTH_LIMIT}, so it cannot prove what the innermost command "
                     "becomes after each shell expands it. Run the inner command directly.")
-        if not invocation.command or invocation.dynamic:
+        # Recurse BEFORE falling back to uncertainty. This short-circuited on `dynamic`
+        # first, which cost enforcement in one direction and precision in the other:
+        # `zsh -c 'SHA=x; git show $SHA:src/f.py'` is a proven hazard -- the inner zsh
+        # applies `:s` whatever SHA holds -- and returned `ask` instead of `deny`, while
+        # `sh -c 'echo $PATH'`, which contains no Git at all, also returned `ask`.
+        if invocation.command:
+            decision, reason = decide(invocation.command, _depth + 1, invocation.shell)
+            if decision != "allow":
+                return (decision, reason)
+        # Only then does an uninspectable body matter, and only when Git is actually in
+        # it. `descendant_git` is the same predicate the deny above is gated on.
+        # sh, bash, dash and ksh apply no history modifier whatever the value expands
+        # to, so an unresolved argument in their body is not this guard's hazard.
+        if (not invocation.command
+                or source_has_dynamic_command_word(invocation.command)):
             return ("ask", "a shell -c command string is empty or dynamic, so its Git "
                     "arguments cannot be inspected before execution")
-        decision, reason = decide(invocation.command, _depth + 1, invocation.shell)
-        if decision != "allow":
-            return (decision, reason)
     return ("allow", "")
 
 
@@ -350,26 +371,26 @@ FIXTURES = [
      "SHA=x; launcher $TOOL show $SHA:src/f.py", "ask"),
     ("RED WRAPPER: bare time is a modelled shell keyword",
      "SHA=x; time git show $SHA:src/f.py", "deny"),
-    ("ASK WRAPPER: eval single-quoted body is dynamic to eval",
-     "SHA=x; eval 'git show $SHA:src/f.py'", "ask"),
+    ("RED WRAPPER: eval body mangles - zsh reports `(eval):1: bad substitution`",
+"SHA=x; eval 'git show $SHA:src/f.py'", "deny"),
     ("RED WRAPPER: eval double-quoted body expands in the outer zsh",
      "SHA=x; eval \"git show $SHA:src/f.py\"", "deny"),
-    ("ASK WRAPPER: builtin eval single-quoted body is dynamic to eval",
-     "SHA=x; builtin eval 'git show $SHA:src/f.py'", "ask"),
+    ("RED WRAPPER: builtin eval body mangles the same way",
+"SHA=x; builtin eval 'git show $SHA:src/f.py'", "deny"),
     ("GREEN WRAPPER: eval of a non-Git body is outside this guard",
      "eval 'printf safe'", "allow"),
-    ("ASK WRAPPER: partially dynamic eval source is not static",
-     "eval \"git grep -P $PATTERN -- README.md\"", "ask"),
-    ("ASK WRAPPER: partially dynamic builtin eval source is not static",
-     "builtin eval \"git grep -P $PATTERN -- README.md\"", "ask"),
+    ("GREEN WRAPPER: dynamic pattern under -P, the safe engine, has no hazard",
+"eval \"git grep -P $PATTERN -- README.md\"", "allow"),
+    ("GREEN WRAPPER: same under builtin eval",
+"builtin eval \"git grep -P $PATTERN -- README.md\"", "allow"),
     ("ASK WRAPPER: single-quoted eval source is dynamic to eval",
      "eval '$CMD; git grep -P harness -- README.md'", "ask"),
     ("ASK WRAPPER: single-quoted builtin eval source is dynamic to eval",
      "builtin eval '$CMD; git grep -P harness -- README.md'", "ask"),
-    ("ASK NESTED: partially dynamic sh -c source is not static",
-     "sh -c \"git grep -P $PATTERN -- README.md\"", "ask"),
-    ("ASK NESTED: partially dynamic zsh -c source is not static",
-     "zsh -c \"git grep -P $PATTERN -- README.md\"", "ask"),
+    ("GREEN NESTED: dynamic pattern under -P is already the remedy",
+"sh -c \"git grep -P $PATTERN -- README.md\"", "allow"),
+    ("GREEN NESTED: dynamic pattern under -P is already the remedy",
+"zsh -c \"git grep -P $PATTERN -- README.md\"", "allow"),
     ("ASK NESTED: single-quoted sh -c source expands in sh",
      "sh -c '$CMD; git grep -P harness -- README.md'", "ask"),
     ("ASK NESTED: single-quoted bash -c source expands in bash",
@@ -418,20 +439,20 @@ FIXTURES = [
     # A nested shell mangles at a different moment depending on which shell it is.
     ("RED NESTED: sh -c body in double quotes - the OUTER zsh expands it first",
      'sh -c "SHA=x; git show $SHA:src/f.py"', "deny"),
-    ("ASK NESTED: zsh -c source contains a downstream expansion",
-     "zsh -c 'SHA=x; git show $SHA:src/f.py'", "ask"),
-    ("ASK NESTED: sh -c source contains a downstream expansion",
-     "sh -c 'SHA=x; git show $SHA:src/f.py'", "ask"),
-    ("ASK NESTED: bash -c source contains a downstream expansion",
-     "bash -c 'SHA=x; git show $SHA:src/f.py'", "ask"),
-    ("ASK NESTED: sh composes a zsh command source from an unresolved expansion",
-     "sh -c 'zsh -c \"git show $SHA:src/f.py\"'", "ask"),
-    ("ASK NESTED: zsh source contains a downstream expansion before sh",
-     "zsh -c 'sh -c \"git show $SHA:src/f.py\"'", "ask"),
-    ("ASK NESTED: bash composes a zsh command source from an unresolved expansion",
-     "bash -c 'zsh -c \"git show $SHA:src/f.py\"'", "ask"),
-    ("ASK NESTED: sh composes a bash command source from an unresolved expansion",
-     "sh -c 'bash -c \"git show $SHA:src/f.py\"'", "ask"),
+    ("RED NESTED: inner zsh applies the modifier - `zsh:1: bad substitution`",
+"zsh -c 'SHA=x; git show $SHA:src/f.py'", "deny"),
+    ("GREEN NESTED: sh expands it, and sh has no history modifiers",
+"sh -c 'SHA=x; git show $SHA:src/f.py'", "allow"),
+    ("GREEN NESTED: bash expands it, and bash has no history modifiers",
+"bash -c 'SHA=x; git show $SHA:src/f.py'", "allow"),
+    ("RED NESTED: sh composes a zsh body - renders `git show :src/f.py`",
+"sh -c 'zsh -c \"git show $SHA:src/f.py\"'", "deny"),
+    ("RED NESTED: outer zsh mangles before sh ever runs",
+"zsh -c 'sh -c \"git show $SHA:src/f.py\"'", "deny"),
+    ("RED NESTED: bash composes a zsh body - renders `git show :src/f.py`",
+"bash -c 'zsh -c \"git show $SHA:src/f.py\"'", "deny"),
+    ("GREEN NESTED: neither sh nor bash applies a modifier",
+"sh -c 'bash -c \"git show $SHA:src/f.py\"'", "allow"),
     ("GREEN NESTED: nested shell with no rev:path git inside",
      'sh -c "git status"', "allow"),
 ]
@@ -464,6 +485,63 @@ FIXTURES += [
 ]
 
 
+# Refspec and rev:path consumers. Each RED line was observed mangling under zsh 5.9; the
+# push cases matter most because push WRITES, so a mangled refspec names a different
+# destination ref and git reports no error.
+FIXTURES += [
+    ("RED REFSPEC: push destination silently rewritten",
+     "B=feature/my-work.v2; git push origin $B:refs/heads/main", "deny"),
+    ("RED REFSPEC: push tag refspec via :t",
+     "T=v1.0; git push origin $T:tags/rel", "deny"),
+    ("RED REFSPEC: fetch refspec", "R=origin.v2; git fetch $R:refs/remotes/x", "deny"),
+    ("RED REFSPEC: pull refspec", "R=origin.v2; git pull $R:refs/remotes/x", "deny"),
+    ("RED REVPATH: difftool takes rev:path like diff",
+     "A=HEAD.v2; git difftool $A:src/f.py", "deny"),
+    ("GREEN REFSPEC: a push with no expansion is untouched",
+     "git push origin HEAD:refs/heads/main", "allow"),
+    ("GREEN REFSPEC: braced NAME only is the safe spelling",
+     "B=x; git push origin ${B}:refs/heads/main", "allow"),
+    ("GREEN REFSPEC: an ordinary push is not this guard's business",
+     "git push origin HEAD", "allow"),
+]
+
+
+# Deliberate modifiers versus a brace that closed one character early. Both spell
+# `${name:mod}`, so the discriminator is what follows the closing brace: a letter or digit
+# means the path continues into text the modifier already ate, which is the mistyped
+# rev:path. A separator or end-of-token means the author asked for the modifier and got
+# it. Flagging both denied `git show HEAD:${f:t}`, which zsh renders `HEAD:c.py` exactly
+# as intended, and the deny text proposed a rewrite that produces a different string.
+FIXTURES += [
+    ("GREEN BRACE: deliberate :t, brace closes before the token ends",
+     "f=/a/b/c.py; git show HEAD:${f:t}", "allow"),
+    ("GREEN BRACE: deliberate :h in a -C argument",
+     "repo=/x/y/z; git -C ${repo:h} log --oneline -5", "allow"),
+    ("GREEN BRACE: deliberate :t as a pathspec",
+     "f=/a/b/c.py; git log --oneline -- ${f:t}", "allow"),
+    ("GREEN BRACE: separator after the brace is still deliberate",
+     "f=/a/b/c.py; git show HEAD:${f:t}/x", "allow"),
+    ("RED BRACE: closes one char early, path continues into the eaten text",
+     "r=/a/b/c.py; git show ${r:t}ests/x", "deny"),
+    ("RED BRACE: same shape with a prefix flag",
+     "SHA=x; git show ${SHA:gu}ards/g.py", "deny"),
+]
+
+
+# Nested bodies with no Git in them. These returned `ask` purely for containing a `$`,
+# which on Codex maps to a hard deny. The command word is what decides: an unknown
+# executable is a real question, an unknown argument to a named command is not.
+FIXTURES += [
+    ("GREEN NESTED: sh -c with no Git at all", "sh -c 'echo $PATH'", "allow"),
+    ("GREEN NESTED: bash -c with no Git at all", "bash -c 'echo $HOME'", "allow"),
+    ("GREEN NESTED: sh -c listing a directory", "sh -c 'ls -la $DIR'", "allow"),
+    ("GREEN NESTED: a literal Git command with no expansion", "sh -c 'git status'", "allow"),
+    ("ASK NESTED: the executable itself comes from an expansion",
+     'sh -c "$CMD"', "ask"),
+    ("ASK NESTED: an empty -c body", 'sh -c ""', "ask"),
+]
+
+
 def _nest(payload, layers):
     """Wrap `payload` in `layers` single-quoted `zsh -c` invocations."""
     for _ in range(layers):
@@ -477,8 +555,8 @@ def _nest(payload, layers):
 # and a typo in it would silently test a different command.
 _HAZARD = "SHA=x; git show $SHA:src/f.py"
 FIXTURES += [
-    (f"ASK NESTED: downstream expansion is unresolved within depth {NEST_DEPTH_LIMIT}",
-     _nest(_HAZARD, NEST_DEPTH_LIMIT), "ask"),
+    (f"RED NESTED: the hazard is still provable at depth {NEST_DEPTH_LIMIT}",
+     _nest(_HAZARD, NEST_DEPTH_LIMIT), "deny"),
     (f"ASK NESTED: hazard at depth {NEST_DEPTH_LIMIT + 1} cannot be proven either way",
      _nest(_HAZARD, NEST_DEPTH_LIMIT + 1), "ask"),
     (f"ASK NESTED: a benign command past the limit is also unprovable, not clean",

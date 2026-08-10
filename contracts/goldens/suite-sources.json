@@ -2,19 +2,19 @@
   "note": "sha256 of each aggregated selftest suite's source. The check count in a receipt is self-reported, so an eight-line stub printing a passing receipt satisfied the floor and the whole gate went green. Binding the source means a suite cannot be replaced by something that merely claims to have run. Update an entry in the same commit that changes its tool, and review the diff: this file is authored, never generated from whatever is on disk.",
   "suites": {
     "askq_timeout_guard": "85c136dc24f3b4f41a60987b8abecb97779e209e49c4e29e74a5d46174d695ef",
-    "bash_command_guard": "4969d77c0f2469634161154a71cbf2d2ded10d490716f4fc183d518a4102accc",
+    "bash_command_guard": "12504be05e55c7bac47f63515c6644d27f7f0477e62f531643b336a64f8c43c8",
     "cc-cost": "972b0122b5f84de10f41915a133132f555b943c46061d91b07e3f7b534a4d003",
-    "ci-gate": "2af85e1a5185b43c20feaaa809ffda7c2a8af37f29617e58a1eeafeffb7d4a08",
+    "ci-gate": "16b4a3ba64db8f20b983c5ed90f62b923a02a26459a9c191184f64598db944e5",
     "claim-provenance": "7b88bdb3792fb65e146b3a9ab2357a81585cd9824043cc9fa8bc835dc4b6e1ff",
     "codex-cost": "fc46c95da8babd276e705c9578c5857a6563588b588da540ea4222c2c6ca793c",
     "codex_session_start": "b9dbedba94d623304ef97ca1b13a14b2f7b000cc98f35e016448ed4c85030567",
-    "git_grep_engine_guard": "eba2f52bf3e4d70e4db6992338788145064330248deda4ac1f9cf300c41c5325",
+    "git_grep_engine_guard": "9d0174da078f323868fdb5cef56273e00298d918b57a6388f46357e3e76f4cab",
     "harness_report": "eec022de9c2f7dec81c612e751dac472f2f8b695029d627784e7e5d840312cbc",
     "portable-conformance": "649c5ee12eafcf86fecc3e3ae06e95188e97b48b7b9b603a1aa7eb22ec4ccace",
     "pr-delivery-state": "da5293b7134b159c1b6bb91b67c40193550076c908db8e185ddcb9d82011fe6b",
     "render-packages": "6b05aa44c351651202e8a5e720bd1a13ed8d2301705367cea0dc198d7f5a178e",
     "run-skill-evals": "3fc8bc86c67ccec70b09255e332b2828eb1e8db1e5467c9ada6ee7142ba68961",
     "spawn_preflight_guard": "b2a0fc907102ab997cd10a7bad6c6cf4f3a5cd4cfd18cf4fc2e7807f81db1a54",
-    "zsh_rev_modifier_guard": "bce63b3a70829d6285efed9359f333b99f131a7daeec0bff43a668fb5e58cd65"
+    "zsh_rev_modifier_guard": "69f6b80b855886706ea8ce69fa182fcf3f64a771d4969f1bf2a29257d72ce542"
   }
 }

@@ -64,6 +64,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from git_grep_engine_guard import (  # noqa: E402
     CommandParseError, MAX_PREFIX_DEPTH, nested_shell_invocation,
+    fixture_pair_duplicates,
     source_has_dynamic_command_word, source_has_git_hazard_hint,
     split_commands, unwrap_command_prefix,
 )
@@ -482,7 +483,7 @@ FIXTURES += [
     ("RED PREFIX: :we via web/", "SHA=x; git show $SHA:web/x.ts", "deny"),
     ("RED PREFIX: :wa via wait/", "SHA=x; git show $SHA:wait/x", "deny"),
     ("RED PREFIX: braced form carries the prefix too",
-     "SHA=x; git show ${SHA:gu}ards/g.py", "deny"),
+     "SHA=x; git show ${SHA:fr}ontend/a.js", "deny"),
     # The flag letters are harmless alone. Folding them into MODS would deny these.
     ("GREEN PREFIX: :go is inert", "SHA=x; git show $SHA:go/main.go", "allow"),
     ("GREEN PREFIX: :gz is inert", "SHA=x; git show $SHA:gz/x", "allow"),
@@ -648,6 +649,38 @@ def check_modifier_sets_against_zsh():
     return failures, 1, 0
 
 
+FIXTURES += [
+    ("RED TOKEN: double-quoted substitution preserves zsh rev hazard",
+     '/bin/echo "$(git show $SHA:src/f.py)"', "deny"),
+    ("RED TOKEN: grouped substitution preserves later zsh rev hazard",
+     '/bin/echo "$( (printf x); git show $SHA:src/f.py)"', "deny"),
+    ("ASK TOKEN: case pattern closer is outside the shared tokenizer model",
+     '/bin/echo "$(case x in x) git show $SHA:src/f.py;; esac)"', "ask"),
+    ("RED TOKEN: backtick substitution preserves zsh rev hazard",
+     "/bin/echo `git show $SHA:src/f.py`", "deny"),
+    ("RED HEREDOC: zsh executes its stdin body",
+     "zsh <<'EOF'\ngit show $SHA:src/f.py\nEOF\n", "deny"),
+    ("RED HEREDOC: zsh -o option value still reads stdin",
+     "zsh -o SH_WORD_SPLIT <<'EOF'\ngit show $SHA:src/f.py\nEOF\n", "deny"),
+    ("GREEN HEREDOC: a data consumer does not execute zsh-looking stdin",
+     "cat <<'EOF'\ngit show $SHA:src/f.py\nEOF\n", "allow"),
+    ("GREEN HEREDOC: zsh -c does not execute its heredoc stdin",
+     "zsh -c cat <<'EOF'\ngit show $SHA:src/f.py\nEOF\n", "allow"),
+    ("RED HEREDOC: a literal pipeline feeds heredoc bytes to zsh",
+     "cat <<'EOF' | zsh\ngit show $SHA:src/f.py\nEOF\n", "deny"),
+    ("RED HEREDOC: unquoted data heredoc expands nested zsh hazard",
+     "cat <<EOF\n$(git show $SHA:src/f.py)\nEOF\n", "deny"),
+    ("GREEN HEREDOC: unquoted literal rev-looking text remains data",
+     "cat <<EOF\ngit show $SHA:src/f.py\nEOF\n", "allow"),
+    ("RED HEREDOC: quoted dashed delimiter feeds zsh stdin",
+     "zsh <<'END-MARK'\ngit show $SHA:src/f.py\nEND-MARK\n", "deny"),
+    ("GREEN HEREDOC: quoted dashed delimiter feeds a data consumer",
+     "cat <<'END-MARK'\ngit show $SHA:src/f.py\nEND-MARK\n", "allow"),
+    ("RED HEREDOC: unquoted dashed data delimiter expands a rev hazard",
+     "cat <<END-MARK\n$(git show $SHA:src/f.py)\nEND-MARK\n", "deny"),
+]
+
+
 def selftest():
     if not FIXTURES:
         print("SCAN SET EMPTY - zero fixtures is an error", file=sys.stderr)
@@ -675,6 +708,13 @@ def selftest():
         print("  %-4s want=%-5s got=%-5s  %s" % ("PASS" if ok else "FAIL", want, got, label))
         if not ok:
             print("        cmd: %s" % cmd)
+    duplicates = fixture_pair_duplicates(FIXTURES)
+    uniqueness_ok = bool(FIXTURES) and not duplicates
+    bad += 0 if uniqueness_ok else 1
+    print("  %-4s fixture command/expected pairs are non-empty and unique"
+          % ("PASS" if uniqueness_ok else "FAIL"))
+    if duplicates:
+        print("        duplicate pairs: %r" % duplicates)
     modifier_failures, modifier_checks, modifier_skips = check_modifier_sets_against_zsh()
     bad += len(modifier_failures)
     for failure in modifier_failures:
@@ -745,7 +785,7 @@ def selftest():
     print("  %-4s modifier probe handles non-UTF-8 bytes through its production call site"
           % ("PASS" if byte_probe_ok else "FAIL"))
 
-    checks = len(FIXTURES) + 3
+    checks = len(FIXTURES) + 4
     print("failures: %d" % bad)
     print("SELFTEST-SUMMARY suite=zsh_rev_modifier_guard checks=%d failures=%d" % (
         checks, bad))

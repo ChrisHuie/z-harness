@@ -146,7 +146,7 @@ same-user pathname replacement during the render is outside the pilot's boundary
 
 ## Logical identity
 
-Schema v2 uses `z-harness-framed-sha256-v2`. The algorithm frames its identifier and domain, then
+The logical identity uses `z-harness-framed-sha256-v2`. The algorithm frames its identifier and domain, then
 preserves the caller-supplied sequence. Tree digests sort records by path and frame path, mode, size,
 and content SHA-256 in fixed order. JSON digests frame one UTF-8 canonical JSON value with sorted
 object keys and retained array order. Separate domains prevent reinterpretation between scopes.
@@ -233,14 +233,12 @@ fixed byte goldens, and negative mutations remain load-bearing.
 ## Publication, host evidence, and rollback
 
 No publisher, host runner, promotion gate, or rollback mechanism exists yet. Render artifacts
-therefore contain no host evidence, no installed digest, and no `authority`: every artifact carries
-`evidence: []`, and authority is absent because it belongs to a guarded fact rather than a package.
-
-They do carry `targetLevel`, `earnedLevel`, and `validationStatus`, derived from the target's adapter
-entry. `earnedLevel` is pinned to `unverified` and never read from configuration, and a
-`validationStatus` above `fixture-only` requires host evidence records plus a non-empty license set,
-so no status a host receipt would justify is reachable while no host receipt producer exists. See
-[`contracts/compatibility-levels.md`](../contracts/compatibility-levels.md) for the evidence rule.
+therefore contain no host evidence, installed digest, authority, compatibility target or earned
+level, validation status, or promotion state. Adapter configuration contains only the concrete
+package version, format, native-manifest path, and adapter revision used to project a target.
+Compatibility levels remain reserved vocabulary for a future external promotion policy; neither an
+adapter nor its artifact may author one. See
+[`contracts/compatibility-levels.md`](../contracts/compatibility-levels.md) for that boundary.
 
 A future publisher must verify the exact subject at its commit/upload fence and bind both the
 logical artifact digest and an immutable transport identity. Host observations belong in separate
@@ -253,5 +251,4 @@ no human edits. Rollback is a new compare-and-swap channel transition to a previ
 subject followed by a fresh install/session check, not a mutation of old artifact evidence.
 
 The project and rendered skill content do not yet declare a license. Local fixtures and CI
-validation can continue, but public distribution or promotion remains blocked until that license is
-chosen and recorded.
+validation can continue; public distribution is outside this pilot.

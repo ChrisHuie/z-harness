@@ -8,7 +8,7 @@ The next architecture separates canonical authoring from installable target pack
 deterministic renderer now provides the migration seam without changing the installed v0.3
 surface. It emits isolated, skills-only Agent Plugins, Codex, Claude, Kimi, and Hermes pilot
 artifacts for the real `ground-claims` skill. Rendered artifacts are unverified candidates: they
-are not published, installed, or promoted by the renderer.
+are not published or installed, and the renderer makes no host-validation or promotion decision.
 
 The live Claude installation can remain `~/.claude`, but new cross-harness authoring should occur in
 a clean repository checkout. Runtime homes and plugin caches are installed state, not release
@@ -35,9 +35,8 @@ The output contains five physically isolated package roots:
 | `hermes/` | Hermes Agent GitHub skill tap | no native manifest; `skills/` is the tap root |
 
 `release/render.json` selects source skills and package metadata. `adapters/targets.json` declares
-per-target render policy — target format, package version, manifest path and adapter revision — and
-the compatibility claims an artifact carries: `targetLevel`, `validationStatus`, and the `evidence`
-records that gate any status above `fixture-only`.
+only concrete per-target render inputs: target format, package version, manifest path, and adapter
+revision.
 Every target writes `z-harness-artifact.json`; its payload inventory excludes that manifest to avoid
 a self-reference, while the non-installable parent `render-index.json` records a domain-separated
 digest of every complete target directory, including its artifact manifest.
@@ -60,8 +59,8 @@ Ownership, ACLs, xattrs, birth times, and Git-clone directory metadata are outsi
 
 Canonical `argument-hint` metadata is retained only in the Claude projection. `allowed-tools` is
 omitted from every rendered target because hosts do not give it one portable authority meaning.
-Rendered artifacts record `validationStatus: fixture-only` and `earnedLevel: unverified`, and carry
-no runtime evidence and no package-wide authority. See
+Rendered artifact manifests contain render, source, payload, and concrete target-format facts. Host
+observations, compatibility decisions, and promotion state belong to separate external records. See
 [`contracts/compatibility-levels.md`](contracts/compatibility-levels.md) for that separation.
 
 ## Install in Codex

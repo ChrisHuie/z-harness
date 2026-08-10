@@ -1,54 +1,43 @@
 # Cross-harness compatibility contract
 
-Shared instruction content does not establish runtime parity. Render identity, host observation,
-promotion authority, publication, and rollback are separate records and state transitions.
+Shared instruction content does not establish runtime parity. Render identity is an artifact fact;
+host observation, promotion authority, publication, and rollback require separate external records
+and state transitions.
 
 ## Compatibility vocabulary
 
-An adapter declares the level it targets, and the artifact records that alongside the level it has
-earned. `earnedLevel` is not read from configuration: it is pinned to `unverified`, because
-rendering and static inspection earn nothing and only a target-host promotion run may advance it.
+These levels are reserved vocabulary for a future external promotion policy. No current adapter or
+rendered artifact declares a target or earned compatibility level.
 
-| level | evidence a future promotion decision would require |
+| level | evidence a future external promotion decision would require |
 |---|---|
 | `portable-core` | The selected Agent Skill is structurally valid and passes a closed positive and negative invocation catalog on the named host. No hook, permission, trust, or side-effect guarantee is implied. |
 | `adapter-functional` | The target-native package additionally passes invocation identity, argument handling, workflow-output, and expected-side-effect scenarios. |
 | `host-integrated` | Installation scope, project binding, cache activation, fresh-session behavior, update, collision detection, and rollback pass for the exact host version and profile. |
 | `governed-parity` | Every authority-bearing invariant has a named host enforcement mechanism, and its allow, deny, crash, timeout, malformed-output, and non-interactive cases pass. |
 
-The current renderer earns none of these levels. It emits reproducible package candidates and
+The current renderer does not evaluate these levels. It emits reproducible package candidates and
 immutable render-time facts only. No host receipt producer, promotion decision maker, publication
 ledger, or rollback controller exists in this pilot.
 
-## Evidence required by a claim
+## Artifact evidence boundary
 
-`validationStatus` is gated on the evidence this contract names, at both ends: the adapter
-configuration is refused at input time and the rendered artifact is refused at verification time,
-through one predicate, so neither end can claim a status the other would reject.
+Adapter configuration contains only concrete projection inputs: package version, format, native
+manifest path, and adapter revision. Artifact manifests contain only values the renderer can derive
+from declared inputs and bytes: package and target identity, build inputs, source provenance, and
+payload identity. They contain no host evidence, validation status, target or earned compatibility
+level, authority, or promotion state.
 
-| `validationStatus` | required |
-|---|---|
-| `fixture-only` | no host evidence records at all |
-| `candidate`, `promoted` | at least one evidence record, and a non-empty license set |
-
-Each evidence record names a host, that host's version, the artifact digest observed after a
-fresh-session install, and the scenario results behind the claim. A scenario that did not pass
-cannot support a status above `fixture-only`.
-
-This checks that a claim carries evidence of the required shape, not that the evidence is true;
-only a target-host run establishes the latter. Because no producer of host receipts exists and the
-pilot declares no license, every status above `fixture-only` is currently unreachable by
-construction rather than by convention, and the absent license set is a mechanical promotion
-blocker rather than a note.
+Host observations and compatibility decisions cannot be written by the adapter or artifact whose
+behavior they judge. A future external receipt and promotion policy may use the vocabulary above,
+but neither record exists in this pilot.
 
 ## Why authority is not an artifact field
 
-`authority` is deliberately absent from render configuration and from every rendered artifact, and
-it is the one field of this family that stays absent. Authority is a property of a guarded fact —
+`authority` is deliberately absent from render configuration and from every rendered artifact.
+Authority is a property of a guarded fact —
 its mechanism, the host version enforcing it, and the scope over which it holds — so a
-package-wide scalar would assert something no package can hold. An adapter that set
-`authority: external-boundary` while carrying no evidence would be making exactly the claim the
-authority vocabulary below exists to discipline.
+package-wide scalar would assert something no package can hold.
 
 Recording authority therefore requires a target-owned overlay keyed per guarded fact, with
 denial-path evidence, not a field on the package manifest.
@@ -103,8 +92,7 @@ repository, but a client must receive exactly one target root.
 
 ## Render identity
 
-Artifact schema v3 contains facts derivable during rendering, plus the claims block derived from
-the target's adapter entry and gated on the evidence above:
+Artifact schema v4 contains only facts derivable during rendering:
 
 - package, target, version, format, and adapter revision;
 - exact renderer, closed render schema/golden set, render-config, and selected adapter-config

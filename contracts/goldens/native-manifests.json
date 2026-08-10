@@ -14,7 +14,7 @@
     ],
     "name": "z-harness",
     "repository": "https://github.com/ChrisHuie/z-harness",
-    "version": "0.4.0-alpha.2"
+    "version": "0.4.0-alpha.3"
   },
   "claude": {
     "author": {
@@ -31,7 +31,7 @@
     "name": "z-harness",
     "repository": "https://github.com/ChrisHuie/z-harness",
     "skills": "./skills/",
-    "version": "0.4.0-alpha.2"
+    "version": "0.4.0-alpha.3"
   },
   "codex": {
     "author": {
@@ -65,7 +65,7 @@
     "name": "z-harness",
     "repository": "https://github.com/ChrisHuie/z-harness",
     "skills": "./skills/",
-    "version": "0.4.0-alpha.2"
+    "version": "0.4.0-alpha.3"
   },
   "hermes": null,
   "kimi": {
@@ -79,6 +79,6 @@
     },
     "name": "z-harness",
     "skills": "./skills/",
-    "version": "0.4.0-alpha.2"
+    "version": "0.4.0-alpha.3"
   }
 }

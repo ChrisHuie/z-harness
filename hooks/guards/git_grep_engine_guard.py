@@ -846,6 +846,30 @@ def git_grep_argv(tokens, resolution=None):
             else:
                 configs.append(f"{key}={value}")
 
+    # GIT_CONFIG_PARAMETERS is the transport `-c` itself uses, so a guard that models
+    # `-c` and not this one models half a channel. Measured on git 2.46.1: both
+    # `'grep.patternType=extended'` and `'grep.patternType'='extended'` select ERE.
+    parameters = command_env.get("GIT_CONFIG_PARAMETERS")
+    if parameters:
+        for item in re.findall(r"'((?:[^']|'\\'')*)'(?:='((?:[^']|'\\'')*)')?",
+                               parameters):
+            key, quoted_value = item
+            if quoted_value:
+                configs.append(f"{key}={quoted_value}")
+            elif "=" in key:
+                configs.append(key)
+            else:
+                unresolved_configs.append(
+                    f"GIT_CONFIG_PARAMETERS entry {key!r} has no value")
+
+    # These name a file whose contents this guard cannot read from argv. The engine is
+    # therefore unproven rather than known-safe, which is what `ask` is for.
+    for file_channel in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"):
+        if command_env.get(file_channel):
+            unresolved_configs.append(
+                f"{file_channel} points at a config file this guard cannot read, and it "
+                f"may set grep.patternType")
+
     def add_config_env(spec):
         key, separator, env_name = spec.partition("=")
         if not separator or not env_name:
@@ -1839,6 +1863,31 @@ FIXTURES += [
      r"""git grep -nE 'a\\\b' -- .""", "deny"),
     ("RED LITERAL: the bare atom is unaffected by the counting",
      r"""git grep -nE 'harness\b' -- README.md""", "deny"),
+]
+
+# Git config through the environment. `-c` and `--config-env` were modelled and
+# GIT_CONFIG_PARAMETERS was not, although it is the transport `-c` itself uses; measured
+# on git 2.46.1, every RED line below returns the decoy line while the guard allowed it.
+FIXTURES += [
+    ("RED ENV: GIT_CONFIG_PARAMETERS selects ERE",
+     r"""GIT_CONFIG_PARAMETERS="'grep.patternType=extended'" git grep -n 'harness\b' -- README.md""",
+     "deny"),
+    ("RED ENV: the key='value' spelling selects it too",
+     r"""GIT_CONFIG_PARAMETERS="'grep.patternType'='extended'" git grep -n 'harness\b' -- README.md""",
+     "deny"),
+    ("RED ENV: same through an env wrapper",
+     r"""env GIT_CONFIG_PARAMETERS="'grep.patternType=extended'" git grep -n 'harness\b' -- README.md""",
+     "deny"),
+    ("ASK ENV: GIT_CONFIG_GLOBAL names a file this guard cannot read",
+     r"""GIT_CONFIG_GLOBAL=/tmp/gc.ini git grep -n 'harness\b' -- README.md""", "ask"),
+    ("ASK ENV: GIT_CONFIG_SYSTEM likewise",
+     r"""GIT_CONFIG_SYSTEM=/tmp/gc.ini git grep -n 'harness\b' -- README.md""", "ask"),
+    ("GREEN ENV: an unrelated key changes no engine",
+     r"""GIT_CONFIG_PARAMETERS="'core.bare=false'" git grep -n 'harness\b' -- README.md""",
+     "allow"),
+    ("GREEN ENV: patternType=perl is the safe engine",
+     r"""GIT_CONFIG_PARAMETERS="'grep.patternType=perl'" git grep -n 'harness\b' -- README.md""",
+     "allow"),
 ]
 
 def selftest():

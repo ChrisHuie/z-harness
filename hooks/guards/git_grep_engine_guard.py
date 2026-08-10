@@ -1531,7 +1531,7 @@ def check_option_table_against_git():
     return failures
 
 
-def check_option_grammar_against_git():
+def check_option_grammar_against_git(argv_mutator=None):
     """Exercise the valid spellings whose argv grammar is load-bearing here."""
     failures = []
     try:
@@ -1546,8 +1546,11 @@ def check_option_grammar_against_git():
             fixture = os.path.join(repo, "fixture.txt")
             with open(fixture, "w", encoding="utf-8") as stream:
                 stream.write("harness\nharnessb\nharnessx\n")
+            engine_order_fixture = os.path.join(repo, "engine-order.txt")
+            with open(engine_order_fixture, "w", encoding="utf-8") as stream:
+                stream.write("zz\n")
             indexed = subprocess.run(
-                ["git", "add", "fixture.txt"], cwd=repo,
+                ["git", "add", "fixture.txt", "engine-order.txt"], cwd=repo,
                 capture_output=True, text=True, timeout=10,
             )
             if indexed.returncode:
@@ -1560,7 +1563,6 @@ def check_option_grammar_against_git():
             # assuming one platform's extension behavior.
             bre_pattern = r"\(harness\)"
             ere_pattern = r"harness{1}b"
-            pcre_pattern = r"harness(?=x)"
             cases = (
                 ("attached -m", ["-Em1", ere_pattern, "--", "fixture.txt"],
                  "fixture.txt:harnessb\n"),
@@ -1573,10 +1575,6 @@ def check_option_grammar_against_git():
                 ("-NUM shorthand", ["-E3", ere_pattern, "--", "fixture.txt"],
                  "fixture.txt:harnessb\n"),
                 ("-NUM before E and e", ["-12Ee" + ere_pattern, "--", "fixture.txt"],
-                 "fixture.txt:harnessb\n"),
-                ("-NUM between E and P", ["-E1Pe" + pcre_pattern, "--", "fixture.txt"],
-                 "fixture.txt:harnessx\n"),
-                ("-NUM between P and E", ["-P1Ee" + ere_pattern, "--", "fixture.txt"],
                  "fixture.txt:harnessb\n"),
                 ("bare optional --color",
                  ["--color", "--no-color", "-E", ere_pattern, "--", "fixture.txt"],
@@ -1601,12 +1599,6 @@ def check_option_grammar_against_git():
                 ("fixed negation resets shared engine",
                  ["--extended-regexp", "--no-fixed-strings", bre_pattern, "--",
                   "fixture.txt"], "fixture.txt:harness\n"),
-                ("positive E after reset",
-                 ["--no-perl-regexp", "--extended-regexp", ere_pattern, "--",
-                  "fixture.txt"], "fixture.txt:harnessb\n"),
-                ("positive P after reset",
-                 ["--no-extended-regexp", "--perl-regexp", pcre_pattern, "--",
-                  "fixture.txt"], "fixture.txt:harnessx\n"),
                 ("unique --extended abbreviation",
                  ["--extended", ere_pattern, "--", "fixture.txt"],
                  "fixture.txt:harnessb\n"),
@@ -1616,9 +1608,6 @@ def check_option_grammar_against_git():
                 ("unique --no-extended abbreviation resets PCRE",
                  ["--perl-regexp", "--no-extended", bre_pattern, "--", "fixture.txt"],
                  "fixture.txt:harness\n"),
-                ("later abbreviated extended engine wins",
-                 ["--no-extended", "--extended", ere_pattern, "--", "fixture.txt"],
-                 "fixture.txt:harnessb\n"),
             )
             for label, args, expected_fragment in cases:
                 observed = subprocess.run(
@@ -1630,6 +1619,45 @@ def check_option_grammar_against_git():
                     failures.append(
                         f"installed Git did not accept {label} with the measured ERE "
                         f"behavior (rc={observed.returncode}, stdout={observed.stdout!r}, "
+                        f"stderr={observed.stderr!r})")
+
+            # POSIX ERE chooses the leftmost-longest alternative (`zz`), while PCRE
+            # chooses the first alternative twice (`z`, `z`). With --only-matching and
+            # a one-line fixture, exact stdout distinguishes the final E and P engines;
+            # a pattern accepted identically by both cannot make these controls green.
+            order_pattern = r"z|zz"
+            exact_engine_cases = (
+                ("-NUM between E and P",
+                 ["--only-matching", "-E1Pe" + order_pattern, "--", "engine-order.txt"],
+                 "engine-order.txt:z\nengine-order.txt:z\n"),
+                ("-NUM between P and E",
+                 ["--only-matching", "-P1Ee" + order_pattern, "--", "engine-order.txt"],
+                 "engine-order.txt:zz\n"),
+                ("positive E after reset",
+                 ["--only-matching", "--no-perl-regexp", "--extended-regexp",
+                  order_pattern, "--", "engine-order.txt"],
+                 "engine-order.txt:zz\n"),
+                ("positive P after reset",
+                 ["--only-matching", "--no-extended-regexp", "--perl-regexp",
+                  order_pattern, "--", "engine-order.txt"],
+                 "engine-order.txt:z\nengine-order.txt:z\n"),
+                ("later abbreviated extended engine wins",
+                 ["--only-matching", "--no-extended", "--extended", order_pattern,
+                  "--", "engine-order.txt"],
+                 "engine-order.txt:zz\n"),
+            )
+            for label, args, expected_stdout in exact_engine_cases:
+                command = ["git", "grep", *args]
+                if argv_mutator is not None:
+                    command = argv_mutator(label, command)
+                observed = subprocess.run(
+                    command, cwd=repo, capture_output=True, text=True, timeout=10,
+                )
+                if observed.returncode != 0 or observed.stdout != expected_stdout:
+                    failures.append(
+                        f"installed Git did not preserve exact final-engine order for "
+                        f"{label} (rc={observed.returncode}, "
+                        f"stdout={observed.stdout!r}, expected={expected_stdout!r}, "
                         f"stderr={observed.stderr!r})")
             ambiguous = subprocess.run(
                 ["git", "grep", "--ext", r"harness\b", "--", "fixture.txt"], cwd=repo,
@@ -1793,6 +1821,18 @@ def selftest():
             print("  FAIL option grammar vs installed git: %s" % failure)
     else:
         print("  PASS numeric, optional-value, negated-engine, and -- grammar matches installed git")
+    def retain_pcre_engine(label, command):
+        if label != "-NUM between P and E":
+            return command
+        return [word.replace("-P1Ee", "-P1Pe") for word in command]
+    retained_pcre_failures = check_option_grammar_against_git(retain_pcre_engine)
+    retained_pcre_red = any(
+        "exact final-engine order for -NUM between P and E" in failure
+        for failure in retained_pcre_failures
+    )
+    bad += 0 if retained_pcre_red else 1
+    print("  %s final-engine oracle rejects an incorrectly retained PCRE engine" % (
+        "PASS" if retained_pcre_red else "FAIL"))
     boundary_failures, boundary_checks, boundary_skips = check_shell_boundary_behavior()
     bad += len(boundary_failures)
     if boundary_failures:
@@ -1815,7 +1855,7 @@ def selftest():
     bad += 0 if absence_ok else 1
     print("  %s absent zsh skips only 8 zsh probes; 4 portable probes still execute" % (
         "PASS" if absence_ok else "FAIL"))
-    checks = len(FIXTURES) + 4
+    checks = len(FIXTURES) + 5
     print("failures: %d" % bad)
     print("SELFTEST-SUMMARY suite=git_grep_engine_guard checks=%d failures=%d" % (
         checks, bad))

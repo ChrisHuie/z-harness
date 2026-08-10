@@ -4,7 +4,7 @@
     "askq_timeout_guard": "85c136dc24f3b4f41a60987b8abecb97779e209e49c4e29e74a5d46174d695ef",
     "bash_command_guard": "4969d77c0f2469634161154a71cbf2d2ded10d490716f4fc183d518a4102accc",
     "cc-cost": "972b0122b5f84de10f41915a133132f555b943c46061d91b07e3f7b534a4d003",
-    "ci-gate": "184313d871b131c3ac86bcca0c9998caa5d7de2510d0e613dab1d1323cc83cd7",
+    "ci-gate": "2af85e1a5185b43c20feaaa809ffda7c2a8af37f29617e58a1eeafeffb7d4a08",
     "claim-provenance": "7b88bdb3792fb65e146b3a9ab2357a81585cd9824043cc9fa8bc835dc4b6e1ff",
     "codex-cost": "fc46c95da8babd276e705c9578c5857a6563588b588da540ea4222c2c6ca793c",
     "codex_session_start": "b9dbedba94d623304ef97ca1b13a14b2f7b000cc98f35e016448ed4c85030567",
@@ -15,6 +15,6 @@
     "render-packages": "6b05aa44c351651202e8a5e720bd1a13ed8d2301705367cea0dc198d7f5a178e",
     "run-skill-evals": "3fc8bc86c67ccec70b09255e332b2828eb1e8db1e5467c9ada6ee7142ba68961",
     "spawn_preflight_guard": "b2a0fc907102ab997cd10a7bad6c6cf4f3a5cd4cfd18cf4fc2e7807f81db1a54",
-    "zsh_rev_modifier_guard": "e894d21de06296d860d91b7fa53f85cf75e0d8559a35955b2a1c398ed2a86eb5"
+    "zsh_rev_modifier_guard": "bce63b3a70829d6285efed9359f333b99f131a7daeec0bff43a668fb5e58cd65"
   }
 }

@@ -28,7 +28,18 @@ returns /bin/zsh). zsh applies history modifiers to parameter expansions:
 
 Dangerous modifier letters, enumerated empirically a-zA-Z on this zsh:
     a A c e h l P q Q r s t u
-Everything else after the colon is inert.
+Plus four flag letters that are inert alone but consume the base modifier after them:
+    g f w F
+so `$SHA:guards/g.py` -> DC185FEB4ards/g.py (`:gu`), and `frontend/` `functions/`
+`flake.nix` `gradle/` `generated/` `graphql/` `web/` `wait/` all mangle the same way,
+while `:go` `:gz` `:gitignore` `:foo` `:world` reach git untouched.
+
+Uppercase `:W` takes a delimiter and is NOT modelled: `:Watch.py` and `:World/x` mangle,
+`:Wa` and `:Warehouse/a.py` do not. A rev:path whose next segment starts with a capital W
+is outside this guard.
+
+Everything else after the colon is inert. The sets are re-derived from the installed zsh
+by `--selftest`; they were hand-listed once and four letters were missing.
 
 Affected expansion forms (all verified mangled): $NAME  $1  $#  $?  $NAME[sub]  ${NAME:m}
 
@@ -45,6 +56,9 @@ Exit codes:  0 = decision emitted on stdout (or out of scope)
 import json
 import os
 import re
+import shutil
+import string
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -54,6 +68,19 @@ from git_grep_engine_guard import (  # noqa: E402
 )
 
 MODS = "aAcehlPqQrstu"
+# Flag letters that carry no meaning alone but consume the base modifier that follows.
+# Enumerated a-zA-Z against zsh 5.9 by asking whether `$v:<letters>rest` differs from the
+# literal concatenation, which is the hazard's own shape. Omitting them read `$SHA:guards/`
+# `$SHA:frontend/` `$SHA:flake.nix` `$SHA:gradle/` as inert while zsh mangled every one --
+# `guards/` is a directory in this repository. They are a separate class rather than more
+# MODS letters because alone they are harmless: `:go` `:gz` `:gitignore` `:foo` `:world`
+# all reach git untouched, so folding them into MODS would deny correct commands.
+MOD_PREFIXES = "gfwF"
+# Uppercase `:W` is deliberately absent from both sets. It takes a delimiter, so what it
+# consumes depends on the rest of the token: `:Watch.py` and `:World/x` mangle while
+# `:Wa` and `:Warehouse/a.py` reach git intact. Neither "always" nor "only before a base
+# modifier" describes it, and guessing would either miss a mangle or deny a correct path.
+MOD_UNMODELLED = "W"
 # unbraced parameter expansions, INCLUDING positionals and specials. $( is excluded.
 EXPANSION = re.compile(
     r"\$(?:"
@@ -61,14 +88,14 @@ EXPANSION = re.compile(
     r"|[0-9]+"                                  # $1 $2
     r"|[#?*@!$-]"                               # $# $? $* $@ $! $$ $-
     r")"
-    r":([" + MODS + r"])")
+    r":[" + MOD_PREFIXES + r"]*([" + MODS + r"])")
 # braced WITH the modifier inside: ${name:t} — mangles identically ("brace it" done
 # wrong). POSIX forms ${name:-x} ${name:+x} ${name:=x} ${name:?x} ${name:0:2} do not
 # collide: -, +, =, ?, digits are not modifier letters.
 EXPANSION_BRACED = re.compile(
     r"\$\{(?:\([^}]*\))?"
     r"(?:[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]+\])?|[0-9]+|[#?*@!$-])"
-    r":g?([" + MODS + r"])(?=[}/:0-9])")
+    r":[" + MOD_PREFIXES + r"]*([" + MODS + r"])(?=[}/:0-9])")
 
 # git subcommands that take a `rev:path` / `rev:./path` argument
 # How many `<shell> -c` layers this guard will unwrap. Reaching it returns `ask`, never
@@ -410,6 +437,33 @@ FIXTURES = [
 ]
 
 
+# Prefix-flag modifiers. Every RED path below was observed mangling under zsh 5.9 and
+# every GREEN one reaching git intact; the guard and the shell were compared on all of
+# them. `guards/` is a directory in this repository, so this was reachable from ordinary
+# work, not only from a crafted string.
+FIXTURES += [
+    ("RED PREFIX: :gu via guards/ - a directory in this repo",
+     "SHA=x; git show $SHA:guards/g.py", "deny"),
+    ("RED PREFIX: :fr via frontend/", "SHA=x; git show $SHA:frontend/a.js", "deny"),
+    ("RED PREFIX: :fu via functions/", "SHA=x; git show $SHA:functions/f.js", "deny"),
+    ("RED PREFIX: :fl via flake.nix", "SHA=x; git show $SHA:flake.nix", "deny"),
+    ("RED PREFIX: :gr via gradle/", "SHA=x; git show $SHA:gradle/b", "deny"),
+    ("RED PREFIX: :ge via generated/", "SHA=x; git show $SHA:generated/x.ts", "deny"),
+    ("RED PREFIX: :we via web/", "SHA=x; git show $SHA:web/x.ts", "deny"),
+    ("RED PREFIX: :wa via wait/", "SHA=x; git show $SHA:wait/x", "deny"),
+    ("RED PREFIX: braced form carries the prefix too",
+     "SHA=x; git show ${SHA:gu}ards/g.py", "deny"),
+    # The flag letters are harmless alone. Folding them into MODS would deny these.
+    ("GREEN PREFIX: :go is inert", "SHA=x; git show $SHA:go/main.go", "allow"),
+    ("GREEN PREFIX: :gz is inert", "SHA=x; git show $SHA:gz/x", "allow"),
+    ("GREEN PREFIX: :gi is inert", "SHA=x; git show $SHA:gitignore", "allow"),
+    ("GREEN PREFIX: :fo is inert", "SHA=x; git show $SHA:foo/bar", "allow"),
+    ("GREEN PREFIX: :wo is inert", "SHA=x; git show $SHA:world/x", "allow"),
+    ("GREEN PREFIX: ordinary path is untouched",
+     "SHA=x; git show $SHA:README.md", "allow"),
+]
+
+
 def _nest(payload, layers):
     """Wrap `payload` in `layers` single-quoted `zsh -c` invocations."""
     for _ in range(layers):
@@ -432,6 +486,56 @@ FIXTURES += [
     ("GREEN NESTED: a benign command at the last modelled depth still allows",
      _nest("git status", NEST_DEPTH_LIMIT), "allow"),
 ]
+
+
+def check_modifier_sets_against_zsh():
+    """Bind MODS and MOD_PREFIXES to what the installed zsh actually consumes.
+
+    Return (failures, executed, skipped). The letters were originally hand-listed and were
+    wrong: five that zsh consumes were missing. Enumerating a-zA-Z here is the only check
+    that can catch the next such drift, because every other case in this file tests the
+    tables against themselves.
+
+    Probe shape is the hazard's own: `$v:<letters>rest` differing from the literal
+    concatenation means zsh ate the colon expression. Skipped, counted, where zsh is
+    absent -- the claim is about zsh, so on a host without it the claim is inapplicable
+    rather than unproven.
+    """
+    if shutil.which("zsh") is None:
+        return [], 0, 1
+
+    def consumed(suffix):
+        probe = subprocess.run(
+            ["zsh", "-c", f'v=/a/b/c.py; print -r -- "$v:{suffix}"'],
+            capture_output=True, text=True, timeout=10,
+        )
+        if probe.returncode != 0:
+            return True
+        return probe.stdout.rstrip("\n") != f"/a/b/c.py:{suffix}"
+
+    failures = []
+    modelled = set(MODS) | set(MOD_PREFIXES) | set(MOD_UNMODELLED)
+    for char in string.ascii_letters:
+        # A base modifier consumes on its own; a prefix letter only ahead of one.
+        alone = consumed(char + "rest")
+        if alone and char not in modelled:
+            failures.append(
+                f"zsh consumes `:{char}` but neither MODS nor MOD_PREFIXES models it, so "
+                f"a rev:path whose next segment starts with {char!r} reaches git mangled")
+        if not alone and char in MODS:
+            failures.append(
+                f"MODS claims `:{char}` is a modifier but this zsh leaves it literal, so "
+                f"a correct rev:path starting with {char!r} is denied")
+    for prefix in MOD_PREFIXES:
+        if consumed(prefix + "o-x"):
+            failures.append(
+                f"MOD_PREFIXES treats `:{prefix}` as harmless alone, but this zsh consumed "
+                f"`:{prefix}o-x`; it belongs in MODS instead")
+        if not consumed(prefix + MODS[0] + "-x"):
+            failures.append(
+                f"MOD_PREFIXES expects `:{prefix}` to consume ahead of a base modifier, "
+                f"but this zsh left `:{prefix}{MODS[0]}-x` literal")
+    return failures, 1 + len(MOD_PREFIXES), 0
 
 
 def selftest():
@@ -461,9 +565,20 @@ def selftest():
         print("  %-4s want=%-5s got=%-5s  %s" % ("PASS" if ok else "FAIL", want, got, label))
         if not ok:
             print("        cmd: %s" % cmd)
+    modifier_failures, modifier_checks, modifier_skips = check_modifier_sets_against_zsh()
+    bad += len(modifier_failures)
+    for failure in modifier_failures:
+        print("  FAIL modifier set vs installed zsh: %s" % failure)
+    if modifier_skips:
+        print("  SKIP modifier set vs installed zsh: no zsh on this host (%d probe group)"
+              % modifier_skips)
+    elif not modifier_failures:
+        print("  PASS MODS and MOD_PREFIXES match the installed zsh (%d probe groups)"
+              % modifier_checks)
+    checks = len(FIXTURES) + modifier_checks + modifier_skips
     print("failures: %d" % bad)
     print("SELFTEST-SUMMARY suite=zsh_rev_modifier_guard checks=%d failures=%d" % (
-        len(FIXTURES), bad))
+        checks, bad))
     return 0 if bad == 0 else 1
 
 

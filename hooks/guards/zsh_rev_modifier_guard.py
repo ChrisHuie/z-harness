@@ -616,11 +616,12 @@ def check_modifier_sets_against_zsh():
     def consumed(suffix):
         probe = subprocess.run(
             ["zsh", "-c", f'v=/a/b/c.py; print -r -- "$v:{suffix}"'],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, timeout=10,
         )
         if probe.returncode != 0:
             return True
-        return probe.stdout.rstrip("\n") != f"/a/b/c.py:{suffix}"
+        expected = f"/a/b/c.py:{suffix}".encode("ascii")
+        return probe.stdout.rstrip(b"\n") != expected
 
     failures = []
     modelled = set(MODS) | set(MOD_PREFIXES) | set(MOD_UNMODELLED)
@@ -698,7 +699,53 @@ def selftest():
     bad += 0 if absent_ok else 1
     print("  %-4s a zsh-less host skips the probe and reports the same check count"
           % ("PASS" if absent_ok else "FAIL"))
-    checks = len(FIXTURES) + 2
+
+    # Some modifier spellings make zsh emit arbitrary bytes. Drive that through the
+    # production subprocess call site: decoding as UTF-8 used to crash before the suite
+    # receipt, and whether it crashed depended on set iteration order. The fake models
+    # the declared tables, then returns invalid UTF-8 for one extra consumed letter so
+    # the probe must report a deterministic semantic mismatch rather than skip or crash.
+    original_run = subprocess.run
+    original_which = shutil.which
+    byte_probe_calls = []
+    def byte_probe(args, **kwargs):
+        byte_probe_calls.append((args, kwargs))
+        suffix = args[2].split('$v:', 1)[1].rsplit('"', 1)[0]
+        consumed = (
+            suffix[0] in MODS + MOD_UNMODELLED
+            or (suffix[0] in MOD_PREFIXES
+                and len(suffix) > 1 and suffix[1] in MODS)
+        )
+        if suffix == "xrest":
+            stdout = b"/a/b/c.py:\xf8rest\n"
+        elif consumed:
+            stdout = b"consumed\n"
+        else:
+            stdout = f"/a/b/c.py:{suffix}\n".encode("ascii")
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr=b"")
+    shutil.which = lambda name: "/fake/zsh" if name == "zsh" else original_which(name)
+    subprocess.run = byte_probe
+    try:
+        byte_failures, byte_executed, byte_skipped = check_modifier_sets_against_zsh()
+    finally:
+        subprocess.run = original_run
+        shutil.which = original_which
+    byte_probe_ok = (
+        byte_executed == 1
+        and byte_skipped == 0
+        and len(byte_failures) == 1
+        and "starts with 'x'" in byte_failures[0]
+        and len(byte_probe_calls) == len(string.ascii_letters) + 2 * len(MOD_PREFIXES)
+        and all(
+            kwargs == {"capture_output": True, "timeout": 10}
+            for _args, kwargs in byte_probe_calls
+        )
+    )
+    bad += 0 if byte_probe_ok else 1
+    print("  %-4s modifier probe handles non-UTF-8 bytes through its production call site"
+          % ("PASS" if byte_probe_ok else "FAIL"))
+
+    checks = len(FIXTURES) + 3
     print("failures: %d" % bad)
     print("SELFTEST-SUMMARY suite=zsh_rev_modifier_guard checks=%d failures=%d" % (
         checks, bad))

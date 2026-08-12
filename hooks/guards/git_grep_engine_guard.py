@@ -1467,7 +1467,7 @@ def trusted_git_authority(executable="git"):
 _GIT_ALIAS_NAME_CACHE = {}
 
 
-def ambient_alias_names(authority):
+def ambient_alias_names(authority, cwd=None):
     """Alias names the trusted Git can see, read ONLY as a reason to ask.
 
     Mutable configuration is never positive authority in this guard. A name found here is
@@ -1479,13 +1479,17 @@ def ambient_alias_names(authority):
     system config files -- on this host `/opt/homebrew/etc/gitconfig` versus none for
     Apple Git -- so an alias defined only in the candidate's system scope is not visible
     through the trusted Git.
+
+    `cwd` defaults to the process directory, which is what production reads. The selftest
+    passes a repository it has just configured, so the reader can be proved against known
+    aliases without chdir'ing the whole interpreter.
     """
-    key = authority.executable
+    key = (authority.executable, cwd)
     if key not in _GIT_ALIAS_NAME_CACHE:
         try:
             probe = subprocess.run(
-                [key, "config", "--get-regexp", r"^alias\."],
-                capture_output=True, text=True, timeout=10,
+                [authority.executable, "config", "--get-regexp", r"^alias\."],
+                capture_output=True, text=True, timeout=10, cwd=cwd,
             )
         except (OSError, subprocess.SubprocessError):
             return None
@@ -5177,17 +5181,14 @@ def selftest():
     # A reader that returns an empty table on every input satisfies "returns a frozenset"
     # and silently reopens the path above, so read a repository whose alias is known.
     live_authority = original_discovery()
-    probe_cwd = os.getcwd()
     with tempfile.TemporaryDirectory(prefix="git-alias-probe-") as alias_repo:
         subprocess.run(["git", "init", "-q", alias_repo], capture_output=True, timeout=30)
         subprocess.run(["git", "-C", alias_repo, "config", "alias.zzprobe", "status"],
                        capture_output=True, timeout=30)
         _GIT_ALIAS_NAME_CACHE.clear()
         try:
-            os.chdir(alias_repo)
-            planted_names = original_alias_names(live_authority)
+            planted_names = original_alias_names(live_authority, cwd=alias_repo)
         finally:
-            os.chdir(probe_cwd)
             _GIT_ALIAS_NAME_CACHE.clear()
     live_ok = planted_names is not None and "zzprobe" in planted_names
     bad += 0 if live_ok else 1

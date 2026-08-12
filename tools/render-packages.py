@@ -1151,6 +1151,40 @@ def load_schema(path: Path) -> Dict[str, Any]:
     return read_json_object(path, f"schema {path.name}")
 
 
+# Object nodes in contracts/artifact-manifest.schema.json that declare `properties`:
+# the root, `build`, `source`, `source.upstreamLocks.items`, `source.skills.items`,
+# `payload`, and `$defs.file`. Counting them makes a NEW node a reviewable edit rather
+# than an unnoticed addition, the same way suite floors work.
+ARTIFACT_SCHEMA_OBJECT_NODES = 7
+
+
+def closure_census(schema: Any, path: str = "") -> Tuple[int, List[str]]:
+    """Count schema object nodes and list any that do not close themselves.
+
+    A node declaring `properties` without `additionalProperties: false` accepts fields the
+    renderer refuses, so the published document and the producer disagree with nothing
+    reporting it.
+    """
+    closed = 0
+    open_nodes: List[str] = []
+    if isinstance(schema, dict):
+        if isinstance(schema.get("properties"), dict):
+            if schema.get("additionalProperties") is False:
+                closed += 1
+            else:
+                open_nodes.append(path or "<root>")
+        for key, value in schema.items():
+            sub_closed, sub_open = closure_census(value, f"{path}.{key}" if path else key)
+            closed += sub_closed
+            open_nodes.extend(sub_open)
+    elif isinstance(schema, list):
+        for index, value in enumerate(schema):
+            sub_closed, sub_open = closure_census(value, f"{path}[{index}]")
+            closed += sub_closed
+            open_nodes.extend(sub_open)
+    return closed, open_nodes
+
+
 def conform_to_schema(
     value: Any,
     schema: Dict[str, Any],
@@ -2690,7 +2724,8 @@ def selftest(
         base_manifest = read_json_object(
             tamper_base / f"claude/{ARTIFACT_MANIFEST}", "sweep manifest"
         )
-        artifact_schema_required = load_schema(ARTIFACT_SCHEMA_FILE).get("required")
+        artifact_schema = load_schema(ARTIFACT_SCHEMA_FILE)
+        artifact_schema_required = artifact_schema.get("required")
         expect(
             "required artifact-field deletion sweep is non-empty and exact",
             bool(required_artifact_fields)
@@ -2698,6 +2733,23 @@ def selftest(
             and len(artifact_schema_required) == len(set(artifact_schema_required))
             and set(artifact_schema_required) == required_artifact_fields
             and set(base_manifest) == required_artifact_fields,
+        )
+        # `required` alone leaves the rest of the published contract unbound. Reopening
+        # `additionalProperties`, or restoring `properties.claims` and `$defs.hostEvidence`
+        # to this file, changed no verdict in any of the ten suites: require_exact_keys
+        # rejects unknown keys first and reaches the same answer, so the schema's own
+        # closure never had to hold. `$id` is a public URL, and an external validator
+        # reads THIS document rather than the renderer, so its vocabulary is bound here.
+        expect(
+            "the artifact schema is closed and declares exactly the required vocabulary",
+            artifact_schema.get("additionalProperties") is False
+            and set(artifact_schema.get("properties", {})) == required_artifact_fields
+            and set(artifact_schema.get("$defs", {})) == {"file", "sha256"},
+        )
+        closed_objects, open_objects = closure_census(artifact_schema)
+        expect(
+            f"every artifact-schema object node is closed ({closed_objects} node(s))",
+            closed_objects == ARTIFACT_SCHEMA_OBJECT_NODES and not open_objects,
         )
         for position, field in enumerate(sorted(required_artifact_fields)):
             case_root = temp / f"delete-artifact-field-{position:02d}"

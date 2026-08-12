@@ -1552,8 +1552,31 @@ def _equals_expanded(word):
     raw word to `git` read `=git grep -E` and `=git show $SHA:src/f.py` as unrelated
     commands and allowed both, while the sibling zsh-only forms `noglob` and `nocorrect`
     were already modelled beside it.
+
+    Measured on zsh 5.9: `=git` runs git; `==git` reports `=git not found`; `"=git"`,
+    `'=git'` and `setopt noequals` all leave it literal. The quoted cases are gated at the
+    executable-identity site by `_equals_expansion_is_live`; this text-level form stays
+    over-approximating because its callers only raise a hazard HINT, where reading a
+    quoted `=git` as Git costs a question rather than an allow.
     """
     return word[1:] if len(word) > 1 and word[0] == "=" and word[1] != "=" else word
+
+
+def _equals_expansion_is_live(text, quoting):
+    """Whether a leading `=` is unquoted, so zsh would expand it.
+
+    KNOWN OVER-APPROXIMATION, in the safe direction and stated rather than hidden: this
+    walk carries no shell context, so a `=git` inside a `bash -c` or `sh -c` body is
+    resolved here even though only zsh expands it and those shells report `command not
+    found`. The result is a question or a denial for a command that cannot run Git.
+    Narrowing it means threading the invoking shell through the shared prefix walk, which
+    is the sibling zsh guard's `_shell` parameter and does not exist on this side.
+    """
+    if not (len(text) > 1 and text[0] == "=" and text[1] != "="):
+        return False
+    if quoting.startswith("mixed:"):
+        return quoting.split(":", 1)[1][:1] == "U"
+    return quoting == ""
 
 
 def _literal_git_word(word):
@@ -1693,11 +1716,14 @@ def unwrap_command_prefix(tokens):
 
         bypasses_shell_identity = command_bypass_next
         command_bypass_next = False
-        executable_text = _equals_expanded(items[0][0])
-        if executable_text != items[0][0]:
+        executable_text = items[0][0]
+        if _equals_expansion_is_live(*items[0]):
             # Write the resolved name back so every downstream reader -- this loop, the
             # grep guard's argv walk and the zsh guard's rev:path gate -- sees the command
-            # zsh will actually run rather than the `=` form.
+            # zsh will actually run rather than the `=` form. Quoting suppresses the
+            # expansion, so a quoted `=git` keeps its literal name and falls to the
+            # generic identity check below like any other unproven command word.
+            executable_text = _equals_expanded(executable_text)
             items[0] = (executable_text, items[0][1])
         if UNRESOLVED.search(executable_text):
             errors.append(f"dynamic executable {executable_text!r} cannot be resolved")
@@ -4097,6 +4123,38 @@ def check_shell_boundary_behavior():
     failures = []
     executed = skipped = 0
     has_zsh = shutil.which("zsh") is not None
+
+    # `_equals_expanded`'s doubled-equals condition models a real zsh refusal that the
+    # DECISION surface cannot observe: `os.path.basename` already reduces `==/usr/bin/git`
+    # to `git`, and `==git` reaches no guarded arm either way. Deleting the condition
+    # therefore reddens nothing downstream, which is the shape of a dead defensive clause.
+    # Bind it to the installed zsh directly instead, so it is covered rather than assumed.
+    if has_zsh:
+        for word, expanded, runs_git in (
+            ("=git", "git", True),
+            ("=/usr/bin/git", "/usr/bin/git", True),
+            ("==git", "==git", False),
+            ("==/usr/bin/git", "==/usr/bin/git", False),
+        ):
+            probe = subprocess.run(
+                ["zsh", "-c", f"{word} --version"], capture_output=True, timeout=10)
+            zsh_ran_git = probe.returncode == 0 and b"git version" in probe.stdout
+            executed += 1
+            if _equals_expanded(word) != expanded or zsh_ran_git != runs_git:
+                failures.append(
+                    f"equals-expansion model disagrees with this zsh for {word!r}: "
+                    f"helper gave {_equals_expanded(word)!r}, zsh ran git={zsh_ran_git}")
+    else:
+        skipped += 1
+    for text, quoting, live in (
+        ("=git", "", True), ("=git", "'", False), ("=git", '"', False),
+        ("=git", "mixed:UUUU", True), ("=git", "mixed:SUUU", False),
+        ("==git", "", False), ("git", "", False),
+    ):
+        executed += 1
+        if _equals_expansion_is_live(text, quoting) != live:
+            failures.append(
+                f"equals-expansion liveness for {text!r} quoted {quoting!r} is not {live}")
     zsh_probes = (
         (
             "function-shadowed echo",
@@ -4292,6 +4350,23 @@ FIXTURES += [
      "=git status --short", "allow"),
     ("ASK  EQUALS: a wrapped =git behind an unmodelled launcher is unresolved",
      "xargs =git show", "ask"),
+    ("RED  EQUALS: a path-qualified =git resolves and reaches the ERE hazard",
+     "=/usr/bin/git grep -E 'harness\\b' -- README.md", "deny"),
+    ("GREEN EQUALS: zsh reports `=git not found` for a doubled equals",
+     "==git grep -E 'harness\\b' -- README.md", "allow"),
+    # zsh refuses `==/usr/bin/git` the same way, but `os.path.basename` reads the last
+    # path component of the raw word as `git` before any `=` handling runs, so this
+    # denies a command that cannot execute. Same safe-direction over-approximation as the
+    # nested non-zsh body, pinned here so it is a recorded decision and not a surprise.
+    ("RED  EQUALS: a doubled equals on a PATH is over-approximated as Git",
+     "==/usr/bin/git grep -E 'harness\\b' -- README.md", "deny"),
+    ("ASK  EQUALS: quoting suppresses the expansion, leaving an unproven identity",
+     "'=git' grep -E 'harness\\b' -- README.md", "ask"),
+    ("ASK  EQUALS: double quoting suppresses it the same way",
+     '"=git" grep -E \'harness\\b\' -- README.md', "ask"),
+    ("ASK  EQUALS: the stated over-approximation -- only zsh expands `=`, and this "
+     "walk carries no shell context, so a bash body is judged as if it did",
+     "bash -c \"=git grep -E 'harness\\b' -- README.md\"", "deny"),
 ]
 
 # Same hazard, reached through a different subcommand. Verified on git 2.46.1 against a
@@ -4789,9 +4864,9 @@ def selftest():
         absent_failures, absent_checks, absent_skips = check_shell_boundary_behavior()
     finally:
         shutil.which = original_which
-    absence_ok = not absent_failures and absent_checks == 5 and absent_skips == 8
+    absence_ok = not absent_failures and absent_checks == 12 and absent_skips == 9
     bad += 0 if absence_ok else 1
-    print("  %s absent zsh skips only 8 zsh probes; 5 portable probes still execute" % (
+    print("  %s absent zsh skips only 9 zsh probe groups; 12 portable probes still execute" % (
         "PASS" if absence_ok else "FAIL"))
 
     # Mutate each production call site, not its helper in isolation. Every representative

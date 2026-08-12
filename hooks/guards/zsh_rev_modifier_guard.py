@@ -118,6 +118,17 @@ NEST_DEPTH_LIMIT = 4
 # missing, which mattered most on `push`: it is the one that WRITES, and
 # `$BRANCH:refs/heads/main` with BRANCH=feature/my-work.v2 was observed reaching git as
 # `feature/my-workefs/heads/main` -- a different destination ref, no error.
+#
+# MEMBERSHIP CRITERION, so a candidate can be tested rather than recalled. Both must hold:
+#   1. the subcommand's documented grammar accepts a `X:Y` operand -- `rev:path`, a
+#      `src:dst` refspec, or an scp-style `host:path`; and
+#   2. a mangled colon still parses, so git addresses a DIFFERENT object instead of
+#      failing. A form that can only produce `fatal: ambiguous argument` is loud, and the
+#      hazard this guard exists for is the silent one under `2>/dev/null`.
+# zsh mangles the expression whatever the subcommand is; membership decides only whether
+# the result is silent. Candidates not yet graded against this criterion, each needing its
+# own grounding against git's documented grammar rather than a guess: `reset`, `clone`,
+# `bundle`, `update-ref`, `ls-remote`, `send-pack`.
 REV_PATH_SUBCOMMANDS = {"show", "diff", "cat-file", "log", "ls-tree", "archive",
                         "checkout", "restore", "grep", "rev-parse", "blame",
                         # refspec `src:dst`
@@ -567,6 +578,30 @@ FIXTURES += [
      "git show ${VAR:-default}", "allow"),
     ("GREEN BRACEWIDE: POSIX substring form is not a modifier",
      "git show HEAD:${VAR:0:2}", "allow"),
+]
+
+# The subcommand gate needs both bounds. Dropping a member is already visible -- removing
+# `show` reddens 62 checks, removing `push` reddens 2 -- but forcing is_rev_path_git to
+# return True left the whole suite green, so nothing described the SET's upper edge. These
+# carry a live `$VAR:<modifier>` on subcommands outside REV_PATH_SUBCOMMANDS: an
+# over-broad set turns them red. The membership criterion the set records is the test they
+# fail, not a judgement that zsh leaves these alone -- zsh mangles every one of them.
+FIXTURES += [
+    ("GREEN SCOPE: config has no X:Y grammar, so a mangled colon cannot redirect it",
+     "git config $SECTION:tests/x.py", "allow"),
+    ("GREEN SCOPE: gc has no X:Y grammar", "git gc $OPT:src/f.py", "allow"),
+    ("GREEN SCOPE: maintenance has no X:Y grammar",
+     "git maintenance run $TASK:src/f.py", "allow"),
+    ("RED  SCOPE: the paired member is still gated", "git show $SHA:src/f.py", "deny"),
+]
+
+# zsh resolves `=name` through PATH before execution. `=git` reached this guard as an
+# unrelated command name and allowed the hazard; the shared prefix walk now resolves it.
+FIXTURES += [
+    ("RED EQUALS: zsh =git show carries the rev:path hazard",
+     "SHA=x; =git show $SHA:src/f.py", "deny"),
+    ("GREEN EQUALS: zsh =git with a braced NAME is correct",
+     "SHA=x; =git show ${SHA}:src/f.py", "allow"),
 ]
 
 

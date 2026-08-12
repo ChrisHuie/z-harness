@@ -1464,13 +1464,64 @@ def trusted_git_authority(executable="git"):
     return authority
 
 
+_GIT_ALIAS_NAME_CACHE = {}
+
+
+def ambient_alias_names(authority):
+    """Alias names the trusted Git can see, read ONLY as a reason to ask.
+
+    Mutable configuration is never positive authority in this guard. A name found here is
+    treated as unresolved; a name absent from the table grants nothing on its own, because
+    the builtin check still has to pass first. `None` means the table could not be
+    enumerated, which the caller turns into a question rather than an allow.
+
+    Residual, measured rather than assumed: two Gits on one machine can read different
+    system config files -- on this host `/opt/homebrew/etc/gitconfig` versus none for
+    Apple Git -- so an alias defined only in the candidate's system scope is not visible
+    through the trusted Git.
+    """
+    key = authority.executable
+    if key not in _GIT_ALIAS_NAME_CACHE:
+        try:
+            probe = subprocess.run(
+                [key, "config", "--get-regexp", r"^alias\."],
+                capture_output=True, text=True, timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        # 1 is "no matches", which is a complete answer; anything else is not.
+        if probe.returncode not in (0, 1):
+            return None
+        _GIT_ALIAS_NAME_CACHE[key] = frozenset(
+            line.split(None, 1)[0][len("alias."):].lower()
+            for line in probe.stdout.splitlines()
+            if line.lower().startswith("alias.") and line.split(None, 1)
+        )
+    return _GIT_ALIAS_NAME_CACHE[key]
+
+
 def authorize_git_subcommand(subcommand, authority, effective_exec_path):
     if subcommand in authority.builtins:
-        # git-config(1): "aliases that hide existing Git commands are ignored". A builtin
-        # name therefore cannot be redirected by ambient alias/config in any Git on this
-        # machine, which is what lets an untrusted candidate be classified from the
-        # trusted Git's inventory. A Git too old or too new to carry the command as a
-        # builtin is outside that inference.
+        if authority.candidate_trusted:
+            # git-config(1): "aliases that hide existing Git commands are ignored", so a
+            # builtin name cannot be redirected by ambient alias/config in THIS Git.
+            # Reproduced per name: alias.grep, alias.status, alias.show, alias.log and
+            # alias.submodule are all ignored, while alias.nonbuiltinname is not.
+            return None
+        # A different Git, whose own inventory cannot be read without executing a binary
+        # the command chose. The trusted Git's builtin list does NOT transfer: measured on
+        # this host, `refs` and `replay` are builtin in git 2.46.1 and absent from Apple
+        # Git 2.39.5, where `-c alias.refs=...` does run the alias. So the builtin check
+        # is kept as a floor and the thing that actually has to be absent is an ambient
+        # alias for this name.
+        aliases = ambient_alias_names(authority)
+        if aliases is None:
+            return (f"Git subcommand {subcommand!r} runs on a Git this guard cannot "
+                    "enumerate, and the ambient alias table could not be read either")
+        if subcommand in aliases:
+            return (f"Git subcommand {subcommand!r} has an ambient alias, and the command "
+                    "names a Git whose own command inventory cannot be read, so the alias "
+                    "may not be ignored the way a builtin would ignore it")
         return None
     if not authority.candidate_trusted:
         return (f"Git subcommand {subcommand!r} is not a builtin of the trusted Git and "
@@ -5102,6 +5153,69 @@ def selftest():
     print("  %s trusted-Git inventory drift loses standard submodule allow" % (
         "PASS" if drift_red else "FAIL"))
 
+    # The untrusted-candidate path authorizes a builtin NAME using an inventory read from
+    # a different binary. That transfer is unsound on its own -- `refs` and `replay` are
+    # builtin in git 2.46.1 and absent from Apple Git 2.39.5, where `-c alias.refs=...`
+    # runs the alias -- so the ambient alias table is what has to be clean. Drive all
+    # three of its answers, and prove the real reader returns a usable one.
+    untrusted_git = "/nonexistent/bin/git status --short"
+    original_alias_names = ambient_alias_names
+    for label, planted, want in (
+        ("an ambient alias for the name", frozenset({"status"}), "ask"),
+        ("an unreadable alias table", None, "ask"),
+        ("a clean alias table", frozenset({"unrelated"}), "allow"),
+    ):
+        globals()["ambient_alias_names"] = lambda _authority, _v=planted: _v
+        try:
+            got = decide(untrusted_git)[0]
+        finally:
+            globals()["ambient_alias_names"] = original_alias_names
+        ok = got == want
+        bad += 0 if ok else 1
+        print("  %s untrusted Git with %s -> %s" % (
+            "PASS" if ok else "FAIL", label, want))
+    # A reader that returns an empty table on every input satisfies "returns a frozenset"
+    # and silently reopens the path above, so read a repository whose alias is known.
+    live_authority = original_discovery()
+    probe_cwd = os.getcwd()
+    with tempfile.TemporaryDirectory(prefix="git-alias-probe-") as alias_repo:
+        subprocess.run(["git", "init", "-q", alias_repo], capture_output=True, timeout=30)
+        subprocess.run(["git", "-C", alias_repo, "config", "alias.zzprobe", "status"],
+                       capture_output=True, timeout=30)
+        _GIT_ALIAS_NAME_CACHE.clear()
+        try:
+            os.chdir(alias_repo)
+            planted_names = original_alias_names(live_authority)
+        finally:
+            os.chdir(probe_cwd)
+            _GIT_ALIAS_NAME_CACHE.clear()
+    live_ok = planted_names is not None and "zzprobe" in planted_names
+    bad += 0 if live_ok else 1
+    print("  %s ambient alias reader reports an alias the installed Git can see" % (
+        "PASS" if live_ok else "FAIL"))
+
+    # An unreadable table must be `None`, never an empty one: empty reads as "no alias
+    # shadows this name" and reopens the untrusted-builtin path. Drive both failure arms.
+    with tempfile.TemporaryDirectory(prefix="git-alias-fail-") as failing_dir:
+        failing_git = os.path.join(failing_dir, "git")
+        with open(failing_git, "w", encoding="utf-8") as handle:
+            handle.write("#!/bin/sh\nexit 3\n")
+        os.chmod(failing_git, 0o755)
+        for label, executable in (
+            ("a Git that exits outside {0,1}", failing_git),
+            ("a Git that cannot be executed", os.path.join(failing_dir, "absent-git")),
+        ):
+            _GIT_ALIAS_NAME_CACHE.clear()
+            try:
+                answer = original_alias_names(
+                    live_authority._replace(executable=executable))
+            finally:
+                _GIT_ALIAS_NAME_CACHE.clear()
+            unreadable_ok = answer is None
+            bad += 0 if unreadable_ok else 1
+            print("  %s ambient alias reader reports %s as unreadable, not empty" % (
+                "PASS" if unreadable_ok else "FAIL", label))
+
     globals()["authorize_git_subcommand"] = (
         lambda subcommand, authority, effective_exec_path:
         None if subcommand == "submodule"
@@ -5441,7 +5555,7 @@ def selftest():
     print("  %s identifier-only heredoc mutation loses dashed-delimiter deny" % (
         "PASS" if dashed_heredoc_red else "FAIL"))
 
-    checks = len(FIXTURES) + 48
+    checks = len(FIXTURES) + 54
     print("failures: %d" % bad)
     print("SELFTEST-SUMMARY suite=git_grep_engine_guard checks=%d failures=%d" % (
         checks, bad))

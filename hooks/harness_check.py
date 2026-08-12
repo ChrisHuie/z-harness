@@ -111,6 +111,7 @@ SELFTEST_SUITES = [
     ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 63),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
     ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 16),
+    ("announced_work_guard", ["hooks/announced_work_guard.py", "--selftest"], 22),
     ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 66),
     ("zsh_rev_modifier_guard", ["hooks/guards/zsh_rev_modifier_guard.py", "--selftest"], 31),
 ]
@@ -218,6 +219,7 @@ REQUIRED_CLAUDE_HANDLERS = [
     ("PostToolUse", "AskUserQuestion", "hooks/askq_timeout_guard.py"),
     ("PreToolUse", "Bash", "hooks/bash_command_guard.py"),
     ("PreToolUse", "Agent|Task", "hooks/spawn_preflight_guard.py"),
+    ("Stop", None, "hooks/announced_work_guard.py"),
 ]
 
 RESERVED_BASENAMES = {"claude.md", "agents.md", "gemini.md"}

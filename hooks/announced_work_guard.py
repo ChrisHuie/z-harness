@@ -28,7 +28,17 @@ the middle of a message and quietly dropped, and it says nothing about whether
 the work that DID run was any good. Blocking here costs one turn; missing costs
 the user's trust in every status line, which is why it is tuned to fire.
 
-Contract, verified in-binary (Claude Code 2.1.227): Stop hooks receive
+CONTRACT, VERIFIED THREE WAYS rather than read once. (1) In-binary against
+Claude Code 2.1.227. (2) Against a REAL captured Stop envelope, shipped as
+hooks/fixtures_stop/S1_stop_real_envelope.json and asserted field-by-field in the
+selftest — `last_assistant_message` is a plain str, `stop_hook_active` a bool.
+(3) End to end in a live headless session: a run told to answer "Starting the
+audit." was blocked at Stop, received this guard's message, and rewrote its
+ending to "no work was performed, no tools were run, and nothing is pending".
+The measurement behind the tuning is re-runnable, not a literal:
+`announced_work_guard.py --sweep` regenerates it over any transcript glob.
+
+Stop hooks receive
 {"hook_event_name": "Stop", "stop_hook_active": bool,
  "last_assistant_message": ..., "session_id", "transcript_path", ...}.
 Exit 2 blocks the stop and returns stderr to the model. `stop_hook_active` is
@@ -302,7 +312,41 @@ def selftest():
         ("present-but-null is a readable state, not drift",
          {"last_assistant_message": None}, False),
     ]
+    # The contract, checked against a REAL captured Stop event rather than
+    # against my reading of the binary. Absence is a failure, not a skip: a
+    # missing fixture would quietly retire the only evidence that this guard
+    # reads a field the runtime actually sends.
+    fx = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                      "fixtures_stop", "S1_stop_real_envelope.json")
+    try:
+        real = json.load(open(fx, encoding="utf-8"))
+    except Exception:
+        real = None
+    cases += [
+        ("real envelope: fixture present and parses",
+         {"__contract__": real is not None}, "contract"),
+        ("real envelope: last_assistant_message is a str",
+         {"__contract__": isinstance((real or {}).get("last_assistant_message"), str)},
+         "contract"),
+        ("real envelope: stop_hook_active is a bool",
+         {"__contract__": isinstance((real or {}).get("stop_hook_active"), bool)},
+         "contract"),
+        ("real envelope: hook_event_name is Stop",
+         {"__contract__": (real or {}).get("hook_event_name") == "Stop"}, "contract"),
+        ("real envelope, benign message -> allow", real if real else {"__contract__": False},
+         False if real else "contract"),
+        ("real envelope, announcement substituted -> block",
+         dict(real, last_assistant_message="Right. Starting the IR-38 audit.")
+         if real else {"__contract__": False}, True if real else "contract"),
+    ]
+
     for name, payload, want in cases:
+        if isinstance(payload, dict) and "__contract__" in payload:
+            got = "contract" if payload["__contract__"] else "BROKEN"
+            if got != want:
+                failures += 1
+            print(f"  {'PASS' if got == want else 'FAIL'} {name} -> {got}")
+            continue
         try:
             got = judge(payload) is not None
         except EnvelopeDrift:
@@ -317,9 +361,84 @@ def selftest():
     return failures == 0
 
 
+def sweep(globs):
+    """Re-run the false-positive measurement over real transcripts.
+
+    The headline number in this file's history — 6 blocks in 2676 turns that
+    end on text, 0.22% — is worthless as a literal: nobody can check it and it
+    drifts the moment the matcher changes. This is the query that regenerates
+    it, so a reviewer can disagree with the number instead of taking it.
+
+    A turn is scored only when it ENDS on text. A turn whose last text is
+    followed by a tool call is the healthy case by construction and is not a
+    candidate, which is why the denominator here is smaller than the turn count.
+    """
+    import glob as _glob
+    files = sorted({f for g in globs for f in _glob.glob(os.path.expanduser(g))})
+    turns_n = ends = blocks = 0
+    hits = []
+    for path in files:
+        turns, cur = [], []
+        try:
+            lines = open(path, encoding="utf-8", errors="replace").readlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if d.get("isSidechain"):
+                continue                        # subagent, not this turn
+            c = (d.get("message") or {}).get("content")
+            if d.get("type") == "user":
+                # a user record carrying tool_result is the harness replying,
+                # not a human turn boundary
+                if isinstance(c, list) and any(
+                        isinstance(b, dict) and b.get("type") == "tool_result" for b in c):
+                    continue
+                if cur:
+                    turns.append(cur)
+                    cur = []
+                continue
+            if d.get("type") == "assistant" and isinstance(c, list):
+                for b in c:
+                    if isinstance(b, dict) and b.get("type") in ("text", "tool_use"):
+                        cur.append((b["type"], b.get("text", "") or b.get("name", "")))
+        if cur:
+            turns.append(cur)
+        turns_n += len(turns)
+        for t in turns:
+            li = max((i for i, (k, _) in enumerate(t) if k == "text"), default=None)
+            if li is None or any(k == "tool_use" for k, _ in t[li + 1:]):
+                continue
+            ends += 1
+            try:
+                trig = judge({"last_assistant_message": t[li][1]})
+            except EnvelopeDrift:
+                continue
+            if trig:
+                blocks += 1
+                hits.append((os.path.basename(os.path.dirname(path))[-30:], trig,
+                             " ".join(t[li][1][-120:].split())))
+    print(f"# COVERAGE transcripts={len(files)} turns={turns_n} ending_on_text={ends}")
+    print("#   NOT COVERED: a turn ending in a tool call cannot exhibit this defect and is "
+          "excluded from the denominator, so this is a rate over CANDIDATES, not over turns.")
+    print("#   NOT COVERED: whether each block is a TRUE positive. That is a human read; "
+          "the tails are printed so it can be disagreed with.")
+    print(f"\n# {blocks} block(s) / {ends} candidates = "
+          f"{100 * blocks / max(ends, 1):.2f}%\n")
+    for proj, trig, tail in hits:
+        print(f"  [{proj}] {trig!r}\n     …{tail}")
+    return 0
+
+
 def main(argv):
     if "--selftest" in argv:
         return 0 if selftest() else 1
+    if "--sweep" in argv:
+        rest = argv[argv.index("--sweep") + 1:]
+        return sweep(rest or ["~/.claude/projects/*/*.jsonl"])
     off = os.environ.get("ANNOUNCED_WORK_GUARD") == "off"
     raw = sys.stdin.read()
     try:

@@ -1,7 +1,7 @@
 {
   "note": "sha256 of each aggregated selftest suite's source. The check count in a receipt is self-reported, so an eight-line stub printing a passing receipt satisfied the floor and the whole gate went green. Binding the source means a suite cannot be replaced by something that merely claims to have run. Update an entry in the same commit that changes its tool, and review the diff: this file is authored, never generated from whatever is on disk.",
   "suites": {
-    "announced_work_guard": "0a06e3e3ad0c39f36abf1d758509e1d552f54e3070ce2eca0cfead7685eb7bd9",
+    "announced_work_guard": "b35acef563854d61d0f9624e2af057fb6ca40692ed822cd3e35ba1ae88d2f748",
     "askq_timeout_guard": "85c136dc24f3b4f41a60987b8abecb97779e209e49c4e29e74a5d46174d695ef",
     "bash_command_guard": "ec2444a33fe366affccf438acb865aa88d338ba1f17ca0b4669705327c425f4d",
     "cc-cost": "972b0122b5f84de10f41915a133132f555b943c46061d91b07e3f7b534a4d003",

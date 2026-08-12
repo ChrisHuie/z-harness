@@ -131,9 +131,44 @@ Do exactly one of these, now:
 
 Do not restate the intention in different words. That is the same claim."""
 
+DRIFT_MSG = """\
+STOP BLOCKED — announced-work guard ({v}) HAS GONE BLIND.
+
+{why}
+
+This guard reads `last_assistant_message` from the Stop envelope. It cannot
+read this one, so it is not checking anything — and a checker that passes
+because it read nothing is worse than no checker, because it still reads as
+green. Blocking once so this is seen rather than silently inherited.
+
+This is a HARNESS defect, not a defect in the turn. Fix
+~/.claude/hooks/announced_work_guard.py against the current Stop contract, or
+set ANNOUNCED_WORK_GUARD=off to disable it deliberately. The retry carries
+stop_hook_active, so the turn will end normally and this will not loop."""
+
+
+class EnvelopeDrift(ValueError):
+    """The Stop envelope no longer carries a message this guard can read.
+
+    Returning "allow" here is the failure this whole file exists to prevent: a
+    renamed or dropped field would make the gate silently pass every turn,
+    forever, while reading as a healthy hook. The house pattern in
+    askq_timeout_guard separates UNRECOGNISED (schema changed) from
+    OUT_OF_SCOPE (legitimately not ours), and only the first is loud.
+
+    Drift blocks ONCE. `stop_hook_active` is true on the retry, so the guard
+    returns success and the turn ends — the operator sees it, and a genuinely
+    dead field costs one turn rather than wedging the session.
+    """
+
 
 def message_text(payload):
     """The last assistant message as plain text, however it is shaped."""
+    if not isinstance(payload, dict):
+        raise EnvelopeDrift(f"stdin parsed to {type(payload).__name__}, expected a JSON object")
+    if "last_assistant_message" not in payload:
+        raise EnvelopeDrift("envelope has no 'last_assistant_message' key — "
+                            "the Stop payload schema changed")
     m = payload.get("last_assistant_message")
     if isinstance(m, str):
         return m
@@ -147,12 +182,15 @@ def message_text(payload):
     if isinstance(m, list):
         return "\n".join(b.get("text", "") for b in m
                          if isinstance(b, dict) and b.get("type") == "text")
-    return ""
+    if m is None:
+        return ""            # present and empty is a real, readable state
+    raise EnvelopeDrift(f"last_assistant_message is a {type(m).__name__}, "
+                        f"not str/dict/list — shape changed")
 
 
 def judge(payload):
     """-> trigger string to block on, or None to allow."""
-    if payload.get("stop_hook_active"):
+    if isinstance(payload, dict) and payload.get("stop_hook_active"):
         return None                     # documented loop guard; never re-block
     text = message_text(payload).strip()
     if not text:
@@ -246,12 +284,33 @@ def selftest():
          {"last_assistant_message": "That settles it. I'll now run the audit."}, True),
     ]
     failures = 0
-    for name, payload, want_block in cases:
-        got = judge(payload) is not None
-        if got != want_block:
+    cases += [
+        # Envelope drift. Silently allowing here would make the gate pass every
+        # turn forever while reading as a healthy hook - the exact
+        # unvalidated-instrument failure the rest of this harness exists to
+        # stop. Each of these must be LOUD, and each blocks only once.
+        ("drift: the field is renamed",
+         {"hook_event_name": "Stop", "assistant_message": "Starting the audit."}, "drift"),
+        ("drift: the field is gone entirely",
+         {"hook_event_name": "Stop", "session_id": "x"}, "drift"),
+        ("drift: the message is an alien shape",
+         {"last_assistant_message": 42}, "drift"),
+        ("drift: stdin is not an object",
+         ["Starting the audit."], "drift"),
+        ("drift blocks ONCE, not forever",
+         {"stop_hook_active": True, "session_id": "x"}, False),
+        ("present-but-null is a readable state, not drift",
+         {"last_assistant_message": None}, False),
+    ]
+    for name, payload, want in cases:
+        try:
+            got = judge(payload) is not None
+        except EnvelopeDrift:
+            got = "drift"
+        if got != want:
             failures += 1
-        print(f"  {'PASS' if got == want_block else 'FAIL'} {name} -> "
-              f"{'block' if got else 'allow'}")
+        label = got if isinstance(got, str) else ("block" if got else "allow")
+        print(f"  {'PASS' if got == want else 'FAIL'} {name} -> {label}")
     print(f"\n  selftest: {failures} failure(s)")
     print(f"SELFTEST-SUMMARY suite=announced_work_guard checks={len(cases)} "
           f"failures={failures}")
@@ -261,16 +320,26 @@ def selftest():
 def main(argv):
     if "--selftest" in argv:
         return 0 if selftest() else 1
+    off = os.environ.get("ANNOUNCED_WORK_GUARD") == "off"
+    raw = sys.stdin.read()
     try:
-        payload = json.load(sys.stdin)
-    except Exception:
-        return 0            # an unreadable envelope must not wedge the session
-    if payload.get("hook_event_name") not in (None, "Stop", "SubagentStop"):
-        return 0
-    trigger = judge(payload)
-    if not trigger:
-        return 0
-    if os.environ.get("ANNOUNCED_WORK_GUARD") == "off":
+        payload = json.loads(raw)
+    except Exception as exc:
+        if off:
+            return 0
+        print(DRIFT_MSG.format(v=VERSION, why=f"stdin is not JSON ({exc})"), file=sys.stderr)
+        return 2
+    if isinstance(payload, dict) and \
+            payload.get("hook_event_name") not in (None, "Stop", "SubagentStop"):
+        return 0                        # out of scope, which is not drift
+    try:
+        trigger = judge(payload)
+    except EnvelopeDrift as exc:
+        if off:
+            return 0
+        print(DRIFT_MSG.format(v=VERSION, why=str(exc)), file=sys.stderr)
+        return 2
+    if not trigger or off:
         return 0
     print(BLOCK_MSG.format(v=VERSION, trigger=trigger), file=sys.stderr)
     return 2

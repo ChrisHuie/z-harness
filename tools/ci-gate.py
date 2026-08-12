@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import importlib.util
+import json
 import re
 import subprocess
 import sys
@@ -34,8 +36,8 @@ EVAL_SKILL_FLOOR = 6
 SUITE_FLOORS = {
     "harness_check": 72,
     "render-packages": 192,
-    "bash_command_guard": 744,
-    "git_grep_engine_guard": 428,
+    "bash_command_guard": 749,
+    "git_grep_engine_guard": 431,
     "zsh_rev_modifier_guard": 171,
 }
 EXPECTED_WORKFLOW = """name: harness-check
@@ -259,6 +261,26 @@ def floor_registry_error() -> str:
     return f"suite floor registry drift: {drift}" if drift else ""
 
 
+def hook_budget_error(*, settings_data=None, codex_data=None, budget=None) -> str:
+    """Return drift between registered hook timeouts and the guard's inner deadline."""
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "_ci_gate_git_guard", ROOT / "hooks/guards/git_grep_engine_guard.py")
+        if spec is None or spec.loader is None:
+            return "cannot load git_grep_engine_guard.py for hook-budget comparison"
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        if settings_data is None:
+            settings_data = json.loads((ROOT / "settings.json").read_text(encoding="utf-8"))
+        if codex_data is None:
+            codex_data = json.loads(
+                (ROOT / "hooks/hooks.json").read_text(encoding="utf-8"))
+        return guard.hook_timeout_contract(
+            settings_data=settings_data, codex_data=codex_data, budget=budget)
+    except Exception as exc:
+        return f"cannot verify hook-budget contract: {exc!r}"
+
+
 def gate(
     runner: Callable[[Sequence[str]], Result] = run_command,
     *,
@@ -288,6 +310,10 @@ def gate(
     print(f"  {'FAIL' if floor_problem else 'PASS'} floor-registry")
     if floor_problem:
         failures.append(floor_problem)
+    budget_problem = hook_budget_error()
+    print(f"  {'FAIL' if budget_problem else 'PASS'} hook-budget")
+    if budget_problem:
+        failures.append(budget_problem)
     completed = 1
     with tempfile.TemporaryDirectory(prefix="z-harness-ci-gate-") as raw:
         render_root = Path(raw) / "rendered"
@@ -355,6 +381,23 @@ def selftest() -> int:
     expect(
         "gate floors agree with harness_check's imported registry",
         floor_registry_error() == "",
+    )
+    expect("hook timeout and internal budget contract matches", hook_budget_error() == "")
+    settings_fixture = json.loads((ROOT / "settings.json").read_text(encoding="utf-8"))
+    settings_fixture["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"] = 4
+    expect(
+        "hook budget contract rejects a Claude timeout mutation",
+        hook_budget_error(settings_data=settings_fixture) != "",
+    )
+    codex_fixture = json.loads((ROOT / "hooks/hooks.json").read_text(encoding="utf-8"))
+    codex_fixture["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"] = 4
+    expect(
+        "hook budget contract rejects a Codex timeout mutation",
+        hook_budget_error(codex_data=codex_fixture) != "",
+    )
+    expect(
+        "hook budget contract rejects a sub-second margin",
+        hook_budget_error(budget=4.01) != "",
     )
 
     fake_calls: List[Sequence[str]] = []

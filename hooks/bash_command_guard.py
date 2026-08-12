@@ -33,6 +33,7 @@ import json
 import subprocess
 import sys
 import pathlib
+import time
 
 VERSION = "1.5.0"
 RUNTIMES = {"claude", "codex"}
@@ -407,6 +408,11 @@ def selftest():
         ("dynamic-heredoc-consumer",
          "cat <<'END-MARK' | $SHELL\ngit grep -E 'harness\\b' -- README.md\nEND-MARK\n",
          "ask"),
+        ("alternate-git-status", "/nonexistent/bin/git status --short", "ask"),
+        ("alternate-git-pcre",
+         "/nonexistent/bin/git grep -P 'harness\\b' -- README.md", "ask"),
+        ("alternate-git-ere",
+         "/nonexistent/bin/git grep -E 'harness\\b' -- README.md", "ask"),
     )
     for label, command, want in hook_cases:
         raw = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
@@ -531,6 +537,7 @@ def selftest():
          "sh <<'END-MARK'\ngit grep -E 'harness\\b' -- README.md\nEND-MARK\n"),
         ("dynamic-heredoc-consumer",
          "cat <<'END-MARK' | $SHELL\ngit grep -E 'harness\\b' -- README.md\nEND-MARK\n"),
+        ("alternate-git-status", "/nonexistent/bin/git status --short"),
     )
     for label, command in codex_cases:
         raw = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
@@ -543,6 +550,22 @@ def selftest():
         failures += (not ok)
         print(f"  {'PASS' if ok else 'FAIL'} codex-json        {label:<18} "
               f"want=deny  got={got!s:<5}")
+    registered_started = time.monotonic()
+    registered_decisions = []
+    for _attempt in range(5):
+        grep_guard._GIT_AUTHORITY_CACHE.clear()
+        raw = json.dumps({"tool_name": "Bash", "tool_input": {"command": "git status --short"}})
+        rc, stdout, stderr = run_raw(raw)
+        registered_decisions.append((rc, stdout, stderr))
+    registered_elapsed = time.monotonic() - registered_started
+    ok = (registered_elapsed < 4.5 and all(
+        rc == 0 and not stdout and not stderr
+        for rc, stdout, stderr in registered_decisions
+    ))
+    total += 1
+    failures += (not ok)
+    print(f"  {'PASS' if ok else 'FAIL'} hook-budget        5 public envelopes in "
+          f"{registered_elapsed:.3f}s (cap 4.5s)")
     oversized = "echo " + ("x" * grep_guard.MAX_COMMAND_CHARS)
     got, reason = decide(oversized)
     ok = got == "ask" and "parse limit" in reason
@@ -603,7 +626,6 @@ def selftest():
     total += 1
     failures += (not ok)
     print(f"  {'PASS' if ok else 'FAIL'} stdin-closed       decode failure has a reason")
-    import time
     large_command = "echo " + ("x" * (256 * 1024))
     started = time.perf_counter()
     tokenized = grep_guard.split_commands(large_command)

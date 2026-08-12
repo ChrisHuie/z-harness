@@ -45,6 +45,7 @@ import string
 import subprocess
 import sys
 import tempfile
+import time
 from typing import NamedTuple
 
 # A live PCRE escape has an odd-length backslash run. A regular expression that only
@@ -61,6 +62,44 @@ MAX_PREFIX_DEPTH = 8
 MAX_ENV_SPLITS = 4
 MAX_ALIAS_DEPTH = 8
 MAX_SOURCE_DEPTH = 16
+REGISTERED_HOOK_TIMEOUT_SECONDS = 5
+GUARD_BUDGET_SECONDS = 4.0
+GIT_PROBE_TIMEOUT_SECONDS = 0.75
+
+
+def hook_timeout_contract(settings_data=None, codex_data=None, *, root=None, budget=None):
+    """Return an error when the two registered Bash hooks do not bound this guard."""
+    root = (os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            if root is None else root)
+    if settings_data is None:
+        settings_data = json.load(open(os.path.join(root, "settings.json"), encoding="utf-8"))
+    if codex_data is None:
+        codex_data = json.load(open(
+            os.path.join(root, "hooks", "hooks.json"), encoding="utf-8"))
+    claude = [
+        hook.get("timeout")
+        for entry in settings_data.get("hooks", {}).get("PreToolUse", [])
+        if entry.get("matcher") == "Bash"
+        for hook in entry.get("hooks", [])
+        if "bash_command_guard.py" in hook.get("command", "")
+    ]
+    codex = [
+        hook.get("timeout")
+        for entry in codex_data.get("hooks", {}).get("PreToolUse", [])
+        if entry.get("matcher") == "^Bash$"
+        for hook in entry.get("hooks", [])
+        if ("bash_command_guard.py" in hook.get("command", "")
+            and "--runtime codex" in hook.get("command", ""))
+    ]
+    if claude != [REGISTERED_HOOK_TIMEOUT_SECONDS]:
+        return f"Claude Bash hook timeouts are {claude!r}, expected [5]"
+    if codex != [REGISTERED_HOOK_TIMEOUT_SECONDS]:
+        return f"Codex Bash hook timeouts are {codex!r}, expected [5]"
+    internal = GUARD_BUDGET_SECONDS if budget is None else budget
+    if internal > REGISTERED_HOOK_TIMEOUT_SECONDS - 1.0:
+        return (f"internal budget {internal} does not leave the required one-second "
+                f"margin inside timeout {REGISTERED_HOOK_TIMEOUT_SECONDS}")
+    return ""
 
 
 class CommandParseError(ValueError):
@@ -117,10 +156,6 @@ class GitAuthority(NamedTuple):
     exec_path: str
     builtins: frozenset
     main: frozenset
-    # False when the command names a Git other than the one PATH resolves. The inventories
-    # still come from the trusted Git -- the named binary is never executed to enumerate
-    # its own -- so only builtins may be classified from them while this is False.
-    candidate_trusted: bool = True
 
 
 class HereStringSource(NamedTuple):
@@ -1415,34 +1450,45 @@ GIT_HAZARD_SUBCOMMANDS = {
 _GIT_AUTHORITY_CACHE = {}
 
 
-def trusted_git_authority(executable="git"):
-    """Bind builtin/main command inventories to one resolved Git and exec path.
+def _remaining_probe_timeout(deadline, clock):
+    remaining = deadline - clock()
+    if remaining <= 0:
+        raise GitAuthorityError("the guard's internal Git-discovery budget was exhausted")
+    return min(GIT_PROBE_TIMEOUT_SECONDS, remaining)
 
-    A command naming a Git other than the one PATH resolves is uncertainty, not a hazard.
-    Stock macOS carries two real Git binaries -- Homebrew's and Apple's /usr/bin/git --
-    and refusing the second denied `/usr/bin/git status`, which carries neither guarded
-    hazard. The named binary is still never executed to read its inventories, because the
-    command chose that path; the authority is returned with `candidate_trusted=False`
-    instead and `authorize_git_subcommand` narrows to builtins.
+
+def trusted_git_authority(executable="git", deadline=None, *, runner=None, clock=None):
+    """Bind command authority to the one Git selected by the inherited PATH.
+
+    A different executable is never probed and never inherits inventories or config from
+    the PATH-selected Git. Discovery calls share the hook's monotonic deadline; any timeout,
+    subprocess failure, or incomplete inventory is uncertainty rather than permission.
     """
+    runner = subprocess.run if runner is None else runner
+    clock = time.monotonic if clock is None else clock
+    deadline = clock() + GUARD_BUDGET_SECONDS if deadline is None else deadline
     trusted = shutil.which("git")
     candidate = (shutil.which(executable) if os.sep not in executable else executable)
     if not trusted or not candidate:
         raise GitAuthorityError("the Git executable cannot be resolved")
     trusted = os.path.realpath(trusted)
     candidate = os.path.realpath(candidate)
+    if candidate != trusted:
+        raise GitAuthorityError(
+            "the command selects a Git executable other than the PATH-trusted Git")
     if trusted not in _GIT_AUTHORITY_CACHE:
         try:
-            exec_path_result = subprocess.run(
-                [trusted, "--exec-path"], capture_output=True, text=True, timeout=10,
+            exec_path_result = runner(
+                [trusted, "--exec-path"], capture_output=True, text=True,
+                timeout=_remaining_probe_timeout(deadline, clock),
             )
-            builtins_result = subprocess.run(
+            builtins_result = runner(
                 [trusted, "--list-cmds=builtins"], capture_output=True,
-                text=True, timeout=10,
+                text=True, timeout=_remaining_probe_timeout(deadline, clock),
             )
-            main_result = subprocess.run(
+            main_result = runner(
                 [trusted, "--list-cmds=main,nohelpers"], capture_output=True,
-                text=True, timeout=10,
+                text=True, timeout=_remaining_probe_timeout(deadline, clock),
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise GitAuthorityError(
@@ -1458,79 +1504,14 @@ def trusted_git_authority(executable="git"):
         _GIT_AUTHORITY_CACHE[trusted] = GitAuthority(
             trusted, os.path.realpath(exec_path), builtins, main,
         )
-    authority = _GIT_AUTHORITY_CACHE[trusted]
-    if candidate != trusted:
-        return authority._replace(candidate_trusted=False)
-    return authority
-
-
-_GIT_ALIAS_NAME_CACHE = {}
-
-
-def ambient_alias_names(authority, cwd=None):
-    """Alias names the trusted Git can see, read ONLY as a reason to ask.
-
-    Mutable configuration is never positive authority in this guard. A name found here is
-    treated as unresolved; a name absent from the table grants nothing on its own, because
-    the builtin check still has to pass first. `None` means the table could not be
-    enumerated, which the caller turns into a question rather than an allow.
-
-    Residual, measured rather than assumed: two Gits on one machine can read different
-    system config files -- on this host `/opt/homebrew/etc/gitconfig` versus none for
-    Apple Git -- so an alias defined only in the candidate's system scope is not visible
-    through the trusted Git.
-
-    `cwd` defaults to the process directory, which is what production reads. The selftest
-    passes a repository it has just configured, so the reader can be proved against known
-    aliases without chdir'ing the whole interpreter.
-    """
-    key = (authority.executable, cwd)
-    if key not in _GIT_ALIAS_NAME_CACHE:
-        try:
-            probe = subprocess.run(
-                [authority.executable, "config", "--get-regexp", r"^alias\."],
-                capture_output=True, text=True, timeout=10, cwd=cwd,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return None
-        # 1 is "no matches", which is a complete answer; anything else is not.
-        if probe.returncode not in (0, 1):
-            return None
-        _GIT_ALIAS_NAME_CACHE[key] = frozenset(
-            line.split(None, 1)[0][len("alias."):].lower()
-            for line in probe.stdout.splitlines()
-            if line.lower().startswith("alias.") and line.split(None, 1)
-        )
-    return _GIT_ALIAS_NAME_CACHE[key]
+    return _GIT_AUTHORITY_CACHE[trusted]
 
 
 def authorize_git_subcommand(subcommand, authority, effective_exec_path):
     if subcommand in authority.builtins:
-        if authority.candidate_trusted:
-            # git-config(1): "aliases that hide existing Git commands are ignored", so a
-            # builtin name cannot be redirected by ambient alias/config in THIS Git.
-            # Reproduced per name: alias.grep, alias.status, alias.show, alias.log and
-            # alias.submodule are all ignored, while alias.nonbuiltinname is not.
-            return None
-        # A different Git, whose own inventory cannot be read without executing a binary
-        # the command chose. The trusted Git's builtin list does NOT transfer: measured on
-        # this host, `refs` and `replay` are builtin in git 2.46.1 and absent from Apple
-        # Git 2.39.5, where `-c alias.refs=...` does run the alias. So the builtin check
-        # is kept as a floor and the thing that actually has to be absent is an ambient
-        # alias for this name.
-        aliases = ambient_alias_names(authority)
-        if aliases is None:
-            return (f"Git subcommand {subcommand!r} runs on a Git this guard cannot "
-                    "enumerate, and the ambient alias table could not be read either")
-        if subcommand in aliases:
-            return (f"Git subcommand {subcommand!r} has an ambient alias, and the command "
-                    "names a Git whose own command inventory cannot be read, so the alias "
-                    "may not be ignored the way a builtin would ignore it")
+        # git-config(1): aliases that hide existing Git commands are ignored. This holds
+        # only because `trusted_git_authority` already proved the executable identity.
         return None
-    if not authority.candidate_trusted:
-        return (f"Git subcommand {subcommand!r} is not a builtin of the trusted Git and "
-                f"the command names a different Git executable, whose helper set and exec "
-                f"path cannot be enumerated without executing it")
     if subcommand in authority.main:
         if os.path.realpath(effective_exec_path) != authority.exec_path:
             return (f"Git subcommand {subcommand!r} is not builtin and the effective "
@@ -2302,7 +2283,7 @@ def resolve_git_alias(subcommand, tail, aliases, authority, effective_exec_path)
             derived_configs)
 
 
-def git_grep_argv(tokens, resolution=None):
+def git_grep_argv(tokens, resolution=None, deadline=None):
     """Return guarded pattern argv, Git config, and unresolved invocation state.
 
     None means the resolved Git subcommand is outside grep/log/shortlog/rev-list
@@ -2324,7 +2305,7 @@ def git_grep_argv(tokens, resolution=None):
     if (os.sep not in words[j]
             and command_env.get("PATH", os.environ.get("PATH")) != os.environ.get("PATH")):
         return [], [], ["PATH changes which Git executable would run"]
-    authority = trusted_git_authority(words[j])
+    authority = trusted_git_authority(words[j], deadline=deadline)
     effective_exec_path = command_env.get("GIT_EXEC_PATH", authority.exec_path)
     j += 1
     configs = []
@@ -2874,11 +2855,11 @@ def _direct_heredoc_header(line):
     return reachable_stdin_shells(commands) == (True,)
 
 
-def classify_direct_here_string(source, shell_depth):
+def classify_direct_here_string(source, shell_depth, deadline):
     if source.dynamic:
         return StdinProvenance(
             "ask", "a directly associated shell here-string has a dynamic source")
-    decision, reason = decide(source.body, shell_depth + 1)
+    decision, reason = decide(source.body, shell_depth + 1, deadline)
     if decision == "allow":
         return None
     return StdinProvenance(
@@ -2886,13 +2867,13 @@ def classify_direct_here_string(source, shell_depth):
         + decision + " (" + reason + ")")
 
 
-def interpreter_stdin_provenance(command, commands, shell_depth):
+def interpreter_stdin_provenance(command, commands, shell_depth, deadline):
     """Classify stdin source reachability over all parsed command/function records."""
     for source in live_here_string_sources(command):
         if source.descriptor != 0:
             continue
         if _direct_here_string_shell(source):
-            classified = classify_direct_here_string(source, shell_depth)
+            classified = classify_direct_here_string(source, shell_depth, deadline)
             if classified is not None:
                 return classified
             continue
@@ -2901,12 +2882,13 @@ def interpreter_stdin_provenance(command, commands, shell_depth):
         if not consumer.reads_stdin and not consumer.unresolved:
             continue
         if consumer.reads_stdin and not consumer.unresolved:
-            classified = classify_direct_here_string(source, shell_depth)
+            classified = classify_direct_here_string(source, shell_depth, deadline)
             if classified is not None:
                 return classified
             continue
         if source.dynamic:
-            nested_decision, nested_reason = decide(source.body, shell_depth + 1)
+            nested_decision, nested_reason = decide(
+                source.body, shell_depth + 1, deadline)
             if nested_decision != "allow":
                 return StdinProvenance(
                     nested_decision,
@@ -3046,8 +3028,13 @@ def conservative_allow_uncertainty(command):
     return None
 
 
-def decide(command, _shell_depth=0):
+def decide(command, _shell_depth=0, _deadline=None):
     """-> (decision, reason). decision in {allow, deny, ask}."""
+    _deadline = (time.monotonic() + GUARD_BUDGET_SECONDS
+                 if _deadline is None else _deadline)
+    if time.monotonic() >= _deadline:
+        return ("ask", "the Bash guard exhausted its internal decision budget before "
+                "the command could be classified; retry with a simpler direct command.")
     if _shell_depth > 4:
         return ("ask", "nested shell -c depth exceeds the git-grep guard's model; "
                 "verify the command or invoke git grep directly with -P.")
@@ -3058,7 +3045,7 @@ def decide(command, _shell_depth=0):
                 "rewrite it as a direct command before proceeding.")
     try:
         stdin_provenance = interpreter_stdin_provenance(
-            command, commands, _shell_depth)
+            command, commands, _shell_depth, _deadline)
     except CommandParseError as exc:
         return ("ask", f"interpreter stdin provenance cannot be parsed safely ({exc}); "
                 "rewrite it as one direct source before proceeding.")
@@ -3078,7 +3065,7 @@ def decide(command, _shell_depth=0):
             # too, purely for containing a `$`.
             if invocation.command:
                 nested_decision, nested_reason = decide(
-                    invocation.command, _shell_depth + 1)
+                    invocation.command, _shell_depth + 1, _deadline)
                 if nested_decision != "allow":
                     return nested_decision, nested_reason
             # Uncertainty about the body only matters once Git is actually in it.
@@ -3091,7 +3078,7 @@ def decide(command, _shell_depth=0):
                         "executable from an expansion, so the Git grep engine cannot be "
                         "inspected before execution")
         try:
-            got = git_grep_argv(tokens, resolution)
+            got = git_grep_argv(tokens, resolution, _deadline)
         except GitAuthorityError as exc:
             # Not proof of the guarded hazard, so not `deny`: this is the unresolved-
             # executable row of the decision contract, which is `ask`.
@@ -3622,8 +3609,8 @@ FIXTURES = [
      """nice -n 5 git grep -nE 'harness\\b' -- README.md""", "deny"),
     ("RED  ROUND 9: shell -c command is recursively inspected",
      """sh -c \"git grep -nE 'harness\\b' -- README.md\"""", "deny"),
-    ("RED  ROUND 9: a different absolute Git path fails authority discovery closed",
-     """/usr/bin/git grep -nE 'harness\\b' -- README.md""", "deny"),
+    ("ASK  ROUND 9: a different absolute Git path fails authority discovery closed",
+     """/nonexistent/bin/git grep -nE 'harness\\b' -- README.md""", "ask"),
     ("ASK  ROUND 9: valueless grep.patternType fails closed",
      """git -c grep.patternType grep -n 'harness\\b' -- README.md""", "ask"),
     ("RED  ROUND 9: env -S command splitting is parsed before git",
@@ -4373,24 +4360,23 @@ FIXTURES += [
     ("ASK LAUNCHER: xargs ahead of git grep", "xargs git grep -E 'x'", "ask"),
 ]
 
-# A machine can carry more than one real Git -- Homebrew's and Apple's /usr/bin/git are
-# both present on stock macOS. Naming the one PATH does not resolve is uncertainty about
-# WHICH binary runs, never proof of the guarded hazard, so it may not reach `deny`. The
-# path below is absolute and nonexistent so it is never the trusted Git on any host, which
-# keeps this group's contribution to `checks` the same everywhere.
+# A machine can carry more than one real Git. The command inventory, aliases, system
+# configuration, and helper path of the PATH-selected Git are not authority for another
+# executable. The path is nonexistent so it cannot equal the trusted Git on any host and
+# the test never executes it.
 _UNTRUSTED_GIT = "/nonexistent/bin/git"
 FIXTURES += [
-    ("GREEN AUTHORITY: an untrusted Git running a builtin is not the guarded hazard",
-     f"{_UNTRUSTED_GIT} status --short", "allow"),
-    ("GREEN AUTHORITY: an untrusted Git staging files is not the guarded hazard",
-     f"{_UNTRUSTED_GIT} add -A", "allow"),
-    ("GREEN AUTHORITY: an untrusted Git with a PCRE engine stays allowed",
-     f"{_UNTRUSTED_GIT} grep -P 'harness\\b' -- README.md", "allow"),
-    ("RED  AUTHORITY: an untrusted Git does not launder the ERE hazard",
-     f"{_UNTRUSTED_GIT} grep -E 'harness\\b' -- README.md", "deny"),
-    ("ASK  AUTHORITY: a non-builtin subcommand on an untrusted Git is unresolved",
+    ("ASK  AUTHORITY: an alternate Git builtin has no transferred authority",
+     f"{_UNTRUSTED_GIT} status --short", "ask"),
+    ("ASK  AUTHORITY: an alternate Git staging command has no transferred authority",
+     f"{_UNTRUSTED_GIT} add -A", "ask"),
+    ("ASK  AUTHORITY: an alternate Git PCRE command is still a different authority",
+     f"{_UNTRUSTED_GIT} grep -P 'harness\\b' -- README.md", "ask"),
+    ("ASK  AUTHORITY: an alternate Git ERE command is not inspected speculatively",
+     f"{_UNTRUSTED_GIT} grep -E 'harness\\b' -- README.md", "ask"),
+    ("ASK  AUTHORITY: an alternate Git non-builtin has no transferred authority",
      f"{_UNTRUSTED_GIT} submodule status", "ask"),
-    ("ASK  AUTHORITY: an unknown subcommand on an untrusted Git is unresolved",
+    ("ASK  AUTHORITY: an alternate Git unknown command has no transferred authority",
      f"{_UNTRUSTED_GIT} project-helper --version", "ask"),
 ]
 
@@ -4405,16 +4391,16 @@ FIXTURES += [
      "=git status --short", "allow"),
     ("ASK  EQUALS: a wrapped =git behind an unmodelled launcher is unresolved",
      "xargs =git show", "ask"),
-    ("RED  EQUALS: a path-qualified =git resolves and reaches the ERE hazard",
-     "=/usr/bin/git grep -E 'harness\\b' -- README.md", "deny"),
+    ("ASK EQUALS: a path-qualified alternate Git has no transferred authority",
+     "=/usr/bin/git grep -E 'harness\\b' -- README.md", "ask"),
     ("GREEN EQUALS: zsh reports `=git not found` for a doubled equals",
      "==git grep -E 'harness\\b' -- README.md", "allow"),
     # zsh refuses `==/usr/bin/git` the same way, but `os.path.basename` reads the last
     # path component of the raw word as `git` before any `=` handling runs, so this
     # denies a command that cannot execute. Same safe-direction over-approximation as the
     # nested non-zsh body, pinned here so it is a recorded decision and not a surprise.
-    ("RED  EQUALS: a doubled equals on a PATH is over-approximated as Git",
-     "==/usr/bin/git grep -E 'harness\\b' -- README.md", "deny"),
+    ("ASK EQUALS: a doubled equals alternate Git remains unresolved",
+     "==/usr/bin/git grep -E 'harness\\b' -- README.md", "ask"),
     ("ASK  EQUALS: quoting suppresses the expansion, leaving an unproven identity",
      "'=git' grep -E 'harness\\b' -- README.md", "ask"),
     ("ASK  EQUALS: double quoting suppresses it the same way",
@@ -5134,8 +5120,8 @@ def selftest():
         "PASS" if unknown_subcommand_red else "FAIL"))
 
     original_discovery = trusted_git_authority
-    globals()["trusted_git_authority"] = lambda _executable="git": (_ for _ in ()).throw(
-        GitAuthorityError("planted discovery failure"))
+    globals()["trusted_git_authority"] = lambda _executable="git", deadline=None: (
+        _ for _ in ()).throw(GitAuthorityError("planted discovery failure"))
     try:
         discovery_red = decide("git status --short")[0] == "ask"
     finally:
@@ -5145,7 +5131,7 @@ def selftest():
         "PASS" if discovery_red else "FAIL"))
 
     trusted_authority = original_discovery()
-    globals()["trusted_git_authority"] = lambda _executable="git": GitAuthority(
+    globals()["trusted_git_authority"] = lambda _executable="git", deadline=None: GitAuthority(
         trusted_authority.executable, trusted_authority.exec_path,
         trusted_authority.builtins, trusted_authority.main - {"submodule"},
     )
@@ -5157,65 +5143,142 @@ def selftest():
     print("  %s trusted-Git inventory drift loses standard submodule allow" % (
         "PASS" if drift_red else "FAIL"))
 
-    # The untrusted-candidate path authorizes a builtin NAME using an inventory read from
-    # a different binary. That transfer is unsound on its own -- `refs` and `replay` are
-    # builtin in git 2.46.1 and absent from Apple Git 2.39.5, where `-c alias.refs=...`
-    # runs the alias -- so the ambient alias table is what has to be clean. Drive all
-    # three of its answers, and prove the real reader returns a usable one.
-    untrusted_git = "/nonexistent/bin/git status --short"
-    original_alias_names = ambient_alias_names
-    for label, planted, want in (
-        ("an ambient alias for the name", frozenset({"status"}), "ask"),
-        ("an unreadable alias table", None, "ask"),
-        ("a clean alias table", frozenset({"unrelated"}), "allow"),
-    ):
-        globals()["ambient_alias_names"] = lambda _authority, _v=planted: _v
-        try:
-            got = decide(untrusted_git)[0]
-        finally:
-            globals()["ambient_alias_names"] = original_alias_names
-        ok = got == want
-        bad += 0 if ok else 1
-        print("  %s untrusted Git with %s -> %s" % (
-            "PASS" if ok else "FAIL", label, want))
-    # A reader that returns an empty table on every input satisfies "returns a frozenset"
-    # and silently reopens the path above, so read a repository whose alias is known.
-    live_authority = original_discovery()
-    with tempfile.TemporaryDirectory(prefix="git-alias-probe-") as alias_repo:
-        subprocess.run(["git", "init", "-q", alias_repo], capture_output=True, timeout=30)
-        subprocess.run(["git", "-C", alias_repo, "config", "alias.zzprobe", "status"],
-                       capture_output=True, timeout=30)
-        _GIT_ALIAS_NAME_CACHE.clear()
-        try:
-            planted_names = original_alias_names(live_authority, cwd=alias_repo)
-        finally:
-            _GIT_ALIAS_NAME_CACHE.clear()
-    live_ok = planted_names is not None and "zzprobe" in planted_names
-    bad += 0 if live_ok else 1
-    print("  %s ambient alias reader reports an alias the installed Git can see" % (
-        "PASS" if live_ok else "FAIL"))
+    # An alternate executable must fail before any subprocess is attempted. Querying the
+    # candidate in order to decide whether to trust it would execute attacker-selected code.
+    candidate_calls = []
+    try:
+        original_discovery(
+            "/nonexistent/bin/git",
+            runner=lambda *args, **kwargs: candidate_calls.append((args, kwargs)),
+        )
+        alternate_preprobe_ok = False
+    except GitAuthorityError:
+        alternate_preprobe_ok = not candidate_calls
+    bad += 0 if alternate_preprobe_ok else 1
+    print("  %s alternate Git is rejected before candidate execution" % (
+        "PASS" if alternate_preprobe_ok else "FAIL"))
 
-    # An unreadable table must be `None`, never an empty one: empty reads as "no alias
-    # shadows this name" and reopens the untrusted-builtin path. Drive both failure arms.
-    with tempfile.TemporaryDirectory(prefix="git-alias-fail-") as failing_dir:
-        failing_git = os.path.join(failing_dir, "git")
-        with open(failing_git, "w", encoding="utf-8") as handle:
-            handle.write("#!/bin/sh\nexit 3\n")
-        os.chmod(failing_git, 0o755)
-        for label, executable in (
-            ("a Git that exits outside {0,1}", failing_git),
-            ("a Git that cannot be executed", os.path.join(failing_dir, "absent-git")),
-        ):
-            _GIT_ALIAS_NAME_CACHE.clear()
-            try:
-                answer = original_alias_names(
-                    live_authority._replace(executable=executable))
-            finally:
-                _GIT_ALIAS_NAME_CACHE.clear()
-            unreadable_ok = answer is None
-            bad += 0 if unreadable_ok else 1
-            print("  %s ambient alias reader reports %s as unreadable, not empty" % (
-                "PASS" if unreadable_ok else "FAIL", label))
+    globals()["trusted_git_authority"] = (
+        lambda _executable="git", deadline=None: trusted_authority
+    )
+    try:
+        alternate_callsite_red = decide(
+            "/nonexistent/bin/git status --short")[0] != "ask"
+    finally:
+        globals()["trusted_git_authority"] = original_discovery
+    bad += 0 if alternate_callsite_red else 1
+    print("  %s alternate-Git authority callsite mutation loses fail-closed ask" % (
+        "PASS" if alternate_callsite_red else "FAIL"))
+
+    # All three discovery calls share one monotonic budget. A slow first probe reduces the
+    # next timeout; it cannot reset a fresh allowance for each subprocess.
+    _GIT_AUTHORITY_CACHE.clear()
+    ticks = [0.0]
+    observed_timeouts = []
+    def budget_runner(argv, **kwargs):
+        observed_timeouts.append(kwargs["timeout"])
+        ticks[0] += 0.3
+        if argv[-1] == "--exec-path":
+            stdout = "/tmp/trusted-git-core\n"
+        elif argv[-1] == "--list-cmds=builtins":
+            stdout = "grep status\n"
+        else:
+            stdout = "grep status submodule\n"
+        return subprocess.CompletedProcess(argv, 0, stdout, "")
+    try:
+        budget_authority = original_discovery(
+            "git", deadline=1.0, runner=budget_runner, clock=lambda: ticks[0])
+        shared_budget_ok = (
+            budget_authority.builtins == frozenset({"grep", "status"})
+            and observed_timeouts == [0.75, 0.7, 0.4]
+        )
+    finally:
+        _GIT_AUTHORITY_CACHE.clear()
+    bad += 0 if shared_budget_ok else 1
+    print("  %s Git discovery subprocesses consume one shared deadline" % (
+        "PASS" if shared_budget_ok else "FAIL"))
+
+    _GIT_AUTHORITY_CACHE.clear()
+    ticks = [0.0]
+    calls = [0]
+    def exhausted_runner(argv, **kwargs):
+        calls[0] += 1
+        ticks[0] = 2.0
+        return subprocess.CompletedProcess(argv, 0, "/tmp/trusted-git-core\n", "")
+    try:
+        original_discovery(
+            "git", deadline=1.0, runner=exhausted_runner, clock=lambda: ticks[0])
+        exhausted_ok = False
+    except GitAuthorityError:
+        exhausted_ok = calls[0] == 1
+    finally:
+        _GIT_AUTHORITY_CACHE.clear()
+    bad += 0 if exhausted_ok else 1
+    print("  %s exhausted shared deadline stops before the next Git probe" % (
+        "PASS" if exhausted_ok else "FAIL"))
+
+    _GIT_AUTHORITY_CACHE.clear()
+    timeout_calls = []
+    def timeout_runner(argv, **kwargs):
+        timeout_calls.append((tuple(argv), kwargs["timeout"]))
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+    try:
+        original_discovery("git", runner=timeout_runner)
+        subprocess_timeout_ok = False
+    except GitAuthorityError:
+        subprocess_timeout_ok = (
+            len(timeout_calls) == 1
+            and timeout_calls[0][0][-1] == "--exec-path"
+            and 0 < timeout_calls[0][1] <= GIT_PROBE_TIMEOUT_SECONDS
+        )
+    finally:
+        _GIT_AUTHORITY_CACHE.clear()
+    bad += 0 if subprocess_timeout_ok else 1
+    print("  %s Git discovery timeout asks before a second probe" % (
+        "PASS" if subprocess_timeout_ok else "FAIL"))
+
+    original_remaining_timeout = _remaining_probe_timeout
+    globals()["_remaining_probe_timeout"] = lambda _deadline, _clock: 0.75
+    _GIT_AUTHORITY_CACHE.clear()
+    ticks = [0.0]
+    def reset_budget_runner(argv, **kwargs):
+        ticks[0] += 2.0
+        if argv[-1] == "--exec-path":
+            stdout = "/tmp/trusted-git-core\n"
+        elif argv[-1] == "--list-cmds=builtins":
+            stdout = "grep status\n"
+        else:
+            stdout = "grep status submodule\n"
+        return subprocess.CompletedProcess(argv, 0, stdout, "")
+    try:
+        try:
+            original_discovery(
+                "git", deadline=1.0, runner=reset_budget_runner,
+                clock=lambda: ticks[0])
+            per_call_deadline_red = True
+        except GitAuthorityError:
+            per_call_deadline_red = False
+    finally:
+        globals()["_remaining_probe_timeout"] = original_remaining_timeout
+        _GIT_AUTHORITY_CACHE.clear()
+    bad += 0 if per_call_deadline_red else 1
+    print("  %s independent-per-call deadline mutation bypasses the shared budget" % (
+        "PASS" if per_call_deadline_red else "FAIL"))
+
+    timeout_contract_ok = hook_timeout_contract() == ""
+    planted_settings = json.load(open(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "settings.json"), encoding="utf-8"))
+    planted_settings["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"] = 4
+    timeout_contract_red = bool(hook_timeout_contract(settings_data=planted_settings))
+    budget_contract_red = bool(hook_timeout_contract(budget=4.01))
+    for label, ok in (
+        ("registered Claude/Codex timeout contract matches", timeout_contract_ok),
+        ("registered timeout mutation turns the contract red", timeout_contract_red),
+        ("internal budget margin mutation turns the contract red", budget_contract_red),
+    ):
+        bad += 0 if ok else 1
+        print("  %s %s" % ("PASS" if ok else "FAIL", label))
 
     globals()["authorize_git_subcommand"] = (
         lambda subcommand, authority, effective_exec_path:
@@ -5426,7 +5489,8 @@ def selftest():
 
     original_here_classifier = classify_direct_here_string
     globals()["classify_direct_here_string"] = (
-        lambda _source, _depth: StdinProvenance("ask", "planted unconditional ask"))
+        lambda _source, _depth, _deadline: StdinProvenance(
+            "ask", "planted unconditional ask"))
     try:
         unconditional_here_red = decide(
             r'''sh 0<<< "/bin/echo safe"''')[0] != "allow"
@@ -5436,7 +5500,7 @@ def selftest():
     print("  %s unconditional here-string mutation loses harmless static allow" % (
         "PASS" if unconditional_here_red else "FAIL"))
 
-    globals()["classify_direct_here_string"] = lambda _source, _depth: None
+    globals()["classify_direct_here_string"] = lambda _source, _depth, _deadline: None
     try:
         here_recursion_red = decide(
             r'''sh <<< "git grep -E 'harness\b' -- README.md"''')[0] != "deny"
@@ -5556,7 +5620,7 @@ def selftest():
     print("  %s identifier-only heredoc mutation loses dashed-delimiter deny" % (
         "PASS" if dashed_heredoc_red else "FAIL"))
 
-    checks = len(FIXTURES) + 54
+    checks = len(FIXTURES) + 57
     print("failures: %d" % bad)
     print("SELFTEST-SUMMARY suite=git_grep_engine_guard checks=%d failures=%d" % (
         checks, bad))

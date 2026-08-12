@@ -1156,6 +1156,9 @@ def load_schema(path: Path) -> Dict[str, Any]:
 # `payload`, and `$defs.file`. Counting them makes a NEW node a reviewable edit rather
 # than an unnoticed addition, the same way suite floors work.
 ARTIFACT_SCHEMA_OBJECT_NODES = 7
+# The same count for contracts/render-index.schema.json: the root and the per-target
+# entry. Both files are published `$id` documents, so both are bound.
+RENDER_INDEX_SCHEMA_OBJECT_NODES = 2
 
 
 def closure_census(schema: Any, path: str = "") -> Tuple[int, List[str]]:
@@ -2750,6 +2753,24 @@ def selftest(
         expect(
             f"every artifact-schema object node is closed ({closed_objects} node(s))",
             closed_objects == ARTIFACT_SCHEMA_OBJECT_NODES and not open_objects,
+        )
+        # Both files under contracts/ are published `$id` documents that an external
+        # validator may read, and `tools/portable-conformance.py` loads both. Binding one
+        # and not the other would leave the render index open to exactly the drift the
+        # check above exists to catch, so the sweep is over the pair, not the one site
+        # the finding happened to name.
+        index_schema = load_schema(RENDER_INDEX_SCHEMA_FILE)
+        index_required = index_schema.get("required")
+        index_closed, index_open = closure_census(index_schema)
+        expect(
+            f"the render-index schema is closed and exact ({index_closed} node(s))",
+            index_schema.get("additionalProperties") is False
+            and isinstance(index_required, list)
+            and len(index_required) == len(set(index_required))
+            and set(index_required) == set(index_schema.get("properties", {}))
+            and set(index_schema.get("$defs", {})) == {"sha256"}
+            and index_closed == RENDER_INDEX_SCHEMA_OBJECT_NODES
+            and not index_open,
         )
         for position, field in enumerate(sorted(required_artifact_fields)):
             case_root = temp / f"delete-artifact-field-{position:02d}"

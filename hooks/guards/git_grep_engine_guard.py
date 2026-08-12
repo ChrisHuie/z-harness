@@ -26,6 +26,13 @@ Also modeled (2026-08-02, both verified breaking on this host):
     git grep -E -f <file>                        -> pattern invisible to argv: ASK,
                                                     naming the form as out of scope
 
+OUT OF SCOPE, named so `allow` is not read as a clean verdict over an unmodelled edge:
+a NON-SHELL interpreter that reaches git through its own runtime. `python3 -c`, `perl -e`,
+`ruby -e`, `node -e` and `awk 'BEGIN{system(...)}'` bodies are not classified, so a guarded
+`git grep -E` inside one is allowed. Shell sources -- `sh -c`, `eval`, substitutions,
+heredocs, here-strings, process substitution, interpreter stdin -- ARE classified. Modelling
+Python or awk semantics is a different guard, not a widening of this one.
+
 Exit codes:  0 = decision emitted on stdout (allow/deny/ask)
              2 = usage error / unknown flag / zero inputs in --selftest
 """
@@ -110,6 +117,10 @@ class GitAuthority(NamedTuple):
     exec_path: str
     builtins: frozenset
     main: frozenset
+    # False when the command names a Git other than the one PATH resolves. The inventories
+    # still come from the trusted Git -- the named binary is never executed to enumerate
+    # its own -- so only builtins may be classified from them while this is False.
+    candidate_trusted: bool = True
 
 
 class HereStringSource(NamedTuple):
@@ -1405,16 +1416,21 @@ _GIT_AUTHORITY_CACHE = {}
 
 
 def trusted_git_authority(executable="git"):
-    """Bind builtin/main command inventories to one resolved Git and exec path."""
+    """Bind builtin/main command inventories to one resolved Git and exec path.
+
+    A command naming a Git other than the one PATH resolves is uncertainty, not a hazard.
+    Stock macOS carries two real Git binaries -- Homebrew's and Apple's /usr/bin/git --
+    and refusing the second denied `/usr/bin/git status`, which carries neither guarded
+    hazard. The named binary is still never executed to read its inventories, because the
+    command chose that path; the authority is returned with `candidate_trusted=False`
+    instead and `authorize_git_subcommand` narrows to builtins.
+    """
     trusted = shutil.which("git")
     candidate = (shutil.which(executable) if os.sep not in executable else executable)
     if not trusted or not candidate:
         raise GitAuthorityError("the Git executable cannot be resolved")
     trusted = os.path.realpath(trusted)
     candidate = os.path.realpath(candidate)
-    if candidate != trusted:
-        raise GitAuthorityError(
-            f"Git executable {executable!r} does not resolve to the trusted Git")
     if trusted not in _GIT_AUTHORITY_CACHE:
         try:
             exec_path_result = subprocess.run(
@@ -1442,12 +1458,24 @@ def trusted_git_authority(executable="git"):
         _GIT_AUTHORITY_CACHE[trusted] = GitAuthority(
             trusted, os.path.realpath(exec_path), builtins, main,
         )
-    return _GIT_AUTHORITY_CACHE[trusted]
+    authority = _GIT_AUTHORITY_CACHE[trusted]
+    if candidate != trusted:
+        return authority._replace(candidate_trusted=False)
+    return authority
 
 
 def authorize_git_subcommand(subcommand, authority, effective_exec_path):
     if subcommand in authority.builtins:
+        # git-config(1): "aliases that hide existing Git commands are ignored". A builtin
+        # name therefore cannot be redirected by ambient alias/config in any Git on this
+        # machine, which is what lets an untrusted candidate be classified from the
+        # trusted Git's inventory. A Git too old or too new to carry the command as a
+        # builtin is outside that inference.
         return None
+    if not authority.candidate_trusted:
+        return (f"Git subcommand {subcommand!r} is not a builtin of the trusted Git and "
+                f"the command names a different Git executable, whose helper set and exec "
+                f"path cannot be enumerated without executing it")
     if subcommand in authority.main:
         if os.path.realpath(effective_exec_path) != authority.exec_path:
             return (f"Git subcommand {subcommand!r} is not builtin and the effective "
@@ -1514,24 +1542,31 @@ EXEC_WRAPPERS = {
     ),
 }
 WRAPPER_TERMINAL_OPTIONS = {"--help", "--version"}
-# Launchers that do run the command that follows but whose argv rewriting this guard does
-# not model. Peeling them by guesswork would mis-locate the command, and ignoring them
-# returns allow for a wrapped invocation, so they are reported as an unresolved prefix and
-# the decision becomes `ask`.
-UNMODELLED_EXEC_WRAPPERS = {"xargs", "script", "strace", "dtruss", "ltrace", "watch",
-                            "parallel", "flock", "chroot", "unshare", "doas", "runuser",
-                            "su", "systemd-run", "ssh"}
+
+
+def _equals_expanded(word):
+    """Resolve zsh's `=name` command form, which bash does not have.
+
+    The Bash tool's shell is zsh on this host, and zsh expands a leading `=` on a command
+    word to that name's PATH resolution before execution, so `=git` IS git. Comparing the
+    raw word to `git` read `=git grep -E` and `=git show $SHA:src/f.py` as unrelated
+    commands and allowed both, while the sibling zsh-only forms `noglob` and `nocorrect`
+    were already modelled beside it.
+    """
+    return word[1:] if len(word) > 1 and word[0] == "=" and word[1] != "=" else word
+
 
 def _literal_git_word(word):
+    word = _equals_expanded(word)
     return (os.path.basename(word) == "git"
-            or bool(re.search(r"(?:^|\s)(?:/[^\s]*/)?git(?:\s|$)", word)))
+            or bool(re.search(r"(?:^|\s)(?:/[^\s]*/)?=?git(?:\s|$)", word)))
 
 
 def has_literal_guarded_git_tail(tokens):
     """Whether argv visibly contains `git` followed by a guarded subcommand."""
     words = [text for text, _quoting in tokens]
     for index, word in enumerate(words):
-        if os.path.basename(word) != "git":
+        if os.path.basename(_equals_expanded(word)) != "git":
             continue
         if any(os.path.basename(tail) in GIT_HAZARD_SUBCOMMANDS
                for tail in words[index + 1:]):
@@ -1658,7 +1693,12 @@ def unwrap_command_prefix(tokens):
 
         bypasses_shell_identity = command_bypass_next
         command_bypass_next = False
-        executable_text = items[0][0]
+        executable_text = _equals_expanded(items[0][0])
+        if executable_text != items[0][0]:
+            # Write the resolved name back so every downstream reader -- this loop, the
+            # grep guard's argv walk and the zsh guard's rev:path gate -- sees the command
+            # zsh will actually run rather than the `=` form.
+            items[0] = (executable_text, items[0][1])
         if UNRESOLVED.search(executable_text):
             errors.append(f"dynamic executable {executable_text!r} cannot be resolved")
             break
@@ -1871,20 +1911,6 @@ def unwrap_command_prefix(tokens):
                 break
             continue
 
-        if executable in UNMODELLED_EXEC_WRAPPERS:
-            # Do not guess where the command starts -- but only say so when a GUARDED Git
-            # operation is actually in the tail. This asked on the name alone, so
-            # `git diff --name-only | xargs git add` was questioned although `add` is not
-            # a subcommand either guard reasons about. The generic identity path below
-            # already required a guarded subcommand; this arm was strictly coarser than
-            # the code beside it, which is why `arch git status` was allowed and
-            # `xargs git add` was not.
-            if has_literal_guarded_git_tail(items) or has_dynamic_guarded_command_tail(items):
-                errors.append(
-                    f"{executable!r} launches the command that follows, and this guard "
-                    f"does not model how it rewrites argv")
-            break
-
         if executable == "eval":
             break
 
@@ -1900,6 +1926,13 @@ def unwrap_command_prefix(tokens):
                  or any(os.path.basename(word) in GIT_HAZARD_SUBCOMMANDS
                         for word, _quoting in items[1:]))
         )
+        # This is also the arm that answers for a launcher whose argv rewriting is not
+        # modelled -- xargs, ssh, flock, su and the rest. It deliberately fires on a
+        # GUARDED tail rather than on the launcher's name: asking on the name alone
+        # questioned `git diff --name-only | xargs git add`, and `add` is a subcommand
+        # neither guard reasons about. A separate name-keyed arm above this one decided
+        # nothing these three predicates did not already decide, so it was removed rather
+        # than left as a list that reads like coverage.
         if (executable != "git" and not explicit_harmless
                 and (has_literal_guarded_git_tail(items)
                      or has_dynamic_guarded_command_tail(items)
@@ -2904,6 +2937,11 @@ def conservative_allow_uncertainty(command):
     This fallback deliberately prefers a question over treating guarded-looking text as
     inert when shell-input association is obscured. Exact non-forwarding binaries are the
     bounded exception; callers using an aliasable data-consumer name may be questioned.
+
+    Its escalation is scoped to SHELL-input association. Guarded text riding a non-shell
+    interpreter body -- `python3 -c`, `perl -e`, `awk 'BEGIN{system(...)}'` -- reaches this
+    function with guarded evidence and leaves it allowed, which is the module docstring's
+    named out-of-scope edge rather than an oversight here.
     """
     if not _raw_has_guarded_evidence(command):
         return None
@@ -2974,9 +3012,12 @@ def decide(command, _shell_depth=0):
         try:
             got = git_grep_argv(tokens, resolution)
         except GitAuthorityError as exc:
-            return ("deny", "trusted Git authority discovery failed closed ("
-                    + str(exc) + "); do not execute a possible Git subcommand until the "
-                    "resolved binary and command inventory can be verified.")
+            # Not proof of the guarded hazard, so not `deny`: this is the unresolved-
+            # executable row of the decision contract, which is `ask`.
+            return ("ask", "the Git behind this command cannot be identified ("
+                    + str(exc) + "), so neither its command inventory nor its regex "
+                    "engine can be proved; confirm the binary or invoke Git directly "
+                    "with an explicit -P engine.")
         if got is None:
             continue
         argv, configs, unresolved_configs = got
@@ -4219,6 +4260,40 @@ FIXTURES += [
     ("ASK LAUNCHER: xargs ahead of git grep", "xargs git grep -E 'x'", "ask"),
 ]
 
+# A machine can carry more than one real Git -- Homebrew's and Apple's /usr/bin/git are
+# both present on stock macOS. Naming the one PATH does not resolve is uncertainty about
+# WHICH binary runs, never proof of the guarded hazard, so it may not reach `deny`. The
+# path below is absolute and nonexistent so it is never the trusted Git on any host, which
+# keeps this group's contribution to `checks` the same everywhere.
+_UNTRUSTED_GIT = "/nonexistent/bin/git"
+FIXTURES += [
+    ("GREEN AUTHORITY: an untrusted Git running a builtin is not the guarded hazard",
+     f"{_UNTRUSTED_GIT} status --short", "allow"),
+    ("GREEN AUTHORITY: an untrusted Git staging files is not the guarded hazard",
+     f"{_UNTRUSTED_GIT} add -A", "allow"),
+    ("GREEN AUTHORITY: an untrusted Git with a PCRE engine stays allowed",
+     f"{_UNTRUSTED_GIT} grep -P 'harness\\b' -- README.md", "allow"),
+    ("RED  AUTHORITY: an untrusted Git does not launder the ERE hazard",
+     f"{_UNTRUSTED_GIT} grep -E 'harness\\b' -- README.md", "deny"),
+    ("ASK  AUTHORITY: a non-builtin subcommand on an untrusted Git is unresolved",
+     f"{_UNTRUSTED_GIT} submodule status", "ask"),
+    ("ASK  AUTHORITY: an unknown subcommand on an untrusted Git is unresolved",
+     f"{_UNTRUSTED_GIT} project-helper --version", "ask"),
+]
+
+# zsh resolves `=name` through PATH before execution; bash has no such form. The Bash
+# tool's shell is zsh on this host, so these are the same invocations as their bare forms.
+FIXTURES += [
+    ("RED  EQUALS: zsh =git reaches the ERE hazard",
+     "=git grep -E 'harness\\b' -- README.md", "deny"),
+    ("GREEN EQUALS: zsh =git with a PCRE engine is correct",
+     "=git grep -P 'harness\\b' -- README.md", "allow"),
+    ("GREEN EQUALS: zsh =git running a builtin carries no guarded hazard",
+     "=git status --short", "allow"),
+    ("ASK  EQUALS: a wrapped =git behind an unmodelled launcher is unresolved",
+     "xargs =git show", "ask"),
+]
+
 # Same hazard, reached through a different subcommand. Verified on git 2.46.1 against a
 # repo whose subjects are "fix foob handling" and "fix foo bar handling": `-E` returns the
 # foob commit, `-P` the intended one. --author behaves identically (authors foob / foo bar).
@@ -4932,11 +5007,11 @@ def selftest():
     globals()["trusted_git_authority"] = lambda _executable="git": (_ for _ in ()).throw(
         GitAuthorityError("planted discovery failure"))
     try:
-        discovery_red = decide("git status --short")[0] == "deny"
+        discovery_red = decide("git status --short")[0] == "ask"
     finally:
         globals()["trusted_git_authority"] = original_discovery
     bad += 0 if discovery_red else 1
-    print("  %s trusted-Git discovery failure cannot become allow" % (
+    print("  %s trusted-Git discovery failure asks instead of allowing" % (
         "PASS" if discovery_red else "FAIL"))
 
     trusted_authority = original_discovery()

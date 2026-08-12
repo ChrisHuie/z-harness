@@ -413,6 +413,17 @@ def selftest():
          "/nonexistent/bin/git grep -P 'harness\\b' -- README.md", "ask"),
         ("alternate-git-ere",
          "/nonexistent/bin/git grep -E 'harness\\b' -- README.md", "ask"),
+        ("noequals-grep",
+         "setopt noequals; =git grep -E 'harness\\b' -- README.md", "ask"),
+        ("noequals-rev",
+         "SHA=x; unsetopt equals; =git show $SHA:src/f.py", "ask"),
+        ("function-noequals",
+         "f(){ setopt noequals; }; f; =git grep -E 'harness\\b' -- README.md", "ask"),
+        ("child-zsh-equals",
+         "setopt noequals; zsh -c \"=git grep -E 'harness\\\\b' -- README.md\"",
+         "deny"),
+        ("sh-stdin-equals",
+         "sh <<< \"=git grep -E 'harness\\b' -- README.md\"", "ask"),
     )
     for label, command, want in hook_cases:
         raw = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
@@ -538,6 +549,12 @@ def selftest():
         ("dynamic-heredoc-consumer",
          "cat <<'END-MARK' | $SHELL\ngit grep -E 'harness\\b' -- README.md\nEND-MARK\n"),
         ("alternate-git-status", "/nonexistent/bin/git status --short"),
+        ("noequals-grep",
+         "setopt noequals; =git grep -E 'harness\\b' -- README.md"),
+        ("function-noequals",
+         "f(){ setopt noequals; }; f; =git grep -E 'harness\\b' -- README.md"),
+        ("sh-stdin-equals",
+         "sh <<< \"=git grep -E 'harness\\b' -- README.md\""),
     )
     for label, command in codex_cases:
         raw = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})

@@ -65,6 +65,9 @@ MAX_SOURCE_DEPTH = 16
 REGISTERED_HOOK_TIMEOUT_SECONDS = 5
 GUARD_BUDGET_SECONDS = 4.0
 GIT_PROBE_TIMEOUT_SECONDS = 0.75
+ZSH_EQUALS_ON = "on"
+ZSH_EQUALS_OFF = "off"
+ZSH_EQUALS_UNKNOWN = "unknown"
 
 
 def hook_timeout_contract(settings_data=None, codex_data=None, *, root=None, budget=None):
@@ -179,6 +182,7 @@ class FileInputSource(NamedTuple):
 class StdinConsumer(NamedTuple):
     reads_stdin: bool
     unresolved: bool
+    shell: str
 
 
 class StdinProvenance(NamedTuple):
@@ -1590,29 +1594,105 @@ def _equals_expanded(word):
     were already modelled beside it.
 
     Measured on zsh 5.9: `=git` runs git; `==git` reports `=git not found`; `"=git"`,
-    `'=git'` and `setopt noequals` all leave it literal. The quoted cases are gated at the
-    executable-identity site by `_equals_expansion_is_live`; this text-level form stays
-    over-approximating because its callers only raise a hazard HINT, where reading a
-    quoted `=git` as Git costs a question rather than an allow.
+    `'=git'` and `setopt noequals` all leave it literal. Quoting is gated by
+    `_equals_expansion_is_live`; the option state is applied by `unwrap_command_prefix`.
     """
     return word[1:] if len(word) > 1 and word[0] == "=" and word[1] != "=" else word
 
 
 def _equals_expansion_is_live(text, quoting):
-    """Whether a leading `=` is unquoted, so zsh would expand it.
-
-    KNOWN OVER-APPROXIMATION, in the safe direction and stated rather than hidden: this
-    walk carries no shell context, so a `=git` inside a `bash -c` or `sh -c` body is
-    resolved here even though only zsh expands it and those shells report `command not
-    found`. The result is a question or a denial for a command that cannot run Git.
-    Narrowing it means threading the invoking shell through the shared prefix walk, which
-    is the sibling zsh guard's `_shell` parameter and does not exist on this side.
-    """
+    """Whether a leading `=` is syntactically live; shell and option state are separate."""
     if not (len(text) > 1 and text[0] == "=" and text[1] != "="):
         return False
     if quoting.startswith("mixed:"):
         return quoting.split(":", 1)[1][:1] == "U"
     return quoting == ""
+
+
+def _zsh_equals_option_action(tokens):
+    """Return the definite EQUALS state established by one straight-line command.
+
+    Only the three literal forms grounded against zsh are authority. A setter in a
+    conditional/list context, a dynamic command, eval, or sourced code can change the
+    calling shell but is not interpreted here, so it returns ``unknown``.
+    """
+    if not tokens:
+        return None
+    has_control = any(text in CONTROL_KEYWORDS for text, _quoting in tokens)
+    words = [text for text, _quoting in tokens if text not in CONTROL_KEYWORDS
+             and not ASSIGNMENT.match(text)]
+    if not words:
+        return None
+    executable = words[0]
+    if executable in {"eval", "source", "."} or UNRESOLVED.search(executable):
+        return ZSH_EQUALS_UNKNOWN
+    if executable not in {"setopt", "unsetopt"}:
+        return None
+    if has_control:
+        return ZSH_EQUALS_UNKNOWN
+    if words == ["setopt", "equals"]:
+        return ZSH_EQUALS_ON
+    if words == ["setopt", "noequals"] or words == ["unsetopt", "equals"]:
+        return ZSH_EQUALS_OFF
+    # A different literal option command is harmless unless it mentions this option.
+    # Dynamic or compound option spellings are not proof of either state.
+    if any("equals" in word.lower() or UNRESOLVED.search(word) for word in words[1:]):
+        return ZSH_EQUALS_UNKNOWN
+    return None
+
+
+def zsh_equals_states(source, commands, initial=ZSH_EQUALS_ON):
+    """State before each parsed command, preserving only proven straight-line changes.
+
+    ``split_commands`` intentionally flattens several compound forms. If an EQUALS setter
+    appears beside live control/scope syntax, the state is therefore uncertain rather than
+    pretending the option mutation is unconditional or leaks out of a child scope.
+    Nested literal shell bodies are parsed by their recursive ``decide`` call and are
+    quoted here, so they do not contaminate this source's state.
+    """
+    state = initial
+    states = []
+    live = []
+    quote = ""
+    index = 0
+    while index < len(source):
+        char = source[index]
+        if quote:
+            if char == "\\" and quote == '"' and index + 1 < len(source):
+                live.extend("  ")
+                index += 2
+                continue
+            live.append(" ")
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in ("'", '"'):
+            quote = char
+            live.append(" ")
+            index += 1
+            continue
+        if char == "\\" and index + 1 < len(source):
+            live.extend("  ")
+            index += 2
+            continue
+        live.append(char)
+        index += 1
+    skeleton = "".join(live)
+    complex_setter = (
+        re.search(r"\b(?:setopt|unsetopt)\b", skeleton) is not None
+        and (re.search(r"&&|\|\||[(){}|]", skeleton) is not None
+             or re.search(r"\b(?:if|then|elif|else|fi|while|until|for|case|function)\b",
+                          skeleton) is not None)
+    )
+    if complex_setter:
+        state = ZSH_EQUALS_UNKNOWN
+    for tokens in commands:
+        states.append(state)
+        action = _zsh_equals_option_action(tokens)
+        if action is not None:
+            state = ZSH_EQUALS_UNKNOWN if complex_setter else action
+    return tuple(states)
 
 
 def _literal_git_word(word):
@@ -1726,7 +1806,7 @@ def _split_env_string(value):
     return [(word, "") for word in words]
 
 
-def unwrap_command_prefix(tokens):
+def unwrap_command_prefix(tokens, shell="zsh", equals_state=ZSH_EQUALS_ON):
     """Resolve the executable boundary shared by both guards.
 
     The result retains uncertainty instead of guessing through a dynamic executable,
@@ -1753,14 +1833,20 @@ def unwrap_command_prefix(tokens):
         bypasses_shell_identity = command_bypass_next
         command_bypass_next = False
         executable_text = items[0][0]
-        if _equals_expansion_is_live(*items[0]):
+        if _equals_expansion_is_live(*items[0]) and shell == "zsh":
             # Write the resolved name back so every downstream reader -- this loop, the
             # grep guard's argv walk and the zsh guard's rev:path gate -- sees the command
             # zsh will actually run rather than the `=` form. Quoting suppresses the
             # expansion, so a quoted `=git` keeps its literal name and falls to the
             # generic identity check below like any other unproven command word.
-            executable_text = _equals_expanded(executable_text)
-            items[0] = (executable_text, items[0][1])
+            if equals_state == ZSH_EQUALS_ON:
+                executable_text = _equals_expanded(executable_text)
+                items[0] = (executable_text, items[0][1])
+            else:
+                errors.append(
+                    "zsh EQUALS expansion is disabled" if equals_state == ZSH_EQUALS_OFF
+                    else "zsh EQUALS expansion state is uncertain")
+                break
         if UNRESOLVED.search(executable_text):
             errors.append(f"dynamic executable {executable_text!r} cannot be resolved")
             break
@@ -2768,29 +2854,30 @@ def associated_stdin_consumer(line, redirect_start, word_end, commands):
     """Resolve one input source to its command record without cross-command joins."""
     marker = "__ZHAR_STDIN_SOURCE__"
     if marker in line:
-        return StdinConsumer(False, True)
+        return StdinConsumer(False, True, "")
     marked = line[:redirect_start] + " " + marker + " " + line[word_end:]
     try:
         marked_commands = split_commands(marked)
     except CommandParseError:
-        return StdinConsumer(False, True)
+        return StdinConsumer(False, True, "")
     matches = []
     for tokens in marked_commands:
         if any(text == marker for text, _quoting in tokens):
             matches.append(tokens)
     if len(matches) != 1:
-        return StdinConsumer(False, True)
+        return StdinConsumer(False, True, "")
     stripped = [token for token in matches[0] if token[0] != marker]
     resolution = unwrap_command_prefix(_without_redirection_tokens(stripped))
     if resolution.errors or not resolution.items:
-        return StdinConsumer(False, True)
+        return StdinConsumer(False, True, "")
     words = [word for word, _quoting in resolution.items]
     executable = words[0]
     if executable in TRUSTED_EXTERNAL_NON_FORWARDING_COMMANDS:
-        return StdinConsumer(False, False)
+        return StdinConsumer(False, False, "")
     if os.path.basename(executable) in SHELLS:
-        return StdinConsumer(_shell_reads_stdin(words), False)
-    return StdinConsumer(False, True)
+        return StdinConsumer(_shell_reads_stdin(words), False,
+                             os.path.basename(executable))
+    return StdinConsumer(False, True, "")
 
 
 def _direct_here_string_shell(source):
@@ -2799,19 +2886,20 @@ def _direct_here_string_shell(source):
     try:
         commands = split_commands(clean_line)
     except CommandParseError:
-        return False
+        return ""
     executable_commands = []
     for tokens in commands:
         stripped = _without_redirection_tokens(tokens)
         if stripped:
             executable_commands.append(stripped)
     if len(executable_commands) != 1:
-        return False
+        return ""
     resolution = unwrap_command_prefix(executable_commands[0])
     if resolution.errors or not resolution.items:
-        return False
+        return ""
     words = [word for word, _quoting in resolution.items]
-    return bool(os.path.basename(words[0]) in SHELLS and _shell_reads_stdin(words))
+    shell = os.path.basename(words[0])
+    return shell if shell in SHELLS and _shell_reads_stdin(words) else ""
 
 
 def _direct_heredoc_header(line):
@@ -2855,11 +2943,13 @@ def _direct_heredoc_header(line):
     return reachable_stdin_shells(commands) == (True,)
 
 
-def classify_direct_here_string(source, shell_depth, deadline):
+def classify_direct_here_string(source, shell_depth, deadline, shell):
     if source.dynamic:
         return StdinProvenance(
             "ask", "a directly associated shell here-string has a dynamic source")
-    decision, reason = decide(source.body, shell_depth + 1, deadline)
+    decision, reason = decide(
+        source.body, shell_depth + 1, deadline, shell,
+        ZSH_EQUALS_ON if shell == "zsh" else ZSH_EQUALS_OFF)
     if decision == "allow":
         return None
     return StdinProvenance(
@@ -2872,8 +2962,10 @@ def interpreter_stdin_provenance(command, commands, shell_depth, deadline):
     for source in live_here_string_sources(command):
         if source.descriptor != 0:
             continue
-        if _direct_here_string_shell(source):
-            classified = classify_direct_here_string(source, shell_depth, deadline)
+        direct_shell = _direct_here_string_shell(source)
+        if direct_shell:
+            classified = classify_direct_here_string(
+                source, shell_depth, deadline, direct_shell)
             if classified is not None:
                 return classified
             continue
@@ -2882,7 +2974,8 @@ def interpreter_stdin_provenance(command, commands, shell_depth, deadline):
         if not consumer.reads_stdin and not consumer.unresolved:
             continue
         if consumer.reads_stdin and not consumer.unresolved:
-            classified = classify_direct_here_string(source, shell_depth, deadline)
+            classified = classify_direct_here_string(
+                source, shell_depth, deadline, consumer.shell)
             if classified is not None:
                 return classified
             continue
@@ -3028,7 +3121,8 @@ def conservative_allow_uncertainty(command):
     return None
 
 
-def decide(command, _shell_depth=0, _deadline=None):
+def decide(command, _shell_depth=0, _deadline=None, _shell="zsh",
+           _equals_state=ZSH_EQUALS_ON):
     """-> (decision, reason). decision in {allow, deny, ask}."""
     _deadline = (time.monotonic() + GUARD_BUDGET_SECONDS
                  if _deadline is None else _deadline)
@@ -3051,21 +3145,31 @@ def decide(command, _shell_depth=0, _deadline=None):
                 "rewrite it as one direct source before proceeding.")
     if stdin_provenance is not None:
         return stdin_provenance.decision, stdin_provenance.reason
-    for tokens in commands:
-        resolution = unwrap_command_prefix(tokens)
+    equals_states = zsh_equals_states(
+        command, commands,
+        _equals_state if _shell == "zsh" else ZSH_EQUALS_OFF)
+    for tokens, equals_state in zip(commands, equals_states):
+        resolution = unwrap_command_prefix(tokens, _shell, equals_state)
         if resolution.errors and resolution.hazard_hint:
             return ("ask", "a possible Git invocation crosses an unresolved command "
                     "prefix (" + "; ".join(resolution.errors) + "); invoke Git directly "
                     "so the pattern engine can be verified.")
-        invocation = nested_shell_invocation(resolution)
+        invocation = nested_shell_invocation(resolution, _shell)
         if invocation is not None:
             # Inspect the body first. Returning `ask` on `dynamic` before recursing meant
             # a nested body carrying a live ERE hazard was downgraded to a question, and
             # a body with no Git in it at all -- `sh -c 'echo $PATH'` -- was questioned
             # too, purely for containing a `$`.
             if invocation.command:
+                executable = (os.path.basename(resolution.items[0][0])
+                              if resolution.items else "")
+                nested_equals_state = (
+                    equals_state if executable == "eval" and invocation.shell == "zsh"
+                    else ZSH_EQUALS_ON if invocation.shell == "zsh"
+                    else ZSH_EQUALS_OFF)
                 nested_decision, nested_reason = decide(
-                    invocation.command, _shell_depth + 1, _deadline)
+                    invocation.command, _shell_depth + 1, _deadline,
+                    invocation.shell, nested_equals_state)
                 if nested_decision != "allow":
                     return nested_decision, nested_reason
             # Uncertainty about the body only matters once Git is actually in it.
@@ -4186,6 +4290,35 @@ def check_shell_boundary_behavior():
                 failures.append(
                     f"equals-expansion model disagrees with this zsh for {word!r}: "
                     f"helper gave {_equals_expanded(word)!r}, zsh ran git={zsh_ran_git}")
+        with tempfile.TemporaryDirectory(prefix="z-harness-equals-") as command_dir:
+            literal_git = os.path.join(command_dir, "=git")
+            with open(literal_git, "w", encoding="utf-8") as handle:
+                handle.write("#!/bin/sh\nprintf 'literal-equals\\n'\n")
+            os.chmod(literal_git, 0o700)
+            for option_command in ("setopt noequals", "unsetopt equals"):
+                probe = subprocess.run(
+                    ["zsh", "-fc",
+                     f'PATH="$1:$PATH"; {option_command}; =git probe',
+                     "zsh", command_dir],
+                    capture_output=True, text=True, timeout=10,
+                )
+                executed += 1
+                if probe.returncode != 0 or probe.stdout != "literal-equals\n":
+                    failures.append(
+                        f"installed zsh did not leave =git literal after "
+                        f"{option_command!r} (rc={probe.returncode}, "
+                        f"stdout={probe.stdout!r}, stderr={probe.stderr!r})")
+            probe = subprocess.run(
+                ["zsh", "-fc",
+                 "setopt noequals; setopt equals; =git --version"],
+                capture_output=True, text=True, timeout=10,
+            )
+            executed += 1
+            if probe.returncode != 0 or "git version" not in probe.stdout:
+                failures.append(
+                    "installed zsh did not restore =git expansion after literal "
+                    f"setopt equals (rc={probe.returncode}, stdout={probe.stdout!r}, "
+                    f"stderr={probe.stderr!r})")
     else:
         skipped += 1
     for text, quoting, live in (
@@ -4389,6 +4522,24 @@ FIXTURES += [
      "=git grep -P 'harness\\b' -- README.md", "allow"),
     ("GREEN EQUALS: zsh =git running a builtin carries no guarded hazard",
      "=git status --short", "allow"),
+    ("ASK EQUALS: setopt noequals leaves =git as an unresolved literal executable",
+     "setopt noequals; =git grep -E 'harness\\b' -- README.md", "ask"),
+    ("ASK EQUALS: unsetopt equals also disables the expansion",
+     "unsetopt equals; =git grep -E 'harness\\b' -- README.md", "ask"),
+    ("RED EQUALS: a later literal setopt equals restores the expansion",
+     "setopt noequals; setopt equals; =git grep -E 'harness\\b' -- README.md", "deny"),
+    ("ASK EQUALS: a conditional option mutation is not unconditional authority",
+     "if true; then setopt equals; fi; =git grep -E 'harness\\b' -- README.md", "ask"),
+    ("ASK EQUALS: a called function option mutation is not flattened after its caller",
+     "f(){ setopt noequals; }; f; =git grep -E 'harness\\b' -- README.md", "ask"),
+    ("ASK EQUALS: a nested zsh tracks its own noequals state",
+     "zsh -c \"setopt noequals; =git grep -E 'harness\\\\b' -- README.md\"", "ask"),
+    ("ASK EQUALS: eval inherits an uncertain option mutation in the current zsh",
+     "eval 'setopt noequals'; =git grep -E 'harness\\b' -- README.md", "ask"),
+    ("ASK EQUALS: sourced code can change the option outside the visible command",
+     "source \"$OPTIONS_FILE\"; =git grep -E 'harness\\b' -- README.md", "ask"),
+    ("RED EQUALS: a child zsh starts with its own default after an outer noequals",
+     "setopt noequals; zsh -c \"=git grep -E 'harness\\\\b' -- README.md\"", "deny"),
     ("ASK  EQUALS: a wrapped =git behind an unmodelled launcher is unresolved",
      "xargs =git show", "ask"),
     ("ASK EQUALS: a path-qualified alternate Git has no transferred authority",
@@ -4405,9 +4556,10 @@ FIXTURES += [
      "'=git' grep -E 'harness\\b' -- README.md", "ask"),
     ("ASK  EQUALS: double quoting suppresses it the same way",
      '"=git" grep -E \'harness\\b\' -- README.md', "ask"),
-    ("ASK  EQUALS: the stated over-approximation -- only zsh expands `=`, and this "
-     "walk carries no shell context, so a bash body is judged as if it did",
-     "bash -c \"=git grep -E 'harness\\b' -- README.md\"", "deny"),
+    ("ASK EQUALS: bash does not expand =git and its literal executable is unresolved",
+     "bash -c \"=git grep -E 'harness\\b' -- README.md\"", "ask"),
+    ("ASK EQUALS: a sh here-string retains the downstream shell identity",
+     "sh <<< \"=git grep -E 'harness\\b' -- README.md\"", "ask"),
 ]
 
 # Same hazard, reached through a different subcommand. Verified on git 2.46.1 against a
@@ -5280,6 +5432,35 @@ def selftest():
         bad += 0 if ok else 1
         print("  %s %s" % ("PASS" if ok else "FAIL", label))
 
+    original_equals_states = zsh_equals_states
+    globals()["zsh_equals_states"] = (
+        lambda _source, commands, initial=ZSH_EQUALS_ON:
+        tuple(ZSH_EQUALS_ON for _command in commands)
+    )
+    try:
+        equals_transition_red = decide(
+            "setopt noequals; =git grep -E 'harness\\b' -- README.md"
+        )[0] != "ask"
+        equals_conditional_red = decide(
+            "if true; then setopt equals; fi; "
+            "=git grep -E 'harness\\b' -- README.md"
+        )[0] != "ask"
+        equals_function_red = decide(
+            "f(){ setopt noequals; }; f; "
+            "=git grep -E 'harness\\b' -- README.md"
+        )[0] != "ask"
+    finally:
+        globals()["zsh_equals_states"] = original_equals_states
+    bad += 0 if equals_transition_red else 1
+    bad += 0 if equals_conditional_red else 1
+    bad += 0 if equals_function_red else 1
+    print("  %s EQUALS-state callsite mutation loses noequals uncertainty" % (
+        "PASS" if equals_transition_red else "FAIL"))
+    print("  %s EQUALS-state callsite mutation loses conditional uncertainty" % (
+        "PASS" if equals_conditional_red else "FAIL"))
+    print("  %s EQUALS-state callsite mutation loses function uncertainty" % (
+        "PASS" if equals_function_red else "FAIL"))
+
     globals()["authorize_git_subcommand"] = (
         lambda subcommand, authority, effective_exec_path:
         None if subcommand == "submodule"
@@ -5453,7 +5634,7 @@ def selftest():
 
     original_association = associated_stdin_consumer
     globals()["associated_stdin_consumer"] = (
-        lambda _line, _start, _end, _commands: StdinConsumer(False, False))
+        lambda _line, _start, _end, _commands: StdinConsumer(False, False, ""))
     try:
         compound_stdin_red = decide(
             r'''{ /bin/echo prep; sh; } <<< "git grep -E 'harness\b' -- README.md"'''
@@ -5476,7 +5657,7 @@ def selftest():
 
     globals()["associated_stdin_consumer"] = (
         lambda _line, _start, _end, parsed:
-        StdinConsumer(any(reachable_stdin_shells(parsed)), False))
+        StdinConsumer(any(reachable_stdin_shells(parsed)), False, "sh"))
     try:
         cartesian_red = decide(
             r'''/bin/cat <<< "git grep -E 'harness\b' -- README.md"; '''
@@ -5489,7 +5670,7 @@ def selftest():
 
     original_here_classifier = classify_direct_here_string
     globals()["classify_direct_here_string"] = (
-        lambda _source, _depth, _deadline: StdinProvenance(
+        lambda _source, _depth, _deadline, _shell: StdinProvenance(
             "ask", "planted unconditional ask"))
     try:
         unconditional_here_red = decide(
@@ -5500,7 +5681,8 @@ def selftest():
     print("  %s unconditional here-string mutation loses harmless static allow" % (
         "PASS" if unconditional_here_red else "FAIL"))
 
-    globals()["classify_direct_here_string"] = lambda _source, _depth, _deadline: None
+    globals()["classify_direct_here_string"] = (
+        lambda _source, _depth, _deadline, _shell: None)
     try:
         here_recursion_red = decide(
             r'''sh <<< "git grep -E 'harness\b' -- README.md"''')[0] != "deny"
@@ -5509,6 +5691,18 @@ def selftest():
     bad += 0 if here_recursion_red else 1
     print("  %s here-string recursion mutation loses guarded nested deny" % (
         "PASS" if here_recursion_red else "FAIL"))
+
+    def force_zsh_here_string(source, depth, deadline, _shell):
+        return original_here_classifier(source, depth, deadline, "zsh")
+    globals()["classify_direct_here_string"] = force_zsh_here_string
+    try:
+        here_shell_red = decide(
+            r'''sh <<< "=git grep -E 'harness\b' -- README.md"''')[0] != "ask"
+    finally:
+        globals()["classify_direct_here_string"] = original_here_classifier
+    bad += 0 if here_shell_red else 1
+    print("  %s here-string shell-identity mutation misclassifies sh EQUALS syntax" % (
+        "PASS" if here_shell_red else "FAIL"))
 
     original_find_heredoc = _find_heredoc_operator
     def confuse_redirection_context(line):
@@ -5620,7 +5814,7 @@ def selftest():
     print("  %s identifier-only heredoc mutation loses dashed-delimiter deny" % (
         "PASS" if dashed_heredoc_red else "FAIL"))
 
-    checks = len(FIXTURES) + 57
+    checks = len(FIXTURES) + 61
     print("failures: %d" % bad)
     print("SELFTEST-SUMMARY suite=git_grep_engine_guard checks=%d failures=%d" % (
         checks, bad))

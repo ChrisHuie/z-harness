@@ -64,9 +64,10 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from git_grep_engine_guard import (  # noqa: E402
     CommandParseError, MAX_PREFIX_DEPTH, nested_shell_invocation,
+    ZSH_EQUALS_OFF, ZSH_EQUALS_ON,
     fixture_pair_duplicates,
     source_has_dynamic_command_word, source_has_git_hazard_hint,
-    split_commands, unwrap_command_prefix,
+    split_commands, unwrap_command_prefix, zsh_equals_states,
 )
 
 MODS = "aAcehlPqQrstu"
@@ -211,15 +212,18 @@ def _deny_hits(hits):
             % (tok, MOD_MEANING.get(mod, mod), mod, arg[:80], braced, len(hits)))
 
 
-def decide(command, _depth=0, _shell="zsh"):
+def decide(command, _depth=0, _shell="zsh", _equals_state=ZSH_EQUALS_ON):
     """-> (decision, reason), tracking the shell that expands each source layer."""
     try:
         commands = split_commands(command)
     except CommandParseError as exc:
         return ("ask", f"the Bash command cannot be parsed safely ({exc}); rewrite it "
                 "as a direct command before proceeding.")
-    for tokens in commands:
-        resolution = unwrap_command_prefix(tokens)
+    equals_states = zsh_equals_states(
+        command, commands,
+        _equals_state if _shell == "zsh" else ZSH_EQUALS_OFF)
+    for tokens, equals_state in zip(commands, equals_states):
+        resolution = unwrap_command_prefix(tokens, _shell, equals_state)
         if resolution.errors and resolution.hazard_hint:
             return ("ask",
                     "this command may launch Git through a prefix the guard cannot "
@@ -247,7 +251,14 @@ def decide(command, _depth=0, _shell="zsh"):
         # applies `:s` whatever SHA holds -- and returned `ask` instead of `deny`, while
         # `sh -c 'echo $PATH'`, which contains no Git at all, also returned `ask`.
         if invocation.command:
-            decision, reason = decide(invocation.command, _depth + 1, invocation.shell)
+            executable = (os.path.basename(resolution.items[0][0])
+                          if resolution.items else "")
+            nested_equals_state = (
+                equals_state if executable == "eval" and invocation.shell == "zsh"
+                else ZSH_EQUALS_ON if invocation.shell == "zsh"
+                else ZSH_EQUALS_OFF)
+            decision, reason = decide(
+                invocation.command, _depth + 1, invocation.shell, nested_equals_state)
             if decision != "allow":
                 return (decision, reason)
         # Only then does an uninspectable body matter, and only when Git is actually in
@@ -602,6 +613,24 @@ FIXTURES += [
      "SHA=x; =git show $SHA:src/f.py", "deny"),
     ("GREEN EQUALS: zsh =git with a braced NAME is correct",
      "SHA=x; =git show ${SHA}:src/f.py", "allow"),
+    ("ASK EQUALS: setopt noequals leaves =git as an unresolved literal executable",
+     "SHA=x; setopt noequals; =git show $SHA:src/f.py", "ask"),
+    ("ASK EQUALS: unsetopt equals also disables the expansion",
+     "SHA=x; unsetopt equals; =git show $SHA:src/f.py", "ask"),
+    ("RED EQUALS: a later literal setopt equals restores the expansion",
+     "SHA=x; setopt noequals; setopt equals; =git show $SHA:src/f.py", "deny"),
+    ("ASK EQUALS: a conditional option mutation is not unconditional authority",
+     "SHA=x; if true; then setopt equals; fi; =git show $SHA:src/f.py", "ask"),
+    ("ASK EQUALS: a called function option mutation is not flattened after its caller",
+     "f(){ setopt noequals; }; f; SHA=x; =git show $SHA:src/f.py", "ask"),
+    ("ASK EQUALS: a nested zsh tracks its own noequals state",
+     "zsh -c 'SHA=x; setopt noequals; =git show $SHA:src/f.py'", "ask"),
+    ("ASK EQUALS: eval inherits an uncertain option mutation in the current zsh",
+     "SHA=x; eval 'setopt noequals'; =git show $SHA:src/f.py", "ask"),
+    ("ASK EQUALS: sourced code can change the option outside the visible command",
+     "SHA=x; source \"$OPTIONS_FILE\"; =git show $SHA:src/f.py", "ask"),
+    ("RED EQUALS: a child zsh starts with its own default after an outer noequals",
+     "setopt noequals; zsh -c 'SHA=x; =git show $SHA:src/f.py'", "deny"),
 ]
 
 
@@ -820,7 +849,21 @@ def selftest():
     print("  %-4s modifier probe handles non-UTF-8 bytes through its production call site"
           % ("PASS" if byte_probe_ok else "FAIL"))
 
-    checks = len(FIXTURES) + 4
+    original_equals_states = zsh_equals_states
+    globals()["zsh_equals_states"] = (
+        lambda _source, commands, initial=ZSH_EQUALS_ON:
+        tuple(ZSH_EQUALS_ON for _command in commands)
+    )
+    try:
+        equals_state_red = decide(
+            "SHA=x; setopt noequals; =git show $SHA:src/f.py")[0] != "ask"
+    finally:
+        globals()["zsh_equals_states"] = original_equals_states
+    bad += 0 if equals_state_red else 1
+    print("  %-4s EQUALS-state callsite mutation loses noequals uncertainty"
+          % ("PASS" if equals_state_red else "FAIL"))
+
+    checks = len(FIXTURES) + 5
     print("failures: %d" % bad)
     print("SELFTEST-SUMMARY suite=zsh_rev_modifier_guard checks=%d failures=%d" % (
         checks, bad))

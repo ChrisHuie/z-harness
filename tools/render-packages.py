@@ -40,7 +40,7 @@ GOLDENS = CONTRACTS / "goldens"
 ARTIFACT_MANIFEST = "z-harness-artifact.json"
 RENDER_INDEX = "render-index.json"
 ARTIFACT_SCHEMA = (
-    "https://github.com/ChrisHuie/z-harness/blob/v0.4.0-alpha.2/"
+    "https://github.com/ChrisHuie/z-harness/blob/v0.4.0-alpha.3/"
     "contracts/artifact-manifest.schema.json"
 )
 RENDER_INDEX_SCHEMA = (
@@ -105,17 +105,6 @@ SKILL_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 SKILL_NAME_MAX = 64
 SKILL_DESCRIPTION_MAX = 1024
 PACKAGE_NAME = re.compile(r"^[a-z0-9]+(?:[.-][a-z0-9]+)*$")
-TARGET_LEVELS = {
-    "portable-core",
-    "adapter-functional",
-    "host-integrated",
-    "governed-parity",
-}
-VALIDATION_STATUSES = {"fixture-only", "candidate", "promoted"}
-# `authority` is deliberately not an artifact field. Authority belongs to a guarded fact
-# -- mechanism, host version, scope -- so a package-wide scalar would assert something no
-# package can hold. contracts/compatibility-levels.md carries that reasoning.
-
 KIMI_PLUGIN_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 # YAML indicators that change a scalar's meaning. The renderer reads frontmatter without
 # a YAML dependency, so any form it cannot faithfully decode is refused by name rather
@@ -375,73 +364,6 @@ def require_string_list(value: Any, label: str, *, nonempty: bool = False) -> Li
     return list(value)
 
 
-def require_validation_evidence(
-    validation_status: str,
-    licenses: Sequence[str],
-    evidence: Any,
-    label: str,
-) -> None:
-    """Gate every compatibility status on the evidence its contract names.
-
-    `contracts/compatibility-levels.md` requires a promoted release to record tested host
-    versions, validation results, the fresh-session installed artifact digest, and a
-    license set. This is the single encoding of that rule; `load_inputs` applies it to the
-    adapter config and `verify_artifact` applies it to the rendered artifact, so neither
-    end can claim a status the other would refuse. It checks that a claim carries its
-    evidence, not that the evidence is true -- only a target-host run establishes that.
-    """
-    if not isinstance(evidence, list):
-        raise RenderError("claims.evidence_shape", f"{label} evidence must be an array")
-    if validation_status == "fixture-only":
-        if evidence:
-            raise RenderError("claims.evidence_unearned",
-                              f"{label} fixture-only must record no host evidence")
-        return
-    if not evidence:
-        raise RenderError(
-            "claims.evidence_missing",
-            f"{label} validationStatus {validation_status!r} requires host evidence records",
-        )
-    if not licenses:
-        raise RenderError(
-            "claims.license_missing",
-            f"{label} validationStatus {validation_status!r} requires a non-empty license set",
-        )
-    seen: List[Tuple[str, str]] = []
-    for index, record in enumerate(evidence):
-        where = f"{label} evidence[{index}]"
-        if not isinstance(record, dict):
-            raise RenderError(f"{where} must be an object")
-        require_exact_keys(
-            record, {"host", "hostVersion", "installedArtifactSha256", "scenarios"}, where
-        )
-        host = require_nonempty_string(record["host"], f"{where} host")
-        host_version = require_nonempty_string(record["hostVersion"], f"{where} hostVersion")
-        if not is_sha256(record["installedArtifactSha256"]):
-            raise RenderError(f"{where} installedArtifactSha256 must be a sha256 value")
-        scenarios = record["scenarios"]
-        if not isinstance(scenarios, list) or not scenarios:
-            raise RenderError(f"{where} scenarios must be a non-empty array")
-        scenario_ids: List[str] = []
-        for position, scenario in enumerate(scenarios):
-            spot = f"{where} scenarios[{position}]"
-            if not isinstance(scenario, dict):
-                raise RenderError(f"{spot} must be an object")
-            require_exact_keys(scenario, {"id", "result"}, spot)
-            scenario_ids.append(require_nonempty_string(scenario["id"], f"{spot} id"))
-            if scenario["result"] != "pass":
-                raise RenderError(
-                    "claims.scenario_failed",
-                    f"{spot} result {scenario['result']!r} does not support a "
-                    f"{validation_status!r} status",
-                )
-        if len(scenario_ids) != len(set(scenario_ids)):
-            raise RenderError(f"{where} scenario ids must be unique")
-        seen.append((host, host_version))
-    if len(seen) != len(set(seen)):
-        raise RenderError(f"{label} evidence host/version pairs must be unique")
-
-
 def load_inputs(
     render_path: Path = DEFAULT_RENDER_CONFIG,
     adapter_path: Path = DEFAULT_ADAPTER_CONFIG,
@@ -565,8 +487,8 @@ def load_inputs(
     targets = require_string_list(render_config["targets"], "targets", nonempty=True)
 
     require_exact_keys(adapter_config, {"schemaVersion", "targets"}, "adapter config")
-    if adapter_config["schemaVersion"] != 2:
-        raise RenderError("adapter.schema_version", "adapter config schemaVersion must be 2")
+    if adapter_config["schemaVersion"] != 3:
+        raise RenderError("adapter.schema_version", "adapter config schemaVersion must be 3")
     adapters = adapter_config["targets"]
     if not isinstance(adapters, dict) or not adapters:
         raise RenderError("adapter config targets must be a non-empty object")
@@ -589,20 +511,7 @@ def load_inputs(
                 "packageVersion",
                 "format",
                 "manifestPath",
-                "targetLevel",
-                "validationStatus",
-                "evidence",
             },
-            f"adapter {target}",
-        )
-        if adapter["targetLevel"] not in TARGET_LEVELS:
-            raise RenderError(f"adapter {target} has an unknown targetLevel")
-        if adapter["validationStatus"] not in VALIDATION_STATUSES:
-            raise RenderError(f"adapter {target} has an unknown validationStatus")
-        require_validation_evidence(
-            adapter["validationStatus"],
-            package["licenses"],
-            adapter["evidence"],
             f"adapter {target}",
         )
         revision = adapter["adapterRevision"]
@@ -1242,6 +1151,43 @@ def load_schema(path: Path) -> Dict[str, Any]:
     return read_json_object(path, f"schema {path.name}")
 
 
+# Object nodes in contracts/artifact-manifest.schema.json that declare `properties`:
+# the root, `build`, `source`, `source.upstreamLocks.items`, `source.skills.items`,
+# `payload`, and `$defs.file`. Counting them makes a NEW node a reviewable edit rather
+# than an unnoticed addition, the same way suite floors work.
+ARTIFACT_SCHEMA_OBJECT_NODES = 7
+# The same count for contracts/render-index.schema.json: the root and the per-target
+# entry. Both files are published `$id` documents, so both are bound.
+RENDER_INDEX_SCHEMA_OBJECT_NODES = 2
+
+
+def closure_census(schema: Any, path: str = "") -> Tuple[int, List[str]]:
+    """Count schema object nodes and list any that do not close themselves.
+
+    A node declaring `properties` without `additionalProperties: false` accepts fields the
+    renderer refuses, so the published document and the producer disagree with nothing
+    reporting it.
+    """
+    closed = 0
+    open_nodes: List[str] = []
+    if isinstance(schema, dict):
+        if isinstance(schema.get("properties"), dict):
+            if schema.get("additionalProperties") is False:
+                closed += 1
+            else:
+                open_nodes.append(path or "<root>")
+        for key, value in schema.items():
+            sub_closed, sub_open = closure_census(value, f"{path}.{key}" if path else key)
+            closed += sub_closed
+            open_nodes.extend(sub_open)
+    elif isinstance(schema, list):
+        for index, value in enumerate(schema):
+            sub_closed, sub_open = closure_census(value, f"{path}[{index}]")
+            closed += sub_closed
+            open_nodes.extend(sub_open)
+    return closed, open_nodes
+
+
 def conform_to_schema(
     value: Any,
     schema: Dict[str, Any],
@@ -1491,23 +1437,6 @@ def derived_build(render_config: Dict[str, Any], adapter: Dict[str, Any]) -> Dic
     }
 
 
-def derived_claims(adapter: Dict[str, Any]) -> Dict[str, Any]:
-    """The claims block an artifact must carry for this adapter entry.
-
-    `earnedLevel` is pinned: rendering and static inspection earn nothing, so it is never
-    read from configuration and only a target-host promotion run may advance it. There is
-    deliberately no `authority` field -- authority belongs to a guarded fact, named with
-    its mechanism, host version and scope, so a package-wide scalar would assert something
-    no package can hold.
-    """
-    return {
-        "targetLevel": adapter["targetLevel"],
-        "earnedLevel": "unverified",
-        "validationStatus": adapter["validationStatus"],
-        "evidence": adapter["evidence"],
-    }
-
-
 def derived_upstream_locks(render_config: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Upstream locks the render inputs authorise. Nothing declares an upstream yet."""
     return []
@@ -1590,7 +1519,7 @@ def render_target(
     payload = payload_records(target_root)
     artifact_manifest = {
         "$schema": ARTIFACT_SCHEMA,
-        "schemaVersion": 3,
+        "schemaVersion": 4,
         "artifactId": f"{package['name']}/{target}",
         "packageName": package["name"],
         "coreVersion": package["coreVersion"],
@@ -1611,7 +1540,6 @@ def render_target(
             "sha256": tree_digest(payload, "payload"),
             "files": payload,
         },
-        "claims": derived_claims(adapter),
     }
     write_json(target_root / ARTIFACT_MANIFEST, artifact_manifest)
     verify_artifact(repo_root, target_root, target, render_config, adapter_config)
@@ -1697,7 +1625,7 @@ def verify_artifact(
     recorded inventory and the bytes on disk, and identity against the render config,
     adapter entry, renderer digest, and current source tree. The third is why a manifest
     field cannot be edited after rendering: every immutable build fact is recomputed, not
-    shape-checked. Host authority and promotion are deliberately absent from this artifact.
+    shape-checked. Host observations, validation, and promotion are separate external records.
 
     Binding to the live source means an artifact rendered from an older tree fails once
     the source moves. That verdict is correct -- the artifact is stale -- and is the
@@ -1730,11 +1658,10 @@ def verify_artifact(
             "build",
             "source",
             "payload",
-            "claims",
         },
         "artifact manifest",
     )
-    if manifest["$schema"] != ARTIFACT_SCHEMA or manifest["schemaVersion"] != 3:
+    if manifest["$schema"] != ARTIFACT_SCHEMA or manifest["schemaVersion"] != 4:
         raise RenderError("artifact manifest schema identity is invalid")
     if manifest["target"] != expected_target:
         raise RenderError(
@@ -1775,27 +1702,6 @@ def verify_artifact(
                 f"artifact {field} does not match the render inputs: "
                 f"artifact={manifest[field]!r} configured={expected!r}"
             )
-    expected_claims = derived_claims(adapter)
-    if manifest["claims"] != expected_claims:
-        drifted = sorted(
-            key for key in expected_claims
-            if not isinstance(manifest["claims"], dict)
-            or manifest["claims"].get(key) != expected_claims[key]
-        )
-        raise RenderError(
-            "claims.underived",
-            f"artifact claims were not derived from the adapter configuration: {drifted}",
-        )
-    claims = manifest["claims"]
-    if claims["targetLevel"] not in TARGET_LEVELS:
-        raise RenderError("artifact targetLevel is unknown")
-    if claims["validationStatus"] not in VALIDATION_STATUSES:
-        raise RenderError("artifact validationStatus is unknown")
-    if claims["earnedLevel"] != "unverified":
-        raise RenderError("renderer may emit only unverified earnedLevel")
-    require_validation_evidence(
-        claims["validationStatus"], manifest["licenses"], claims["evidence"], "artifact"
-    )
     expected_build = derived_build(render_config, adapter)
     if manifest["build"] != expected_build:
         drifted = sorted(
@@ -2167,6 +2073,36 @@ def selftest(
         failures += 1
 
     render_config, adapter_config = load_inputs(render_path, adapter_path)
+    forbidden_assertion_fields = (
+        "authority",
+        "claims",
+        "earnedLevel",
+        "evidence",
+        "promotion",
+        "targetLevel",
+        "validationStatus",
+    )
+    required_adapter_fields = frozenset({
+        "adapterRevision",
+        "packageVersion",
+        "format",
+        "manifestPath",
+    })
+    required_artifact_fields = frozenset({
+        "$schema",
+        "schemaVersion",
+        "artifactId",
+        "packageName",
+        "coreVersion",
+        "packageVersion",
+        "licenses",
+        "target",
+        "format",
+        "adapterRevision",
+        "build",
+        "source",
+        "payload",
+    })
     with tempfile.TemporaryDirectory(prefix="z-harness-render-selftest-") as raw_temp:
         temp = Path(raw_temp)
         first = temp / "first"
@@ -2363,6 +2299,62 @@ def selftest(
             lambda: load_inputs_from(render_config, extra_adapter),
         )
         expect(
+            "required adapter-field deletion sweep is non-empty and exact",
+            bool(required_adapter_fields)
+            and all(
+                set(adapter) == required_adapter_fields
+                for adapter in adapter_config["targets"].values()
+            ),
+        )
+        for field in sorted(required_adapter_fields):
+            missing_adapter_field = json.loads(json.dumps(adapter_config))
+            del missing_adapter_field["targets"]["claude"][field]
+            try:
+                load_inputs_from(render_config, missing_adapter_field)
+            except RenderError as exc:
+                rejected_without_crash = exc.detail == (
+                    f"adapter claude keys: missing={[field]} unknown=[]"
+                )
+            except Exception:  # noqa: BLE001
+                rejected_without_crash = False
+            else:
+                rejected_without_crash = False
+            expect(
+                f"input validation rejects missing required adapter field {field} "
+                "without crashing",
+                rejected_without_crash,
+            )
+        for field in forbidden_assertion_fields:
+            asserted_adapter = json.loads(json.dumps(adapter_config))
+            asserted_adapter["targets"]["claude"][field] = (
+                [] if field == "evidence" else "self-asserted"
+            )
+            expect_error(
+                f"adapter input rejects self-asserted field {field}",
+                lambda candidate=asserted_adapter: load_inputs_from(
+                    render_config, candidate
+                ),
+            )
+        original_require_exact_keys = globals()["require_exact_keys"]
+        def planted_adapter_key_check(
+            value: Dict[str, Any], expected: Iterable[str], label: str
+        ) -> None:
+            if label == "adapter agent-plugins":
+                raise RenderError(
+                    "selftest.adapter_key_callsite",
+                    "planted adapter exact-key verifier",
+                )
+            original_require_exact_keys(value, expected, label)
+        globals()["require_exact_keys"] = planted_adapter_key_check
+        try:
+            expect_code(
+                "load_inputs invokes the adapter exact-key verifier call site",
+                "selftest.adapter_key_callsite",
+                lambda: load_inputs_from(render_config, adapter_config),
+            )
+        finally:
+            globals()["require_exact_keys"] = original_require_exact_keys
+        expect(
             "every artifact discovers the real ground-claims skill",
             all((first / target / "skills/ground-claims/SKILL.md").is_file()
                 for target in render_config["targets"]),
@@ -2402,26 +2394,57 @@ def selftest(
             and not (first / "hermes/plugin.yaml").exists()
             and not (first / "hermes/__init__.py").exists(),
         )
-        expect("no artifact asserts a package-wide authority", all(
-            "authority" not in json.dumps(manifest).split('"')
-            for manifest in verified.values()
-        ))
         expect(
-            "every artifact carries claims derived from its own adapter entry",
+            "artifact manifests carry no host assertion or promotion fields",
             all(
-                manifest["claims"] == derived_claims(adapter_config["targets"][target])
+                not (set(manifest) & set(forbidden_assertion_fields))
+                for manifest in verified.values()
+            ),
+        )
+        expect(
+            "artifact target and format identity is derived from each adapter",
+            all(
+                manifest["target"] == target
+                and manifest["format"] == adapter_config["targets"][target]["format"]
+                and manifest["adapterRevision"]
+                == adapter_config["targets"][target]["adapterRevision"]
                 for target, manifest in verified.items()
             ),
         )
         expect(
-            "the pilot earns nothing and claims no validated host",
+            "artifact v4 and alpha.3 identities require regeneration of older outputs",
             all(
-                manifest["claims"]["earnedLevel"] == "unverified"
-                and manifest["claims"]["validationStatus"] == "fixture-only"
-                and manifest["claims"]["evidence"] == []
+                manifest["$schema"] == ARTIFACT_SCHEMA
+                and manifest["schemaVersion"] == 4
+                and manifest["coreVersion"] == "0.4.0-alpha.3"
+                and manifest["packageVersion"] == "0.4.0-alpha.3"
                 for manifest in verified.values()
             ),
         )
+        original_conform_to_schema = globals()["conform_to_schema"]
+        def planted_artifact_schema_check(
+            value: Any,
+            schema: Dict[str, Any],
+            label: str,
+            root: Optional[Dict[str, Any]] = None,
+        ) -> None:
+            if label == "artifact manifest":
+                raise RenderError(
+                    "selftest.artifact_schema_callsite",
+                    "planted artifact schema verifier",
+                )
+            original_conform_to_schema(value, schema, label, root)
+        globals()["conform_to_schema"] = planted_artifact_schema_check
+        try:
+            expect_code(
+                "verify_artifact invokes the artifact schema verifier call site",
+                "selftest.artifact_schema_callsite",
+                lambda: verify_artifact(
+                    ROOT, first / "claude", "claude", render_config, adapter_config
+                ),
+            )
+        finally:
+            globals()["conform_to_schema"] = original_conform_to_schema
         expect(
             "every artifact records the exact renderer and canonical config inputs",
             all(
@@ -2704,6 +2727,78 @@ def selftest(
         base_manifest = read_json_object(
             tamper_base / f"claude/{ARTIFACT_MANIFEST}", "sweep manifest"
         )
+        artifact_schema = load_schema(ARTIFACT_SCHEMA_FILE)
+        artifact_schema_required = artifact_schema.get("required")
+        expect(
+            "required artifact-field deletion sweep is non-empty and exact",
+            bool(required_artifact_fields)
+            and isinstance(artifact_schema_required, list)
+            and len(artifact_schema_required) == len(set(artifact_schema_required))
+            and set(artifact_schema_required) == required_artifact_fields
+            and set(base_manifest) == required_artifact_fields,
+        )
+        # `required` alone leaves the rest of the published contract unbound. Reopening
+        # `additionalProperties`, or restoring `properties.claims` and `$defs.hostEvidence`
+        # to this file, changed no verdict in any of the ten suites: require_exact_keys
+        # rejects unknown keys first and reaches the same answer, so the schema's own
+        # closure never had to hold. `$id` is a public URL, and an external validator
+        # reads THIS document rather than the renderer, so its vocabulary is bound here.
+        expect(
+            "the artifact schema is closed and declares exactly the required vocabulary",
+            artifact_schema.get("additionalProperties") is False
+            and set(artifact_schema.get("properties", {})) == required_artifact_fields
+            and set(artifact_schema.get("$defs", {})) == {"file", "sha256"},
+        )
+        closed_objects, open_objects = closure_census(artifact_schema)
+        expect(
+            f"every artifact-schema object node is closed ({closed_objects} node(s))",
+            closed_objects == ARTIFACT_SCHEMA_OBJECT_NODES and not open_objects,
+        )
+        # Both files under contracts/ are published `$id` documents that an external
+        # validator may read, and `tools/portable-conformance.py` loads both. Binding one
+        # and not the other would leave the render index open to exactly the drift the
+        # check above exists to catch, so the sweep is over the pair, not the one site
+        # the finding happened to name.
+        index_schema = load_schema(RENDER_INDEX_SCHEMA_FILE)
+        index_required = index_schema.get("required")
+        index_closed, index_open = closure_census(index_schema)
+        expect(
+            f"the render-index schema is closed and exact ({index_closed} node(s))",
+            index_schema.get("additionalProperties") is False
+            and isinstance(index_required, list)
+            and len(index_required) == len(set(index_required))
+            and set(index_required) == set(index_schema.get("properties", {}))
+            and set(index_schema.get("$defs", {})) == {"sha256"}
+            and index_closed == RENDER_INDEX_SCHEMA_OBJECT_NODES
+            and not index_open,
+        )
+        for position, field in enumerate(sorted(required_artifact_fields)):
+            case_root = temp / f"delete-artifact-field-{position:02d}"
+            shutil.copytree(tamper_base, case_root)
+            manifest_path = case_root / f"claude/{ARTIFACT_MANIFEST}"
+            missing_artifact_field = read_json_object(
+                manifest_path, "artifact deletion sweep manifest"
+            )
+            del missing_artifact_field[field]
+            write_json(manifest_path, missing_artifact_field)
+            normalize_physical_tree(case_root)
+            try:
+                verify_render_root(
+                    fixture_root, case_root, render_config, adapter_config
+                )
+            except RenderError as exc:
+                rejected_without_crash = exc.detail == (
+                    f"artifact manifest: required property {field!r} is absent"
+                )
+            except Exception:  # noqa: BLE001
+                rejected_without_crash = False
+            else:
+                rejected_without_crash = False
+            expect(
+                f"public verification rejects missing required artifact field {field} "
+                "without crashing",
+                rejected_without_crash,
+            )
         manifest_paths = leaf_paths(base_manifest)
         survivors: List[str] = []
         for position, path in enumerate(manifest_paths):
@@ -2771,127 +2866,30 @@ def selftest(
             })),
         )
 
-        planted(
-            "verification rejects a well-formed authority claim injected into immutable facts",
-            "codex",
-            edit_manifest(lambda m: m.__setitem__("authority", "instruction-only")),
-        )
-        planted(
-            "verification rejects an authority field smuggled into the claims block",
-            "codex",
-            edit_manifest(
-                lambda m: m["claims"].__setitem__("authority", "external-boundary")
-            ),
-        )
-        planted(
-            "verification rejects a self-promoted claims.earnedLevel",
-            "agent-plugins",
-            edit_manifest(lambda m: m["claims"].__setitem__("earnedLevel", "governed-parity")),
-        )
-        # Schema-valid values, so the identity binding is the only thing that can reject
-        # them: these two are what prove it, and they name its code.
-        for field, value in (
-            ("targetLevel", "governed-parity"),
-            ("validationStatus", "promoted"),
-        ):
+        for field in forbidden_assertion_fields:
             planted(
-                f"verification rejects a self-promoted claims.{field}",
+                f"verification rejects artifact-authored field {field}",
                 "agent-plugins",
-                edit_manifest(lambda m, f=field, v=value: m["claims"].__setitem__(f, v)),
-                "claims.underived",
+                edit_manifest(
+                    lambda manifest, key=field: manifest.__setitem__(
+                        key, [] if key == "evidence" else "self-asserted"
+                    )
+                ),
             )
         planted(
-            "verification rejects host evidence a fixture-only artifact cannot have",
+            "verification rejects a claim-bearing artifact schema v3 identity",
             "agent-plugins",
-            edit_manifest(lambda m: m["claims"].__setitem__("evidence", [{
-                "host": "claude-code",
-                "hostVersion": "2.1.0",
-                "installedArtifactSha256": "0" * 64,
-                "scenarios": [{"id": "fresh-session", "result": "pass"}],
-            }])),
-            "claims.underived",
+            edit_manifest(lambda manifest: manifest.__setitem__("schemaVersion", 3)),
         )
-
-        # The evidence rule is one predicate applied at both ends, so the adapter side
-        # needs its own proofs: a status above fixture-only is unreachable while nothing
-        # produces host receipts and the package declares no license.
-        complete_evidence = {
-            "host": "claude-code",
-            "hostVersion": "2.1.0",
-            "installedArtifactSha256": "0" * 64,
-            "scenarios": [{"id": "fresh-session-invocation", "result": "pass"}],
-        }
-
-        def adapter_with(**fields: Any) -> Dict[str, Any]:
-            copy = json.loads(json.dumps(adapter_config))
-            copy["targets"]["claude"].update(fields)
-            return copy
-
-        def licensed_config() -> Dict[str, Any]:
-            copy = json.loads(json.dumps(render_config))
-            copy["package"]["licenses"] = ["MIT"]
-            return copy
-
-        expect_code(
-            "a status above fixture-only without host evidence is refused at input",
-            "claims.evidence_missing",
-            lambda: load_inputs_from(
-                render_config, adapter_with(validationStatus="promoted")
-            ),
-        )
-        expect_code(
-            "host evidence without a license set cannot support a promoted status",
-            "claims.license_missing",
-            lambda: load_inputs_from(
-                render_config,
-                adapter_with(validationStatus="promoted", evidence=[complete_evidence]),
-            ),
-        )
-        expect_code(
-            "a failed scenario cannot support a promoted status",
-            "claims.scenario_failed",
-            lambda: load_inputs_from(
-                licensed_config(),
-                adapter_with(validationStatus="promoted", evidence=[{
-                    **complete_evidence,
-                    "scenarios": [{"id": "fresh-session", "result": "fail"}],
-                }]),
-            ),
-        )
-        expect_code(
-            "a fixture-only adapter cannot carry host evidence",
-            "claims.evidence_unearned",
-            lambda: load_inputs_from(
-                licensed_config(), adapter_with(evidence=[complete_evidence])
-            ),
-        )
-        expect(
-            "complete evidence plus a license set is accepted, so the gate is not vacuous",
-            load_inputs_from(
-                licensed_config(),
-                adapter_with(validationStatus="promoted", evidence=[complete_evidence]),
-            ) is not None,
-        )
-
-        # verify_artifact re-applies the evidence predicate as well as re-deriving claims.
-        # Every tamper reachable through a rendered tree is caught by the derivation first,
-        # so the predicate's arm at this end only executes for a caller that did not come
-        # through load_inputs. Drive that caller directly, or the guard is unexercised.
-        unchecked_adapter = json.loads(json.dumps(adapter_config))
-        unchecked_adapter["targets"]["claude"]["validationStatus"] = "promoted"
-        unchecked_root = temp / "unchecked-adapter"
-        shutil.copytree(tamper_base / "claude", unchecked_root)
-        unchecked_manifest = read_json_object(
-            unchecked_root / ARTIFACT_MANIFEST, "unchecked artifact manifest"
-        )
-        unchecked_manifest["claims"]["validationStatus"] = "promoted"
-        write_json(unchecked_root / ARTIFACT_MANIFEST, unchecked_manifest)
-        normalize_physical_tree(unchecked_root)
-        expect_code(
-            "verification re-applies the evidence rule for an adapter that skipped input validation",
-            "claims.evidence_missing",
-            lambda: verify_artifact(
-                fixture_root, unchecked_root, "claude", render_config, unchecked_adapter
+        planted(
+            "verification rejects the superseded alpha.2 artifact schema identifier",
+            "agent-plugins",
+            edit_manifest(
+                lambda manifest: manifest.__setitem__(
+                    "$schema",
+                    "https://github.com/ChrisHuie/z-harness/blob/v0.4.0-alpha.2/"
+                    "contracts/artifact-manifest.schema.json",
+                )
             ),
         )
 

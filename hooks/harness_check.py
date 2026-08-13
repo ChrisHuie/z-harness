@@ -106,7 +106,7 @@ SELFTEST_SUITES = [
     ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 42),
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 8),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
-    ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
+    ("render-packages", ["tools/render-packages.py", "--selftest"], 220),
     ("ci-gate", ["tools/ci-gate.py", "--selftest"], 22),
     ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 63),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
@@ -167,8 +167,10 @@ STALE_PATTERNS = [
     "ph-lint",                  # linter that never existed here
     "Each push is its own action needing its own confirmation",  # retired consent loop
     "committed to the PR",      # local commit falsely described as published
-    "contain no `targetLevel`", # artifacts carry the claims block; denied in two docs
-    "no validation status",     # same denial, README wording
+    "compatibility claims an artifact carries", # retired adapter-authored claim path
+    "plus the claims block derived from",        # retired artifact schema v3 wording
+    "They do carry `targetLevel`",                # retired architecture assertion
+    "Rendered artifacts record `validationStatus", # retired README assertion
 ]
 
 # C1: source digest per aggregated suite. A receipt's check count is self-reported, so a

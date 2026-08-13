@@ -1,50 +1,35 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "targets": {
     "agent-plugins": {
-      "adapterRevision": 2,
-      "packageVersion": "0.4.0-alpha.2",
+      "adapterRevision": 3,
+      "packageVersion": "0.4.0-alpha.3",
       "format": "agent-plugins/1.0.0",
-      "manifestPath": "plugin.json",
-      "targetLevel": "portable-core",
-      "validationStatus": "fixture-only",
-      "evidence": []
+      "manifestPath": "plugin.json"
     },
     "claude": {
-      "adapterRevision": 2,
-      "packageVersion": "0.4.0-alpha.2",
+      "adapterRevision": 3,
+      "packageVersion": "0.4.0-alpha.3",
       "format": "claude-plugin/native",
-      "manifestPath": ".claude-plugin/plugin.json",
-      "targetLevel": "portable-core",
-      "validationStatus": "fixture-only",
-      "evidence": []
+      "manifestPath": ".claude-plugin/plugin.json"
     },
     "codex": {
-      "adapterRevision": 2,
-      "packageVersion": "0.4.0-alpha.2",
+      "adapterRevision": 3,
+      "packageVersion": "0.4.0-alpha.3",
       "format": "codex-plugin/native",
-      "manifestPath": ".codex-plugin/plugin.json",
-      "targetLevel": "portable-core",
-      "validationStatus": "fixture-only",
-      "evidence": []
+      "manifestPath": ".codex-plugin/plugin.json"
     },
     "hermes": {
-      "adapterRevision": 2,
-      "packageVersion": "0.4.0-alpha.2",
+      "adapterRevision": 3,
+      "packageVersion": "0.4.0-alpha.3",
       "format": "hermes-skill-tap/github",
-      "manifestPath": null,
-      "targetLevel": "portable-core",
-      "validationStatus": "fixture-only",
-      "evidence": []
+      "manifestPath": null
     },
     "kimi": {
-      "adapterRevision": 2,
-      "packageVersion": "0.4.0-alpha.2",
+      "adapterRevision": 3,
+      "packageVersion": "0.4.0-alpha.3",
       "format": "kimi-code-plugin/native",
-      "manifestPath": "kimi.plugin.json",
-      "targetLevel": "portable-core",
-      "validationStatus": "fixture-only",
-      "evidence": []
+      "manifestPath": "kimi.plugin.json"
     }
   }
 }

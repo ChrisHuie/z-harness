@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "package": {
     "name": "z-harness",
-    "coreVersion": "0.4.0-alpha.2",
+    "coreVersion": "0.4.0-alpha.3",
     "description": "Portable operating methods for coding agents.",
     "author": {
       "name": "Chris Huie",

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/ChrisHuie/z-harness/blob/v0.4.0-alpha.2/contracts/artifact-manifest.schema.json",
-  "title": "z-harness rendered artifact manifest v2",
+  "$id": "https://github.com/ChrisHuie/z-harness/blob/v0.4.0-alpha.3/contracts/artifact-manifest.schema.json",
+  "title": "z-harness rendered artifact manifest v4",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -17,15 +17,14 @@
     "adapterRevision",
     "build",
     "source",
-    "payload",
-    "claims"
+    "payload"
   ],
   "properties": {
     "$schema": {
-      "const": "https://github.com/ChrisHuie/z-harness/blob/v0.4.0-alpha.2/contracts/artifact-manifest.schema.json"
+      "const": "https://github.com/ChrisHuie/z-harness/blob/v0.4.0-alpha.3/contracts/artifact-manifest.schema.json"
     },
     "schemaVersion": {
-      "const": 3
+      "const": 4
     },
     "artifactId": {
       "type": "string",
@@ -216,44 +215,6 @@
           }
         }
       }
-    },
-    "claims": {
-      "description": "Compatibility claims derived from the adapter entry. There is no `authority` field: authority belongs to a guarded fact named with its mechanism, host version and scope, not to a package.",
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "targetLevel",
-        "earnedLevel",
-        "validationStatus",
-        "evidence"
-      ],
-      "properties": {
-        "targetLevel": {
-          "enum": [
-            "portable-core",
-            "adapter-functional",
-            "host-integrated",
-            "governed-parity"
-          ]
-        },
-        "earnedLevel": {
-          "const": "unverified"
-        },
-        "validationStatus": {
-          "enum": [
-            "fixture-only",
-            "candidate",
-            "promoted"
-          ]
-        },
-        "evidence": {
-          "description": "Target-host validation records. Empty for fixture-only; any other status requires at least one complete record and a non-empty license set.",
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/hostEvidence"
-          }
-        }
-      }
     }
   },
   "$defs": {
@@ -287,53 +248,6 @@
         },
         "sha256": {
           "$ref": "#/$defs/sha256"
-        }
-      }
-    },
-    "hostEvidence": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "host",
-        "hostVersion",
-        "installedArtifactSha256",
-        "scenarios"
-      ],
-      "properties": {
-        "host": {
-          "type": "string",
-          "minLength": 1
-        },
-        "hostVersion": {
-          "type": "string",
-          "minLength": 1
-        },
-        "installedArtifactSha256": {
-          "$ref": "#/$defs/sha256"
-        },
-        "scenarios": {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "id",
-              "result"
-            ],
-            "properties": {
-              "id": {
-                "type": "string",
-                "minLength": 1
-              },
-              "result": {
-                "enum": [
-                  "pass",
-                  "fail"
-                ]
-              }
-            }
-          }
         }
       }
     }

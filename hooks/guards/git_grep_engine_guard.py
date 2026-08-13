@@ -45,6 +45,7 @@ import string
 import subprocess
 import sys
 import tempfile
+import time
 from typing import NamedTuple
 
 # A live PCRE escape has an odd-length backslash run. A regular expression that only
@@ -61,10 +62,58 @@ MAX_PREFIX_DEPTH = 8
 MAX_ENV_SPLITS = 4
 MAX_ALIAS_DEPTH = 8
 MAX_SOURCE_DEPTH = 16
+MAX_FUNCTION_DECLARATIONS = 512
+REGISTERED_HOOK_TIMEOUT_SECONDS = 5
+GUARD_BUDGET_SECONDS = 4.0
+GIT_PROBE_TIMEOUT_SECONDS = 0.75
+ZSH_EQUALS_ON = "on"
+ZSH_EQUALS_OFF = "off"
+ZSH_EQUALS_UNKNOWN = "unknown"
+
+
+def hook_timeout_contract(settings_data=None, codex_data=None, *, root=None, budget=None):
+    """Return an error when the two registered Bash hooks do not bound this guard."""
+    root = (os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            if root is None else root)
+    if settings_data is None:
+        settings_data = json.load(open(os.path.join(root, "settings.json"), encoding="utf-8"))
+    if codex_data is None:
+        codex_data = json.load(open(
+            os.path.join(root, "hooks", "hooks.json"), encoding="utf-8"))
+    claude = [
+        hook.get("timeout")
+        for entry in settings_data.get("hooks", {}).get("PreToolUse", [])
+        if entry.get("matcher") == "Bash"
+        for hook in entry.get("hooks", [])
+        if "bash_command_guard.py" in hook.get("command", "")
+    ]
+    codex = [
+        hook.get("timeout")
+        for entry in codex_data.get("hooks", {}).get("PreToolUse", [])
+        if entry.get("matcher") == "^Bash$"
+        for hook in entry.get("hooks", [])
+        if ("bash_command_guard.py" in hook.get("command", "")
+            and "--runtime codex" in hook.get("command", ""))
+    ]
+    if claude != [REGISTERED_HOOK_TIMEOUT_SECONDS]:
+        return f"Claude Bash hook timeouts are {claude!r}, expected [5]"
+    if codex != [REGISTERED_HOOK_TIMEOUT_SECONDS]:
+        return f"Codex Bash hook timeouts are {codex!r}, expected [5]"
+    internal = GUARD_BUDGET_SECONDS if budget is None else budget
+    if internal > REGISTERED_HOOK_TIMEOUT_SECONDS - 1.0:
+        return (f"internal budget {internal} does not leave the required one-second "
+                f"margin inside timeout {REGISTERED_HOOK_TIMEOUT_SECONDS}")
+    return ""
 
 
 class CommandParseError(ValueError):
     """The Bash source cannot be tokenized within the guard's closed limits."""
+
+
+def _check_decision_budget(deadline):
+    if deadline is not None and time.monotonic() >= deadline:
+        raise CommandParseError(
+            "the guard's internal decision budget was exhausted while parsing")
 
 
 class GitAuthorityError(RuntimeError):
@@ -78,12 +127,16 @@ class PrefixResolution(NamedTuple):
     command_env: dict
     errors: tuple
     hazard_hint: bool
+    lookup_authority_uncertain: bool
+    descendant_lookup_authority_uncertain: bool
 
 
 class ShellInvocation(NamedTuple):
     shell: str
     command: str
     dynamic: bool
+    command_env: dict
+    lookup_authority_uncertain: bool
 
 
 class PatternScan(NamedTuple):
@@ -117,13 +170,10 @@ class GitAuthority(NamedTuple):
     exec_path: str
     builtins: frozenset
     main: frozenset
-    # False when the command names a Git other than the one PATH resolves. The inventories
-    # still come from the trusted Git -- the named binary is never executed to enumerate
-    # its own -- so only builtins may be classified from them while this is False.
-    candidate_trusted: bool = True
 
 
 class HereStringSource(NamedTuple):
+    prefix: str
     line: str
     redirect_start: int
     word_end: int
@@ -144,11 +194,33 @@ class FileInputSource(NamedTuple):
 class StdinConsumer(NamedTuple):
     reads_stdin: bool
     unresolved: bool
+    shell: str
 
 
 class StdinProvenance(NamedTuple):
     decision: str
     reason: str
+
+
+class HeredocFinding(NamedTuple):
+    shell: str
+    header: str
+    body: str
+    prefix: str
+    header_offset: int
+
+
+class HeredocExpansionFinding(NamedTuple):
+    source: str
+    prefix: str
+    header: str
+    header_offset: int
+
+
+class ZshArgvState(NamedTuple):
+    equals_state: str
+    command_index: object
+    reads_stdin: bool
 
 
 def scan_pcre_constructs(pattern):
@@ -535,10 +607,71 @@ def _backtick_substitution(cmd, start):
     raise CommandParseError("command source has an unclosed backtick substitution")
 
 
+def _zsh_argv_state(words, default=ZSH_EQUALS_ON):
+    """Parse zsh options once for EQUALS state, ``-c`` body, and stdin use."""
+    state = default
+    command_mode = False
+    explicit_stdin = False
+    operands = []
+    index = 1
+    while index < len(words):
+        word = words[index]
+        if word == "--":
+            operands.extend(range(index + 1, len(words)))
+            break
+        normalized = re.sub(r"[-_]", "", word.lower())
+        if word.startswith("--"):
+            if normalized == "equals":
+                state = ZSH_EQUALS_ON
+            elif normalized == "noequals":
+                state = ZSH_EQUALS_OFF
+            elif "equal" in normalized:
+                state = ZSH_EQUALS_UNKNOWN
+            index += 1
+            continue
+        cluster = (re.fullmatch(r"([+-])([^+-].*)", word)
+                   if not word.startswith(("--", "++")) else None)
+        if cluster:
+            sign, letters = cluster.groups()
+            option_index = letters.find("o")
+            flag_letters = letters if option_index < 0 else letters[:option_index]
+            command_mode = command_mode or "c" in flag_letters
+            explicit_stdin = explicit_stdin or "s" in flag_letters
+            if option_index >= 0:
+                attached = letters[option_index + 1:]
+                if attached:
+                    option_word = attached
+                elif index + 1 < len(words):
+                    option_word = words[index + 1]
+                    index += 1
+                else:
+                    return ZshArgvState(ZSH_EQUALS_UNKNOWN, None, True)
+                option = re.sub(r"[-_]", "", option_word.lower())
+                if option == "equals":
+                    state = ZSH_EQUALS_ON if sign == "-" else ZSH_EQUALS_OFF
+                elif option == "noequals":
+                    state = ZSH_EQUALS_OFF if sign == "-" else ZSH_EQUALS_ON
+                elif "equal" in option:
+                    state = ZSH_EQUALS_UNKNOWN
+            index += 1
+            continue
+        # Zsh stops parsing startup options at the first operand.  In ``-c``
+        # mode that operand is the command string; otherwise it is the script
+        # path.  Everything after it is positional argv, even when it looks
+        # like another option.
+        operands.append(index)
+        break
+    command_index = operands[0] if command_mode and operands else None
+    reads_stdin = explicit_stdin or (not command_mode and not operands)
+    return ZshArgvState(state, command_index, reads_stdin)
+
+
 def _shell_reads_stdin(words):
     """Whether a directly named shell consumes commands from standard input."""
     if not words or os.path.basename(words[0]) not in SHELLS:
         return False
+    if os.path.basename(words[0]) == "zsh":
+        return _zsh_argv_state(words).reads_stdin
     operands = []
     explicit_stdin = False
     options_with_values = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
@@ -567,26 +700,26 @@ def _shell_reads_stdin(words):
     return explicit_stdin or not operands
 
 
-def _header_executes_shell(header, suffix=""):
-    """Whether a heredoc feeds a named shell; None means the consumer is uncertain."""
+def _header_stdin_shell(header, suffix="", deadline=None):
+    """Return the named stdin-reading shell, empty for data, or None if uncertain."""
     try:
-        header_commands = split_commands(header)
+        header_commands = split_commands(header, _deadline=deadline)
     except CommandParseError:
         return None
     if not header_commands:
-        return False
+        return ""
     header_resolution = unwrap_command_prefix(header_commands[-1])
     if header_resolution.errors:
         return None
     words = [word for word, _quoting in header_resolution.items]
     if _shell_reads_stdin(words):
-        return True
+        return os.path.basename(words[0])
     # A literal pipeline into a shell also executes the heredoc bytes. This recognizes
     # the direct bounded form; arbitrary filters and compound redirections remain outside
     # the tokenizer contract and therefore must not be described as comprehensively parsed.
     if suffix:
         try:
-            downstream_commands = split_commands(suffix)
+            downstream_commands = split_commands(suffix, _deadline=deadline)
         except CommandParseError:
             return None
         if downstream_commands:
@@ -594,7 +727,32 @@ def _header_executes_shell(header, suffix=""):
             if downstream_resolution.errors:
                 return None
             candidate = [word for word, _quoting in downstream_resolution.items]
-            return _shell_reads_stdin(candidate)
+            if _shell_reads_stdin(candidate):
+                return os.path.basename(candidate[0])
+    return ""
+
+
+def _header_executes_shell(header, suffix="", deadline=None):
+    """Whether a heredoc feeds a named shell; None means the consumer is uncertain."""
+    shell = _header_stdin_shell(header, suffix, deadline)
+    return None if shell is None else bool(shell)
+
+
+def _leading_equals_hazard(source, subcommands=None, deadline=None):
+    """Whether source visibly executes guarded `=git` syntax."""
+    subcommands = GIT_HAZARD_SUBCOMMANDS if subcommands is None else subcommands
+    try:
+        commands = split_commands(source, _deadline=deadline)
+    except CommandParseError:
+        return True
+    for tokens in commands:
+        meaningful = [token for token in tokens
+                      if token[0] not in CONTROL_KEYWORDS
+                      and not ASSIGNMENT.match(token[0])]
+        if (meaningful and _equals_expansion_is_live(*meaningful[0])
+                and any(os.path.basename(word) in subcommands
+                        for word, _quoting in meaningful[1:])):
+            return True
     return False
 
 
@@ -726,12 +884,17 @@ def _parse_heredoc_delimiter_word(line, start):
     return "".join(output), quoted, index
 
 
-def extract_heredoc_sources(cmd):
+def extract_heredoc_sources(cmd, deadline=None, equals_findings=None,
+                            equals_subcommands=None, shell_findings=None,
+                            expansion_findings=None,
+                            classify_non_direct_shell_bodies=False):
     """Remove heredoc payloads from argv text and return executable shell bodies."""
+    _check_decision_budget(deadline)
     bodies = []
     cleaned = []
     cursor = 0
     while cursor < len(cmd):
+        _check_decision_budget(deadline)
         header_end = cmd.find("\n", cursor)
         if header_end < 0:
             header_end = len(cmd)
@@ -748,6 +911,7 @@ def extract_heredoc_sources(cmd):
         redirects = []
         search = 0
         while True:
+            _check_decision_budget(deadline)
             found = _find_heredoc_operator(header_line[search:])
             if found is None:
                 break
@@ -777,20 +941,34 @@ def extract_heredoc_sources(cmd):
         if header_end >= len(cmd):
             raise CommandParseError("heredoc header has no payload line")
         header_parts = []
+        clean_redirect_offsets = {}
+        clean_length = 0
         part_start = 0
         for redirect_start, word_end, *_rest in redirects:
-            header_parts.append(header_line[part_start:redirect_start])
+            part = header_line[part_start:redirect_start]
+            header_parts.append(part)
+            clean_length += len(part)
+            clean_redirect_offsets[redirect_start] = clean_length
             header_parts.append(" ")
+            clean_length += 1
             part_start = word_end
-        header_parts.append(header_line[part_start:])
+        final_part = header_line[part_start:]
+        header_parts.append(final_part)
         clean_header = "".join(header_parts)
-        executes_shell = _header_executes_shell(clean_header)
+        stdin_shell = _header_stdin_shell(clean_header, deadline=deadline)
+        executes_shell = None if stdin_shell is None else bool(stdin_shell)
+        single_shell_body = (
+            executes_shell is True
+            and sum(1 for redirect in redirects if redirect[-1]) == 1
+            and (classify_non_direct_shell_bodies
+                 or _direct_heredoc_header(header_line, deadline)))
         body_start = header_end + 1
         for _start, _end, delimiter, quoted, strip_tabs, feeds_stdin in redirects:
             scan = body_start
             body_end = None
             terminator_end = None
             while scan <= len(cmd):
+                _check_decision_budget(deadline)
                 line_end = cmd.find("\n", scan)
                 if line_end < 0:
                     line_end = len(cmd)
@@ -807,21 +985,51 @@ def extract_heredoc_sources(cmd):
                 raise CommandParseError(
                     f"heredoc delimiter {delimiter!r} has no exact terminator")
             body = cmd[body_start:body_end]
+            equals_hazard = (feeds_stdin and stdin_shell
+                             and _leading_equals_hazard(
+                                 body, equals_subcommands, deadline))
+            if equals_hazard and equals_findings is not None:
+                equals_findings.append(HeredocFinding(
+                    stdin_shell, clean_header, body, cmd[:cursor],
+                    clean_redirect_offsets[_start]))
+            elif equals_hazard and stdin_shell != "zsh":
+                raise CommandParseError(
+                    f"{stdin_shell} heredoc contains guarded leading-equals command "
+                    "syntax whose executable identity is unresolved outside zsh")
             if (feeds_stdin and executes_shell is None
                     and source_has_git_hazard_hint(body)):
                 raise CommandParseError(
                     "heredoc has guarded source and an unresolved stdin consumer")
             if feeds_stdin and executes_shell is True:
                 bodies.append(body)
+                if shell_findings is not None and single_shell_body:
+                    shell_findings.append(HeredocFinding(
+                        stdin_shell, clean_header, body, cmd[:cursor],
+                        clean_redirect_offsets[_start]))
             if not quoted:
-                bodies.extend(_heredoc_expansion_sources(body))
+                expansion_sources = _heredoc_expansion_sources(body)
+                bodies.extend(expansion_sources)
+                if (expansion_findings is not None
+                        and not (feeds_stdin and executes_shell is True)):
+                    expansion_findings.extend(
+                        HeredocExpansionFinding(
+                            source, cmd[:cursor], clean_header,
+                            clean_redirect_offsets[_start])
+                        for source in expansion_sources)
             body_start = terminator_end
         cleaned.append(clean_header + "\n")
         cursor = body_start
     return "".join(cleaned), tuple(bodies)
 
 
-def _function_scope_pairs(cmd, records):
+def command_without_heredoc_payloads(command, deadline=None):
+    """Return headers and ordinary commands without reclassifying payload bytes."""
+    cleaned, _bodies = extract_heredoc_sources(
+        command, deadline, [], (), [], [])
+    return cleaned
+
+
+def _function_scope_pairs(cmd, records, deadline=None):
     """Return ordinary subshell/command-source pairs outside declaration bodies."""
     by_start = {record.start: record for record in records}
     pairs = []
@@ -830,6 +1038,8 @@ def _function_scope_pairs(cmd, records):
     arithmetic_depth = 0
     index = 0
     while index < len(cmd):
+        if index % 256 == 0:
+            _check_decision_budget(deadline)
         if index in by_start:
             index = by_start[index].end
             continue
@@ -880,13 +1090,15 @@ def _function_scope_pairs(cmd, records):
     return tuple(sorted(pairs))
 
 
-def _conditional_function_intervals(cmd, records):
+def _conditional_function_intervals(cmd, records, deadline=None):
     masked = list(cmd)
     for record in records:
         masked[record.start:record.end] = " " * (record.end - record.start)
     quote = ""
     index = 0
     while index < len(masked):
+        if index % 256 == 0:
+            _check_decision_budget(deadline)
         char = masked[index]
         if quote:
             masked[index] = " "
@@ -922,6 +1134,7 @@ def _conditional_function_intervals(cmd, records):
     stack = []
     intervals = []
     for match in token.finditer(source):
+        _check_decision_budget(deadline)
         word = match.group(1)
         position = match.start(1)
         if word in openers:
@@ -937,16 +1150,19 @@ def _conditional_function_intervals(cmd, records):
     return tuple(intervals)
 
 
-def _function_list_operators(cmd, records, pairs):
+def _function_list_operators(cmd, records, deadline=None):
     """Return live list/pipeline operators with their lexical subshell scope."""
     by_start = {record.start: record for record in records}
     operators = []
     record_braces = {}
     brace_stack = []
+    scope_stack = []
     quote = ""
     arithmetic_depth = 0
     index = 0
     while index < len(cmd):
+        if index % 256 == 0:
+            _check_decision_budget(deadline)
         if index in by_start:
             record_braces[index] = tuple(brace_stack)
             index = by_start[index].end
@@ -986,6 +1202,15 @@ def _function_list_operators(cmd, records, pairs):
                 arithmetic_depth -= 1
             index += 1
             continue
+        if char == "(":
+            scope_stack.append(index)
+            index += 1
+            continue
+        if char == ")":
+            if scope_stack:
+                scope_stack.pop()
+            index += 1
+            continue
         if char == "{":
             brace_stack.append(index)
             index += 1
@@ -1010,24 +1235,28 @@ def _function_list_operators(cmd, records, pairs):
         if operator is None:
             index += 1
             continue
-        containers = [pair for pair in pairs if pair[0] < index < pair[1]]
-        scope_start = (-1 if not containers else min(
-            containers, key=lambda pair: pair[1] - pair[0])[0])
+        scope_start = scope_stack[-1] if scope_stack else -1
         operators.append((index, width, operator, scope_start,
                           tuple(brace_stack)))
         index += width
     return tuple(operators), record_braces
 
 
-def annotate_function_declarations(cmd, records):
+def annotate_function_declarations(cmd, records, deadline=None):
     """Attach lexical subshell scope and conditional reachability to declarations."""
-    pairs = _function_scope_pairs(cmd, records)
-    intervals = _conditional_function_intervals(cmd, records)
-    operators, record_braces = _function_list_operators(cmd, records, pairs)
+    _check_decision_budget(deadline)
+    pairs = _function_scope_pairs(cmd, records, deadline)
+    intervals = _conditional_function_intervals(cmd, records, deadline)
+    operators, record_braces = _function_list_operators(cmd, records, deadline)
     annotated = []
     for record in records:
-        containers = [pair for pair in pairs
-                      if pair[0] < record.start < pair[1]]
+        _check_decision_budget(deadline)
+        containers = []
+        for pair_index, pair in enumerate(pairs):
+            if pair_index % 256 == 0:
+                _check_decision_budget(deadline)
+            if pair[0] < record.start < pair[1]:
+                containers.append(pair)
         scope_start, scope_end = (-1, len(cmd))
         if containers:
             scope_start, scope_end = min(
@@ -1039,9 +1268,13 @@ def annotate_function_declarations(cmd, records):
         maybe = False
         pipeline_candidates = []
         for context in contexts:
-            same_context = [operator for operator in operators
-                            if operator[3] == scope_start
-                            and operator[4] == context]
+            _check_decision_budget(deadline)
+            same_context = []
+            for operator_index, operator in enumerate(operators):
+                if operator_index % 256 == 0:
+                    _check_decision_budget(deadline)
+                if operator[3] == scope_start and operator[4] == context:
+                    same_context.append(operator)
             previous = [operator for operator in same_context
                         if operator[0] < record.start]
             following = [operator for operator in same_context
@@ -1067,8 +1300,9 @@ def annotate_function_declarations(cmd, records):
     return tuple(annotated)
 
 
-def function_declaration_records(cmd):
+def function_declaration_records(cmd, deadline=None):
     """Return live function declarations with temporal reachability and scope."""
+    _check_decision_budget(deadline)
     if "()" not in cmd and "function " not in cmd:
         return ()
     pattern = re.compile(
@@ -1078,6 +1312,8 @@ def function_declaration_records(cmd):
     quote = ""
     index = 0
     while index < len(cmd):
+        if index % 256 == 0:
+            _check_decision_budget(deadline)
         char = cmd[index]
         if quote:
             live[index] = False
@@ -1099,6 +1335,7 @@ def function_declaration_records(cmd):
     records = []
     cursor = 0
     for match in pattern.finditer(cmd):
+        _check_decision_budget(deadline)
         if match.start() < cursor:
             continue
         if not live[match.start()]:
@@ -1107,6 +1344,8 @@ def function_declaration_records(cmd):
         closer = "}" if opener == "{" else ")"
         depth, quote, index = 1, "", match.end()
         while index < len(cmd) and depth:
+            if index % 256 == 0:
+                _check_decision_budget(deadline)
             char = cmd[index]
             if quote:
                 if char == "\\" and quote == '"':
@@ -1130,22 +1369,26 @@ def function_declaration_records(cmd):
             index += 1
         if depth:
             raise CommandParseError("function declaration has an unclosed body")
+        if len(records) >= MAX_FUNCTION_DECLARATIONS:
+            raise CommandParseError(
+                f"command source exceeds the {MAX_FUNCTION_DECLARATIONS}-function parse limit")
         records.append(FunctionDeclaration(
             match.start(), index, match.group(1) or match.group(2),
             cmd[match.end():index - 1], -1, len(cmd), False, False, -1, -1,
         ))
         cursor = index
-    return annotate_function_declarations(cmd, tuple(records))
+    return annotate_function_declarations(cmd, tuple(records), deadline)
 
 
-def _invoked_function_bodies(source, declarations, uncertain=()):
+def _invoked_function_bodies(source, declarations, uncertain=(), deadline=None):
+    _check_decision_budget(deadline)
     if not declarations and not uncertain:
         return ()
-    if source_has_dynamic_command_word(source):
+    if source_has_dynamic_command_word(source, deadline):
         raise CommandParseError(
             "a dynamic command word may invoke a declared function")
     invoked = []
-    for tokens in split_commands(source):
+    for tokens in split_commands(source, _deadline=deadline):
         words = [text for text, _quoting in tokens
                  if text not in CONTROL_KEYWORDS and not ASSIGNMENT.match(text)]
         if words and words[0] in uncertain:
@@ -1164,7 +1407,8 @@ def _invoked_function_bodies(source, declarations, uncertain=()):
 
 def _extract_function_region(cmd, records, start, end, scope_start,
                              inherited, inherited_uncertain,
-                             pipeline_scope=None):
+                             pipeline_scope=None, deadline=None):
+    _check_decision_budget(deadline)
     declarations = dict(inherited)
     uncertain = set(inherited_uncertain)
     direct_records = [record for record in records
@@ -1200,12 +1444,13 @@ def _extract_function_region(cmd, records, start, end, scope_start,
     invoked = []
     cursor = start
     for position, kind, item in events:
+        _check_decision_budget(deadline)
         if position < cursor:
             continue
         segment = cmd[cursor:position]
         cleaned.append(segment)
         invoked.extend(_invoked_function_bodies(
-            segment, declarations, uncertain))
+            segment, declarations, uncertain, deadline))
         if kind == "record":
             record = item
             if record.conditional or record.maybe:
@@ -1219,7 +1464,7 @@ def _extract_function_region(cmd, records, start, end, scope_start,
         if kind == "pipeline":
             child_cleaned, child_invoked = _extract_function_region(
                 cmd, records, child_start, child_end, scope_start,
-                declarations, uncertain, (child_start, child_end),
+                declarations, uncertain, (child_start, child_end), deadline,
             )
             cleaned.append(child_cleaned)
             invoked.extend(child_invoked)
@@ -1227,7 +1472,7 @@ def _extract_function_region(cmd, records, start, end, scope_start,
             continue
         child_cleaned, child_invoked = _extract_function_region(
             cmd, records, child_start + 1, child_end, child_start,
-            declarations, uncertain, None,
+            declarations, uncertain, None, deadline,
         )
         cleaned.extend((cmd[child_start:child_start + 1], child_cleaned,
                         cmd[child_end:child_end + 1]))
@@ -1235,26 +1480,28 @@ def _extract_function_region(cmd, records, start, end, scope_start,
         cursor = child_end + 1
     tail = cmd[cursor:end]
     cleaned.append(tail)
-    invoked.extend(_invoked_function_bodies(tail, declarations, uncertain))
+    invoked.extend(_invoked_function_bodies(tail, declarations, uncertain, deadline))
     return "".join(cleaned), tuple(invoked)
 
 
-def extract_function_invocations(cmd):
+def extract_function_invocations(cmd, deadline=None):
     """Follow calls against definitions live at that point and in that shell scope."""
-    records = function_declaration_records(cmd)
+    _check_decision_budget(deadline)
+    records = function_declaration_records(cmd, deadline)
     if not records:
         return cmd, ()
     return _extract_function_region(
-        cmd, records, 0, len(cmd), -1, {}, set(), None)
+        cmd, records, 0, len(cmd), -1, {}, set(), None, deadline)
 
 
-def split_commands(cmd, _parse_depth=0):
+def split_commands(cmd, _parse_depth=0, _deadline=None):
     """Split on UNQUOTED && || ; | newline ( ) and yield token lists.
 
     Tokens are (text, quoting) where quoting is one of '', "'", '"'.
     Command substitutions are recursively inspected even inside double quotes. Heredoc
     bodies are inspected only when stdin is executed by a named shell interpreter.
     """
+    _check_decision_budget(_deadline)
     if not isinstance(cmd, str):
         raise CommandParseError("command source is not text")
     if _parse_depth > MAX_SOURCE_DEPTH:
@@ -1263,8 +1510,8 @@ def split_commands(cmd, _parse_depth=0):
     if len(cmd) > MAX_COMMAND_CHARS:
         raise CommandParseError(
             f"command source exceeds the {MAX_COMMAND_CHARS}-byte parse limit")
-    cmd, function_sources = extract_function_invocations(cmd)
-    cmd, heredoc_sources = extract_heredoc_sources(cmd)
+    cmd, function_sources = extract_function_invocations(cmd, _deadline)
+    cmd, heredoc_sources = extract_heredoc_sources(cmd, _deadline)
     out, cur, embedded = [], [], []
     tok_parts, tok_mode_parts, tok_modes, q, i = [], [], set(), "", 0
     token_count = 0
@@ -1300,28 +1547,30 @@ def split_commands(cmd, _parse_depth=0):
         cur = []
 
     while i < n:
+        if i % 256 == 0:
+            _check_decision_budget(_deadline)
         c = cmd[i]
         if q:
             if q == '"' and cmd.startswith("${", i):
                 text, i, sources = _parameter_expansion(cmd, i)
                 for source in sources:
-                    embedded.extend(split_commands(source, _parse_depth + 1))
+                    embedded.extend(split_commands(source, _parse_depth + 1, _deadline))
                 append_tok(text, q)
                 continue
             if q == '"' and cmd.startswith("$((", i):
                 _body, i, sources = _arithmetic_expansion(cmd, i)
                 for source in sources:
-                    embedded.extend(split_commands(source, _parse_depth + 1))
+                    embedded.extend(split_commands(source, _parse_depth + 1, _deadline))
                 append_tok("$((__ARITH__))", q)
                 continue
             if q == '"' and cmd.startswith("$(", i):
                 body, i = _command_substitution(cmd, i)
-                embedded.extend(split_commands(body, _parse_depth + 1))
+                embedded.extend(split_commands(body, _parse_depth + 1, _deadline))
                 append_tok("$(__COMMAND__)", q)
                 continue
             if q == '"' and c == "`":
                 body, i = _backtick_substitution(cmd, i)
-                embedded.extend(split_commands(body, _parse_depth + 1))
+                embedded.extend(split_commands(body, _parse_depth + 1, _deadline))
                 append_tok("`__COMMAND__`", q)
                 continue
             if c == q:
@@ -1349,23 +1598,23 @@ def split_commands(cmd, _parse_depth=0):
         if cmd.startswith("$((", i):
             _body, i, sources = _arithmetic_expansion(cmd, i)
             for source in sources:
-                embedded.extend(split_commands(source, _parse_depth + 1))
+                embedded.extend(split_commands(source, _parse_depth + 1, _deadline))
             append_tok("$((__ARITH__))")
             continue
         if cmd.startswith("$(", i):
             body, i = _command_substitution(cmd, i)
-            embedded.extend(split_commands(body, _parse_depth + 1))
+            embedded.extend(split_commands(body, _parse_depth + 1, _deadline))
             append_tok("$(__COMMAND__)")
             continue
         if cmd.startswith("${", i):
             text, i, sources = _parameter_expansion(cmd, i)
             for source in sources:
-                embedded.extend(split_commands(source, _parse_depth + 1))
+                embedded.extend(split_commands(source, _parse_depth + 1, _deadline))
             append_tok(text)
             continue
         if c == "`":
             body, i = _backtick_substitution(cmd, i)
-            embedded.extend(split_commands(body, _parse_depth + 1))
+            embedded.extend(split_commands(body, _parse_depth + 1, _deadline))
             append_tok("`__COMMAND__`")
             continue
         if c == "\\" and i + 1 < n:
@@ -1391,9 +1640,9 @@ def split_commands(cmd, _parse_depth=0):
         raise CommandParseError("command source has an unclosed quote")
     flush_cmd()
     for source in heredoc_sources:
-        embedded.extend(split_commands(source, _parse_depth + 1))
+        embedded.extend(split_commands(source, _parse_depth + 1, _deadline))
     for source in function_sources:
-        embedded.extend(split_commands(source, _parse_depth + 1))
+        embedded.extend(split_commands(source, _parse_depth + 1, _deadline))
     out.extend(embedded)
     if len(out) > MAX_SUBCOMMANDS:
         raise CommandParseError(
@@ -1415,34 +1664,45 @@ GIT_HAZARD_SUBCOMMANDS = {
 _GIT_AUTHORITY_CACHE = {}
 
 
-def trusted_git_authority(executable="git"):
-    """Bind builtin/main command inventories to one resolved Git and exec path.
+def _remaining_probe_timeout(deadline, clock):
+    remaining = deadline - clock()
+    if remaining <= 0:
+        raise GitAuthorityError("the guard's internal Git-discovery budget was exhausted")
+    return min(GIT_PROBE_TIMEOUT_SECONDS, remaining)
 
-    A command naming a Git other than the one PATH resolves is uncertainty, not a hazard.
-    Stock macOS carries two real Git binaries -- Homebrew's and Apple's /usr/bin/git --
-    and refusing the second denied `/usr/bin/git status`, which carries neither guarded
-    hazard. The named binary is still never executed to read its inventories, because the
-    command chose that path; the authority is returned with `candidate_trusted=False`
-    instead and `authorize_git_subcommand` narrows to builtins.
+
+def trusted_git_authority(executable="git", deadline=None, *, runner=None, clock=None):
+    """Bind command authority to the one Git selected by the inherited PATH.
+
+    A different executable is never probed and never inherits inventories or config from
+    the PATH-selected Git. Discovery calls share the hook's monotonic deadline; any timeout,
+    subprocess failure, or incomplete inventory is uncertainty rather than permission.
     """
+    runner = subprocess.run if runner is None else runner
+    clock = time.monotonic if clock is None else clock
+    deadline = clock() + GUARD_BUDGET_SECONDS if deadline is None else deadline
     trusted = shutil.which("git")
     candidate = (shutil.which(executable) if os.sep not in executable else executable)
     if not trusted or not candidate:
         raise GitAuthorityError("the Git executable cannot be resolved")
     trusted = os.path.realpath(trusted)
     candidate = os.path.realpath(candidate)
+    if candidate != trusted:
+        raise GitAuthorityError(
+            "the command selects a Git executable other than the PATH-trusted Git")
     if trusted not in _GIT_AUTHORITY_CACHE:
         try:
-            exec_path_result = subprocess.run(
-                [trusted, "--exec-path"], capture_output=True, text=True, timeout=10,
+            exec_path_result = runner(
+                [trusted, "--exec-path"], capture_output=True, text=True,
+                timeout=_remaining_probe_timeout(deadline, clock),
             )
-            builtins_result = subprocess.run(
+            builtins_result = runner(
                 [trusted, "--list-cmds=builtins"], capture_output=True,
-                text=True, timeout=10,
+                text=True, timeout=_remaining_probe_timeout(deadline, clock),
             )
-            main_result = subprocess.run(
+            main_result = runner(
                 [trusted, "--list-cmds=main,nohelpers"], capture_output=True,
-                text=True, timeout=10,
+                text=True, timeout=_remaining_probe_timeout(deadline, clock),
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise GitAuthorityError(
@@ -1458,79 +1718,14 @@ def trusted_git_authority(executable="git"):
         _GIT_AUTHORITY_CACHE[trusted] = GitAuthority(
             trusted, os.path.realpath(exec_path), builtins, main,
         )
-    authority = _GIT_AUTHORITY_CACHE[trusted]
-    if candidate != trusted:
-        return authority._replace(candidate_trusted=False)
-    return authority
-
-
-_GIT_ALIAS_NAME_CACHE = {}
-
-
-def ambient_alias_names(authority, cwd=None):
-    """Alias names the trusted Git can see, read ONLY as a reason to ask.
-
-    Mutable configuration is never positive authority in this guard. A name found here is
-    treated as unresolved; a name absent from the table grants nothing on its own, because
-    the builtin check still has to pass first. `None` means the table could not be
-    enumerated, which the caller turns into a question rather than an allow.
-
-    Residual, measured rather than assumed: two Gits on one machine can read different
-    system config files -- on this host `/opt/homebrew/etc/gitconfig` versus none for
-    Apple Git -- so an alias defined only in the candidate's system scope is not visible
-    through the trusted Git.
-
-    `cwd` defaults to the process directory, which is what production reads. The selftest
-    passes a repository it has just configured, so the reader can be proved against known
-    aliases without chdir'ing the whole interpreter.
-    """
-    key = (authority.executable, cwd)
-    if key not in _GIT_ALIAS_NAME_CACHE:
-        try:
-            probe = subprocess.run(
-                [authority.executable, "config", "--get-regexp", r"^alias\."],
-                capture_output=True, text=True, timeout=10, cwd=cwd,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return None
-        # 1 is "no matches", which is a complete answer; anything else is not.
-        if probe.returncode not in (0, 1):
-            return None
-        _GIT_ALIAS_NAME_CACHE[key] = frozenset(
-            line.split(None, 1)[0][len("alias."):].lower()
-            for line in probe.stdout.splitlines()
-            if line.lower().startswith("alias.") and line.split(None, 1)
-        )
-    return _GIT_ALIAS_NAME_CACHE[key]
+    return _GIT_AUTHORITY_CACHE[trusted]
 
 
 def authorize_git_subcommand(subcommand, authority, effective_exec_path):
     if subcommand in authority.builtins:
-        if authority.candidate_trusted:
-            # git-config(1): "aliases that hide existing Git commands are ignored", so a
-            # builtin name cannot be redirected by ambient alias/config in THIS Git.
-            # Reproduced per name: alias.grep, alias.status, alias.show, alias.log and
-            # alias.submodule are all ignored, while alias.nonbuiltinname is not.
-            return None
-        # A different Git, whose own inventory cannot be read without executing a binary
-        # the command chose. The trusted Git's builtin list does NOT transfer: measured on
-        # this host, `refs` and `replay` are builtin in git 2.46.1 and absent from Apple
-        # Git 2.39.5, where `-c alias.refs=...` does run the alias. So the builtin check
-        # is kept as a floor and the thing that actually has to be absent is an ambient
-        # alias for this name.
-        aliases = ambient_alias_names(authority)
-        if aliases is None:
-            return (f"Git subcommand {subcommand!r} runs on a Git this guard cannot "
-                    "enumerate, and the ambient alias table could not be read either")
-        if subcommand in aliases:
-            return (f"Git subcommand {subcommand!r} has an ambient alias, and the command "
-                    "names a Git whose own command inventory cannot be read, so the alias "
-                    "may not be ignored the way a builtin would ignore it")
+        # git-config(1): aliases that hide existing Git commands are ignored. This holds
+        # only because `trusted_git_authority` already proved the executable identity.
         return None
-    if not authority.candidate_trusted:
-        return (f"Git subcommand {subcommand!r} is not a builtin of the trusted Git and "
-                f"the command names a different Git executable, whose helper set and exec "
-                f"path cannot be enumerated without executing it")
     if subcommand in authority.main:
         if os.path.realpath(effective_exec_path) != authority.exec_path:
             return (f"Git subcommand {subcommand!r} is not builtin and the effective "
@@ -1609,29 +1804,380 @@ def _equals_expanded(word):
     were already modelled beside it.
 
     Measured on zsh 5.9: `=git` runs git; `==git` reports `=git not found`; `"=git"`,
-    `'=git'` and `setopt noequals` all leave it literal. The quoted cases are gated at the
-    executable-identity site by `_equals_expansion_is_live`; this text-level form stays
-    over-approximating because its callers only raise a hazard HINT, where reading a
-    quoted `=git` as Git costs a question rather than an allow.
+    `'=git'` and `setopt noequals` all leave it literal. Quoting is gated by
+    `_equals_expansion_is_live`; the option state is applied by `unwrap_command_prefix`.
     """
     return word[1:] if len(word) > 1 and word[0] == "=" and word[1] != "=" else word
 
 
 def _equals_expansion_is_live(text, quoting):
-    """Whether a leading `=` is unquoted, so zsh would expand it.
-
-    KNOWN OVER-APPROXIMATION, in the safe direction and stated rather than hidden: this
-    walk carries no shell context, so a `=git` inside a `bash -c` or `sh -c` body is
-    resolved here even though only zsh expands it and those shells report `command not
-    found`. The result is a question or a denial for a command that cannot run Git.
-    Narrowing it means threading the invoking shell through the shared prefix walk, which
-    is the sibling zsh guard's `_shell` parameter and does not exist on this side.
-    """
+    """Whether a leading `=` is syntactically live; shell and option state are separate."""
     if not (len(text) > 1 and text[0] == "=" and text[1] != "="):
         return False
     if quoting.startswith("mixed:"):
         return quoting.split(":", 1)[1][:1] == "U"
     return quoting == ""
+
+
+def _resolve_outer_zsh_equals(tokens, shell, equals_state, command_env,
+                              lookup_authority_uncertain):
+    """Resolve live ``=name`` words before command wrappers change the environment.
+
+    zsh performs filename generation for every live word in the outer command before
+    ``env``, ``command -p``, or ``sudo`` executes. Preserve that absolute identity so a
+    later wrapper cannot incorrectly turn a known ERE/PCRE decision into lookup doubt.
+    A child shell receives its own environment and lookup uncertainty through
+    ``ShellInvocation`` and therefore does not borrow the parent's resolution.
+    """
+    prepared = list(tokens)
+    if shell != "zsh" or equals_state != ZSH_EQUALS_ON:
+        return prepared
+    if lookup_authority_uncertain:
+        return prepared
+    search_path = command_env.get("PATH")
+    for index, (text, quoting) in enumerate(prepared):
+        if not _equals_expansion_is_live(text, quoting):
+            continue
+        name = _equals_expanded(text)
+        resolved = shutil.which(name, path=search_path)
+        if resolved:
+            prepared[index] = (os.path.realpath(resolved), quoting)
+    return prepared
+
+
+def _zsh_equals_option_action(tokens):
+    """Return the definite EQUALS state established by one straight-line command.
+
+    Only the three literal forms grounded against zsh are authority. A setter in a
+    conditional/list context, a dynamic command, eval, or sourced code can change the
+    calling shell but is not interpreted here, so it returns ``unknown``.
+    """
+    if not tokens:
+        return None
+    has_control = any(text in CONTROL_KEYWORDS for text, _quoting in tokens)
+    words = [text for text, _quoting in tokens if text not in CONTROL_KEYWORDS
+             and not ASSIGNMENT.match(text)]
+    if not words:
+        return None
+    executable = words[0]
+    if executable in {"eval", "source", "."} or UNRESOLVED.search(executable):
+        return ZSH_EQUALS_UNKNOWN
+    if executable == "set":
+        if words == ["set", "-o", "equals"]:
+            return ZSH_EQUALS_ON
+        if words in (["set", "-o", "noequals"], ["set", "+o", "equals"]):
+            return ZSH_EQUALS_OFF
+        if words == ["set", "+o", "noequals"]:
+            return ZSH_EQUALS_ON
+        if any("equals" in word.lower() or UNRESOLVED.search(word)
+               for word in words[1:]):
+            return ZSH_EQUALS_UNKNOWN
+        return None
+    if executable == "emulate":
+        modes = [word.lower() for word in words[1:] if not word.startswith("-")]
+        if len(modes) == 1 and modes[0] == "zsh":
+            return ZSH_EQUALS_ON
+        if len(modes) == 1 and modes[0] in {"sh", "ksh", "bash"}:
+            return ZSH_EQUALS_OFF
+        return ZSH_EQUALS_UNKNOWN
+    if executable not in {"setopt", "unsetopt"}:
+        return None
+    if has_control:
+        return ZSH_EQUALS_UNKNOWN
+    if words == ["setopt", "equals"]:
+        return ZSH_EQUALS_ON
+    if words == ["setopt", "noequals"] or words == ["unsetopt", "equals"]:
+        return ZSH_EQUALS_OFF
+    # A different literal option command is harmless unless it mentions this option.
+    # Dynamic or compound option spellings are not proof of either state.
+    if any("equals" in word.lower() or UNRESOLVED.search(word) for word in words[1:]):
+        return ZSH_EQUALS_UNKNOWN
+    return None
+
+
+def _zsh_option_skeleton(source, deadline=None):
+    """Blank quoted bytes while preserving source offsets for option-state events."""
+    live = []
+    quote = ""
+    index = 0
+    while index < len(source):
+        if index % 256 == 0:
+            _check_decision_budget(deadline)
+        char = source[index]
+        if quote:
+            if char == "\\" and quote == '"' and index + 1 < len(source):
+                live.extend("  ")
+                index += 2
+                continue
+            live.append(" ")
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in ("'", '"'):
+            quote = char
+            live.append(" ")
+            index += 1
+            continue
+        if char == "\\" and index + 1 < len(source):
+            live.extend("  ")
+            index += 2
+            continue
+        live.append(char)
+        index += 1
+    return "".join(live)
+
+
+def zsh_equals_states(source, commands, initial=ZSH_EQUALS_ON, deadline=None):
+    """State before each parsed command, preserving only proven straight-line changes.
+
+    ``split_commands`` intentionally flattens several compound forms. If an EQUALS setter
+    appears beside live control/scope syntax, the state is therefore uncertain rather than
+    pretending the option mutation is unconditional or leaks out of a child scope.
+    Nested literal shell bodies are parsed by their recursive ``decide`` call and are
+    quoted here, so they do not contaminate this source's state.
+    """
+    _check_decision_budget(deadline)
+    state = initial
+    states = []
+    records = function_declaration_records(source, deadline)
+    lexical_source = _zsh_option_skeleton(source, deadline)
+    state_source = list(lexical_source)
+    excluded = []
+    for record in records:
+        state_source[record.start:record.end] = " " * (record.end - record.start)
+        excluded.append((record.start, record.end))
+    for start, end in _function_scope_pairs(source, records, deadline):
+        state_source[start:end + 1] = " " * (end + 1 - start)
+        excluded.append((start, end + 1))
+    _cleaned, invoked_sources = extract_function_invocations(source, deadline)
+    invoked_setter = any(
+        re.search(r"\b(?:setopt|unsetopt|emulate)\b|\bset\s+[+-]o\b", body)
+        for body in invoked_sources
+    )
+    skeleton = "".join(state_source)
+    complex_setter = invoked_setter or (
+        re.search(r"\b(?:setopt|unsetopt|emulate)\b|\bset\s+[+-]o\b",
+                  skeleton) is not None
+        and (re.search(r"&&|\|\||[(){}|]", skeleton) is not None
+             or re.search(r"\b(?:if|then|elif|else|fi|while|until|for|case|function)\b",
+                          skeleton) is not None)
+    )
+    if complex_setter:
+        state = ZSH_EQUALS_UNKNOWN
+    used_action_positions = set()
+    for tokens in commands:
+        states.append(state)
+        action = _zsh_equals_option_action(tokens)
+        if action is not None:
+            action_words = [re.escape(text) for text, _quoting in tokens
+                            if text not in CONTROL_KEYWORDS
+                            and not ASSIGNMENT.match(text)]
+            pattern = r"(?<![A-Za-z0-9_])" + r"\s+".join(action_words)
+            positions = [match.start() for match in re.finditer(
+                pattern, lexical_source) if match.start() not in used_action_positions]
+            position = positions[0] if positions else None
+            if position is not None:
+                used_action_positions.add(position)
+            inside_excluded_scope = (position is not None and any(
+                start <= position < end for start, end in excluded))
+            if inside_excluded_scope:
+                continue
+            state = (ZSH_EQUALS_UNKNOWN
+                     if complex_setter or position is None else action)
+    return tuple(states)
+
+
+def _path_environment_action(tokens):
+    """Return one proven shell-persistent PATH action, or ``None``."""
+    words = [word for word, _quoting in tokens]
+    while words and words[0] in CONTROL_KEYWORDS:
+        words = words[1:]
+    if words and all(ASSIGNMENT.match(word) for word in words):
+        updates = {}
+        for word in words:
+            key, value = word.split("=", 1)
+            if key == "PATH":
+                updates[key] = value
+        return (updates, ()) if updates else None
+    if words and words[0] == "export":
+        tail = words[1:]
+        while tail and tail[0] in {"-x", "--"}:
+            tail = tail[1:]
+        if tail and all(ASSIGNMENT.match(word) for word in tail):
+            updates = {}
+            for word in tail:
+                key, value = word.split("=", 1)
+                if key == "PATH":
+                    updates[key] = value
+            return (updates, ()) if updates else None
+    if words and words[0] == "unset":
+        tail = words[1:]
+        while tail and tail[0] in {"-v", "--"}:
+            tail = tail[1:]
+        if tail == ["PATH"]:
+            return ({}, ("PATH",))
+    return None
+
+
+def command_environment_states(
+        source, commands, initial_env=None, initial_lookup_uncertain=False,
+        deadline=None):
+    """Return the environment and lookup authority before each parsed command.
+
+    Only assignment-only, ``export PATH=...``, and ``unset PATH`` statements at the
+    current shell scope advance definite state. Conditional or otherwise unmodelled PATH
+    mutation becomes uncertainty; function bodies and subshells cannot silently rewrite
+    their parent's lookup state.
+    """
+    current_env = dict(os.environ if initial_env is None else initial_env)
+    current_lookup = bool(initial_lookup_uncertain)
+    states = []
+    records = function_declaration_records(source, deadline)
+    lexical_source = _zsh_option_skeleton(source, deadline)
+    excluded = [(record.start, record.end) for record in records]
+    for start, end in _function_scope_pairs(source, records, deadline):
+        excluded.append((start, end + 1))
+    conditional = _conditional_function_intervals(source, records, deadline)
+    invoked_path_mutation = any(
+        re.search(r"(?:^|[;\s])(?:PATH=|export\s+PATH=|unset\s+(?:-v\s+)?PATH\b)",
+                  body)
+        for body in extract_function_invocations(source, deadline)[1]
+    )
+    dynamic_path_mutation = invoked_path_mutation or bool(re.search(
+        r"(?:^|[;\s])(?:source|\.)\s+|\beval\b[^;\n]*\bPATH\b", lexical_source))
+    operators, _record_braces = _function_list_operators(source, records, deadline)
+    used_positions = set()
+    for tokens in commands:
+        _check_decision_budget(deadline)
+        states.append((dict(current_env), current_lookup))
+        action = _path_environment_action(tokens)
+        if action is None:
+            continue
+        words = [re.escape(word) for word, _quoting in tokens]
+        pattern = r"(?<![A-Za-z0-9_])" + r"\s+".join(words)
+        positions = [match.start() for match in re.finditer(pattern, lexical_source)
+                     if match.start() not in used_positions]
+        position = positions[0] if positions else None
+        if position is not None:
+            used_positions.add(position)
+        if position is not None and any(start <= position < end
+                                        for start, end in excluded):
+            continue
+        maybe = (position is None or dynamic_path_mutation
+                 or (position is not None and any(
+                     start < position < end for start, end in conditional))
+                 or (position is not None and any(
+                     operator[0] < position and operator[2] in {"&&", "||", "|"}
+                     for operator in operators)))
+        if maybe:
+            current_lookup = True
+            continue
+        updates, removals = action
+        current_env.update(updates)
+        for name in removals:
+            current_env.pop(name, None)
+        current_lookup = True
+    return tuple(states)
+
+
+def zsh_invocation_equals_state(words, default=ZSH_EQUALS_ON):
+    """Resolve literal zsh startup option spellings that alter EQUALS."""
+    if not words or os.path.basename(words[0]) != "zsh":
+        return ZSH_EQUALS_OFF
+    return _zsh_argv_state(words, default).equals_state
+
+
+_ENV_OCCURRENCE_MARKER = "__ZHAR_ENV_OCCURRENCE__"
+
+
+def _marked_occurrence_command_index(source, deadline=None):
+    """Return the command containing the exact occurrence marker."""
+    commands = split_commands(source, _deadline=deadline)
+    matches = []
+    for index, tokens in enumerate(commands):
+        if not any(word == _ENV_OCCURRENCE_MARKER
+                   for word, _quoting in tokens):
+            continue
+        # A redirect following a closed subshell, ``(sh) <<< ...``, belongs to
+        # that preceding command even though inserting a word at the redirect
+        # offset makes the marker a standalone lexical command.
+        marker_only = all(word == _ENV_OCCURRENCE_MARKER
+                          for word, _quoting in tokens)
+        matches.append(index - 1 if marker_only and index > 0 else index)
+    if len(matches) != 1:
+        raise CommandParseError("source occurrence does not map to one command")
+    return matches[0]
+
+
+def _occurrence_command_index(source, offset, deadline=None):
+    """Return the command containing one exact source offset."""
+    marked = (source[:offset] + " " + _ENV_OCCURRENCE_MARKER + " "
+              + source[offset:])
+    return _marked_occurrence_command_index(marked, deadline)
+
+
+def _command_at_occurrence(source, offset, deadline=None):
+    """Return the token record containing one exact source offset."""
+    marked = (source[:offset] + " " + _ENV_OCCURRENCE_MARKER + " "
+              + source[offset:])
+    commands = split_commands(marked, _deadline=deadline)
+    index = _occurrence_command_index(source, offset, deadline)
+    return [token for token in commands[index]
+            if token[0] != _ENV_OCCURRENCE_MARKER]
+
+
+def _occurrence_environment(
+        prefix, fragment, occurrence_offset, command_env=None,
+        lookup_authority_uncertain=False, deadline=None):
+    """Return authority state before one exact occurrence, including prior lines."""
+    joined = prefix
+    if joined and fragment and not joined.endswith(("\n", ";")):
+        joined += "\n"
+    fragment_start = len(joined)
+    joined += fragment
+    marked_joined = (joined[:fragment_start + occurrence_offset] + " "
+                     + _ENV_OCCURRENCE_MARKER + " "
+                     + joined[fragment_start + occurrence_offset:])
+    marked_cleaned = command_without_heredoc_payloads(marked_joined, deadline)
+    target_index = _marked_occurrence_command_index(marked_cleaned, deadline)
+    cleaned = command_without_heredoc_payloads(joined, deadline)
+    commands = split_commands(cleaned, _deadline=deadline)
+    if not commands:
+        return (dict(os.environ if command_env is None else command_env),
+                bool(lookup_authority_uncertain))
+    states = command_environment_states(
+        cleaned, commands, command_env, lookup_authority_uncertain, deadline)
+    if target_index >= len(states):
+        raise CommandParseError("source occurrence command has no environment state")
+    return states[target_index]
+
+
+def _heredoc_occurrence_environment(
+        finding, command_env=None, lookup_authority_uncertain=False,
+        deadline=None):
+    """Bind an executable heredoc header to its preceding command state."""
+    return _occurrence_environment(
+        finding.prefix, finding.header, finding.header_offset, command_env,
+        lookup_authority_uncertain, deadline)
+
+
+def _heredoc_expansion_environment(
+        finding, command_env=None, lookup_authority_uncertain=False,
+        deadline=None):
+    """Bind an unquoted heredoc expansion to its preceding command state."""
+    return _occurrence_environment(
+        finding.prefix, finding.header, finding.header_offset, command_env,
+        lookup_authority_uncertain, deadline)
+
+
+def _here_string_occurrence_environment(
+        source, fragment, command_env=None, lookup_authority_uncertain=False,
+        deadline=None):
+    """Bind a here-string source to state established on prior physical lines."""
+    return _occurrence_environment(
+        source.prefix, fragment, source.redirect_start, command_env,
+        lookup_authority_uncertain, deadline)
 
 
 def _literal_git_word(word):
@@ -1667,10 +2213,10 @@ def command_has_git_hazard_hint(tokens):
                for word in meaningful[1:])
 
 
-def source_has_git_hazard_hint(command):
+def source_has_git_hazard_hint(command, deadline=None):
     """Conservative Git-hazard hint for a nested command source string."""
     try:
-        commands = split_commands(command)
+        commands = split_commands(command, _deadline=deadline)
     except CommandParseError:
         return True
     return any(command_has_git_hazard_hint(tokens) for tokens in commands)
@@ -1689,17 +2235,17 @@ def _token_has_live_unresolved(token):
                for match in UNRESOLVED.finditer(text))
 
 
-def source_has_live_unresolved(source):
+def source_has_live_unresolved(source, deadline=None):
     """Inspect command source as the downstream shell or eval will parse it."""
     try:
-        commands = split_commands(source)
+        commands = split_commands(source, _deadline=deadline)
     except CommandParseError:
         return True
     return any(_token_has_live_unresolved(token) for tokens in commands
                for token in tokens)
 
 
-def source_has_dynamic_command_word(source):
+def source_has_dynamic_command_word(source, deadline=None):
     """Whether the EXECUTABLE of any subcommand in this source is itself an expansion.
 
     `sh -c "$CMD"` is genuinely unknowable and must stay a question. `sh -c 'git show
@@ -1708,7 +2254,7 @@ def source_has_dynamic_command_word(source):
     containing a `$`.
     """
     try:
-        commands = split_commands(source)
+        commands = split_commands(source, _deadline=deadline)
     except CommandParseError:
         return True
     for tokens in commands:
@@ -1745,7 +2291,40 @@ def _split_env_string(value):
     return [(word, "") for word in words]
 
 
-def unwrap_command_prefix(tokens):
+GIT_LOOKUP_AUTHORITY_ERROR = (
+    "Git executable lookup or configuration authority changes across a wrapper, so "
+    "the PATH-trusted Git inventory cannot be transferred"
+)
+ZSH_EQUALS_LOOKUP_AUTHORITY_ERROR = (
+    "zsh EQUALS executable lookup could not be resolved from the effective shell "
+    "environment"
+)
+
+
+def changed_git_lookup_authority_error(executable, lookup_authority_uncertain):
+    """Reject Git authority transfer across wrappers that change executable lookup."""
+    if (os.path.basename(executable) == "git" and os.sep not in executable
+            and lookup_authority_uncertain):
+        return GIT_LOOKUP_AUTHORITY_ERROR
+    return ""
+
+
+def only_changed_git_lookup_authority_error(resolution):
+    """True when prefix parsing resolved Git but could not transfer its authority."""
+    return (bool(resolution.errors)
+            and all(error == GIT_LOOKUP_AUTHORITY_ERROR
+                    for error in resolution.errors))
+
+
+def only_changed_zsh_equals_lookup_authority_error(resolution):
+    """True when a live =name is known but its changed PATH authority is not."""
+    return (bool(resolution.errors)
+            and all(error == ZSH_EQUALS_LOOKUP_AUTHORITY_ERROR
+                    for error in resolution.errors))
+
+
+def unwrap_command_prefix(tokens, shell="zsh", equals_state=ZSH_EQUALS_ON,
+                          command_env=None, lookup_authority_uncertain=False):
     """Resolve the executable boundary shared by both guards.
 
     The result retains uncertainty instead of guessing through a dynamic executable,
@@ -1753,33 +2332,45 @@ def unwrap_command_prefix(tokens):
     `hazard_hint` and return `ask` rather than treating an unresolved command as clean.
     """
     original = list(tokens)
-    items = list(tokens)
-    command_env = dict(os.environ)
+    command_env = dict(os.environ if command_env is None else command_env)
+    items = _resolve_outer_zsh_equals(
+        tokens, shell, equals_state, command_env, lookup_authority_uncertain)
     errors = []
     guarded_prefix_hazard = False
     wrapper_depth = 0
     env_splits = 0
     command_bypass_next = False
+    lookup_authority_uncertain = bool(lookup_authority_uncertain)
+    descendant_lookup_authority_uncertain = lookup_authority_uncertain
     while items:
         while items and items[0][0] in CONTROL_KEYWORDS:
             items.pop(0)
         while items and ASSIGNMENT.match(items[0][0]):
             key, value = items.pop(0)[0].split("=", 1)
             command_env[key] = value
+            if key == "PATH":
+                lookup_authority_uncertain = True
+                descendant_lookup_authority_uncertain = True
         if not items:
             break
 
         bypasses_shell_identity = command_bypass_next
         command_bypass_next = False
         executable_text = items[0][0]
-        if _equals_expansion_is_live(*items[0]):
+        if _equals_expansion_is_live(*items[0]) and shell == "zsh":
             # Write the resolved name back so every downstream reader -- this loop, the
             # grep guard's argv walk and the zsh guard's rev:path gate -- sees the command
             # zsh will actually run rather than the `=` form. Quoting suppresses the
             # expansion, so a quoted `=git` keeps its literal name and falls to the
             # generic identity check below like any other unproven command word.
-            executable_text = _equals_expanded(executable_text)
-            items[0] = (executable_text, items[0][1])
+            if equals_state == ZSH_EQUALS_ON:
+                errors.append(ZSH_EQUALS_LOOKUP_AUTHORITY_ERROR)
+                break
+            else:
+                errors.append(
+                    "zsh EQUALS expansion is disabled" if equals_state == ZSH_EQUALS_OFF
+                    else "zsh EQUALS expansion state is uncertain")
+                break
         if UNRESOLVED.search(executable_text):
             errors.append(f"dynamic executable {executable_text!r} cannot be resolved")
             break
@@ -1815,6 +2406,10 @@ def unwrap_command_prefix(tokens):
                     items.pop(0)
                     break
                 if word == "-p" or re.fullmatch(r"-p+", word):
+                    # `command -p` changes how this one executable is located. It does
+                    # not rewrite the environment inherited by a launched shell, so a
+                    # child must not borrow this launcher's lookup uncertainty.
+                    lookup_authority_uncertain = True
                     items.pop(0)
                     continue
                 if word in {"-v", "-V", "--version"} or (
@@ -1865,6 +2460,8 @@ def unwrap_command_prefix(tokens):
                     break
                 if word in {"-i", "--ignore-environment"}:
                     command_env = {}
+                    lookup_authority_uncertain = True
+                    descendant_lookup_authority_uncertain = True
                     items.pop(0)
                     continue
                 if word in {"-u", "--unset", "-C", "--chdir"}:
@@ -1875,9 +2472,16 @@ def unwrap_command_prefix(tokens):
                     value = items.pop(0)[0]
                     if option in {"-u", "--unset"}:
                         command_env.pop(value, None)
+                        if value == "PATH":
+                            lookup_authority_uncertain = True
+                            descendant_lookup_authority_uncertain = True
                     continue
                 if word.startswith("--unset="):
-                    command_env.pop(word.split("=", 1)[1], None)
+                    unset_name = word.split("=", 1)[1]
+                    command_env.pop(unset_name, None)
+                    if unset_name == "PATH":
+                        lookup_authority_uncertain = True
+                        descendant_lookup_authority_uncertain = True
                     items.pop(0)
                     continue
                 if word.startswith("--chdir="):
@@ -1914,6 +2518,9 @@ def unwrap_command_prefix(tokens):
                 if ASSIGNMENT.match(word):
                     key, value = items.pop(0)[0].split("=", 1)
                     command_env[key] = value
+                    if key == "PATH":
+                        lookup_authority_uncertain = True
+                        descendant_lookup_authority_uncertain = True
                     continue
                 break
             if errors:
@@ -1946,6 +2553,9 @@ def unwrap_command_prefix(tokens):
             continue
 
         if executable in EXEC_WRAPPERS:
+            if executable == "sudo":
+                lookup_authority_uncertain = True
+                descendant_lookup_authority_uncertain = True
             wrapper_depth += 1
             flags, value_options, attached_prefixes, short_flags, positionals = (
                 EXEC_WRAPPERS[executable]
@@ -1995,6 +2605,13 @@ def unwrap_command_prefix(tokens):
         if executable == "eval":
             break
 
+        lookup_error = changed_git_lookup_authority_error(
+            executable_text, lookup_authority_uncertain)
+        if lookup_error:
+            errors.append(lookup_error)
+            guarded_prefix_hazard = True
+            break
+
         explicit_harmless = (
             executable_text in TRUSTED_EXTERNAL_NON_FORWARDING_COMMANDS
             or (bypasses_shell_identity and executable_text == executable
@@ -2029,10 +2646,16 @@ def unwrap_command_prefix(tokens):
         errors.append(f"more than {MAX_PREFIX_DEPTH} nested command wrappers")
     return PrefixResolution(
         items, command_env, tuple(errors),
-        command_has_git_hazard_hint(original) or guarded_prefix_hazard)
+        command_has_git_hazard_hint(original) or guarded_prefix_hazard,
+        lookup_authority_uncertain, descendant_lookup_authority_uncertain)
 
 
-def nested_shell_invocation(resolution, current_shell="sh"):
+def _descendant_lookup_authority(resolution):
+    """Select lookup uncertainty inherited inside a launched shell."""
+    return resolution.descendant_lookup_authority_uncertain
+
+
+def nested_shell_invocation(resolution, current_shell="sh", deadline=None):
     """Return the resolved shell and its `-c` body, if this command invokes one."""
     if resolution.errors or not resolution.items:
         return None
@@ -2045,11 +2668,24 @@ def nested_shell_invocation(resolution, current_shell="sh"):
             current_shell,
             " ".join(word for word, _quoting in args),
             source_has_live_unresolved(
-                " ".join(word for word, _quoting in args)),
+                " ".join(word for word, _quoting in args), deadline),
+            dict(resolution.command_env),
+            _descendant_lookup_authority(resolution),
         )
     if shell not in SHELLS:
         return None
     args = resolution.items[1:]
+    if shell == "zsh":
+        words = [word for word, _quoting in resolution.items]
+        state = _zsh_argv_state(words)
+        if state.command_index is None:
+            return None
+        command_arg = resolution.items[state.command_index]
+        return ShellInvocation(
+            shell, command_arg[0],
+            source_has_live_unresolved(command_arg[0], deadline),
+            dict(resolution.command_env),
+            _descendant_lookup_authority(resolution))
     for index, (word, _quoting) in enumerate(args):
         if word == "--":
             continue
@@ -2057,8 +2693,108 @@ def nested_shell_invocation(resolution, current_shell="sh"):
                              and "c" in word[1:]):
             command_arg = args[index + 1] if index + 1 < len(args) else ("", "")
             return ShellInvocation(
-                shell, command_arg[0], source_has_live_unresolved(command_arg[0]))
+                shell, command_arg[0],
+                source_has_live_unresolved(command_arg[0], deadline),
+                dict(resolution.command_env),
+                _descendant_lookup_authority(resolution))
     return None
+
+
+def nested_shell_equals_state(resolution, invocation, inherited=ZSH_EQUALS_ON):
+    """Return EQUALS state for an eval body or a newly launched shell."""
+    if invocation.shell != "zsh":
+        return ZSH_EQUALS_OFF
+    executable = (os.path.basename(resolution.items[0][0])
+                  if resolution.items else "")
+    if executable == "eval":
+        return inherited
+    words = [word for word, _quoting in resolution.items]
+    return zsh_invocation_equals_state(words)
+
+
+def _strongest_decision(decisions):
+    """Return the highest-severity decision without making source order authority."""
+    rank = {"allow": 0, "ask": 1, "deny": 2}
+    worst = max(rank[decision] for decision, _reason in decisions)
+    selected = [(decision, reason) for decision, reason in decisions
+                if rank[decision] == worst]
+    return selected[0][0], "\n\n".join(reason for _decision, reason in selected)
+
+
+def _reduce_stdin_provenance(findings):
+    """Reduce every stdin-source decision so an earlier question cannot mask denial."""
+    decision, reason = _strongest_decision(
+        [(finding.decision, finding.reason) for finding in findings])
+    return StdinProvenance(decision, reason)
+
+
+def heredoc_equals_decision(
+        command, deadline=None, subcommands=None, classifier=None,
+        current_shell="zsh", inherited_equals_state=ZSH_EQUALS_ON,
+        command_env=None, lookup_authority_uncertain=False,
+        classify_non_direct_shell_bodies=False):
+    """Recursively classify direct shell heredocs with deny precedence."""
+    equals_findings = []
+    shell_findings = []
+    expansion_findings = []
+    try:
+        extract_heredoc_sources(
+            command, deadline, equals_findings, subcommands, shell_findings,
+            expansion_findings, classify_non_direct_shell_bodies)
+    except CommandParseError:
+        return None
+    findings = shell_findings + [finding for finding in equals_findings
+                                 if finding not in shell_findings]
+    decisions = []
+    for finding in findings:
+        _check_decision_budget(deadline)
+        resolved_env = dict(command_env or os.environ)
+        resolved_lookup = lookup_authority_uncertain
+        try:
+            occurrence_env, occurrence_lookup = _heredoc_occurrence_environment(
+                finding, command_env, lookup_authority_uncertain, deadline)
+            header_command = _command_at_occurrence(
+                finding.header, finding.header_offset, deadline)
+            resolution = unwrap_command_prefix(
+                header_command, current_shell, inherited_equals_state,
+                occurrence_env, occurrence_lookup)
+            resolved_env = resolution.command_env
+            resolved_lookup = _descendant_lookup_authority(resolution)
+            words = [word for word, _quoting in resolution.items]
+            state = (zsh_invocation_equals_state(words)
+                     if finding.shell == "zsh" else ZSH_EQUALS_OFF)
+        except (CommandParseError, IndexError):
+            state = ZSH_EQUALS_UNKNOWN
+        if classifier is None:
+            decision = ("deny" if finding.shell == "zsh" and state == ZSH_EQUALS_ON
+                        else "ask")
+            reason = ("a zsh heredoc executes guarded `=git` syntax while its EQUALS "
+                      "option is enabled" if decision == "deny"
+                      else f"a {finding.shell} heredoc contains guarded `=git` syntax but its "
+                      "executable identity is not proven")
+        else:
+            decision, reason = classifier(
+                finding.body, finding.shell, state, deadline,
+                resolved_env, resolved_lookup)
+        if decision != "allow":
+            decisions.append((decision, reason))
+    if classifier is not None:
+        for finding in expansion_findings:
+            _check_decision_budget(deadline)
+            try:
+                resolved_env, resolved_lookup = _heredoc_expansion_environment(
+                    finding, command_env, lookup_authority_uncertain, deadline)
+            except CommandParseError:
+                resolved_env = dict(command_env or os.environ)
+                resolved_lookup = True
+            decision, reason = classifier(
+                finding.source, current_shell, inherited_equals_state, deadline,
+                resolved_env, resolved_lookup)
+            if decision != "allow":
+                decisions.append((decision, reason))
+    if not decisions:
+        return None
+    return _strongest_decision(decisions)
 
 def _alias_table(configs):
     aliases = {}
@@ -2100,7 +2836,9 @@ ALIAS_GUARDED = "guarded"
 ALIAS_UNCERTAIN = "uncertain"
 
 
-def _alias_guard_state(name, aliases, seen=(), depth=0):
+def _alias_guard_state(
+        name, aliases, seen=(), depth=0, deadline=None, command_env=None,
+        lookup_authority_uncertain=False):
     """Classify a standard alias chain without collapsing uncertainty into safety."""
     lowered = name.lower()
     if lowered in GIT_HAZARD_SUBCOMMANDS:
@@ -2114,7 +2852,9 @@ def _alias_guard_state(name, aliases, seen=(), depth=0):
     body = aliases[lowered]
     if body.startswith("!"):
         return _shell_alias_guard_state(
-            body[1:], aliases, seen + (lowered,), depth + 1)
+            body[1:], aliases, seen + (lowered,), depth + 1,
+            deadline=deadline, command_env=command_env,
+            lookup_authority_uncertain=lookup_authority_uncertain)
     try:
         words = shlex.split(body, posix=True)
     except ValueError:
@@ -2132,10 +2872,11 @@ def _alias_guard_state(name, aliases, seen=(), depth=0):
     if index >= len(words) or words[index].startswith("-"):
         return ALIAS_UNCERTAIN
     return _alias_guard_state(
-        words[index], local_aliases, seen + (lowered,), depth + 1)
+        words[index], local_aliases, seen + (lowered,), depth + 1, deadline,
+        command_env, lookup_authority_uncertain)
 
 
-def _shell_alias_git_state(resolution, aliases, seen, depth):
+def _shell_alias_git_state(resolution, aliases, seen, depth, deadline=None):
     """Classify one literal Git invocation reached from shell alias source."""
     words = [word for word, _quoting in resolution.items]
     if not words or os.path.basename(words[0]) != "git":
@@ -2202,44 +2943,113 @@ def _shell_alias_git_state(resolution, aliases, seen, depth):
             index += 1
     if index >= len(words):
         return ALIAS_HARMLESS
-    return _alias_guard_state(words[index], local_aliases, seen, depth + 1)
+    return _alias_guard_state(
+        words[index], local_aliases, seen, depth + 1, deadline,
+        resolution.command_env,
+        resolution.descendant_lookup_authority_uncertain)
+
+
+def _alias_authority_context(command_env, lookup_authority_uncertain):
+    """Copy authority state at each shell-alias parser re-entry."""
+    return dict(command_env), bool(lookup_authority_uncertain)
+
+
+def _alias_command_environment_states(
+        source, commands, command_env, lookup_authority_uncertain, deadline):
+    """Bind alias commands to the same straight-line PATH state as public source."""
+    return command_environment_states(
+        source, commands, command_env, lookup_authority_uncertain, deadline)
 
 
 def _shell_alias_guard_state(source, aliases, seen=(), depth=0,
-                             current_shell="sh"):
+                             current_shell="sh", deadline=None, command_env=None,
+                             lookup_authority_uncertain=False):
     """Tri-state literal shell alias traversal shared with top-level shell parsing."""
     if depth > MAX_ALIAS_DEPTH:
         return ALIAS_UNCERTAIN
     if not isinstance(source, str) or not source:
         return ALIAS_UNCERTAIN
+    alias_env = dict(os.environ if command_env is None else command_env)
+
+    def classify_heredoc(body, shell, state, inner_deadline, env, lookup):
+        nested_env, nested_lookup = _alias_authority_context(env, lookup)
+        nested = _shell_alias_guard_state(
+            body, aliases, seen, depth + 1, shell, inner_deadline,
+            nested_env, nested_lookup)
+        return (("allow", "") if nested == ALIAS_HARMLESS
+                else ("ask", "shell alias heredoc is guarded or unresolved"))
+
+    heredoc = heredoc_equals_decision(
+        source, deadline, classifier=classify_heredoc,
+        current_shell=current_shell,
+        inherited_equals_state=(ZSH_EQUALS_ON if current_shell == "zsh"
+                                else ZSH_EQUALS_OFF),
+        command_env=alias_env,
+        lookup_authority_uncertain=lookup_authority_uncertain)
+    if heredoc is not None:
+        return ALIAS_UNCERTAIN
+    for here_source in live_here_string_sources(source):
+        if here_source.descriptor != 0:
+            continue
+        direct = direct_here_string_invocation(
+            here_source, current_shell,
+            ZSH_EQUALS_ON if current_shell == "zsh" else ZSH_EQUALS_OFF,
+            alias_env, lookup_authority_uncertain, deadline)
+        if not direct:
+            continue
+        resolution, invocation = direct
+        if here_source.dynamic:
+            return ALIAS_UNCERTAIN
+        nested_env, nested_lookup = _alias_authority_context(
+            invocation.command_env, invocation.lookup_authority_uncertain)
+        nested = _shell_alias_guard_state(
+            here_source.body, aliases, seen, depth + 1, invocation.shell,
+            deadline, nested_env, nested_lookup)
+        if nested != ALIAS_HARMLESS:
+            return nested
     try:
-        commands = split_commands(source)
+        commands = split_commands(source, _deadline=deadline)
     except CommandParseError:
         return ALIAS_UNCERTAIN
+    environments = _alias_command_environment_states(
+        source, commands, alias_env, lookup_authority_uncertain, deadline)
     state = ALIAS_HARMLESS
-    for tokens in commands:
-        resolution = unwrap_command_prefix(tokens)
+    for tokens, (nested_command_env, nested_lookup) in zip(
+            commands, environments):
+        resolution = unwrap_command_prefix(
+            tokens, current_shell,
+            ZSH_EQUALS_ON if current_shell == "zsh" else ZSH_EQUALS_OFF,
+            nested_command_env, nested_lookup)
         if resolution.errors:
             return ALIAS_UNCERTAIN
-        invocation = nested_shell_invocation(resolution, current_shell)
+        invocation = nested_shell_invocation(
+            resolution, current_shell, deadline)
         if invocation is not None:
             if not invocation.command:
                 return ALIAS_UNCERTAIN
+            nested_env, nested_lookup = _alias_authority_context(
+                invocation.command_env, invocation.lookup_authority_uncertain)
             nested_state = _shell_alias_guard_state(
-                invocation.command, aliases, seen, depth + 1, invocation.shell)
+                invocation.command, aliases, seen, depth + 1, invocation.shell,
+                deadline, nested_env, nested_lookup)
             if nested_state != ALIAS_HARMLESS:
                 return nested_state
-            if invocation.dynamic or source_has_dynamic_command_word(invocation.command):
+            if (invocation.dynamic
+                    or source_has_dynamic_command_word(
+                        invocation.command, deadline)):
                 return ALIAS_UNCERTAIN
             continue
-        command_state = _shell_alias_git_state(resolution, aliases, seen, depth)
+        command_state = _shell_alias_git_state(
+            resolution, aliases, seen, depth, deadline)
         if command_state != ALIAS_HARMLESS:
             return command_state
         state = command_state
     return state
 
 
-def resolve_git_alias(subcommand, tail, aliases, authority, effective_exec_path):
+def resolve_git_alias(
+        subcommand, tail, aliases, authority, effective_exec_path, deadline=None,
+        command_env=None, lookup_authority_uncertain=False):
     """Resolve standard Git aliases with bounded recursive closure.
 
     Return ``(subcommand, argv, error, derived-config)``. A harmless shell alias has no subcommand;
@@ -2263,7 +3073,10 @@ def resolve_git_alias(subcommand, tail, aliases, authority, effective_exec_path)
         seen.append(current)
         body = aliases[current]
         if body.startswith("!"):
-            shell_state = _shell_alias_guard_state(body[1:], aliases, tuple(seen))
+            shell_state = _shell_alias_guard_state(
+                body[1:], aliases, tuple(seen), deadline=deadline,
+                command_env=command_env,
+                lookup_authority_uncertain=lookup_authority_uncertain)
             if shell_state != ALIAS_HARMLESS:
                 detail = ("contains or reaches a guarded Git operation"
                           if shell_state == ALIAS_GUARDED
@@ -2302,7 +3115,7 @@ def resolve_git_alias(subcommand, tail, aliases, authority, effective_exec_path)
             derived_configs)
 
 
-def git_grep_argv(tokens, resolution=None):
+def git_grep_argv(tokens, resolution=None, deadline=None):
     """Return guarded pattern argv, Git config, and unresolved invocation state.
 
     None means the resolved Git subcommand is outside grep/log/shortlog/rev-list
@@ -2324,7 +3137,7 @@ def git_grep_argv(tokens, resolution=None):
     if (os.sep not in words[j]
             and command_env.get("PATH", os.environ.get("PATH")) != os.environ.get("PATH")):
         return [], [], ["PATH changes which Git executable would run"]
-    authority = trusted_git_authority(words[j])
+    authority = trusted_git_authority(words[j], deadline=deadline)
     effective_exec_path = command_env.get("GIT_EXEC_PATH", authority.exec_path)
     j += 1
     configs = []
@@ -2416,7 +3229,8 @@ def git_grep_argv(tokens, resolution=None):
         return None
     subcommand, rest, alias_error, alias_configs = resolve_git_alias(
         words[j], items[j + 1:], _alias_table(configs), authority,
-        effective_exec_path)
+        effective_exec_path, deadline, command_env,
+        resolution.descendant_lookup_authority_uncertain)
     configs.extend(alias_configs)
     if alias_error:
         unresolved_configs.append(alias_error)
@@ -2630,7 +3444,12 @@ def _parse_shell_input_word(line, start):
 
 def live_here_string_sources(command):
     sources = []
-    for line in command.splitlines():
+    offset = 0
+    for raw_line in command.splitlines(keepends=True):
+        line = raw_line[:-1] if raw_line.endswith("\n") else raw_line
+        if line.endswith("\r"):
+            line = line[:-1]
+        prefix = command[:offset]
         quote = ""
         index = 0
         while index < len(line):
@@ -2664,10 +3483,11 @@ def live_here_string_sources(command):
                 descriptor_text = ""
             body, dynamic, word_end = _parse_shell_input_word(line, index + 3)
             sources.append(HereStringSource(
-                line, redirect_start, word_end, int(descriptor_text or "0"),
-                body, dynamic,
+                prefix, line, redirect_start, word_end,
+                int(descriptor_text or "0"), body, dynamic,
             ))
             index = word_end
+        offset += len(raw_line)
     return tuple(sources)
 
 
@@ -2783,57 +3603,87 @@ def reachable_stdin_shells(commands):
     return tuple(states)
 
 
-def associated_stdin_consumer(line, redirect_start, word_end, commands):
-    """Resolve one input source to its command record without cross-command joins."""
+def _marked_stdin_command(line, redirect_start, word_end, deadline=None):
+    """Return the one command record owning an input-source marker."""
     marker = "__ZHAR_STDIN_SOURCE__"
     if marker in line:
-        return StdinConsumer(False, True)
+        return None
     marked = line[:redirect_start] + " " + marker + " " + line[word_end:]
     try:
-        marked_commands = split_commands(marked)
+        marked_commands = split_commands(marked, _deadline=deadline)
     except CommandParseError:
-        return StdinConsumer(False, True)
+        return None
     matches = []
-    for tokens in marked_commands:
+    for index, tokens in enumerate(marked_commands):
         if any(text == marker for text, _quoting in tokens):
-            matches.append(tokens)
+            matches.append((index, tokens))
     if len(matches) != 1:
-        return StdinConsumer(False, True)
-    stripped = [token for token in matches[0] if token[0] != marker]
+        return None
+    index, tokens = matches[0]
+    return index, [token for token in tokens if token[0] != marker]
+
+
+def associated_stdin_consumer(
+        line, redirect_start, word_end, deadline=None):
+    """Resolve one input source to its command record without cross-command joins."""
+    marked = _marked_stdin_command(line, redirect_start, word_end, deadline)
+    if marked is None:
+        return StdinConsumer(False, True, "")
+    _index, stripped = marked
     resolution = unwrap_command_prefix(_without_redirection_tokens(stripped))
     if resolution.errors or not resolution.items:
-        return StdinConsumer(False, True)
+        return StdinConsumer(False, True, "")
     words = [word for word, _quoting in resolution.items]
     executable = words[0]
     if executable in TRUSTED_EXTERNAL_NON_FORWARDING_COMMANDS:
-        return StdinConsumer(False, False)
+        return StdinConsumer(False, False, "")
     if os.path.basename(executable) in SHELLS:
-        return StdinConsumer(_shell_reads_stdin(words), False)
-    return StdinConsumer(False, True)
+        return StdinConsumer(_shell_reads_stdin(words), False,
+                             os.path.basename(executable))
+    return StdinConsumer(False, True, "")
 
 
-def _direct_here_string_shell(source):
+def direct_here_string_invocation(
+        source, current_shell="zsh", equals_state=ZSH_EQUALS_ON,
+        command_env=None, lookup_authority_uncertain=False, deadline=None):
+    """Bind a direct shell here-string to the wrapper authority that launches it."""
+    marked = _marked_stdin_command(
+        source.line, source.redirect_start, source.word_end, deadline)
+    if marked is None:
+        return None
+    command_index, marked_tokens = marked
+    if (not marked_tokens and command_index > 0
+            and re.fullmatch(
+                r"\s*\(\s*(?:/[^\s()]+/)?(?:sh|bash|zsh|dash|ksh)\s*\)\s*",
+                source.line[:source.redirect_start])):
+        command_index -= 1
     clean_line = (source.line[:source.redirect_start] + " "
                   + source.line[source.word_end:])
     try:
-        commands = split_commands(clean_line)
-    except CommandParseError:
-        return False
-    executable_commands = []
-    for tokens in commands:
-        stripped = _without_redirection_tokens(tokens)
-        if stripped:
-            executable_commands.append(stripped)
-    if len(executable_commands) != 1:
-        return False
-    resolution = unwrap_command_prefix(executable_commands[0])
+        occurrence_env, occurrence_lookup = _here_string_occurrence_environment(
+            source, clean_line, command_env, lookup_authority_uncertain,
+            deadline)
+        commands = split_commands(clean_line, _deadline=deadline)
+        if command_index >= len(commands):
+            return None
+        resolution = unwrap_command_prefix(
+            commands[command_index], current_shell, equals_state,
+            occurrence_env, occurrence_lookup)
+    except (CommandParseError, IndexError):
+        return None
     if resolution.errors or not resolution.items:
-        return False
+        return None
     words = [word for word, _quoting in resolution.items]
-    return bool(os.path.basename(words[0]) in SHELLS and _shell_reads_stdin(words))
+    shell = os.path.basename(words[0])
+    if shell not in SHELLS or not _shell_reads_stdin(words):
+        return None
+    invocation = ShellInvocation(
+        shell, source.body, source.dynamic, dict(resolution.command_env),
+        _descendant_lookup_authority(resolution))
+    return resolution, invocation
 
 
-def _direct_heredoc_header(line):
+def _direct_heredoc_header(line, deadline=None):
     redirects = []
     search = 0
     while True:
@@ -2868,17 +3718,22 @@ def _direct_heredoc_header(line):
         cursor = end
     parts.append(line[cursor:])
     try:
-        commands = split_commands("".join(parts))
+        commands = split_commands("".join(parts), _deadline=deadline)
     except CommandParseError:
         return False
-    return reachable_stdin_shells(commands) == (True,)
+    return len(commands) == 1 and reachable_stdin_shells(commands) == (True,)
 
 
-def classify_direct_here_string(source, shell_depth):
+def classify_direct_here_string(source, shell_depth, deadline, resolution,
+                                invocation, inherited_equals_state):
     if source.dynamic:
         return StdinProvenance(
             "ask", "a directly associated shell here-string has a dynamic source")
-    decision, reason = decide(source.body, shell_depth + 1)
+    decision, reason = decide(
+        source.body, shell_depth + 1, deadline, invocation.shell,
+        nested_shell_equals_state(
+            resolution, invocation, inherited_equals_state),
+        invocation.command_env, invocation.lookup_authority_uncertain)
     if decision == "allow":
         return None
     return StdinProvenance(
@@ -2886,51 +3741,81 @@ def classify_direct_here_string(source, shell_depth):
         + decision + " (" + reason + ")")
 
 
-def interpreter_stdin_provenance(command, commands, shell_depth):
+def interpreter_stdin_provenance(
+        command, commands, shell_depth, deadline, current_shell="zsh",
+        equals_state=ZSH_EQUALS_ON, command_env=None,
+        lookup_authority_uncertain=False):
     """Classify stdin source reachability over all parsed command/function records."""
+    findings = []
     for source in live_here_string_sources(command):
         if source.descriptor != 0:
             continue
-        if _direct_here_string_shell(source):
-            classified = classify_direct_here_string(source, shell_depth)
+        clean_line = (source.line[:source.redirect_start] + " "
+                      + source.line[source.word_end:])
+        try:
+            source_env, source_lookup = _here_string_occurrence_environment(
+                source, clean_line, command_env, lookup_authority_uncertain,
+                deadline)
+        except CommandParseError:
+            source_env = dict(command_env or os.environ)
+            source_lookup = True
+        direct = direct_here_string_invocation(
+            source, current_shell, equals_state, command_env,
+            lookup_authority_uncertain, deadline)
+        if direct:
+            resolution, invocation = direct
+            classified = classify_direct_here_string(
+                source, shell_depth, deadline, resolution, invocation,
+                equals_state)
             if classified is not None:
-                return classified
+                findings.append(classified)
             continue
         consumer = associated_stdin_consumer(
-            source.line, source.redirect_start, source.word_end, commands)
+            source.line, source.redirect_start, source.word_end, deadline)
         if not consumer.reads_stdin and not consumer.unresolved:
             continue
         if consumer.reads_stdin and not consumer.unresolved:
-            classified = classify_direct_here_string(source, shell_depth)
+            classified = classify_direct_here_string(
+                source, shell_depth, deadline,
+                PrefixResolution(
+                    [(consumer.shell, "")], dict(source_env), (),
+                    False, source_lookup, source_lookup),
+                ShellInvocation(
+                    consumer.shell, source.body, source.dynamic,
+                    dict(source_env), source_lookup),
+                equals_state)
             if classified is not None:
-                return classified
+                findings.append(classified)
             continue
         if source.dynamic:
-            nested_decision, nested_reason = decide(source.body, shell_depth + 1)
+            nested_decision, nested_reason = decide(
+                source.body, shell_depth + 1, deadline, current_shell,
+                equals_state, source_env, source_lookup)
             if nested_decision != "allow":
-                return StdinProvenance(
+                findings.append(StdinProvenance(
                     nested_decision,
                     "a here-string expansion recursively classified as "
                     + nested_decision + " (" + nested_reason + ")",
-                )
+                ))
         guarded_body = _raw_has_guarded_evidence(source.body)
         if (consumer.unresolved and guarded_body
-                and _has_simple_unproven_shell_input(source.line)):
+                and _has_simple_unproven_shell_input(source.line, deadline)):
             continue
         if consumer.unresolved:
-            return StdinProvenance(
+            findings.append(StdinProvenance(
                 "ask", "a here-string consumer edge could not be resolved to a "
-                "proven data consumer or interpreter")
+                "proven data consumer or interpreter"))
+            continue
         if source.dynamic or guarded_body:
             association = "unresolved" if consumer.unresolved else "executable"
-            return StdinProvenance(
+            findings.append(StdinProvenance(
                 "ask", f"a guarded or dynamic here-string has an {association} "
-                "interpreter edge through a compound, subshell, or function")
+                "interpreter edge through a compound, subshell, or function"))
     for source in live_file_input_sources(command):
         if source.descriptor != 0:
             continue
         consumer = associated_stdin_consumer(
-            source.line, source.redirect_start, source.word_end, commands)
+            source.line, source.redirect_start, source.word_end, deadline)
         if not consumer.reads_stdin and not consumer.unresolved:
             continue
         if source.path == "/dev/null":
@@ -2939,17 +3824,20 @@ def interpreter_stdin_provenance(command, commands, shell_depth):
             detail = "dynamic" if source.dynamic else "guarded"
         else:
             detail = "uninspected"
-        return StdinProvenance(
+        findings.append(StdinProvenance(
             "ask", f"a {detail} file-input source can reach an executable interpreter; "
-            "use an explicit script operand or a directly classified source")
+            "use an explicit script operand or a directly classified source"))
     guarded_or_dynamic = _raw_has_guarded_evidence(command) or bool(UNRESOLVED.search(command))
     if not guarded_or_dynamic:
-        return None
+        if not findings:
+            return None
+        return _reduce_stdin_provenance(findings)
     has_pipeline = False
     for line in command.splitlines():
         for position in _live_shell_operator_positions(line, "|"):
             try:
-                downstream = split_commands(line[position + 1:])
+                downstream = split_commands(
+                    line[position + 1:], _deadline=deadline)
             except CommandParseError:
                 has_pipeline = True
                 break
@@ -2966,7 +3854,7 @@ def interpreter_stdin_provenance(command, commands, shell_depth):
         for kind, prefix, descriptor in _live_interpreter_input_redirects(line):
             if kind != "process substitution" or descriptor != 0:
                 continue
-            executes = _header_executes_shell(line[:prefix])
+            executes = _header_executes_shell(line[:prefix], deadline=deadline)
             if executes is not False:
                 has_process_input = True
                 break
@@ -2975,14 +3863,17 @@ def interpreter_stdin_provenance(command, commands, shell_depth):
     heredoc_headers = [line for line in command.splitlines()
                        if _find_heredoc_operator(line) is not None]
     has_unproven_heredoc = any(
-        not _direct_heredoc_header(line)
-        and _header_executes_shell(line[:_find_heredoc_operator(line)[0]]) is not False
+        not _direct_heredoc_header(line, deadline)
+        and _header_executes_shell(
+            line[:_find_heredoc_operator(line)[0]], deadline=deadline) is not False
         for line in heredoc_headers)
     if has_pipeline or has_process_input or has_unproven_heredoc:
-        return StdinProvenance(
+        findings.append(StdinProvenance(
             "ask", "guarded or dynamic stdin source syntax can reach an executable "
-            "interpreter but no single direct source association was proven")
-    return None
+            "interpreter but no single direct source association was proven"))
+    if not findings:
+        return None
+    return _reduce_stdin_provenance(findings)
 
 
 def _raw_has_guarded_evidence(command):
@@ -2997,10 +3888,20 @@ def _raw_has_guarded_evidence(command):
     return (has_git and has_guarded_subcommand) or has_rev_expansion
 
 
-def _has_simple_unproven_shell_input(line):
+def _has_simple_unproven_shell_input(line, deadline=None):
+    stdin_sources = [source for source in live_here_string_sources(line)
+                     if source.descriptor == 0]
+    if stdin_sources:
+        consumers = [associated_stdin_consumer(
+            source.line, source.redirect_start, source.word_end, deadline)
+            for source in stdin_sources]
+        if all(not consumer.unresolved and not consumer.reads_stdin
+               for consumer in consumers):
+            return False
     for _kind, prefix_end, descriptor in _live_interpreter_input_redirects(line):
         prefix = line[:prefix_end]
-        if (descriptor == 0 and _header_executes_shell(prefix) is False
+        if (descriptor == 0
+                and _header_executes_shell(prefix, deadline=deadline) is False
                 and not any(_live_shell_operator_positions(line, operator)
                             for operator in (";", "|", "&", "{", "}", "(", ")"))
                 and re.search(
@@ -3012,7 +3913,7 @@ def _has_simple_unproven_shell_input(line):
     return False
 
 
-def conservative_allow_uncertainty(command):
+def conservative_allow_uncertainty(command, deadline=None):
     """Catch guarded execution syntax left unresolved by the detailed parser.
 
     This fallback deliberately prefers a question over treating guarded-looking text as
@@ -3027,7 +3928,7 @@ def conservative_allow_uncertainty(command):
     if not _raw_has_guarded_evidence(command):
         return None
     try:
-        commands = split_commands(command)
+        commands = split_commands(command, _deadline=deadline)
     except CommandParseError:
         return "guarded execution syntax could not be classified"
     if commands:
@@ -3041,87 +3942,137 @@ def conservative_allow_uncertainty(command):
                 break
         if exact_inert:
             return None
-    if any(_has_simple_unproven_shell_input(line) for line in command.splitlines()):
+    if any(_has_simple_unproven_shell_input(line, deadline)
+           for line in command.splitlines()):
         return "shell-input association remains unproven after detailed parsing"
     return None
 
 
-def decide(command, _shell_depth=0):
+def decide(command, _shell_depth=0, _deadline=None, _shell="zsh",
+           _equals_state=ZSH_EQUALS_ON, _command_env=None,
+           _lookup_authority_uncertain=False):
     """-> (decision, reason). decision in {allow, deny, ask}."""
+    _deadline = (time.monotonic() + GUARD_BUDGET_SECONDS
+                 if _deadline is None else _deadline)
+    if time.monotonic() >= _deadline:
+        return ("ask", "the Bash guard exhausted its internal decision budget before "
+                "the command could be classified; retry with a simpler direct command.")
     if _shell_depth > 4:
         return ("ask", "nested shell -c depth exceeds the git-grep guard's model; "
                 "verify the command or invoke git grep directly with -P.")
+    equals_heredoc = heredoc_equals_decision(
+        command, _deadline,
+        classifier=lambda body, shell, state, deadline, env, lookup: decide(
+            body, _shell_depth + 1, deadline, shell, state, env, lookup),
+        current_shell=_shell, inherited_equals_state=_equals_state,
+        command_env=_command_env,
+        lookup_authority_uncertain=_lookup_authority_uncertain)
+    decisions = []
+    if equals_heredoc is not None:
+        decisions.append(equals_heredoc)
     try:
-        commands = split_commands(command)
+        scan_command = command_without_heredoc_payloads(command, _deadline)
+        commands = split_commands(scan_command, _deadline=_deadline)
     except CommandParseError as exc:
-        return ("ask", f"the Bash command cannot be parsed safely ({exc}); "
-                "rewrite it as a direct command before proceeding.")
+        decisions.append((
+            "ask", f"the Bash command cannot be parsed safely ({exc}); "
+            "rewrite it as a direct command before proceeding."))
+        return _strongest_decision(decisions)
     try:
         stdin_provenance = interpreter_stdin_provenance(
-            command, commands, _shell_depth)
+            command, commands, _shell_depth, _deadline, _shell, _equals_state,
+            _command_env, _lookup_authority_uncertain)
     except CommandParseError as exc:
-        return ("ask", f"interpreter stdin provenance cannot be parsed safely ({exc}); "
-                "rewrite it as one direct source before proceeding.")
+        decisions.append((
+            "ask", f"interpreter stdin provenance cannot be parsed safely ({exc}); "
+            "rewrite it as one direct source before proceeding."))
+        return _strongest_decision(decisions)
     if stdin_provenance is not None:
-        return stdin_provenance.decision, stdin_provenance.reason
-    for tokens in commands:
-        resolution = unwrap_command_prefix(tokens)
+        decisions.append((stdin_provenance.decision, stdin_provenance.reason))
+    equals_states = zsh_equals_states(
+        scan_command, commands,
+        _equals_state if _shell == "zsh" else ZSH_EQUALS_OFF, _deadline)
+    environment_states = command_environment_states(
+        scan_command, commands, _command_env, _lookup_authority_uncertain,
+        _deadline)
+    for tokens, equals_state, (command_env, lookup_uncertain) in zip(
+            commands, equals_states, environment_states):
+        resolution = unwrap_command_prefix(
+            tokens, _shell, equals_state, command_env, lookup_uncertain)
         if resolution.errors and resolution.hazard_hint:
-            return ("ask", "a possible Git invocation crosses an unresolved command "
-                    "prefix (" + "; ".join(resolution.errors) + "); invoke Git directly "
-                    "so the pattern engine can be verified.")
-        invocation = nested_shell_invocation(resolution)
+            decisions.append((
+                "ask", "a possible Git invocation crosses an unresolved command "
+                "prefix (" + "; ".join(resolution.errors) + "); invoke Git directly "
+                "so the pattern engine can be verified."))
+            continue
+        invocation = nested_shell_invocation(resolution, _shell, _deadline)
         if invocation is not None:
             # Inspect the body first. Returning `ask` on `dynamic` before recursing meant
             # a nested body carrying a live ERE hazard was downgraded to a question, and
             # a body with no Git in it at all -- `sh -c 'echo $PATH'` -- was questioned
             # too, purely for containing a `$`.
             if invocation.command:
+                nested_equals_state = nested_shell_equals_state(
+                    resolution, invocation, equals_state)
                 nested_decision, nested_reason = decide(
-                    invocation.command, _shell_depth + 1)
+                    invocation.command, _shell_depth + 1, _deadline,
+                    invocation.shell, nested_equals_state,
+                    invocation.command_env,
+                    invocation.lookup_authority_uncertain)
                 if nested_decision != "allow":
-                    return nested_decision, nested_reason
+                    decisions.append((nested_decision, nested_reason))
             # Uncertainty about the body only matters once Git is actually in it.
             # An unknown EXECUTABLE is the honest question: the body could be anything,
             # including a git grep. An unknown ARGUMENT to a named command is not -- that
             # is judged on what is written.
             if (not invocation.command
-                    or source_has_dynamic_command_word(invocation.command)):
-                return ("ask", "a shell -c command string is empty, or chooses its "
-                        "executable from an expansion, so the Git grep engine cannot be "
-                        "inspected before execution")
+                    or source_has_dynamic_command_word(invocation.command, _deadline)):
+                decisions.append((
+                    "ask", "a shell -c command string is empty, or chooses its "
+                    "executable from an expansion, so the Git grep engine cannot be "
+                    "inspected before execution"))
         try:
-            got = git_grep_argv(tokens, resolution)
+            got = git_grep_argv(tokens, resolution, _deadline)
         except GitAuthorityError as exc:
             # Not proof of the guarded hazard, so not `deny`: this is the unresolved-
             # executable row of the decision contract, which is `ask`.
-            return ("ask", "the Git behind this command cannot be identified ("
-                    + str(exc) + "), so neither its command inventory nor its regex "
-                    "engine can be proved; confirm the binary or invoke Git directly "
-                    "with an explicit -P engine.")
+            decisions.append((
+                "ask", "the Git behind this command cannot be identified ("
+                + str(exc) + "), so neither its command inventory nor its regex "
+                "engine can be proved; confirm the binary or invoke Git directly "
+                "with an explicit -P engine."))
+            continue
         if got is None:
             continue
         argv, configs, unresolved_configs = got
         if unresolved_configs:
-            return ("ask",
-                    "the Git pattern invocation has unresolved configuration or alias "
-                    "state: " + "; ".join(unresolved_configs) + ". This guard cannot "
-                    "prove the command and regex engine, so use a direct invocation with "
-                    "an explicit -P engine.")
+            decisions.append((
+                "ask", "the Git pattern invocation has unresolved configuration or alias "
+                "state: " + "; ".join(unresolved_configs) + ". This guard cannot "
+                "prove the command and regex engine, so use a direct invocation with "
+                "an explicit -P engine."))
+            continue
         engine = None
         engine_src = None
+        invalid_config = False
         for cfg in configs:
             key, separator, value = cfg.partition("=")
             key = key.strip().lower()
             val = value.strip().lower()
             if key == "grep.patterntype":
                 if not separator:
-                    return ("ask", "git grep has grep.patternType with no value; Git may "
-                            "fail without diagnostics, so the guard cannot prove an engine. "
-                            "Use an explicit value or invoke git grep with -P.")
+                    decisions.append((
+                        "ask", "git grep has grep.patternType with no value; Git may "
+                        "fail without diagnostics, so the guard cannot prove an engine. "
+                        "Use an explicit value or invoke git grep with -P."))
+                    invalid_config = True
+                    break
                 if val not in CONFIG_ENGINE:
-                    return ("ask", f"git grep has unrecognized grep.patternType={value!r}; "
-                            "the guard cannot prove an engine. Use -P explicitly.")
+                    decisions.append((
+                        "ask", f"git grep has unrecognized grep.patternType={value!r}; "
+                        "the guard cannot prove an engine. Use -P explicitly."))
+                    invalid_config = True
+                    break
                 engine = CONFIG_ENGINE[val]
                 engine_src = "config"
             elif key == "grep.extendedregexp":
@@ -3131,6 +4082,8 @@ def decide(command, _shell_depth=0):
                 else:
                     engine = "E"
                     engine_src = "config"
+        if invalid_config:
+            continue
         patterns = []
         pattern_from_file = False
         pattern_declared = False
@@ -3228,25 +4181,30 @@ def decide(command, _shell_depth=0):
             k += 1
 
         if uncertain_engine_options:
-            return ("ask", "git grep has an ambiguous or invalid long option ("
-                    + ", ".join(uncertain_engine_options)
-                    + "); use the complete option name so its arity and regex-engine "
-                    "effect can be classified before execution.")
+            decisions.append((
+                "ask", "git grep has an ambiguous or invalid long option ("
+                + ", ".join(uncertain_engine_options)
+                + "); use the complete option name so its arity and regex-engine "
+                "effect can be classified before execution."))
+            continue
         if engine not in {None, "E"}:
             continue
         if engine is None and AMBIENT_ENGINE_REQUIRES_EXPLICIT and pattern_from_file:
-            return ("ask", "git grep has no command-resolved regex engine and reads a "
-                    "pattern file that argv inspection cannot classify. Ambient Git "
-                    "configuration may select ERE; use an explicit -P/-E/-G/-F engine.")
+            decisions.append((
+                "ask", "git grep has no command-resolved regex engine and reads a "
+                "pattern file that argv inspection cannot classify. Ambient Git "
+                "configuration may select ERE; use an explicit -P/-E/-G/-F engine."))
+            continue
         engine_desc = "-E" if engine_src == "flag" else "Git grep configuration"
         if not patterns:
             if pattern_from_file:
-                return ("ask",
-                        "git grep with the ERE engine (%s) and a -f PATTERN FILE: this "
-                        "guard reads argv only and CANNOT see the file's patterns, so a "
-                        "live PCRE-only construct may silently mismatch under ERE. "
-                        "Out of scope for this guard - verify the file's patterns by hand "
-                        "or use -P." % engine_desc)
+                decisions.append((
+                    "ask",
+                    "git grep with the ERE engine (%s) and a -f PATTERN FILE: this "
+                    "guard reads argv only and CANNOT see the file's patterns, so a "
+                    "live PCRE-only construct may silently mismatch under ERE. "
+                    "Out of scope for this guard - verify the file's patterns by hand "
+                    "or use -P." % engine_desc))
             continue
         unresolved = None
         bad_atoms = set()
@@ -3263,38 +4221,45 @@ def decide(command, _shell_depth=0):
                 constructs = sorted(bad_atoms | uncertain_atoms)
                 detail = (", ".join(constructs) if constructs
                           else f"dynamic pattern {unresolved!r}")
-                return ("ask", "git grep has no command-resolved regex engine while its "
-                        f"pattern contains {detail}. Mutable ambient Git configuration "
-                        "may change the effective engine; choose -P/-E/-G/-F explicitly.")
+                decisions.append((
+                    "ask", "git grep has no command-resolved regex engine while its "
+                    f"pattern contains {detail}. Mutable ambient Git configuration "
+                    "may change the effective engine; choose -P/-E/-G/-F explicitly."))
             continue
         if engine is None:
             continue
         if bad_atoms:
-            return ("deny",
-                    "git grep with the ERE engine (selected by " + engine_desc + ") "
-                    "cannot interpret %s with the intended PCRE grammar. Installed-Git "
-                    "selftests distinguish these live constructs from escaped-literal controls. "
-                    "An empty or different result is evidence about the selected regex engine, "
-                    "not about the repository. Re-run with -P."
-                    % ", ".join(sorted(bad_atoms)))
+            decisions.append((
+                "deny",
+                "git grep with the ERE engine (selected by " + engine_desc + ") "
+                "cannot interpret %s with the intended PCRE grammar. Installed-Git "
+                "selftests distinguish these live constructs from escaped-literal controls. "
+                "An empty or different result is evidence about the selected regex engine, "
+                "not about the repository. Re-run with -P."
+                % ", ".join(sorted(bad_atoms))))
+            continue
         if uncertain_atoms:
-            return ("ask",
-                    "git grep with the ERE engine contains unmodelled live regex "
-                    "construct(s) %s. The guard cannot prove those constructs have the same "
-                    "meaning under ERE and PCRE; use -P or replace them with grounded portable "
-                    "syntax." % ", ".join(sorted(uncertain_atoms)))
+            decisions.append((
+                "ask",
+                "git grep with the ERE engine contains unmodelled live regex "
+                "construct(s) %s. The guard cannot prove those constructs have the same "
+                "meaning under ERE and PCRE; use -P or replace them with grounded portable "
+                "syntax." % ", ".join(sorted(uncertain_atoms))))
+            continue
         if unresolved is not None:
-            return ("ask",
-                    "git grep -E with a shell-expanded pattern (%s): this guard reads argv "
-                    "only and CANNOT see the final pattern, so regex-engine compatibility is "
-                    "UNCHECKED here. Out of scope for this guard - verify by hand or use -P."
-                    % unresolved[:60])
-    fallback_uncertainty = conservative_allow_uncertainty(command)
+            decisions.append((
+                "ask",
+                "git grep -E with a shell-expanded pattern (%s): this guard reads argv "
+                "only and CANNOT see the final pattern, so regex-engine compatibility is "
+                "UNCHECKED here. Out of scope for this guard - verify by hand or use -P."
+                % unresolved[:60]))
+    fallback_uncertainty = conservative_allow_uncertainty(command, _deadline)
     if fallback_uncertainty:
-        return ("ask", fallback_uncertainty + "; guarded-looking text is allowed through "
-                "complex input syntax only when the operation resolves to an exact trusted "
-                "data-consumer path. Otherwise rewrite it as one directly classified source.")
-    return ("allow", "")
+        decisions.append((
+            "ask", fallback_uncertainty + "; guarded-looking text is allowed through "
+            "complex input syntax only when the operation resolves to an exact trusted "
+            "data-consumer path. Otherwise rewrite it as one directly classified source."))
+    return _strongest_decision(decisions) if decisions else ("allow", "")
 
 
 FIXTURES = [
@@ -3491,12 +4456,12 @@ FIXTURES = [
      """git grep -EZe'harness\\b' -- README.md""", "allow"),
     # Prefix peeling is shared with the zsh guard, so a launcher missing from that table
     # hid the same invocation from both.
-    ("RED WRAPPER: sudo",
-     """sudo git grep -nE 'harness\\b' -- README.md""", "deny"),
-    ("RED WRAPPER: sudo with a target user",
-     """sudo -u root git grep -nE 'harness\\b' -- README.md""", "deny"),
-    ("RED WRAPPER: command -p still executes git",
-     """command -p git grep -nE 'harness\\b' -- README.md""", "deny"),
+    ("ASK WRAPPER: sudo changes Git execution authority",
+     """sudo git grep -nE 'harness\\b' -- README.md""", "ask"),
+    ("ASK WRAPPER: sudo user selection changes Git execution authority",
+     """sudo -u root git grep -nE 'harness\\b' -- README.md""", "ask"),
+    ("ASK WRAPPER: command -p uses a different executable search path",
+     """command -p git grep -nE 'harness\\b' -- README.md""", "ask"),
     ("RED WRAPPER: command -- still executes git",
      "command -- git grep -Ee'harness\\b' -- README.md", "deny"),
     ("RED WRAPPER: builtin command -- still executes git",
@@ -3622,8 +4587,8 @@ FIXTURES = [
      """nice -n 5 git grep -nE 'harness\\b' -- README.md""", "deny"),
     ("RED  ROUND 9: shell -c command is recursively inspected",
      """sh -c \"git grep -nE 'harness\\b' -- README.md\"""", "deny"),
-    ("RED  ROUND 9: a different absolute Git path fails authority discovery closed",
-     """/usr/bin/git grep -nE 'harness\\b' -- README.md""", "deny"),
+    ("ASK  ROUND 9: a different absolute Git path fails authority discovery closed",
+     """/nonexistent/bin/git grep -nE 'harness\\b' -- README.md""", "ask"),
     ("ASK  ROUND 9: valueless grep.patternType fails closed",
      """git -c grep.patternType grep -n 'harness\\b' -- README.md""", "ask"),
     ("RED  ROUND 9: env -S command splitting is parsed before git",
@@ -4178,18 +5143,23 @@ def check_shell_boundary_behavior():
     failures = []
     executed = skipped = 0
     has_zsh = shutil.which("zsh") is not None
+    resolved_git = shutil.which("git")
+    if has_zsh and resolved_git is None:
+        failures.append("installed zsh boundary probes cannot resolve Git")
+        has_zsh = False
 
     # `_equals_expanded`'s doubled-equals condition models a real zsh refusal that the
-    # DECISION surface cannot observe: `os.path.basename` already reduces `==/usr/bin/git`
+    # DECISION surface cannot observe: `os.path.basename` already reduces a doubled-equals
+    # absolute Git path
     # to `git`, and `==git` reaches no guarded arm either way. Deleting the condition
     # therefore reddens nothing downstream, which is the shape of a dead defensive clause.
     # Bind it to the installed zsh directly instead, so it is covered rather than assumed.
     if has_zsh:
         for word, expanded, runs_git in (
             ("=git", "git", True),
-            ("=/usr/bin/git", "/usr/bin/git", True),
+            ("=" + resolved_git, resolved_git, True),
             ("==git", "==git", False),
-            ("==/usr/bin/git", "==/usr/bin/git", False),
+            ("==" + resolved_git, "==" + resolved_git, False),
         ):
             probe = subprocess.run(
                 ["zsh", "-c", f"{word} --version"], capture_output=True, timeout=10)
@@ -4199,6 +5169,162 @@ def check_shell_boundary_behavior():
                 failures.append(
                     f"equals-expansion model disagrees with this zsh for {word!r}: "
                     f"helper gave {_equals_expanded(word)!r}, zsh ran git={zsh_ran_git}")
+        with tempfile.TemporaryDirectory(prefix="z-harness-equals-") as command_dir:
+            literal_git = os.path.join(command_dir, "=git")
+            with open(literal_git, "w", encoding="utf-8") as handle:
+                handle.write("#!/bin/sh\nprintf 'literal-equals\\n'\n")
+            os.chmod(literal_git, 0o700)
+            expanded_git = os.path.join(command_dir, "git")
+            with open(expanded_git, "w", encoding="utf-8") as handle:
+                handle.write("#!/bin/sh\nprintf 'expanded-git\\n'\n")
+            os.chmod(expanded_git, 0o700)
+            for option_command in (
+                    "setopt noequals", "unsetopt equals", "set -o noequals",
+                    "set +o equals", "emulate sh"):
+                probe = subprocess.run(
+                    ["zsh", "-fc",
+                     f'PATH="$1:$PATH"; {option_command}; =git probe',
+                     "zsh", command_dir],
+                    capture_output=True, text=True, timeout=10,
+                )
+                executed += 1
+                if probe.returncode != 0 or probe.stdout != "literal-equals\n":
+                    failures.append(
+                        f"installed zsh did not leave =git literal after "
+                        f"{option_command!r} (rc={probe.returncode}, "
+                        f"stdout={probe.stdout!r}, stderr={probe.stderr!r})")
+            for restore_command in (
+                    "setopt equals", "set +o noequals", "emulate zsh"):
+                probe = subprocess.run(
+                    ["zsh", "-fc",
+                     f"setopt noequals; {restore_command}; =git --version"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                executed += 1
+                if probe.returncode != 0 or "git version" not in probe.stdout:
+                    failures.append(
+                        "installed zsh did not restore =git expansion after literal "
+                        f"{restore_command!r} (rc={probe.returncode}, "
+                        f"stdout={probe.stdout!r}, stderr={probe.stderr!r})")
+            for option_args in (
+                    ("-o", "NO_EQUALS"), ("+o", "EQUALS"),
+                    ("-oNO_EQUALS",), ("+oEQUALS",),
+                    ("-foNO_EQUALS",), ("+foEQUALS",),
+                    ("--no-equals",)):
+                probe = subprocess.run(
+                    ["zsh", *option_args, "-fc", 'PATH="$1:$PATH"; =git probe',
+                     "zsh", command_dir],
+                    capture_output=True, text=True, timeout=10,
+                )
+                executed += 1
+                if probe.returncode != 0 or probe.stdout != "literal-equals\n":
+                    failures.append(
+                        "installed zsh child option did not leave =git literal for "
+                        f"{option_args!r} (rc={probe.returncode}, "
+                        f"stdout={probe.stdout!r}, stderr={probe.stderr!r})")
+            for option_arg in ("-coNO_EQUALS", "+coEQUALS"):
+                probe = subprocess.run(
+                    ["zsh", option_arg, 'PATH="$1:$PATH"; =git probe',
+                     "zsh", command_dir],
+                    capture_output=True, text=True, timeout=10,
+                )
+                executed += 1
+                if probe.returncode != 0 or probe.stdout != "literal-equals\n":
+                    failures.append(
+                        "installed zsh clustered -c option did not leave =git literal "
+                        f"for {option_arg!r} (rc={probe.returncode}, "
+                        f"stdout={probe.stdout!r}, stderr={probe.stderr!r})")
+            for option_args in (
+                    ("--no-equals",), ("-o", "NO_EQUALS"),
+                    ("-oNO_EQUALS",)):
+                probe = subprocess.run(
+                    ["zsh", "-c", *option_args,
+                     'PATH="$1:$PATH"; =git probe', "zsh", command_dir],
+                    capture_output=True, text=True, timeout=10,
+                )
+                executed += 1
+                if probe.returncode != 0 or probe.stdout != "literal-equals\n":
+                    failures.append(
+                        "installed zsh did not parse a startup option after -c "
+                        f"for {option_args!r} (rc={probe.returncode}, "
+                        f"stdout={probe.stdout!r}, stderr={probe.stderr!r})")
+            for option_args in (
+                    ("--no-equals",), ("-o", "NO_EQUALS"),
+                    ("-oNO_EQUALS",)):
+                probe = subprocess.run(
+                    ["zsh", "-c", '[[ -o equals ]] && print on || print off',
+                     *option_args],
+                    capture_output=True, text=True, timeout=10,
+                )
+                executed += 1
+                if probe.returncode != 0 or probe.stdout != "on\n":
+                    failures.append(
+                        "installed zsh treated a positional post-command option as "
+                        f"startup state for {option_args!r} (rc={probe.returncode}, "
+                        f"stdout={probe.stdout!r}, stderr={probe.stderr!r})")
+            clustered_stdin = subprocess.run(
+                ["zsh", "-fo", "NO_EQUALS"],
+                input=f'PATH="{command_dir}:$PATH"; =git probe\n',
+                capture_output=True, text=True, timeout=10,
+            )
+            executed += 1
+            if (clustered_stdin.returncode != 0
+                    or clustered_stdin.stdout != "literal-equals\n"):
+                failures.append(
+                    "installed zsh did not consume a separated option value from "
+                    "clustered -fo before reading stdin "
+                    f"(rc={clustered_stdin.returncode}, "
+                    f"stdout={clustered_stdin.stdout!r}, "
+                    f"stderr={clustered_stdin.stderr!r})")
+            for scoped_setter in (
+                    "f(){ unsetopt equals; }; ",
+                    "(unsetopt equals); ",
+                    "ignored=$(unsetopt equals); "):
+                probe = subprocess.run(
+                    ["zsh", "-fc", scoped_setter + "=git --version"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                executed += 1
+                if probe.returncode != 0 or "git version" not in probe.stdout:
+                    failures.append(
+                        "installed zsh leaked a scope-local EQUALS option change "
+                        f"from {scoped_setter!r} (rc={probe.returncode}, "
+                        f"stdout={probe.stdout!r}, stderr={probe.stderr!r})")
+            for wrapper in ("env -i", "command -p"):
+                probe = subprocess.run(
+                    ["zsh", "-fc", f"{wrapper} =git --version"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                executed += 1
+                if probe.returncode != 0 or "git version" not in probe.stdout:
+                    failures.append(
+                        "installed zsh did not expand =git before wrapper execution "
+                        f"for {wrapper!r} (rc={probe.returncode}, "
+                        f"stdout={probe.stdout!r}, stderr={probe.stderr!r})")
+            prior_path = subprocess.run(
+                ["zsh", "-fc", 'PATH="$1"; =git probe', "zsh", command_dir],
+                capture_output=True, text=True, timeout=10,
+            )
+            executed += 1
+            if prior_path.returncode != 0 or prior_path.stdout != "expanded-git\n":
+                failures.append(
+                    "installed zsh did not apply a prior PATH assignment to a later "
+                    f"=git expansion (rc={prior_path.returncode}, "
+                    f"stdout={prior_path.stdout!r}, stderr={prior_path.stderr!r})")
+            command_p_child = subprocess.run(
+                ["zsh", "-fc",
+                 'PATH="$1"; command -p zsh -fc \'=git probe\'',
+                 "zsh", command_dir],
+                capture_output=True, text=True, timeout=10,
+            )
+            executed += 1
+            if (command_p_child.returncode != 0
+                    or command_p_child.stdout != "expanded-git\n"):
+                failures.append(
+                    "installed zsh command -p launcher did not preserve the child PATH "
+                    f"and default EQUALS state (rc={command_p_child.returncode}, "
+                    f"stdout={command_p_child.stdout!r}, "
+                    f"stderr={command_p_child.stderr!r})")
     else:
         skipped += 1
     for text, quoting, live in (
@@ -4373,25 +5499,52 @@ FIXTURES += [
     ("ASK LAUNCHER: xargs ahead of git grep", "xargs git grep -E 'x'", "ask"),
 ]
 
-# A machine can carry more than one real Git -- Homebrew's and Apple's /usr/bin/git are
-# both present on stock macOS. Naming the one PATH does not resolve is uncertainty about
-# WHICH binary runs, never proof of the guarded hazard, so it may not reach `deny`. The
-# path below is absolute and nonexistent so it is never the trusted Git on any host, which
-# keeps this group's contribution to `checks` the same everywhere.
+# A machine can carry more than one real Git. The command inventory, aliases, system
+# configuration, and helper path of the PATH-selected Git are not authority for another
+# executable. The path is nonexistent so it cannot equal the trusted Git on any host and
+# the test never executes it.
 _UNTRUSTED_GIT = "/nonexistent/bin/git"
 FIXTURES += [
-    ("GREEN AUTHORITY: an untrusted Git running a builtin is not the guarded hazard",
-     f"{_UNTRUSTED_GIT} status --short", "allow"),
-    ("GREEN AUTHORITY: an untrusted Git staging files is not the guarded hazard",
-     f"{_UNTRUSTED_GIT} add -A", "allow"),
-    ("GREEN AUTHORITY: an untrusted Git with a PCRE engine stays allowed",
-     f"{_UNTRUSTED_GIT} grep -P 'harness\\b' -- README.md", "allow"),
-    ("RED  AUTHORITY: an untrusted Git does not launder the ERE hazard",
-     f"{_UNTRUSTED_GIT} grep -E 'harness\\b' -- README.md", "deny"),
-    ("ASK  AUTHORITY: a non-builtin subcommand on an untrusted Git is unresolved",
+    ("ASK  AUTHORITY: an alternate Git builtin has no transferred authority",
+     f"{_UNTRUSTED_GIT} status --short", "ask"),
+    ("ASK  AUTHORITY: an alternate Git staging command has no transferred authority",
+     f"{_UNTRUSTED_GIT} add -A", "ask"),
+    ("ASK  AUTHORITY: an alternate Git PCRE command is still a different authority",
+     f"{_UNTRUSTED_GIT} grep -P 'harness\\b' -- README.md", "ask"),
+    ("ASK  AUTHORITY: an alternate Git ERE command is not inspected speculatively",
+     f"{_UNTRUSTED_GIT} grep -E 'harness\\b' -- README.md", "ask"),
+    ("ASK  AUTHORITY: an alternate Git non-builtin has no transferred authority",
      f"{_UNTRUSTED_GIT} submodule status", "ask"),
-    ("ASK  AUTHORITY: an unknown subcommand on an untrusted Git is unresolved",
+    ("ASK  AUTHORITY: an alternate Git unknown command has no transferred authority",
      f"{_UNTRUSTED_GIT} project-helper --version", "ask"),
+    ("ASK AUTHORITY: command -p cannot transfer PATH-selected Git authority",
+     "command -p git status --short", "ask"),
+    ("ASK AUTHORITY: builtin command -p has the same alternate search path",
+     "builtin command -p git status --short", "ask"),
+    ("ASK AUTHORITY: env -i removes executable-search authority",
+     "env -i git status --short", "ask"),
+    ("ASK AUTHORITY: long env ignore-environment removes executable-search authority",
+     "env --ignore-environment git status --short", "ask"),
+    ("ASK AUTHORITY: env -u PATH removes executable-search authority",
+     "env -u PATH git status --short", "ask"),
+    ("ASK AUTHORITY: env --unset PATH removes executable-search authority",
+     "env --unset=PATH git status --short", "ask"),
+    ("ASK AUTHORITY: sudo changes identity and executable-search authority",
+     "sudo -i git status --short", "ask"),
+    ("ASK AUTHORITY: env-clean authority persists into a shell -c body",
+     "env -i sh -c 'git status --short'", "ask"),
+    ("ASK AUTHORITY: env-unset authority persists into a shell -c body",
+     "env -u PATH sh -c 'git status --short'", "ask"),
+    ("ASK AUTHORITY: sudo authority persists into a shell -c body",
+     "sudo sh -c 'git status --short'", "ask"),
+    ("ASK AUTHORITY: env-clean uncertainty survives an explicit PCRE spelling",
+     "env -i sh -c \"git grep -P 'harness\\b' -- README.md\"", "ask"),
+    ("ASK AUTHORITY: env-clean authority persists into a shell here-string",
+     "env -i sh 0<<< 'git status --short'", "ask"),
+    ("ASK AUTHORITY: env-clean authority persists into a shell heredoc",
+     "env -i sh <<'EOF'\ngit status --short\nEOF\n", "ask"),
+    ("GREEN AUTHORITY: an environment-cleared harmless shell body stays harmless",
+     "env -i sh -c '/bin/echo safe'", "allow"),
 ]
 
 # zsh resolves `=name` through PATH before execution; bash has no such form. The Bash
@@ -4403,25 +5556,221 @@ FIXTURES += [
      "=git grep -P 'harness\\b' -- README.md", "allow"),
     ("GREEN EQUALS: zsh =git running a builtin carries no guarded hazard",
      "=git status --short", "allow"),
+    ("ASK EQUALS: setopt noequals leaves =git as an unresolved literal executable",
+     "setopt noequals; =git grep -E 'harness\\b' -- README.md", "ask"),
+    ("ASK EQUALS: unsetopt equals also disables the expansion",
+     "unsetopt equals; =git grep -E 'harness\\b' -- README.md", "ask"),
+    ("ASK EQUALS: set -o noequals disables the expansion",
+     "set -o noequals; =git grep -E 'harness\\b' -- README.md", "ask"),
+    ("ASK EQUALS: set +o equals disables the expansion",
+     "set +o equals; =git grep -E 'harness\\b' -- README.md", "ask"),
+    ("ASK EQUALS: emulate sh disables zsh executable expansion",
+     "emulate sh; =git grep -E 'harness\\b' -- README.md", "ask"),
+    ("RED EQUALS: a later literal setopt equals restores the expansion",
+     "setopt noequals; setopt equals; =git grep -E 'harness\\b' -- README.md", "deny"),
+    ("RED EQUALS: emulate zsh restores the native option set",
+     "setopt noequals; emulate zsh; =git grep -E 'harness\\b' -- README.md", "deny"),
+    ("ASK EQUALS: a conditional option mutation is not unconditional authority",
+     "if true; then setopt equals; fi; =git grep -E 'harness\\b' -- README.md", "ask"),
+    ("ASK EQUALS: a called function option mutation is not flattened after its caller",
+     "f(){ setopt noequals; }; f; =git grep -E 'harness\\b' -- README.md", "ask"),
+    ("ASK EQUALS: a nested zsh tracks its own noequals state",
+     "zsh -c \"setopt noequals; =git grep -E 'harness\\\\b' -- README.md\"", "ask"),
+    ("ASK EQUALS: zsh -o NO_EQUALS changes the child startup state",
+     "zsh -o NO_EQUALS -c \"=git grep -E 'harness\\\\b' -- README.md\"", "ask"),
+    ("ASK EQUALS: zsh +o EQUALS changes the child startup state",
+     "zsh +o EQUALS -c \"=git grep -E 'harness\\\\b' -- README.md\"", "ask"),
+    ("ASK EQUALS: attached -oNO_EQUALS changes the child startup state",
+     "zsh -oNO_EQUALS -c \"=git grep -E 'harness\\\\b' -- README.md\"", "ask"),
+    ("ASK EQUALS: attached +oEQUALS changes the child startup state",
+     "zsh +oEQUALS -c \"=git grep -E 'harness\\\\b' -- README.md\"", "ask"),
+    ("ASK EQUALS: long --no-equals changes the child startup state",
+     "zsh --no-equals -c \"=git grep -E 'harness\\\\b' -- README.md\"", "ask"),
+    ("ASK EQUALS: eval inherits an uncertain option mutation in the current zsh",
+     "eval 'setopt noequals'; =git grep -E 'harness\\b' -- README.md", "ask"),
+    ("ASK EQUALS: sourced code can change the option outside the visible command",
+     "source \"$OPTIONS_FILE\"; =git grep -E 'harness\\b' -- README.md", "ask"),
+    ("RED EQUALS: a child zsh starts with its own default after an outer noequals",
+     "setopt noequals; zsh -c \"=git grep -E 'harness\\\\b' -- README.md\"", "deny"),
+    ("RED EQUALS: an uncalled function cannot alter the parent option state",
+     "f(){ unsetopt equals; }; =git grep -E 'harness\\b' -- README.md", "deny"),
+    ("GREEN EQUALS: the uncalled-function control preserves an explicit PCRE engine",
+     "f(){ unsetopt equals; }; =git grep -P 'harness\\b' -- README.md", "allow"),
+    ("RED EQUALS: a subshell option change cannot escape to the parent",
+     "(unsetopt equals); =git grep -E 'harness\\b' -- README.md", "deny"),
+    ("GREEN EQUALS: the subshell control preserves an explicit PCRE engine",
+     "(unsetopt equals); =git grep -P 'harness\\b' -- README.md", "allow"),
+    ("RED EQUALS: a command-substitution option change cannot escape",
+     "ignored=$(unsetopt equals); =git grep -E 'harness\\b' -- README.md", "deny"),
+    ("RED EQUALS: env cannot change an outer pre-expanded executable identity",
+     "env -i =git grep -E 'harness\\b' -- README.md", "deny"),
+    ("GREEN EQUALS: outer pre-expansion preserves PCRE through env",
+     "env -i =git grep -P 'harness\\b' -- README.md", "allow"),
+    ("RED EQUALS: command -p cannot change an outer pre-expanded identity",
+     "command -p =git grep -E 'harness\\b' -- README.md", "deny"),
+    ("RED EQUALS: sudo cannot change an outer pre-expanded identity",
+     "sudo =git grep -E 'harness\\b' -- README.md", "deny"),
     ("ASK  EQUALS: a wrapped =git behind an unmodelled launcher is unresolved",
      "xargs =git show", "ask"),
-    ("RED  EQUALS: a path-qualified =git resolves and reaches the ERE hazard",
-     "=/usr/bin/git grep -E 'harness\\b' -- README.md", "deny"),
+    ("ASK EQUALS: a path-qualified alternate Git has no transferred authority",
+     "=/nonexistent/bin/git grep -E 'harness\\b' -- README.md", "ask"),
     ("GREEN EQUALS: zsh reports `=git not found` for a doubled equals",
      "==git grep -E 'harness\\b' -- README.md", "allow"),
-    # zsh refuses `==/usr/bin/git` the same way, but `os.path.basename` reads the last
+    # zsh refuses a doubled-equals absolute Git path the same way, but
+    # `os.path.basename` reads the last
     # path component of the raw word as `git` before any `=` handling runs, so this
     # denies a command that cannot execute. Same safe-direction over-approximation as the
     # nested non-zsh body, pinned here so it is a recorded decision and not a surprise.
-    ("RED  EQUALS: a doubled equals on a PATH is over-approximated as Git",
-     "==/usr/bin/git grep -E 'harness\\b' -- README.md", "deny"),
+    ("ASK EQUALS: a doubled equals alternate Git remains unresolved",
+     "==/nonexistent/bin/git grep -E 'harness\\b' -- README.md", "ask"),
     ("ASK  EQUALS: quoting suppresses the expansion, leaving an unproven identity",
      "'=git' grep -E 'harness\\b' -- README.md", "ask"),
     ("ASK  EQUALS: double quoting suppresses it the same way",
      '"=git" grep -E \'harness\\b\' -- README.md', "ask"),
-    ("ASK  EQUALS: the stated over-approximation -- only zsh expands `=`, and this "
-     "walk carries no shell context, so a bash body is judged as if it did",
-     "bash -c \"=git grep -E 'harness\\b' -- README.md\"", "deny"),
+    ("ASK EQUALS: bash does not expand =git and its literal executable is unresolved",
+     "bash -c \"=git grep -E 'harness\\b' -- README.md\"", "ask"),
+    ("ASK EQUALS: a sh here-string retains the downstream shell identity",
+     "sh <<< \"=git grep -E 'harness\\b' -- README.md\"", "ask"),
+    ("ASK EQUALS: zsh -o NO_EQUALS applies to a here-string body",
+     "zsh -o NO_EQUALS <<< \"=git grep -E 'harness\\b' -- README.md\"", "ask"),
+    ("ASK EQUALS: zsh +o EQUALS applies to a here-string body",
+     "zsh +o EQUALS <<< \"=git grep -E 'harness\\b' -- README.md\"", "ask"),
+    ("ASK EQUALS: attached -oNO_EQUALS applies to a here-string body",
+     "zsh -oNO_EQUALS <<< \"=git grep -E 'harness\\b' -- README.md\"", "ask"),
+    ("ASK EQUALS: a sh heredoc retains the downstream shell identity",
+     "sh <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n", "ask"),
+    ("ASK EQUALS: zsh -o NO_EQUALS applies to a heredoc body",
+     "zsh -o NO_EQUALS <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n", "ask"),
+    ("ASK EQUALS: zsh +o EQUALS applies to a heredoc body",
+     "zsh +o EQUALS <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n", "ask"),
+    ("ASK EQUALS: attached -oNO_EQUALS applies to a heredoc body",
+     "zsh -oNO_EQUALS <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n", "ask"),
+    ("RED EQUALS: child zsh heredoc starts from its own default",
+     "unsetopt equals; zsh <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n", "deny"),
+    ("GREEN EQUALS: a child zsh heredoc preserves explicit PCRE",
+     "zsh <<'EOF'\n=git grep -P 'harness\\b' -- README.md\nEOF\n", "allow"),
+    ("RED EQUALS: a later zsh heredoc deny outranks an earlier sh question",
+     ("sh <<'A'\n=git grep -E 'harness\\b' -- README.md\nA\n"
+      "zsh <<'B'\n=git grep -E 'harness\\b' -- README.md\nB\n"), "deny"),
+    ("RED EQUALS: heredoc deny precedence is independent of source order",
+     ("zsh <<'A'\n=git grep -E 'harness\\b' -- README.md\nA\n"
+      "sh <<'B'\n=git grep -E 'harness\\b' -- README.md\nB\n"), "deny"),
+]
+
+_FUNCTION_PARSE_LIMIT_SOURCE = (
+    "f(){ git status --short; }; f;" * (MAX_FUNCTION_DECLARATIONS + 1))
+_FUNCTION_OPERATOR_BUDGET_SOURCE = (
+    "f(){ /bin/echo safe; }; f;" + "( : );" * 16000)
+FIXTURES += [
+    ("ASK LIMIT: too many function declarations cannot consume the hook timeout",
+     _FUNCTION_PARSE_LIMIT_SOURCE, "ask"),
+    ("GREEN LIMIT: operator-heavy source remains inside the public hook budget",
+     _FUNCTION_OPERATOR_BUDGET_SOURCE, "allow"),
+]
+
+# Authority and decision composition across command/alias boundaries. These cases bind
+# state to the command that actually consumes it instead of letting one parser re-entry
+# borrow the ambient process or letting an earlier question mask a later denial.
+FIXTURES += [
+    ("ASK ALIAS AUTHORITY: env-clean state survives shell-alias -c traversal",
+     "git -c 'alias.x=!env -i sh -c \"git status --short\"' x", "ask"),
+    ("ASK ALIAS AUTHORITY: env-clean state survives shell-alias eval traversal",
+     "git -c 'alias.x=!env -i sh -c \"eval git\\ status\\ --short\"' x", "ask"),
+    ("ASK ALIAS AUTHORITY: env-clean state survives shell-alias here-string traversal",
+     "git -c 'alias.x=!env -i sh 0<<< \"git status --short\"' x", "ask"),
+    ("ASK ALIAS AUTHORITY: prior PATH survives shell-alias -c traversal",
+     "git -c 'alias.x=!PATH=/usr/bin; sh -c \"git status --short\"' x", "ask"),
+    ("ASK ALIAS AUTHORITY: prior PATH survives shell-alias here-string traversal",
+     "git -c 'alias.x=!PATH=/usr/bin; sh 0<<< \"git status --short\"' x", "ask"),
+    ("ASK PATH STATE: an earlier PATH selects an alternate Git",
+     "PATH=/usr/bin; =git grep -P harness -- README.md", "ask"),
+    ("ASK PATH STATE: an unavailable earlier PATH cannot inherit ambient Git",
+     "PATH=/definitely-missing; =git grep -E 'harness\\b' -- README.md", "ask"),
+    ("GREEN PATH STATE: same-command PATH does not precede outer EQUALS expansion",
+     "PATH=/definitely-missing =git grep -P harness -- README.md", "allow"),
+    ("ASK PATH STATE: conditional mutation is not straight-line authority",
+     "if true; then PATH=/usr/bin; fi; =git grep -P harness -- README.md", "ask"),
+    ("ASK PATH STATE: prior PATH reaches a directly associated shell here-string",
+     "PATH=/usr/bin; sh 0<<< 'git status --short'", "ask"),
+    ("ASK PATH STATE: prior-line PATH reaches a child zsh heredoc",
+     "PATH=/usr/bin\nzsh <<'EOF'\n=git grep -P 'harness\\b' -- README.md\nEOF\n",
+     "ask"),
+    ("ASK PATH STATE: prior-line PATH reaches a child zsh here-string",
+     "PATH=/usr/bin\nzsh 0<<< \"=git grep -P 'harness\\b' -- README.md\"",
+     "ask"),
+    ("GREEN PATH STATE: later same-line PATH cannot alter an earlier here-string",
+     ("zsh 0<<< \"=git grep -P 'harness\\b' -- README.md\"; "
+      "PATH=/usr/bin; /bin/echo done"), "allow"),
+    ("GREEN PATH STATE: later same-line unset cannot alter an earlier here-string",
+     ("zsh 0<<< \"=git grep -P 'harness\\b' -- README.md\"; "
+      "unset PATH; /bin/echo done"), "allow"),
+    ("ASK PATH STATE: prior PATH reaches an unquoted heredoc expansion",
+     "PATH=/usr/bin; cat <<EOF\n$(=git grep -P 'harness\\b' -- README.md)\nEOF\n",
+     "ask"),
+    ("GREEN PATH STATE: later header PATH cannot alter an earlier heredoc expansion",
+     ("cat <<EOF; PATH=/usr/bin; /bin/echo done\n"
+      "$(=git grep -P 'harness\\b' -- README.md)\nEOF\n"), "allow"),
+    ("GREEN PATH STATE: a quoted data heredoc does not expand its body",
+     "PATH=/usr/bin; cat <<'EOF'\n$(=git grep -P 'harness\\b' -- README.md)\nEOF\n",
+     "allow"),
+    ("RED COMMAND-P: launcher lookup does not taint child zsh EQUALS state",
+     "command -p zsh -c \"=git grep -E 'harness\\\\b' -- README.md\"", "deny"),
+    ("GREEN COMMAND-P: child zsh preserves an explicit PCRE engine",
+     "command -p zsh -c \"=git grep -P 'harness\\\\b' -- README.md\"", "allow"),
+    ("RED COMMAND-P: child zsh here-string keeps inherited PATH authority",
+     "command -p zsh 0<<< \"=git grep -E 'harness\\b' -- README.md\"", "deny"),
+    ("RED COMMAND-P: child zsh heredoc keeps inherited PATH authority",
+     "command -p zsh <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n", "deny"),
+    ("RED PRECEDENCE: a nested question cannot mask a later direct denial",
+     ("sh -c \"=git grep -E 'harness\\\\b' -- README.md\"; "
+      "=git grep -E 'harness\\b' -- README.md"), "deny"),
+    ("RED PRECEDENCE: direct denial remains strongest in the reverse order",
+     ("=git grep -E 'harness\\b' -- README.md; "
+      "sh -c \"=git grep -E 'harness\\\\b' -- README.md\""), "deny"),
+    ("RED PRECEDENCE: a heredoc question cannot mask a later ordinary denial",
+     ("sh <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n"
+      "git grep -E 'harness\\b' -- README.md"), "deny"),
+    ("RED PRECEDENCE: an ordinary denial outranks a later heredoc question",
+     ("git grep -E 'harness\\b' -- README.md\n"
+      "sh <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n"), "deny"),
+    ("ASK EQUALS: clustered -fo consumes attached NO_EQUALS",
+     "zsh -foNO_EQUALS -c \"=git grep -E 'harness\\\\b' -- README.md\"", "ask"),
+    ("ASK EQUALS: clustered +fo consumes attached EQUALS",
+     "zsh +foEQUALS -c \"=git grep -E 'harness\\\\b' -- README.md\"", "ask"),
+    ("ASK EQUALS: -co processes EQUALS state before the command body",
+     "zsh -coNO_EQUALS \"=git grep -E 'harness\\\\b' -- README.md\"", "ask"),
+    ("ASK EQUALS: clustered -fo applies to a here-string body",
+     "zsh -foNO_EQUALS 0<<< \"=git grep -E 'harness\\b' -- README.md\"", "ask"),
+    ("ASK EQUALS: clustered -fo applies to a heredoc body",
+     "zsh -foNO_EQUALS <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n",
+     "ask"),
+    ("RED ZSH ARGV: a long option after -c does not hide the command body",
+     "zsh -c --no-equals \"git grep -E 'harness\\\\b' -- README.md\"",
+     "deny"),
+    ("RED ZSH ARGV: a split option after -c does not hide the command body",
+     "zsh -c -o NO_EQUALS \"git grep -E 'harness\\\\b' -- README.md\"",
+     "deny"),
+    ("RED ZSH ARGV: an attached option after -c does not hide the command body",
+     "zsh -c -oNO_EQUALS \"git grep -E 'harness\\\\b' -- README.md\"",
+     "deny"),
+    ("RED ZSH ARGV: a post-body long option is positional, not startup state",
+     "zsh -c \"=git grep -E 'harness\\\\b' -- README.md\" --no-equals",
+     "deny"),
+    ("GREEN ZSH ARGV: post-body split options do not change a PCRE command",
+     "zsh -c \"=git grep -P 'harness\\\\b' -- README.md\" -o NO_EQUALS",
+     "allow"),
+    ("GREEN ZSH ARGV: post-body -s does not make zsh read a here-string",
+     ("zsh -fc '/usr/bin/printf command-only' -s 0<<< "
+      "\"git grep -E 'harness\\b' -- README.md\""), "allow"),
+    ("RED ZSH ARGV: clustered -fo consumes its separated option before stdin",
+     "zsh -fo NO_EQUALS <<'EOF'\n"
+     "git grep -E 'harness\\b' -- README.md\nEOF\n", "deny"),
+    ("RED PRECEDENCE: a later zsh here-string deny outranks a sh question",
+     ("sh 0<<< \"=git grep -E 'harness\\b' -- README.md\"; "
+      "zsh 0<<< \"=git grep -E 'harness\\b' -- README.md\""), "deny"),
+    ("RED PRECEDENCE: here-string deny precedence is source-order independent",
+     ("zsh 0<<< \"=git grep -E 'harness\\b' -- README.md\"; "
+      "sh 0<<< \"=git grep -E 'harness\\b' -- README.md\""), "deny"),
 ]
 
 # Same hazard, reached through a different subcommand. Verified on git 2.46.1 against a
@@ -4971,7 +6320,8 @@ def selftest():
 
     original_alias = resolve_git_alias
     globals()["resolve_git_alias"] = (
-        lambda subcommand, tail, _aliases, _authority, _exec_path:
+        lambda subcommand, tail, _aliases, _authority, _exec_path, _deadline=None,
+        _command_env=None, _lookup_authority_uncertain=False:
         (subcommand.lower(), list(tail), None, [])
     )
     try:
@@ -4985,10 +6335,10 @@ def selftest():
         "PASS" if alias_red else "FAIL"))
 
     original_nested_shell = nested_shell_invocation
-    def ignore_alias_eval(resolution, current_shell="sh"):
+    def ignore_alias_eval(resolution, current_shell="sh", deadline=None):
         if resolution.items and os.path.basename(resolution.items[0][0]) == "eval":
             return None
-        return original_nested_shell(resolution, current_shell)
+        return original_nested_shell(resolution, current_shell, deadline)
     globals()["nested_shell_invocation"] = ignore_alias_eval
     try:
         alias_eval_red = decide(
@@ -5000,11 +6350,11 @@ def selftest():
     print("  %s shell-alias eval traversal mutation loses uncertain outcome" % (
         "PASS" if alias_eval_red else "FAIL"))
 
-    def ignore_alias_shell_c(resolution, current_shell="sh"):
+    def ignore_alias_shell_c(resolution, current_shell="sh", deadline=None):
         if (resolution.items
                 and os.path.basename(resolution.items[0][0]) in SHELLS):
             return None
-        return original_nested_shell(resolution, current_shell)
+        return original_nested_shell(resolution, current_shell, deadline)
     globals()["nested_shell_invocation"] = ignore_alias_shell_c
     try:
         alias_shell_red = decide(
@@ -5134,8 +6484,8 @@ def selftest():
         "PASS" if unknown_subcommand_red else "FAIL"))
 
     original_discovery = trusted_git_authority
-    globals()["trusted_git_authority"] = lambda _executable="git": (_ for _ in ()).throw(
-        GitAuthorityError("planted discovery failure"))
+    globals()["trusted_git_authority"] = lambda _executable="git", deadline=None: (
+        _ for _ in ()).throw(GitAuthorityError("planted discovery failure"))
     try:
         discovery_red = decide("git status --short")[0] == "ask"
     finally:
@@ -5145,7 +6495,7 @@ def selftest():
         "PASS" if discovery_red else "FAIL"))
 
     trusted_authority = original_discovery()
-    globals()["trusted_git_authority"] = lambda _executable="git": GitAuthority(
+    globals()["trusted_git_authority"] = lambda _executable="git", deadline=None: GitAuthority(
         trusted_authority.executable, trusted_authority.exec_path,
         trusted_authority.builtins, trusted_authority.main - {"submodule"},
     )
@@ -5157,65 +6507,680 @@ def selftest():
     print("  %s trusted-Git inventory drift loses standard submodule allow" % (
         "PASS" if drift_red else "FAIL"))
 
-    # The untrusted-candidate path authorizes a builtin NAME using an inventory read from
-    # a different binary. That transfer is unsound on its own -- `refs` and `replay` are
-    # builtin in git 2.46.1 and absent from Apple Git 2.39.5, where `-c alias.refs=...`
-    # runs the alias -- so the ambient alias table is what has to be clean. Drive all
-    # three of its answers, and prove the real reader returns a usable one.
-    untrusted_git = "/nonexistent/bin/git status --short"
-    original_alias_names = ambient_alias_names
-    for label, planted, want in (
-        ("an ambient alias for the name", frozenset({"status"}), "ask"),
-        ("an unreadable alias table", None, "ask"),
-        ("a clean alias table", frozenset({"unrelated"}), "allow"),
-    ):
-        globals()["ambient_alias_names"] = lambda _authority, _v=planted: _v
-        try:
-            got = decide(untrusted_git)[0]
-        finally:
-            globals()["ambient_alias_names"] = original_alias_names
-        ok = got == want
-        bad += 0 if ok else 1
-        print("  %s untrusted Git with %s -> %s" % (
-            "PASS" if ok else "FAIL", label, want))
-    # A reader that returns an empty table on every input satisfies "returns a frozenset"
-    # and silently reopens the path above, so read a repository whose alias is known.
-    live_authority = original_discovery()
-    with tempfile.TemporaryDirectory(prefix="git-alias-probe-") as alias_repo:
-        subprocess.run(["git", "init", "-q", alias_repo], capture_output=True, timeout=30)
-        subprocess.run(["git", "-C", alias_repo, "config", "alias.zzprobe", "status"],
-                       capture_output=True, timeout=30)
-        _GIT_ALIAS_NAME_CACHE.clear()
-        try:
-            planted_names = original_alias_names(live_authority, cwd=alias_repo)
-        finally:
-            _GIT_ALIAS_NAME_CACHE.clear()
-    live_ok = planted_names is not None and "zzprobe" in planted_names
-    bad += 0 if live_ok else 1
-    print("  %s ambient alias reader reports an alias the installed Git can see" % (
-        "PASS" if live_ok else "FAIL"))
+    # An alternate executable must fail before any subprocess is attempted. Querying the
+    # candidate in order to decide whether to trust it would execute attacker-selected code.
+    candidate_calls = []
+    try:
+        original_discovery(
+            "/nonexistent/bin/git",
+            runner=lambda *args, **kwargs: candidate_calls.append((args, kwargs)),
+        )
+        alternate_preprobe_ok = False
+    except GitAuthorityError:
+        alternate_preprobe_ok = not candidate_calls
+    bad += 0 if alternate_preprobe_ok else 1
+    print("  %s alternate Git is rejected before candidate execution" % (
+        "PASS" if alternate_preprobe_ok else "FAIL"))
 
-    # An unreadable table must be `None`, never an empty one: empty reads as "no alias
-    # shadows this name" and reopens the untrusted-builtin path. Drive both failure arms.
-    with tempfile.TemporaryDirectory(prefix="git-alias-fail-") as failing_dir:
-        failing_git = os.path.join(failing_dir, "git")
-        with open(failing_git, "w", encoding="utf-8") as handle:
-            handle.write("#!/bin/sh\nexit 3\n")
-        os.chmod(failing_git, 0o755)
-        for label, executable in (
-            ("a Git that exits outside {0,1}", failing_git),
-            ("a Git that cannot be executed", os.path.join(failing_dir, "absent-git")),
+    globals()["trusted_git_authority"] = (
+        lambda _executable="git", deadline=None: trusted_authority
+    )
+    try:
+        alternate_callsite_red = decide(
+            "/nonexistent/bin/git status --short")[0] != "ask"
+    finally:
+        globals()["trusted_git_authority"] = original_discovery
+    bad += 0 if alternate_callsite_red else 1
+    print("  %s alternate-Git authority callsite mutation loses fail-closed ask" % (
+        "PASS" if alternate_callsite_red else "FAIL"))
+
+    original_lookup_authority = changed_git_lookup_authority_error
+    globals()["changed_git_lookup_authority_error"] = (
+        lambda _executable, _uncertain: "")
+    try:
+        lookup_authority_red = all(decide(source)[0] != "ask" for source in (
+            "command -p git status --short",
+            "builtin command -p git status --short",
+            "env -i git status --short",
+            "env --ignore-environment git status --short",
+            "env -u PATH git status --short",
+            "env --unset=PATH git status --short",
+            "sudo -i git status --short",
+        ))
+    finally:
+        globals()["changed_git_lookup_authority_error"] = original_lookup_authority
+    bad += 0 if lookup_authority_red else 1
+    print("  %s wrapper lookup-authority mutation transfers PATH Git authority" % (
+        "PASS" if lookup_authority_red else "FAIL"))
+
+    original_nested_invocation = nested_shell_invocation
+    def drop_nested_authority(resolution, current_shell="sh", deadline=None):
+        invocation = original_nested_invocation(resolution, current_shell, deadline)
+        if invocation is None:
+            return None
+        return invocation._replace(
+            command_env=dict(os.environ), lookup_authority_uncertain=False)
+    globals()["nested_shell_invocation"] = drop_nested_authority
+    try:
+        nested_authority_red = all(decide(source)[0] != "ask" for source in (
+            "env -i sh -c 'git status --short'",
+            "env -u PATH sh -c 'git status --short'",
+            "sudo sh -c 'git status --short'",
+        ))
+    finally:
+        globals()["nested_shell_invocation"] = original_nested_invocation
+    bad += 0 if nested_authority_red else 1
+    print("  %s nested-shell mutation drops wrapper lookup authority" % (
+        "PASS" if nested_authority_red else "FAIL"))
+
+    original_direct_invocation = direct_here_string_invocation
+    def drop_here_string_authority(
+            source, current_shell="zsh", equals_state=ZSH_EQUALS_ON,
+            command_env=None, lookup_authority_uncertain=False, deadline=None):
+        direct = original_direct_invocation(
+            source, current_shell, equals_state, command_env,
+            lookup_authority_uncertain, deadline)
+        if direct is None:
+            return None
+        resolution, invocation = direct
+        return (resolution._replace(
+                    command_env=dict(os.environ),
+                    lookup_authority_uncertain=False),
+                invocation._replace(
+                    command_env=dict(os.environ),
+                    lookup_authority_uncertain=False))
+    globals()["direct_here_string_invocation"] = drop_here_string_authority
+    try:
+        here_authority_red = all(decide(source)[0] != "ask" for source in (
+            "env -i sh 0<<< 'git status --short'",
+            "PATH=/usr/bin; sh 0<<< 'git status --short'",
+        ))
+    finally:
+        globals()["direct_here_string_invocation"] = original_direct_invocation
+    bad += 0 if here_authority_red else 1
+    print("  %s here-string mutation drops wrapper lookup authority" % (
+        "PASS" if here_authority_red else "FAIL"))
+
+    original_heredoc_decision = heredoc_equals_decision
+    def drop_heredoc_authority(
+            source, deadline=None, subcommands=None, classifier=None,
+            **context):
+        stripped = (None if classifier is None else
+                    lambda body, shell, state, inner_deadline, _env, _lookup:
+                    classifier(body, shell, state, inner_deadline,
+                               dict(os.environ), False))
+        return original_heredoc_decision(
+            source, deadline, subcommands, stripped, **context)
+    globals()["heredoc_equals_decision"] = drop_heredoc_authority
+    try:
+        heredoc_authority_red = decide(
+            "env -i sh <<'EOF'\ngit status --short\nEOF\n")[0] != "ask"
+    finally:
+        globals()["heredoc_equals_decision"] = original_heredoc_decision
+    bad += 0 if heredoc_authority_red else 1
+    print("  %s heredoc mutation drops wrapper lookup authority" % (
+        "PASS" if heredoc_authority_red else "FAIL"))
+
+    original_alias_context = _alias_authority_context
+    globals()["_alias_authority_context"] = (
+        lambda _env, _lookup: (dict(os.environ), False))
+    try:
+        alias_authority_red = all(decide(source)[0] != "ask" for source in (
+            "git -c 'alias.x=!env -i sh -c \"git status --short\"' x",
+            "git -c 'alias.x=!env -i sh -c \"eval git\\ status\\ --short\"' x",
+            "git -c 'alias.x=!env -i sh 0<<< \"git status --short\"' x",
+        ))
+    finally:
+        globals()["_alias_authority_context"] = original_alias_context
+    bad += 0 if alias_authority_red else 1
+    print("  %s shell-alias re-entry mutation drops lookup authority" % (
+        "PASS" if alias_authority_red else "FAIL"))
+
+    original_alias_environments = _alias_command_environment_states
+    globals()["_alias_command_environment_states"] = (
+        lambda _source, commands, command_env,
+        lookup_authority_uncertain, _deadline: tuple(
+            (dict(command_env), bool(lookup_authority_uncertain))
+            for _command in commands))
+    try:
+        alias_path_red = decide(
+            "git -c 'alias.x=!PATH=/usr/bin; sh -c \"git status --short\"' x"
+        )[0] != "ask"
+    finally:
+        globals()["_alias_command_environment_states"] = original_alias_environments
+    bad += 0 if alias_path_red else 1
+    print("  %s shell-alias PATH-state callsite mutation transfers ambient authority" % (
+        "PASS" if alias_path_red else "FAIL"))
+
+    original_environment_states = command_environment_states
+    globals()["command_environment_states"] = (
+        lambda _source, commands, initial_env=None,
+        initial_lookup_uncertain=False, deadline=None: tuple(
+            (dict(os.environ if initial_env is None else initial_env),
+             bool(initial_lookup_uncertain)) for _command in commands))
+    try:
+        path_state_red = all(decide(source)[0] != "ask" for source in (
+            "PATH=/usr/bin; =git grep -P harness -- README.md",
+            "PATH=/definitely-missing; =git grep -E 'harness\\b' -- README.md",
+            "PATH=/usr/bin; sh 0<<< 'git status --short'",
+            "git -c 'alias.x=!PATH=/usr/bin; sh 0<<< \"git status --short\"' x",
+        ))
+    finally:
+        globals()["command_environment_states"] = original_environment_states
+    bad += 0 if path_state_red else 1
+    print("  %s straight-line PATH-state mutation transfers ambient Git authority" % (
+        "PASS" if path_state_red else "FAIL"))
+
+    original_descendant_lookup = _descendant_lookup_authority
+    globals()["_descendant_lookup_authority"] = (
+        lambda resolution: resolution.lookup_authority_uncertain)
+    try:
+        command_p_child_red = all(decide(source)[0] != expected for source, expected in (
+            ("command -p zsh -c \"=git grep -E 'harness\\\\b' -- README.md\"",
+             "deny"),
+            ("command -p zsh -c \"=git grep -P 'harness\\\\b' -- README.md\"",
+             "allow"),
+            ("command -p zsh 0<<< \"=git grep -E 'harness\\b' -- README.md\"",
+             "deny"),
+        ))
+    finally:
+        globals()["_descendant_lookup_authority"] = original_descendant_lookup
+    bad += 0 if command_p_child_red else 1
+    print("  %s command-p descendant mutation transfers launcher uncertainty" % (
+        "PASS" if command_p_child_red else "FAIL"))
+
+    # All three discovery calls share one monotonic budget. A slow first probe reduces the
+    # next timeout; it cannot reset a fresh allowance for each subprocess.
+    _GIT_AUTHORITY_CACHE.clear()
+    ticks = [0.0]
+    observed_timeouts = []
+    def budget_runner(argv, **kwargs):
+        observed_timeouts.append(kwargs["timeout"])
+        ticks[0] += 0.3
+        if argv[-1] == "--exec-path":
+            stdout = "/tmp/trusted-git-core\n"
+        elif argv[-1] == "--list-cmds=builtins":
+            stdout = "grep status\n"
+        else:
+            stdout = "grep status submodule\n"
+        return subprocess.CompletedProcess(argv, 0, stdout, "")
+    try:
+        budget_authority = original_discovery(
+            "git", deadline=1.0, runner=budget_runner, clock=lambda: ticks[0])
+        shared_budget_ok = (
+            budget_authority.builtins == frozenset({"grep", "status"})
+            and observed_timeouts == [0.75, 0.7, 0.4]
+        )
+    finally:
+        _GIT_AUTHORITY_CACHE.clear()
+    bad += 0 if shared_budget_ok else 1
+    print("  %s Git discovery subprocesses consume one shared deadline" % (
+        "PASS" if shared_budget_ok else "FAIL"))
+
+    _GIT_AUTHORITY_CACHE.clear()
+    ticks = [0.0]
+    calls = [0]
+    def exhausted_runner(argv, **kwargs):
+        calls[0] += 1
+        ticks[0] = 2.0
+        return subprocess.CompletedProcess(argv, 0, "/tmp/trusted-git-core\n", "")
+    try:
+        original_discovery(
+            "git", deadline=1.0, runner=exhausted_runner, clock=lambda: ticks[0])
+        exhausted_ok = False
+    except GitAuthorityError:
+        exhausted_ok = calls[0] == 1
+    finally:
+        _GIT_AUTHORITY_CACHE.clear()
+    bad += 0 if exhausted_ok else 1
+    print("  %s exhausted shared deadline stops before the next Git probe" % (
+        "PASS" if exhausted_ok else "FAIL"))
+
+    _GIT_AUTHORITY_CACHE.clear()
+    timeout_calls = []
+    def timeout_runner(argv, **kwargs):
+        timeout_calls.append((tuple(argv), kwargs["timeout"]))
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+    try:
+        original_discovery("git", runner=timeout_runner)
+        subprocess_timeout_ok = False
+    except GitAuthorityError:
+        subprocess_timeout_ok = (
+            len(timeout_calls) == 1
+            and timeout_calls[0][0][-1] == "--exec-path"
+            and 0 < timeout_calls[0][1] <= GIT_PROBE_TIMEOUT_SECONDS
+        )
+    finally:
+        _GIT_AUTHORITY_CACHE.clear()
+    bad += 0 if subprocess_timeout_ok else 1
+    print("  %s Git discovery timeout asks before a second probe" % (
+        "PASS" if subprocess_timeout_ok else "FAIL"))
+
+    original_remaining_timeout = _remaining_probe_timeout
+    globals()["_remaining_probe_timeout"] = lambda _deadline, _clock: 0.75
+    _GIT_AUTHORITY_CACHE.clear()
+    ticks = [0.0]
+    def reset_budget_runner(argv, **kwargs):
+        ticks[0] += 2.0
+        if argv[-1] == "--exec-path":
+            stdout = "/tmp/trusted-git-core\n"
+        elif argv[-1] == "--list-cmds=builtins":
+            stdout = "grep status\n"
+        else:
+            stdout = "grep status submodule\n"
+        return subprocess.CompletedProcess(argv, 0, stdout, "")
+    try:
+        try:
+            original_discovery(
+                "git", deadline=1.0, runner=reset_budget_runner,
+                clock=lambda: ticks[0])
+            per_call_deadline_red = True
+        except GitAuthorityError:
+            per_call_deadline_red = False
+    finally:
+        globals()["_remaining_probe_timeout"] = original_remaining_timeout
+        _GIT_AUTHORITY_CACHE.clear()
+    bad += 0 if per_call_deadline_red else 1
+    print("  %s independent-per-call deadline mutation bypasses the shared budget" % (
+        "PASS" if per_call_deadline_red else "FAIL"))
+
+    timeout_contract_ok = hook_timeout_contract() == ""
+    planted_settings = json.load(open(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "settings.json"), encoding="utf-8"))
+    planted_settings["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"] = 4
+    timeout_contract_red = bool(hook_timeout_contract(settings_data=planted_settings))
+    budget_contract_red = bool(hook_timeout_contract(budget=4.01))
+    for label, ok in (
+        ("registered Claude/Codex timeout contract matches", timeout_contract_ok),
+        ("registered timeout mutation turns the contract red", timeout_contract_red),
+        ("internal budget margin mutation turns the contract red", budget_contract_red),
+    ):
+        bad += 0 if ok else 1
+        print("  %s %s" % ("PASS" if ok else "FAIL", label))
+
+    original_parse_limit = MAX_FUNCTION_DECLARATIONS
+    globals()["MAX_FUNCTION_DECLARATIONS"] = original_parse_limit + 1
+    try:
+        parse_limit_red = decide(_FUNCTION_PARSE_LIMIT_SOURCE)[0] != "ask"
+    finally:
+        globals()["MAX_FUNCTION_DECLARATIONS"] = original_parse_limit
+    bad += 0 if parse_limit_red else 1
+    print("  %s function-declaration limit mutation loses bounded-parse ask" % (
+        "PASS" if parse_limit_red else "FAIL"))
+
+    original_budget_check = _check_decision_budget
+    globals()["_check_decision_budget"] = lambda _deadline: None
+    try:
+        try:
+            split_commands("/bin/echo safe", _deadline=time.monotonic() - 1.0)
+            parser_budget_red = True
+        except CommandParseError:
+            parser_budget_red = False
+    finally:
+        globals()["_check_decision_budget"] = original_budget_check
+    bad += 0 if parser_budget_red else 1
+    print("  %s parser-deadline checkpoint mutation accepts an expired budget" % (
+        "PASS" if parser_budget_red else "FAIL"))
+
+    original_split_commands = split_commands
+    observed_parser_deadlines = []
+    def record_parser_deadline(source, _parse_depth=0, _deadline=None):
+        observed_parser_deadlines.append(_deadline)
+        return original_split_commands(source, _parse_depth, _deadline)
+    globals()["split_commands"] = record_parser_deadline
+    try:
+        parser_deadline_callsite = True
+        for parser_source in (
+                "zsh <<'EOF'\n/bin/echo safe\nEOF\n",
+                "git -c 'alias.x=!sh -c \"/bin/echo safe\"' x",
         ):
-            _GIT_ALIAS_NAME_CACHE.clear()
-            try:
-                answer = original_alias_names(
-                    live_authority._replace(executable=executable))
-            finally:
-                _GIT_ALIAS_NAME_CACHE.clear()
-            unreadable_ok = answer is None
-            bad += 0 if unreadable_ok else 1
-            print("  %s ambient alias reader reports %s as unreadable, not empty" % (
-                "PASS" if unreadable_ok else "FAIL", label))
+            observed_parser_deadlines.clear()
+            parser_deadline_callsite = (
+                parser_deadline_callsite
+                and decide(parser_source)[0] == "allow"
+                and len(observed_parser_deadlines) >= 2
+                and observed_parser_deadlines[0] is not None
+                and len(set(observed_parser_deadlines)) == 1
+            )
+    finally:
+        globals()["split_commands"] = original_split_commands
+    bad += 0 if parser_deadline_callsite else 1
+    print("  %s top-level parser receives the shared decision deadline" % (
+        "PASS" if parser_deadline_callsite else "FAIL"))
+
+    original_function_operators = _function_list_operators
+    observed_operator_deadlines = []
+    def record_function_operator_deadline(source, records, deadline=None):
+        observed_operator_deadlines.append(deadline)
+        return original_function_operators(source, records, deadline)
+    globals()["_function_list_operators"] = record_function_operator_deadline
+    try:
+        function_operator_deadline = (
+            decide("f(){ /bin/echo safe; }; f; ( : );")[0] == "allow"
+            and bool(observed_operator_deadlines)
+            and all(item is not None for item in observed_operator_deadlines)
+            and len(set(observed_operator_deadlines)) == 1)
+    finally:
+        globals()["_function_list_operators"] = original_function_operators
+    bad += 0 if function_operator_deadline else 1
+    print("  %s function operator scan receives the shared decision deadline" % (
+        "PASS" if function_operator_deadline else "FAIL"))
+
+    original_equals_states = zsh_equals_states
+    globals()["zsh_equals_states"] = (
+        lambda _source, commands, initial=ZSH_EQUALS_ON, deadline=None:
+        tuple(ZSH_EQUALS_ON for _command in commands)
+    )
+    try:
+        equals_transition_red = decide(
+            "setopt noequals; =git grep -E 'harness\\b' -- README.md"
+        )[0] != "ask"
+        equals_conditional_red = decide(
+            "if true; then setopt equals; fi; "
+            "=git grep -E 'harness\\b' -- README.md"
+        )[0] != "ask"
+        equals_function_red = decide(
+            "f(){ setopt noequals; }; f; "
+            "=git grep -E 'harness\\b' -- README.md"
+        )[0] != "ask"
+    finally:
+        globals()["zsh_equals_states"] = original_equals_states
+    bad += 0 if equals_transition_red else 1
+    bad += 0 if equals_conditional_red else 1
+    bad += 0 if equals_function_red else 1
+    print("  %s EQUALS-state callsite mutation loses noequals uncertainty" % (
+        "PASS" if equals_transition_red else "FAIL"))
+    print("  %s EQUALS-state callsite mutation loses conditional uncertainty" % (
+        "PASS" if equals_conditional_red else "FAIL"))
+    print("  %s EQUALS-state callsite mutation loses function uncertainty" % (
+        "PASS" if equals_function_red else "FAIL"))
+
+    original_nested_equals = nested_shell_equals_state
+    globals()["nested_shell_equals_state"] = (
+        lambda _resolution, invocation, _inherited=ZSH_EQUALS_ON:
+        ZSH_EQUALS_ON if invocation.shell == "zsh" else ZSH_EQUALS_OFF)
+    try:
+        nested_option_red = all(decide(source)[0] != "ask" for source in (
+            "zsh -o NO_EQUALS -c \"=git grep -E 'harness\\\\b' -- README.md\"",
+            "zsh +o EQUALS -c \"=git grep -E 'harness\\\\b' -- README.md\"",
+            "zsh -oNO_EQUALS -c \"=git grep -E 'harness\\\\b' -- README.md\"",
+            "zsh +oEQUALS -c \"=git grep -E 'harness\\\\b' -- README.md\"",
+            "zsh --no-equals -c \"=git grep -E 'harness\\\\b' -- README.md\"",
+            "zsh -foNO_EQUALS -c \"=git grep -E 'harness\\\\b' -- README.md\"",
+            "zsh +foEQUALS -c \"=git grep -E 'harness\\\\b' -- README.md\"",
+            "zsh -coNO_EQUALS \"=git grep -E 'harness\\\\b' -- README.md\"",
+        ))
+    finally:
+        globals()["nested_shell_equals_state"] = original_nested_equals
+    bad += 0 if nested_option_red else 1
+    print("  %s nested-zsh option-state mutation loses startup uncertainty" % (
+        "PASS" if nested_option_red else "FAIL"))
+
+    original_nested_invocation = nested_shell_invocation
+    def immediate_post_c_body(resolution, current_shell="sh", deadline=None):
+        if (resolution.items
+                and os.path.basename(resolution.items[0][0]) == "zsh"):
+            args = resolution.items[1:]
+            for index, (word, _quoting) in enumerate(args):
+                if (word == "-c"
+                        or (word.startswith("-") and not word.startswith("--")
+                            and "c" in word[1:])):
+                    command_arg = (args[index + 1]
+                                   if index + 1 < len(args) else ("", ""))
+                    return ShellInvocation(
+                        "zsh", command_arg[0],
+                        source_has_live_unresolved(command_arg[0], deadline),
+                        dict(resolution.command_env),
+                        _descendant_lookup_authority(resolution))
+            return None
+        return original_nested_invocation(resolution, current_shell, deadline)
+    globals()["nested_shell_invocation"] = immediate_post_c_body
+    try:
+        post_c_argv_red = all(decide(source)[0] != "deny" for source in (
+            "zsh -c --no-equals \"git grep -E 'harness\\\\b' -- README.md\"",
+            "zsh -c -o NO_EQUALS \"git grep -E 'harness\\\\b' -- README.md\"",
+            "zsh -c -oNO_EQUALS \"git grep -E 'harness\\\\b' -- README.md\"",
+        ))
+    finally:
+        globals()["nested_shell_invocation"] = original_nested_invocation
+    bad += 0 if post_c_argv_red else 1
+    print("  %s nested-zsh argv callsite mutation loses post-c command bodies" % (
+        "PASS" if post_c_argv_red else "FAIL"))
+
+    original_zsh_argv_state = _zsh_argv_state
+    def scan_post_operand_options(words, default=ZSH_EQUALS_ON):
+        parsed = original_zsh_argv_state(words, default)
+        if parsed.command_index is None:
+            return parsed
+        tail = original_zsh_argv_state(
+            [words[0], *words[parsed.command_index + 1:]], parsed.equals_state)
+        return ZshArgvState(
+            tail.equals_state, parsed.command_index,
+            parsed.reads_stdin or tail.reads_stdin)
+    globals()["_zsh_argv_state"] = scan_post_operand_options
+    try:
+        post_operand_red = all(decide(source)[0] != expected
+                               for source, expected in (
+            ("zsh -c \"=git grep -E 'harness\\\\b' -- README.md\" "
+             "--no-equals", "deny"),
+            ("zsh -c \"=git grep -P 'harness\\\\b' -- README.md\" "
+             "-o NO_EQUALS", "allow"),
+            (("zsh -fc '/usr/bin/printf command-only' -s 0<<< "
+              "\"git grep -E 'harness\\b' -- README.md\""), "allow"),
+        ))
+    finally:
+        globals()["_zsh_argv_state"] = original_zsh_argv_state
+    bad += 0 if post_operand_red else 1
+    print("  %s zsh-argv boundary mutation parses positional args as options" % (
+        "PASS" if post_operand_red else "FAIL"))
+
+    original_direct_invocation = direct_here_string_invocation
+    def force_direct_equals_on(source, current_shell="zsh",
+                               equals_state=ZSH_EQUALS_ON, command_env=None,
+                               lookup_authority_uncertain=False, deadline=None):
+        direct = original_direct_invocation(
+            source, current_shell, equals_state, command_env,
+            lookup_authority_uncertain, deadline)
+        if not direct:
+            return None
+        resolution, invocation = direct
+        return resolution._replace(items=[("zsh", "")]), invocation
+    globals()["direct_here_string_invocation"] = force_direct_equals_on
+    try:
+        here_option_red = all(decide(source)[0] != "ask" for source in (
+            "zsh -o NO_EQUALS <<< \"=git grep -E 'harness\\b' -- README.md\"",
+            "zsh -foNO_EQUALS 0<<< \"=git grep -E 'harness\\b' -- README.md\"",
+        ))
+    finally:
+        globals()["direct_here_string_invocation"] = original_direct_invocation
+    bad += 0 if here_option_red else 1
+    print("  %s here-string zsh option-state mutation loses startup uncertainty" % (
+        "PASS" if here_option_red else "FAIL"))
+
+    original_heredoc_equals = heredoc_equals_decision
+    globals()["heredoc_equals_decision"] = (
+        lambda _source, _deadline=None, _subcommands=None, classifier=None,
+        **_context: None)
+    try:
+        heredoc_default_red = all(decide(source)[0] != expected
+                                  for source, expected in (
+            ("unsetopt equals; zsh <<'EOF'\n"
+             "=git grep -E 'harness\\b' -- README.md\nEOF\n", "deny"),
+            ("zsh -foNO_EQUALS <<'EOF'\n"
+             "=git grep -E 'harness\\b' -- README.md\nEOF\n", "ask"),
+        ))
+    finally:
+        globals()["heredoc_equals_decision"] = original_heredoc_equals
+    bad += 0 if heredoc_default_red else 1
+    print("  %s heredoc child-state mutation inherits the outer EQUALS option" % (
+        "PASS" if heredoc_default_red else "FAIL"))
+
+    original_shell_reads_stdin = _shell_reads_stdin
+    def drop_clustered_zsh_option_value(words):
+        if (len(words) >= 3 and os.path.basename(words[0]) == "zsh"
+                and words[1] in {"-fo", "+fo"}):
+            return False
+        return original_shell_reads_stdin(words)
+    globals()["_shell_reads_stdin"] = drop_clustered_zsh_option_value
+    try:
+        clustered_stdin_red = decide(
+            "zsh -fo NO_EQUALS <<'EOF'\n"
+            "git grep -E 'harness\\b' -- README.md\nEOF\n")[0] != "deny"
+    finally:
+        globals()["_shell_reads_stdin"] = original_shell_reads_stdin
+    bad += 0 if clustered_stdin_red else 1
+    print("  %s zsh-stdin argv callsite mutation loses clustered option value" % (
+        "PASS" if clustered_stdin_red else "FAIL"))
+
+    original_scope_pairs = _function_scope_pairs
+    globals()["_function_scope_pairs"] = (
+        lambda _source, _records, deadline=None: ())
+    try:
+        scope_equals_red = decide(
+            "(unsetopt equals); =git grep -E 'harness\\b' -- README.md"
+        )[0] != "deny"
+    finally:
+        globals()["_function_scope_pairs"] = original_scope_pairs
+    bad += 0 if scope_equals_red else 1
+    print("  %s EQUALS scope mutation leaks a subshell option change" % (
+        "PASS" if scope_equals_red else "FAIL"))
+
+    original_outer_equals = _resolve_outer_zsh_equals
+    globals()["_resolve_outer_zsh_equals"] = (
+        lambda tokens, _shell, _state, _env, _lookup: list(tokens))
+    try:
+        outer_equals_red = (
+            decide("env -i =git grep -E 'harness\\b' -- README.md")[0]
+            != "deny"
+            and decide("env -i =git grep -P 'harness\\b' -- README.md")[0]
+            != "allow")
+    finally:
+        globals()["_resolve_outer_zsh_equals"] = original_outer_equals
+    bad += 0 if outer_equals_red else 1
+    print("  %s outer EQUALS pre-resolution mutation transfers wrapper authority" % (
+        "PASS" if outer_equals_red else "FAIL"))
+
+    original_strongest = _strongest_decision
+    globals()["_strongest_decision"] = (
+        lambda decisions: min(
+            decisions, key=lambda item: {"allow": 0, "ask": 1, "deny": 2}[item[0]]))
+    try:
+        precedence_red = all(decide(source)[0] != "deny" for source in (
+            "sh <<'A'\n=git grep -E 'harness\\b' -- README.md\nA\n"
+            "zsh <<'B'\n=git grep -E 'harness\\b' -- README.md\nB\n",
+            "zsh <<'A'\n=git grep -E 'harness\\b' -- README.md\nA\n"
+            "sh <<'B'\n=git grep -E 'harness\\b' -- README.md\nB\n",
+            ("sh -c \"=git grep -E 'harness\\\\b' -- README.md\"; "
+             "=git grep -E 'harness\\b' -- README.md"),
+            ("=git grep -E 'harness\\b' -- README.md; "
+             "sh -c \"=git grep -E 'harness\\\\b' -- README.md\""),
+            ("sh <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n"
+             "git grep -E 'harness\\b' -- README.md"),
+            ("git grep -E 'harness\\b' -- README.md\n"
+             "sh <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n"),
+        ))
+    finally:
+        globals()["_strongest_decision"] = original_strongest
+    bad += 0 if precedence_red else 1
+    print("  %s decision-reducer mutation lets a question mask a deny" % (
+        "PASS" if precedence_red else "FAIL"))
+
+    original_stdin_reducer = _reduce_stdin_provenance
+    globals()["_reduce_stdin_provenance"] = lambda findings: findings[0]
+    try:
+        here_string_precedence_red = decide(
+            "sh 0<<< \"=git grep -E 'harness\\b' -- README.md\"; "
+            "zsh 0<<< \"=git grep -E 'harness\\b' -- README.md\""
+        )[0] != "deny"
+    finally:
+        globals()["_reduce_stdin_provenance"] = original_stdin_reducer
+    bad += 0 if here_string_precedence_red else 1
+    print("  %s stdin-reducer mutation lets a here-string question mask a deny" % (
+        "PASS" if here_string_precedence_red else "FAIL"))
+
+    ambient_occurrence = lambda _finding, command_env=None, \
+        lookup_authority_uncertain=False, deadline=None: (
+            dict(os.environ if command_env is None else command_env),
+            bool(lookup_authority_uncertain))
+    original_heredoc_occurrence = _heredoc_occurrence_environment
+    globals()["_heredoc_occurrence_environment"] = ambient_occurrence
+    try:
+        heredoc_occurrence_red = decide(
+            "PATH=/usr/bin\nzsh <<'EOF'\n"
+            "=git grep -P 'harness\\b' -- README.md\nEOF\n")[0] != "ask"
+    finally:
+        globals()["_heredoc_occurrence_environment"] = original_heredoc_occurrence
+    bad += 0 if heredoc_occurrence_red else 1
+    print("  %s heredoc-occurrence mutation drops prior-line PATH authority" % (
+        "PASS" if heredoc_occurrence_red else "FAIL"))
+
+    original_expansion_occurrence = _heredoc_expansion_environment
+    globals()["_heredoc_expansion_environment"] = ambient_occurrence
+    try:
+        expansion_occurrence_red = decide(
+            "PATH=/usr/bin; cat <<EOF\n"
+            "$(=git grep -P 'harness\\b' -- README.md)\nEOF\n")[0] != "ask"
+    finally:
+        globals()["_heredoc_expansion_environment"] = original_expansion_occurrence
+    bad += 0 if expansion_occurrence_red else 1
+    print("  %s heredoc-expansion mutation drops prior PATH authority" % (
+        "PASS" if expansion_occurrence_red else "FAIL"))
+
+    original_here_occurrence = _here_string_occurrence_environment
+    globals()["_here_string_occurrence_environment"] = (
+        lambda _source, _fragment, command_env=None,
+        lookup_authority_uncertain=False, deadline=None: (
+            dict(os.environ if command_env is None else command_env),
+            bool(lookup_authority_uncertain)))
+    try:
+        here_occurrence_red = decide(
+            "PATH=/usr/bin\nzsh 0<<< \"=git grep -P 'harness\\b' -- README.md\""
+        )[0] != "ask"
+    finally:
+        globals()["_here_string_occurrence_environment"] = original_here_occurrence
+    bad += 0 if here_occurrence_red else 1
+    print("  %s here-string occurrence mutation drops prior-line PATH authority" % (
+        "PASS" if here_occurrence_red else "FAIL"))
+
+    original_occurrence_index = _marked_occurrence_command_index
+    def choose_last_occurrence(source, deadline=None):
+        commands = split_commands(source, _deadline=deadline)
+        if not commands:
+            raise CommandParseError("mutated occurrence source has no command")
+        return len(commands) - 1
+    globals()["_marked_occurrence_command_index"] = choose_last_occurrence
+    try:
+        future_occurrence_red = all(decide(source)[0] != "allow" for source in (
+            ("zsh 0<<< \"=git grep -P 'harness\\b' -- README.md\"; "
+             "PATH=/usr/bin; /bin/echo done"),
+            ("zsh 0<<< \"=git grep -P 'harness\\b' -- README.md\"; "
+             "unset PATH; /bin/echo done"),
+            ("cat <<EOF; PATH=/usr/bin; /bin/echo done\n"
+             "$(=git grep -P 'harness\\b' -- README.md)\nEOF\n"),
+        ))
+    finally:
+        globals()["_marked_occurrence_command_index"] = original_occurrence_index
+    bad += 0 if future_occurrence_red else 1
+    print("  %s occurrence-index mutation lets future PATH state flow backward" % (
+        "PASS" if future_occurrence_red else "FAIL"))
+
+    original_ordinary_source = command_without_heredoc_payloads
+    globals()["command_without_heredoc_payloads"] = (
+        lambda source, deadline=None: "" if "<<'EOF'" in source
+        else original_ordinary_source(source, deadline))
+    try:
+        heredoc_composition_red = all(decide(source)[0] != "deny" for source in (
+            ("sh <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n"
+             "git grep -E 'harness\\b' -- README.md"),
+            ("git grep -E 'harness\\b' -- README.md\n"
+             "sh <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n"),
+        ))
+    finally:
+        globals()["command_without_heredoc_payloads"] = original_ordinary_source
+    bad += 0 if heredoc_composition_red else 1
+    print("  %s heredoc-composition mutation skips ordinary-command denial" % (
+        "PASS" if heredoc_composition_red else "FAIL"))
 
     globals()["authorize_git_subcommand"] = (
         lambda subcommand, authority, effective_exec_path:
@@ -5247,7 +7212,8 @@ def selftest():
         "PASS" if ambient_engine_red else "FAIL"))
 
     original_functions = extract_function_invocations
-    globals()["extract_function_invocations"] = lambda source: (source, ())
+    globals()["extract_function_invocations"] = (
+        lambda source, deadline=None: (source, ()))
     try:
         declaration_red = all(decide(source)[0] != "allow" for source in (
             r'''scan() { git grep -E 'harness\b' -- README.md; }; /bin/echo safe''',
@@ -5263,8 +7229,8 @@ def selftest():
     print("  %s declaration-time execution mutation loses harmless declaration control" % (
         "PASS" if declaration_red else "FAIL"))
 
-    def drop_function_invocations(source):
-        cleaned, _sources = original_functions(source)
+    def drop_function_invocations(source, deadline=None):
+        cleaned, _sources = original_functions(source, deadline)
         return cleaned, ()
     globals()["extract_function_invocations"] = drop_function_invocations
     try:
@@ -5280,8 +7246,8 @@ def selftest():
         "PASS" if invocation_red else "FAIL"))
 
     original_function_records = function_declaration_records
-    def collapse_function_versions(source):
-        records = original_function_records(source)
+    def collapse_function_versions(source, deadline=None):
+        records = original_function_records(source, deadline)
         last_body = {record.name: record.body for record in records}
         return tuple(FunctionDeclaration(
             record.start, record.end, record.name, last_body[record.name],
@@ -5304,9 +7270,9 @@ def selftest():
         "PASS" if collapse_red else "FAIL"))
 
     original_annotation = annotate_function_declarations
-    def ignore_conditional_reachability(source, records):
+    def ignore_conditional_reachability(source, records, deadline=None):
         return tuple(record._replace(conditional=False)
-                     for record in original_annotation(source, records))
+                     for record in original_annotation(source, records, deadline))
     globals()["annotate_function_declarations"] = ignore_conditional_reachability
     try:
         conditional_red = decide(
@@ -5318,9 +7284,9 @@ def selftest():
     print("  %s conditional-reachability mutation loses uncertain call outcome" % (
         "PASS" if conditional_red else "FAIL"))
 
-    def globalize_function_scope(source, records):
+    def globalize_function_scope(source, records, deadline=None):
         return tuple(record._replace(scope_start=-1, scope_end=len(source))
-                     for record in original_annotation(source, records))
+                     for record in original_annotation(source, records, deadline))
     globals()["annotate_function_declarations"] = globalize_function_scope
     try:
         scope_red = decide(
@@ -5336,9 +7302,9 @@ def selftest():
     print("  %s subshell-scope mutation loses both outer-definition controls" % (
         "PASS" if scope_red else "FAIL"))
 
-    def globalize_maybe_definitions(source, records):
+    def globalize_maybe_definitions(source, records, deadline=None):
         return tuple(record._replace(maybe=False)
-                     for record in original_annotation(source, records))
+                     for record in original_annotation(source, records, deadline))
     globals()["annotate_function_declarations"] = globalize_maybe_definitions
     try:
         maybe_red = all(decide(source)[0] != "ask" for source in (
@@ -5357,9 +7323,9 @@ def selftest():
     print("  %s short-circuit-state mutation loses all maybe-definition asks" % (
         "PASS" if maybe_red else "FAIL"))
 
-    def globalize_pipeline_definitions(source, records):
+    def globalize_pipeline_definitions(source, records, deadline=None):
         return tuple(record._replace(pipeline_start=-1, pipeline_end=-1)
-                     for record in original_annotation(source, records))
+                     for record in original_annotation(source, records, deadline))
     globals()["annotate_function_declarations"] = globalize_pipeline_definitions
     try:
         pipeline_scope_red = decide(
@@ -5377,20 +7343,22 @@ def selftest():
     print("  %s pipeline-child mutation loses both outer-definition controls" % (
         "PASS" if pipeline_scope_red else "FAIL"))
 
-    original_direct_here = _direct_here_string_shell
-    globals()["_direct_here_string_shell"] = lambda _source: False
+    original_marked_stdin = _marked_stdin_command
+    globals()["_marked_stdin_command"] = (
+        lambda _line, _start, _end, _deadline=None: None)
     try:
         leading_stdin_red = decide(
             r'''(sh) <<< "git grep -E 'harness\b' -- README.md"''')[0] != "deny"
     finally:
-        globals()["_direct_here_string_shell"] = original_direct_here
+        globals()["_marked_stdin_command"] = original_marked_stdin
     bad += 0 if leading_stdin_red else 1
     print("  %s grouped-shell association mutation loses recursive deny" % (
         "PASS" if leading_stdin_red else "FAIL"))
 
     original_association = associated_stdin_consumer
     globals()["associated_stdin_consumer"] = (
-        lambda _line, _start, _end, _commands: StdinConsumer(False, False))
+        lambda _line, _start, _end, _deadline=None:
+        StdinConsumer(False, False, ""))
     try:
         compound_stdin_red = decide(
             r'''{ /bin/echo prep; sh; } <<< "git grep -E 'harness\b' -- README.md"'''
@@ -5412,8 +7380,8 @@ def selftest():
         "PASS" if file_input_red else "FAIL"))
 
     globals()["associated_stdin_consumer"] = (
-        lambda _line, _start, _end, parsed:
-        StdinConsumer(any(reachable_stdin_shells(parsed)), False))
+        lambda _line, _start, _end, _deadline=None:
+        StdinConsumer(True, False, "sh"))
     try:
         cartesian_red = decide(
             r'''/bin/cat <<< "git grep -E 'harness\b' -- README.md"; '''
@@ -5426,7 +7394,9 @@ def selftest():
 
     original_here_classifier = classify_direct_here_string
     globals()["classify_direct_here_string"] = (
-        lambda _source, _depth: StdinProvenance("ask", "planted unconditional ask"))
+        lambda _source, _depth, _deadline, _resolution, _invocation,
+        _equals_state: StdinProvenance(
+            "ask", "planted unconditional ask"))
     try:
         unconditional_here_red = decide(
             r'''sh 0<<< "/bin/echo safe"''')[0] != "allow"
@@ -5436,7 +7406,9 @@ def selftest():
     print("  %s unconditional here-string mutation loses harmless static allow" % (
         "PASS" if unconditional_here_red else "FAIL"))
 
-    globals()["classify_direct_here_string"] = lambda _source, _depth: None
+    globals()["classify_direct_here_string"] = (
+        lambda _source, _depth, _deadline, _resolution, _invocation,
+        _equals_state: None)
     try:
         here_recursion_red = decide(
             r'''sh <<< "git grep -E 'harness\b' -- README.md"''')[0] != "deny"
@@ -5445,6 +7417,49 @@ def selftest():
     bad += 0 if here_recursion_red else 1
     print("  %s here-string recursion mutation loses guarded nested deny" % (
         "PASS" if here_recursion_red else "FAIL"))
+
+    original_direct_invocation = direct_here_string_invocation
+    def force_direct_zsh(source, current_shell="zsh",
+                         equals_state=ZSH_EQUALS_ON, command_env=None,
+                         lookup_authority_uncertain=False, deadline=None):
+        direct = original_direct_invocation(
+            source, current_shell, equals_state, command_env,
+            lookup_authority_uncertain, deadline)
+        if not direct:
+            return None
+        resolution, invocation = direct
+        return (resolution._replace(items=[("zsh", "")]),
+                invocation._replace(shell="zsh"))
+    globals()["direct_here_string_invocation"] = force_direct_zsh
+    try:
+        here_shell_red = decide(
+            r'''sh <<< "=git grep -E 'harness\b' -- README.md"''')[0] != "ask"
+    finally:
+        globals()["direct_here_string_invocation"] = original_direct_invocation
+    bad += 0 if here_shell_red else 1
+    print("  %s here-string shell-identity mutation misclassifies sh EQUALS syntax" % (
+        "PASS" if here_shell_red else "FAIL"))
+
+    original_heredoc_decision = heredoc_equals_decision
+    def force_zsh_heredoc_identity(
+            source, deadline=None, subcommands=None, classifier=None,
+            **context):
+        forced = (None if classifier is None else
+                  lambda body, _shell, state, inner_deadline, env, lookup:
+                  classifier(body, "zsh", ZSH_EQUALS_ON, inner_deadline,
+                             env, lookup))
+        return original_heredoc_decision(
+            source, deadline, subcommands, forced, **context)
+    globals()["heredoc_equals_decision"] = force_zsh_heredoc_identity
+    try:
+        heredoc_shell_red = decide(
+            "sh <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n"
+        )[0] != "ask"
+    finally:
+        globals()["heredoc_equals_decision"] = original_heredoc_decision
+    bad += 0 if heredoc_shell_red else 1
+    print("  %s heredoc shell-identity mutation misclassifies sh EQUALS syntax" % (
+        "PASS" if heredoc_shell_red else "FAIL"))
 
     original_find_heredoc = _find_heredoc_operator
     def confuse_redirection_context(line):
@@ -5484,8 +7499,12 @@ def selftest():
         "PASS" if backtick_red else "FAIL"))
 
     original_heredoc = extract_heredoc_sources
-    def drop_heredoc_body(source):
-        cleaned, _bodies = original_heredoc(source)
+    def drop_heredoc_body(source, deadline=None, equals_findings=None,
+                          equals_subcommands=None, shell_findings=None,
+                          expansion_findings=None,
+                          classify_non_direct_shell_bodies=False):
+        cleaned, _bodies = original_heredoc(
+            source, deadline, equals_findings, equals_subcommands, None)
         return cleaned, ()
     globals()["extract_heredoc_sources"] = drop_heredoc_body
     try:
@@ -5498,9 +7517,19 @@ def selftest():
     print("  %s executable-heredoc callsite mutation loses nested deny" % (
         "PASS" if heredoc_red else "FAIL"))
 
-    def keep_winning_heredoc_only(source):
-        cleaned, bodies = original_heredoc(source)
+    def keep_winning_heredoc_only(source, deadline=None, equals_findings=None,
+                                  equals_subcommands=None, shell_findings=None,
+                                  expansion_findings=None,
+                                  classify_non_direct_shell_bodies=False):
+        expansion_start = (len(expansion_findings)
+                           if expansion_findings is not None else 0)
+        cleaned, bodies = original_heredoc(
+            source, deadline, equals_findings, equals_subcommands,
+            shell_findings, expansion_findings,
+            classify_non_direct_shell_bodies)
         if "<<A <<'B'" in source:
+            if expansion_findings is not None:
+                del expansion_findings[expansion_start:]
             return cleaned, ()
         return cleaned, bodies
     globals()["extract_heredoc_sources"] = keep_winning_heredoc_only
@@ -5515,20 +7544,22 @@ def selftest():
     print("  %s winner-only heredoc mutation loses nonwinning-body expansion deny" % (
         "PASS" if winner_red else "FAIL"))
 
-    original_header_executes = _header_executes_shell
-    globals()["_header_executes_shell"] = lambda _header, _suffix="": False
+    original_header_shell = _header_stdin_shell
+    globals()["_header_stdin_shell"] = (
+        lambda _header, _suffix="", deadline=None: "")
     try:
         heredoc_path_red = decide(
             "sh 0<<'EOF'\ngit grep -E 'harness\\b' -- README.md\nEOF\n"
         )[0] != "deny"
     finally:
-        globals()["_header_executes_shell"] = original_header_executes
+        globals()["_header_stdin_shell"] = original_header_shell
     bad += 0 if heredoc_path_red else 1
     print("  %s heredoc execution-header mutation loses descriptor-zero deny" % (
         "PASS" if heredoc_path_red else "FAIL"))
 
     original_fallback = conservative_allow_uncertainty
-    globals()["conservative_allow_uncertainty"] = lambda _source: None
+    globals()["conservative_allow_uncertainty"] = (
+        lambda _source, _deadline=None: None)
     try:
         fallback_red = decide(
             r'''launcher /bin/sh 0<<< "git grep -E 'harness\b' -- README.md"'''
@@ -5556,7 +7587,7 @@ def selftest():
     print("  %s identifier-only heredoc mutation loses dashed-delimiter deny" % (
         "PASS" if dashed_heredoc_red else "FAIL"))
 
-    checks = len(FIXTURES) + 54
+    checks = len(FIXTURES) + 69
     print("failures: %d" % bad)
     print("SELFTEST-SUMMARY suite=git_grep_engine_guard checks=%d failures=%d" % (
         checks, bad))

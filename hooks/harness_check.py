@@ -86,7 +86,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 72
+SELFTEST_FLOOR = 73
 
 AUTHORING_SKILLS = {"craft-prompt", "craft-skill", "craft-context-file", "review-prompt"}
 BODY_CHAR_CAP = 5000          # chars after frontmatter — the builders' instrument
@@ -98,7 +98,7 @@ DESC_CAP = 400                # house cap (spec ceiling is 1024)
 # checks=111, so a suite can be gutted with nothing failing. Raise a floor in the same
 # commit that adds the checks; lowering one is a deliberate, reviewable edit.
 SELFTEST_SUITES = [
-    ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"], 744),
+    ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"], 1051),
     ("askq_timeout_guard", ["hooks/askq_timeout_guard.py", "--selftest"], 13),
     ("harness_report", ["hooks/harness_report.py", "--selftest"], 12),
     ("cc-cost", ["tools/cc-cost.py", "--selftest"], 8),
@@ -107,13 +107,18 @@ SELFTEST_SUITES = [
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 8),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 220),
-    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 18),
+    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 22),
     ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 63),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
     ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 16),
-    ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 428),
-    ("zsh_rev_modifier_guard", ["hooks/guards/zsh_rev_modifier_guard.py", "--selftest"], 171),
+    ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 537),
+    ("zsh_rev_modifier_guard", ["hooks/guards/zsh_rev_modifier_guard.py", "--selftest"], 239),
 ]
+# The public Bash-guard selftest intentionally runs five independent process-level timing
+# observations for each runtime. Give that aggregate suite enough wall-clock without
+# weakening the five-second deadline each individual hook process must meet.
+SELFTEST_TIMEOUTS = {"bash_command_guard": 90}
+DEFAULT_SELFTEST_TIMEOUT = 15
 # The only non-aggregated selftest is this recursive meta-suite itself.
 SELFTEST_EXEMPTIONS = {
     "hooks/harness_check.py": "recursive meta-suite",
@@ -483,12 +488,14 @@ class Run:
                                 f"the same commit and review that diff")
                     continue
             try:
+                timeout = SELFTEST_TIMEOUTS.get(name, DEFAULT_SELFTEST_TIMEOUT)
                 p = subprocess.run(
                     [sys.executable, os.path.join(self.root, cmd[0])] + cmd[1:],
-                    capture_output=True, cwd=self.root, timeout=15,
+                    capture_output=True, cwd=self.root, timeout=timeout,
                 )
             except subprocess.TimeoutExpired:
-                self.result("C1", False, f"selftest {name}: exceeded 15s")
+                self.result("C1", False,
+                            f"selftest {name}: exceeded {timeout}s")
                 continue
             receipts = re.findall(
                 rb"^SELFTEST-SUMMARY suite=([a-z0-9_-]+) checks=(\d+) failures=(\d+)$",
@@ -1234,6 +1241,28 @@ def selftest():
                                    for _c, d in c1_bound.failures))
         expect_red("C1 floor control: the same suite exactly at its floor stays green",
                    lambda: not c1_at_floor.failures)
+
+        observed_timeouts = []
+        original_subprocess_run = subprocess.run
+        def record_c1_timeout(*args, **kwargs):
+            observed_timeouts.append(kwargs.get("timeout"))
+            return subprocess.CompletedProcess(
+                args[0], 0,
+                b"SELFTEST-SUMMARY suite=bash_command_guard checks=1 failures=0\n",
+                b"")
+        subprocess.run = record_c1_timeout
+        try:
+            c1_timeout = Run(td, ci=True)
+            c1_timeout.c1_selftests(
+                [("bash_command_guard", [stub_suite], 1)],
+                sources=planted_sources("bash_command_guard", stub_suite))
+        finally:
+            subprocess.run = original_subprocess_run
+        expect_red(
+            "C1 gives the process-level Bash timing suite its registered aggregate timeout",
+            lambda: observed_timeouts == [SELFTEST_TIMEOUTS["bash_command_guard"]]
+            and not c1_timeout.failures,
+        )
 
         os.makedirs(os.path.join(td, "tools"))
         open(os.path.join(td, "tools", "unregistered.py"), "w").write(

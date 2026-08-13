@@ -34,11 +34,11 @@ EVAL_SKILL_FLOOR = 6
 # 165 here and 178 in harness_check -- and a fake that hardcodes its own number tests the
 # literal rather than the contract.
 SUITE_FLOORS = {
-    "harness_check": 72,
+    "harness_check": 73,
     "render-packages": 192,
-    "bash_command_guard": 776,
-    "git_grep_engine_guard": 445,
-    "zsh_rev_modifier_guard": 181,
+    "bash_command_guard": 1051,
+    "git_grep_engine_guard": 537,
+    "zsh_rev_modifier_guard": 239,
 }
 EXPECTED_WORKFLOW = """name: harness-check
 on:

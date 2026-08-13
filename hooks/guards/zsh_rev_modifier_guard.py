@@ -60,14 +60,24 @@ import shutil
 import string
 import subprocess
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import git_grep_engine_guard as git_guard  # noqa: E402
 from git_grep_engine_guard import (  # noqa: E402
-    CommandParseError, MAX_PREFIX_DEPTH, nested_shell_invocation,
+    CommandParseError, GUARD_BUDGET_SECONDS, MAX_PREFIX_DEPTH, PrefixResolution,
+    nested_shell_invocation,
+    nested_shell_equals_state, heredoc_equals_decision,
+    live_here_string_sources, direct_here_string_invocation,
     ZSH_EQUALS_OFF, ZSH_EQUALS_ON,
     fixture_pair_duplicates,
+    only_changed_git_lookup_authority_error,
+    only_changed_zsh_equals_lookup_authority_error,
     source_has_dynamic_command_word, source_has_git_hazard_hint,
-    split_commands, unwrap_command_prefix, zsh_equals_states,
+    split_commands, command_without_heredoc_payloads,
+    unwrap_command_prefix, zsh_equals_states,
+    command_environment_states, _strongest_decision,
+    _equals_expanded,
 )
 
 MODS = "aAcehlPqQrstu"
@@ -212,64 +222,132 @@ def _deny_hits(hits):
             % (tok, MOD_MEANING.get(mod, mod), mod, arg[:80], braced, len(hits)))
 
 
-def decide(command, _depth=0, _shell="zsh", _equals_state=ZSH_EQUALS_ON):
+def decide(command, _depth=0, _shell="zsh", _equals_state=ZSH_EQUALS_ON,
+           _deadline=None, _command_env=None,
+           _lookup_authority_uncertain=False):
     """-> (decision, reason), tracking the shell that expands each source layer."""
+    _deadline = (time.monotonic() + GUARD_BUDGET_SECONDS
+                 if _deadline is None else _deadline)
+    if time.monotonic() >= _deadline:
+        return ("ask", "the Bash guard exhausted its internal decision budget before "
+                "the zsh rev:path command could be classified")
+    equals_heredoc = heredoc_equals_decision(
+        command, _deadline, REV_PATH_SUBCOMMANDS,
+        lambda body, shell, state, deadline, env, lookup: decide(
+            body, _depth + 1, shell, state, deadline, env, lookup),
+        current_shell=_shell, inherited_equals_state=_equals_state,
+        command_env=_command_env,
+        lookup_authority_uncertain=_lookup_authority_uncertain,
+        classify_non_direct_shell_bodies=True)
+    decisions = []
+    if equals_heredoc is not None:
+        decisions.append(equals_heredoc)
+    for source in live_here_string_sources(command):
+        if source.descriptor != 0:
+            continue
+        direct = direct_here_string_invocation(
+            source, _shell, _equals_state, _command_env,
+            _lookup_authority_uncertain, _deadline)
+        if not direct:
+            continue
+        resolution, invocation = direct
+        if source.dynamic:
+            decisions.append((
+                "ask", "a directly associated shell here-string has a dynamic "
+                "source, so its rev:path arguments cannot be inspected"))
+            continue
+        nested_decision, nested_reason = decide(
+            source.body, _depth + 1, invocation.shell,
+            nested_shell_equals_state(
+                resolution, invocation, _equals_state), _deadline,
+            invocation.command_env, invocation.lookup_authority_uncertain)
+        if nested_decision != "allow":
+            decisions.append((nested_decision, nested_reason))
     try:
-        commands = split_commands(command)
+        scan_command = command_without_heredoc_payloads(command, _deadline)
+        commands = split_commands(scan_command, _deadline=_deadline)
     except CommandParseError as exc:
-        return ("ask", f"the Bash command cannot be parsed safely ({exc}); rewrite it "
-                "as a direct command before proceeding.")
+        decisions.append((
+            "ask", f"the Bash command cannot be parsed safely ({exc}); rewrite it "
+            "as a direct command before proceeding."))
+        return _strongest_decision(decisions)
     equals_states = zsh_equals_states(
-        command, commands,
-        _equals_state if _shell == "zsh" else ZSH_EQUALS_OFF)
-    for tokens, equals_state in zip(commands, equals_states):
-        resolution = unwrap_command_prefix(tokens, _shell, equals_state)
-        if resolution.errors and resolution.hazard_hint:
-            return ("ask",
-                    "this command may launch Git through a prefix the guard cannot "
-                    "resolve (" + "; ".join(resolution.errors) + "), so it cannot prove "
-                    "whether a `rev:path` argument survives shell expansion. Run Git "
-                    "directly with a literal executable.")
-        direct_git = is_rev_path_git(tokens, resolution)
-        invocation = nested_shell_invocation(resolution, _shell)
+        scan_command, commands,
+        _equals_state if _shell == "zsh" else ZSH_EQUALS_OFF, _deadline)
+    environment_states = command_environment_states(
+        scan_command, commands, _command_env, _lookup_authority_uncertain,
+        _deadline)
+    for tokens, equals_state, (command_env, lookup_uncertain) in zip(
+            commands, equals_states, environment_states):
+        resolution = unwrap_command_prefix(
+            tokens, _shell, equals_state, command_env, lookup_uncertain)
+        rev_path_resolution = resolution
+        git_lookup_only = only_changed_git_lookup_authority_error(resolution)
+        equals_lookup_only = only_changed_zsh_equals_lookup_authority_error(resolution)
+        if git_lookup_only or equals_lookup_only:
+            # `sudo`, `command -p`, and environment-clearing wrappers change which Git
+            # executable is trusted, so the sibling Git guard must ask. They do not move
+            # zsh expansion inside the wrapper: the outer zsh still consumes `$SHA:src`
+            # before launching it. Preserve the resolved argv solely for that independent
+            # rev:path decision, then retain the authority error for every later decision.
+            rev_items = list(resolution.items)
+            if equals_lookup_only and rev_items:
+                rev_items[0] = (_equals_expanded(rev_items[0][0]), rev_items[0][1])
+            rev_path_resolution = PrefixResolution(
+                rev_items, resolution.command_env, (), resolution.hazard_hint,
+                resolution.lookup_authority_uncertain,
+                resolution.descendant_lookup_authority_uncertain)
+        direct_git = is_rev_path_git(tokens, rev_path_resolution)
+        invocation = nested_shell_invocation(resolution, _shell, _deadline)
         descendant_git = (invocation is not None
-                          and source_has_git_hazard_hint(invocation.command))
+                          and source_has_git_hazard_hint(
+                              invocation.command, _deadline))
         if _shell == "zsh" and (direct_git or descendant_git):
             hits = _zsh_expansion_hits(tokens)
             if hits:
-                return _deny_hits(hits)
+                decisions.append(_deny_hits(hits))
+        if resolution.errors and resolution.hazard_hint:
+            decisions.append((
+                "ask",
+                "this command may launch Git through a prefix the guard cannot "
+                "resolve (" + "; ".join(resolution.errors) + "), so it cannot prove "
+                "whether a `rev:path` argument survives shell expansion. Run Git "
+                "directly with a literal executable."))
+            continue
         if invocation is None:
             continue
         if _depth >= NEST_DEPTH_LIMIT:
-            return ("ask",
-                    f"nested shell invocations exceed this guard's depth limit of "
-                    f"{NEST_DEPTH_LIMIT}, so it cannot prove what the innermost command "
-                    "becomes after each shell expands it. Run the inner command directly.")
+            decisions.append((
+                "ask",
+                f"nested shell invocations exceed this guard's depth limit of "
+                f"{NEST_DEPTH_LIMIT}, so it cannot prove what the innermost command "
+                "becomes after each shell expands it. Run the inner command directly."))
+            continue
         # Recurse BEFORE falling back to uncertainty. This short-circuited on `dynamic`
         # first, which cost enforcement in one direction and precision in the other:
         # `zsh -c 'SHA=x; git show $SHA:src/f.py'` is a proven hazard -- the inner zsh
         # applies `:s` whatever SHA holds -- and returned `ask` instead of `deny`, while
         # `sh -c 'echo $PATH'`, which contains no Git at all, also returned `ask`.
         if invocation.command:
-            executable = (os.path.basename(resolution.items[0][0])
-                          if resolution.items else "")
-            nested_equals_state = (
-                equals_state if executable == "eval" and invocation.shell == "zsh"
-                else ZSH_EQUALS_ON if invocation.shell == "zsh"
-                else ZSH_EQUALS_OFF)
+            nested_equals_state = nested_shell_equals_state(
+                resolution, invocation, equals_state)
             decision, reason = decide(
-                invocation.command, _depth + 1, invocation.shell, nested_equals_state)
+                invocation.command, _depth + 1, invocation.shell,
+                nested_equals_state, _deadline, invocation.command_env,
+                invocation.lookup_authority_uncertain)
             if decision != "allow":
-                return (decision, reason)
+                decisions.append((decision, reason))
         # Only then does an uninspectable body matter, and only when Git is actually in
         # it. `descendant_git` is the same predicate the deny above is gated on.
         # sh, bash, dash and ksh apply no history modifier whatever the value expands
         # to, so an unresolved argument in their body is not this guard's hazard.
         if (not invocation.command
-                or source_has_dynamic_command_word(invocation.command)):
-            return ("ask", "a shell -c command string is empty or dynamic, so its Git "
-                    "arguments cannot be inspected before execution")
-    return ("allow", "")
+                or source_has_dynamic_command_word(
+                    invocation.command, _deadline)):
+            decisions.append((
+                "ask", "a shell -c command string is empty or dynamic, so its Git "
+                "arguments cannot be inspected before execution"))
+    return _strongest_decision(decisions) if decisions else ("allow", "")
 
 
 FIXTURES = [
@@ -362,6 +440,16 @@ FIXTURES = [
      "SHA=x; sudo --user=root git show $SHA:src/f.py", "deny"),
     ("RED WRAPPER: command -p still executes git",
      "SHA=x; command -p git show $SHA:src/f.py", "deny"),
+    ("RED WRAPPER: builtin command -p still expands in the outer zsh",
+     "SHA=x; builtin command -p git show $SHA:src/f.py", "deny"),
+    ("RED WRAPPER: env -i changes authority after outer zsh expansion",
+     "SHA=x; env -i git show $SHA:src/f.py", "deny"),
+    ("RED WRAPPER: long env ignore-environment has the same expansion order",
+     "SHA=x; env --ignore-environment git show $SHA:src/f.py", "deny"),
+    ("RED WRAPPER: env -u PATH changes lookup after outer zsh expansion",
+     "SHA=x; env -u PATH git show $SHA:src/f.py", "deny"),
+    ("RED WRAPPER: env --unset PATH changes lookup after outer zsh expansion",
+     "SHA=x; env --unset=PATH git show $SHA:src/f.py", "deny"),
     ("RED WRAPPER: command -- still executes git",
      "SHA=x; command -- git show $SHA:src/f.py", "deny"),
     ("RED WRAPPER: builtin command -- still executes git",
@@ -617,20 +705,121 @@ FIXTURES += [
      "SHA=x; setopt noequals; =git show $SHA:src/f.py", "ask"),
     ("ASK EQUALS: unsetopt equals also disables the expansion",
      "SHA=x; unsetopt equals; =git show $SHA:src/f.py", "ask"),
+    ("ASK EQUALS: set -o noequals disables the expansion",
+     "SHA=x; set -o noequals; =git show $SHA:src/f.py", "ask"),
+    ("ASK EQUALS: set +o equals disables the expansion",
+     "SHA=x; set +o equals; =git show $SHA:src/f.py", "ask"),
+    ("ASK EQUALS: emulate sh disables the expansion",
+     "SHA=x; emulate sh; =git show $SHA:src/f.py", "ask"),
     ("RED EQUALS: a later literal setopt equals restores the expansion",
      "SHA=x; setopt noequals; setopt equals; =git show $SHA:src/f.py", "deny"),
+    ("RED EQUALS: emulate zsh restores the native option set",
+     "SHA=x; setopt noequals; emulate zsh; =git show $SHA:src/f.py", "deny"),
     ("ASK EQUALS: a conditional option mutation is not unconditional authority",
      "SHA=x; if true; then setopt equals; fi; =git show $SHA:src/f.py", "ask"),
     ("ASK EQUALS: a called function option mutation is not flattened after its caller",
      "f(){ setopt noequals; }; f; SHA=x; =git show $SHA:src/f.py", "ask"),
     ("ASK EQUALS: a nested zsh tracks its own noequals state",
      "zsh -c 'SHA=x; setopt noequals; =git show $SHA:src/f.py'", "ask"),
+    ("ASK EQUALS: zsh -o NO_EQUALS changes the child startup state",
+     "zsh -o NO_EQUALS -c 'SHA=x; =git show $SHA:src/f.py'", "ask"),
+    ("ASK EQUALS: zsh +o EQUALS changes the child startup state",
+     "zsh +o EQUALS -c 'SHA=x; =git show $SHA:src/f.py'", "ask"),
+    ("ASK EQUALS: attached -oNO_EQUALS changes the child startup state",
+     "zsh -oNO_EQUALS -c 'SHA=x; =git show $SHA:src/f.py'", "ask"),
+    ("ASK EQUALS: attached +oEQUALS changes the child startup state",
+     "zsh +oEQUALS -c 'SHA=x; =git show $SHA:src/f.py'", "ask"),
+    ("ASK EQUALS: long --no-equals changes the child startup state",
+     "zsh --no-equals -c 'SHA=x; =git show $SHA:src/f.py'", "ask"),
     ("ASK EQUALS: eval inherits an uncertain option mutation in the current zsh",
      "SHA=x; eval 'setopt noequals'; =git show $SHA:src/f.py", "ask"),
     ("ASK EQUALS: sourced code can change the option outside the visible command",
      "SHA=x; source \"$OPTIONS_FILE\"; =git show $SHA:src/f.py", "ask"),
     ("RED EQUALS: a child zsh starts with its own default after an outer noequals",
      "setopt noequals; zsh -c 'SHA=x; =git show $SHA:src/f.py'", "deny"),
+    ("RED EQUALS: an uncalled function cannot alter the parent option state",
+     "f(){ unsetopt equals; }; SHA=x; =git show $SHA:src/f.py", "deny"),
+    ("GREEN EQUALS: an uncalled function preserves a braced rev",
+     "f(){ unsetopt equals; }; SHA=x; =git show ${SHA}:src/f.py", "allow"),
+    ("RED EQUALS: a subshell option change cannot escape to the parent",
+     "(unsetopt equals); SHA=x; =git show $SHA:src/f.py", "deny"),
+    ("GREEN EQUALS: a subshell option change preserves a braced rev",
+     "(unsetopt equals); SHA=x; =git show ${SHA}:src/f.py", "allow"),
+    ("RED EQUALS: a command-substitution option change cannot escape",
+     "ignored=$(unsetopt equals); SHA=x; =git show $SHA:src/f.py", "deny"),
+    ("RED EQUALS: env cannot change an outer pre-expanded executable identity",
+     "SHA=x; env -i =git show $SHA:src/f.py", "deny"),
+    ("RED EQUALS: command -p cannot change an outer pre-expanded identity",
+     "SHA=x; command -p =git show $SHA:src/f.py", "deny"),
+    ("RED EQUALS: sudo cannot change an outer pre-expanded identity",
+     "SHA=x; sudo =git show $SHA:src/f.py", "deny"),
+    ("ASK EQUALS: a sh heredoc retains the downstream shell identity",
+     "sh <<'EOF'\nSHA=x; =git show $SHA:src/f.py\nEOF\n", "ask"),
+    ("ASK EQUALS: zsh -o NO_EQUALS applies to a here-string body",
+     "zsh -o NO_EQUALS <<< 'SHA=x; =git show $SHA:src/f.py'", "ask"),
+    ("ASK EQUALS: zsh +o EQUALS applies to a here-string body",
+     "zsh +o EQUALS <<< 'SHA=x; =git show $SHA:src/f.py'", "ask"),
+    ("ASK EQUALS: attached -oNO_EQUALS applies to a here-string body",
+     "zsh -oNO_EQUALS <<< 'SHA=x; =git show $SHA:src/f.py'", "ask"),
+    ("ASK EQUALS: zsh -o NO_EQUALS applies to a heredoc body",
+     "zsh -o NO_EQUALS <<'EOF'\nSHA=x; =git show $SHA:src/f.py\nEOF\n", "ask"),
+    ("ASK EQUALS: zsh +o EQUALS applies to a heredoc body",
+     "zsh +o EQUALS <<'EOF'\nSHA=x; =git show $SHA:src/f.py\nEOF\n", "ask"),
+    ("ASK EQUALS: attached -oNO_EQUALS applies to a heredoc body",
+     "zsh -oNO_EQUALS <<'EOF'\nSHA=x; =git show $SHA:src/f.py\nEOF\n", "ask"),
+    ("RED EQUALS: child zsh heredoc starts from its own default",
+     "unsetopt equals; zsh <<'EOF'\nSHA=x; =git show $SHA:src/f.py\nEOF\n", "deny"),
+    ("GREEN EQUALS: child zsh heredoc preserves a braced rev",
+     "zsh <<'EOF'\nSHA=x; =git show ${SHA}:src/f.py\nEOF\n", "allow"),
+    ("RED EQUALS: a later zsh heredoc deny outranks an earlier sh question",
+     ("sh <<'A'\nSHA=x; =git show $SHA:src/f.py\nA\n"
+      "zsh <<'B'\nSHA=x; =git show $SHA:src/f.py\nB\n"), "deny"),
+    ("RED EQUALS: heredoc deny precedence is independent of source order",
+     ("zsh <<'A'\nSHA=x; =git show $SHA:src/f.py\nA\n"
+      "sh <<'B'\nSHA=x; =git show $SHA:src/f.py\nB\n"), "deny"),
+    ("RED PATH STATE: zsh still mangles rev:path before the selected Git runs",
+     "PATH=/usr/bin; SHA=x; =git show $SHA:src/f.py", "deny"),
+    ("RED COMMAND-P: launcher lookup does not taint child zsh rev analysis",
+     "command -p zsh -c 'SHA=x; =git show $SHA:src/f.py'", "deny"),
+    ("RED PRECEDENCE: nested uncertainty cannot mask a later direct rev denial",
+     ("sh -c 'SHA=x; =git show $SHA:src/f.py'; "
+      "SHA=x; =git show $SHA:src/f.py"), "deny"),
+    ("ASK EQUALS: clustered -fo consumes attached NO_EQUALS",
+     "zsh -foNO_EQUALS -c 'SHA=x; =git show $SHA:src/f.py'", "ask"),
+    ("ASK EQUALS: -co processes state before the command body",
+     "zsh -coNO_EQUALS 'SHA=x; =git show $SHA:src/f.py'", "ask"),
+    ("ASK EQUALS: clustered -fo applies to a here-string body",
+     "zsh -foNO_EQUALS 0<<< 'SHA=x; =git show $SHA:src/f.py'", "ask"),
+    ("ASK EQUALS: clustered -fo applies to a heredoc body",
+     "zsh -foNO_EQUALS <<'EOF'\nSHA=x; =git show $SHA:src/f.py\nEOF\n", "ask"),
+    ("RED ZSH ARGV: a long option after -c does not hide the command body",
+     "zsh -c --no-equals 'SHA=x; git show $SHA:src/f.py'", "deny"),
+    ("RED ZSH ARGV: a split option after -c does not hide the command body",
+     "zsh -c -o NO_EQUALS 'SHA=x; git show $SHA:src/f.py'", "deny"),
+    ("RED ZSH ARGV: an attached option after -c does not hide the command body",
+     "zsh -c -oNO_EQUALS 'SHA=x; git show $SHA:src/f.py'", "deny"),
+    ("RED ZSH ARGV: a post-body long option is positional, not startup state",
+     "zsh -c 'SHA=x; =git show $SHA:src/f.py' --no-equals", "deny"),
+    ("GREEN ZSH ARGV: post-body -s does not make zsh read a here-string",
+     ("zsh -fc '/usr/bin/printf command-only' -s 0<<< "
+      "'SHA=x; git show $SHA:src/f.py'"), "allow"),
+    ("RED ZSH ARGV: clustered -fo consumes its separated option before stdin",
+     "zsh -fo NO_EQUALS <<'EOF'\n"
+     "SHA=x; git show $SHA:src/f.py\nEOF\n", "deny"),
+    ("ASK PATH STATE: prior-line PATH reaches a child zsh heredoc",
+     "PATH=/usr/bin\nzsh <<'EOF'\n"
+     "SHA=x; =git show ${SHA}:src/f.py\nEOF\n", "ask"),
+    ("ASK PATH STATE: prior-line PATH reaches a child zsh here-string",
+     "PATH=/usr/bin\nzsh 0<<< 'SHA=x; =git show ${SHA}:src/f.py'", "ask"),
+    ("GREEN PATH STATE: later PATH cannot alter an earlier safe here-string",
+     ("zsh 0<<< 'SHA=x; =git show ${SHA}:src/f.py'; "
+      "PATH=/usr/bin; /bin/echo done"), "allow"),
+    ("RED PRECEDENCE: a later zsh here-string deny outranks a sh question",
+     ("sh 0<<< 'SHA=x; =git show $SHA:src/f.py'; "
+      "zsh 0<<< 'SHA=x; =git show $SHA:src/f.py'"), "deny"),
+    ("RED PRECEDENCE: here-string deny precedence is source-order independent",
+     ("zsh 0<<< 'SHA=x; =git show $SHA:src/f.py'; "
+      "sh 0<<< 'SHA=x; =git show $SHA:src/f.py'"), "deny"),
 ]
 
 
@@ -742,6 +931,12 @@ FIXTURES += [
      "cat <<'END-MARK'\ngit show $SHA:src/f.py\nEND-MARK\n", "allow"),
     ("RED HEREDOC: unquoted dashed data delimiter expands a rev hazard",
      "cat <<END-MARK\n$(git show $SHA:src/f.py)\nEND-MARK\n", "deny"),
+    ("RED PRECEDENCE: a heredoc question cannot mask a later rev:path denial",
+     ("sh <<'EOF'\n=git show $SHA:src/f.py\nEOF\n"
+      "git show $SHA:src/f.py"), "deny"),
+    ("RED PRECEDENCE: a rev:path denial outranks a later heredoc question",
+     ("git show $SHA:src/f.py\n"
+      "sh <<'EOF'\n=git show $SHA:src/f.py\nEOF\n"), "deny"),
 ]
 
 
@@ -851,7 +1046,7 @@ def selftest():
 
     original_equals_states = zsh_equals_states
     globals()["zsh_equals_states"] = (
-        lambda _source, commands, initial=ZSH_EQUALS_ON:
+        lambda _source, commands, initial=ZSH_EQUALS_ON, deadline=None:
         tuple(ZSH_EQUALS_ON for _command in commands)
     )
     try:
@@ -863,7 +1058,131 @@ def selftest():
     print("  %-4s EQUALS-state callsite mutation loses noequals uncertainty"
           % ("PASS" if equals_state_red else "FAIL"))
 
-    checks = len(FIXTURES) + 5
+    original_nested_invocation = nested_shell_invocation
+    def immediate_post_c_body(resolution, current_shell="sh", deadline=None):
+        if (resolution.items
+                and os.path.basename(resolution.items[0][0]) == "zsh"):
+            args = resolution.items[1:]
+            for index, (word, _quoting) in enumerate(args):
+                if (word == "-c"
+                        or (word.startswith("-") and not word.startswith("--")
+                            and "c" in word[1:])):
+                    command_arg = (args[index + 1]
+                                   if index + 1 < len(args) else ("", ""))
+                    return git_guard.ShellInvocation(
+                        "zsh", command_arg[0],
+                        git_guard.source_has_live_unresolved(
+                            command_arg[0], deadline),
+                        dict(resolution.command_env),
+                        git_guard._descendant_lookup_authority(resolution))
+            return None
+        return original_nested_invocation(resolution, current_shell, deadline)
+    globals()["nested_shell_invocation"] = immediate_post_c_body
+    try:
+        post_c_argv_red = all(decide(source)[0] != "deny" for source in (
+            "zsh -c --no-equals 'SHA=x; git show $SHA:src/f.py'",
+            "zsh -c -o NO_EQUALS 'SHA=x; git show $SHA:src/f.py'",
+            "zsh -c -oNO_EQUALS 'SHA=x; git show $SHA:src/f.py'",
+        ))
+    finally:
+        globals()["nested_shell_invocation"] = original_nested_invocation
+    bad += 0 if post_c_argv_red else 1
+    print("  %-4s nested-zsh argv mutation loses post-c rev:path bodies"
+          % ("PASS" if post_c_argv_red else "FAIL"))
+
+    original_zsh_argv_state = git_guard._zsh_argv_state
+    def scan_post_operand_options(words, default=ZSH_EQUALS_ON):
+        parsed = original_zsh_argv_state(words, default)
+        if parsed.command_index is None:
+            return parsed
+        tail = original_zsh_argv_state(
+            [words[0], *words[parsed.command_index + 1:]], parsed.equals_state)
+        return git_guard.ZshArgvState(
+            tail.equals_state, parsed.command_index,
+            parsed.reads_stdin or tail.reads_stdin)
+    git_guard._zsh_argv_state = scan_post_operand_options
+    try:
+        post_operand_red = all(decide(source)[0] != expected
+                               for source, expected in (
+            ("zsh -c 'SHA=x; =git show $SHA:src/f.py' --no-equals", "deny"),
+            (("zsh -fc '/usr/bin/printf command-only' -s 0<<< "
+              "'SHA=x; git show $SHA:src/f.py'"), "allow"),
+        ))
+    finally:
+        git_guard._zsh_argv_state = original_zsh_argv_state
+    bad += 0 if post_operand_red else 1
+    print("  %-4s zsh-argv boundary mutation parses positional args as options"
+          % ("PASS" if post_operand_red else "FAIL"))
+
+    original_shell_reads_stdin = git_guard._shell_reads_stdin
+    def drop_clustered_zsh_option_value(words):
+        if (len(words) >= 3 and os.path.basename(words[0]) == "zsh"
+                and words[1] in {"-fo", "+fo"}):
+            return False
+        return original_shell_reads_stdin(words)
+    git_guard._shell_reads_stdin = drop_clustered_zsh_option_value
+    try:
+        clustered_stdin_red = decide(
+            "zsh -fo NO_EQUALS <<'EOF'\n"
+            "SHA=x; git show $SHA:src/f.py\nEOF\n")[0] != "deny"
+    finally:
+        git_guard._shell_reads_stdin = original_shell_reads_stdin
+    bad += 0 if clustered_stdin_red else 1
+    print("  %-4s zsh-stdin argv mutation loses clustered option value"
+          % ("PASS" if clustered_stdin_red else "FAIL"))
+
+    original_lookup_error = only_changed_git_lookup_authority_error
+    globals()["only_changed_git_lookup_authority_error"] = lambda _resolution: False
+    try:
+        lookup_error_red = all(
+            decide(source)[0] != "deny"
+            for source in (
+                "SHA=x; sudo git show $SHA:src/f.py",
+                "SHA=x; command -p git show $SHA:src/f.py",
+                "SHA=x; builtin command -p git show $SHA:src/f.py",
+                "SHA=x; env -i git show $SHA:src/f.py",
+                "SHA=x; env --ignore-environment git show $SHA:src/f.py",
+                "SHA=x; env -u PATH git show $SHA:src/f.py",
+                "SHA=x; env --unset=PATH git show $SHA:src/f.py",
+            )
+        )
+    finally:
+        globals()["only_changed_git_lookup_authority_error"] = original_lookup_error
+    bad += 0 if lookup_error_red else 1
+    print("  %-4s zsh rev:path proof remains live across Git lookup-authority errors"
+          % ("PASS" if lookup_error_red else "FAIL"))
+
+    original_equals_lookup_error = only_changed_zsh_equals_lookup_authority_error
+    globals()["only_changed_zsh_equals_lookup_authority_error"] = (
+        lambda _resolution: False)
+    try:
+        equals_lookup_red = decide(
+            "PATH=/usr/bin; SHA=x; =git show $SHA:src/f.py")[0] != "deny"
+    finally:
+        globals()["only_changed_zsh_equals_lookup_authority_error"] = (
+            original_equals_lookup_error)
+    bad += 0 if equals_lookup_red else 1
+    print("  %-4s zsh rev:path proof survives prior-PATH EQUALS lookup uncertainty"
+          % ("PASS" if equals_lookup_red else "FAIL"))
+
+    original_ordinary_source = command_without_heredoc_payloads
+    globals()["command_without_heredoc_payloads"] = (
+        lambda source, deadline=None: "" if "<<'EOF'" in source
+        else original_ordinary_source(source, deadline))
+    try:
+        heredoc_composition_red = all(decide(source)[0] != "deny" for source in (
+            ("sh <<'EOF'\n=git show $SHA:src/f.py\nEOF\n"
+             "git show $SHA:src/f.py"),
+            ("git show $SHA:src/f.py\n"
+             "sh <<'EOF'\n=git show $SHA:src/f.py\nEOF\n"),
+        ))
+    finally:
+        globals()["command_without_heredoc_payloads"] = original_ordinary_source
+    bad += 0 if heredoc_composition_red else 1
+    print("  %-4s heredoc composition mutation skips ordinary rev:path denial"
+          % ("PASS" if heredoc_composition_red else "FAIL"))
+
+    checks = len(FIXTURES) + 10
     print("failures: %d" % bad)
     print("SELFTEST-SUMMARY suite=zsh_rev_modifier_guard checks=%d failures=%d" % (
         checks, bad))

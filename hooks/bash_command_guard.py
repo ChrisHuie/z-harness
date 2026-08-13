@@ -53,12 +53,19 @@ class EnvelopeError(ValueError):
     """The matched PreToolUse envelope cannot be judged safely."""
 
 
-def decide(command):
+def decide(command, _deadline=None):
     """-> (decision, reason). Worst decision wins; reasons accumulate."""
+    _deadline = (time.monotonic() + grep_guard.GUARD_BUDGET_SECONDS
+                 if _deadline is None else _deadline)
     worst, reasons = "allow", []
     for name, mod in GUARDS:
         try:
-            result = mod.decide(command)
+            if time.monotonic() >= _deadline:
+                result = (
+                    "ask", "the Bash guard exhausted its shared internal decision "
+                    "budget before every predicate could classify the command")
+            else:
+                result = mod.decide(command, _deadline=_deadline)
             if not isinstance(result, tuple) or len(result) != 2:
                 raise TypeError(f"expected (decision, reason), got {result!r}")
             decision, reason = result
@@ -413,6 +420,149 @@ def selftest():
          "/nonexistent/bin/git grep -P 'harness\\b' -- README.md", "ask"),
         ("alternate-git-ere",
          "/nonexistent/bin/git grep -E 'harness\\b' -- README.md", "ask"),
+        ("command-p-authority", "command -p git status --short", "ask"),
+        ("builtin-command-p-authority",
+         "builtin command -p git status --short", "ask"),
+        ("env-clean-authority", "env -i git status --short", "ask"),
+        ("env-unset-path-authority", "env --unset=PATH git status --short", "ask"),
+        ("sudo-authority", "sudo -i git status --short", "ask"),
+        ("nested-env-clean-authority",
+         "env -i sh -c 'git status --short'", "ask"),
+        ("nested-env-unset-authority",
+         "env -u PATH sh -c 'git status --short'", "ask"),
+        ("nested-sudo-authority",
+         "sudo sh -c 'git status --short'", "ask"),
+        ("stdin-env-clean-authority",
+         "env -i sh 0<<< 'git status --short'", "ask"),
+        ("heredoc-env-clean-authority",
+         "env -i sh <<'EOF'\ngit status --short\nEOF\n", "ask"),
+        ("shell-alias-env-clean-authority",
+         "git -c 'alias.x=!env -i sh -c \"git status --short\"' x", "ask"),
+        ("shell-alias-env-eval-authority",
+         "git -c 'alias.x=!env -i sh -c \"eval git\\ status\\ --short\"' x",
+         "ask"),
+        ("shell-alias-env-stdin-authority",
+         "git -c 'alias.x=!env -i sh 0<<< \"git status --short\"' x", "ask"),
+        ("shell-alias-path-child-authority",
+         "git -c 'alias.x=!PATH=/usr/bin; sh -c \"git status --short\"' x",
+         "ask"),
+        ("shell-alias-path-stdin-authority",
+         "git -c 'alias.x=!PATH=/usr/bin; sh 0<<< \"git status --short\"' x",
+         "ask"),
+        ("prior-path-authority",
+         "PATH=/usr/bin; =git grep -P harness -- README.md", "ask"),
+        ("prior-path-missing",
+         "PATH=/definitely-missing; =git grep -E 'harness\\b' -- README.md",
+         "ask"),
+        ("same-command-path-control",
+         "PATH=/definitely-missing =git grep -P harness -- README.md", None),
+        ("prior-path-stdin-authority",
+         "PATH=/usr/bin; sh 0<<< 'git status --short'", "ask"),
+        ("prior-line-path-heredoc",
+         "PATH=/usr/bin\nzsh <<'EOF'\n"
+         "=git grep -P 'harness\\b' -- README.md\nEOF\n", "ask"),
+        ("prior-line-path-here-string",
+         "PATH=/usr/bin\nzsh 0<<< \"=git grep -P 'harness\\b' -- README.md\"",
+         "ask"),
+        ("future-path-here-string",
+         ("zsh 0<<< \"=git grep -P 'harness\\b' -- README.md\"; "
+          "PATH=/usr/bin; /bin/echo done"), None),
+        ("future-unset-here-string",
+         ("zsh 0<<< \"=git grep -P 'harness\\b' -- README.md\"; "
+          "unset PATH; /bin/echo done"), None),
+        ("prior-line-path-rev-heredoc",
+         "PATH=/usr/bin\nzsh <<'EOF'\n"
+         "SHA=x; =git show ${SHA}:src/f.py\nEOF\n", "ask"),
+        ("prior-line-path-rev-here-string",
+         "PATH=/usr/bin\nzsh 0<<< 'SHA=x; =git show ${SHA}:src/f.py'", "ask"),
+        ("prior-path-heredoc-expansion",
+         "PATH=/usr/bin; cat <<EOF\n"
+         "$(=git grep -P 'harness\\b' -- README.md)\nEOF\n", "ask"),
+        ("future-path-heredoc-expansion",
+         ("cat <<EOF; PATH=/usr/bin; /bin/echo done\n"
+          "$(=git grep -P 'harness\\b' -- README.md)\nEOF\n"), None),
+        ("quoted-path-heredoc-control",
+         "PATH=/usr/bin; cat <<'EOF'\n"
+         "$(=git grep -P 'harness\\b' -- README.md)\nEOF\n", None),
+        ("command-p-child-equals",
+         "command -p zsh -c \"=git grep -E 'harness\\\\b' -- README.md\"",
+         "deny"),
+        ("command-p-child-pcre",
+         "command -p zsh -c \"=git grep -P 'harness\\\\b' -- README.md\"",
+         None),
+        ("command-p-stdin-equals",
+         "command -p zsh 0<<< \"=git grep -E 'harness\\b' -- README.md\"",
+         "deny"),
+        ("nested-ask-later-deny",
+         ("sh -c \"=git grep -E 'harness\\\\b' -- README.md\"; "
+          "=git grep -E 'harness\\b' -- README.md"), "deny"),
+        ("direct-deny-later-ask",
+         ("=git grep -E 'harness\\b' -- README.md; "
+          "sh -c \"=git grep -E 'harness\\\\b' -- README.md\""), "deny"),
+        ("heredoc-ask-later-deny",
+         ("sh <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n"
+          "git grep -E 'harness\\b' -- README.md"), "deny"),
+        ("direct-deny-later-heredoc",
+         ("git grep -E 'harness\\b' -- README.md\n"
+          "sh <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n"), "deny"),
+        ("clustered-child-noequals",
+         "zsh -foNO_EQUALS -c \"=git grep -E 'harness\\\\b' -- README.md\"",
+         "ask"),
+        ("clustered-child-command-noequals",
+         "zsh -coNO_EQUALS \"=git grep -E 'harness\\\\b' -- README.md\"",
+         "ask"),
+        ("clustered-child-stdin-noequals",
+         "zsh -foNO_EQUALS 0<<< \"=git grep -E 'harness\\b' -- README.md\"",
+         "ask"),
+        ("clustered-child-heredoc-noequals",
+         "zsh -foNO_EQUALS <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n",
+         "ask"),
+        ("post-c-long-option",
+         "zsh -c --no-equals \"git grep -E 'harness\\\\b' -- README.md\"",
+         "deny"),
+        ("post-c-split-option",
+         "zsh -c -o NO_EQUALS \"git grep -E 'harness\\\\b' -- README.md\"",
+         "deny"),
+        ("post-c-attached-option",
+         "zsh -c -oNO_EQUALS \"git grep -E 'harness\\\\b' -- README.md\"",
+         "deny"),
+        ("post-c-long-option-rev",
+         "zsh -c --no-equals 'SHA=x; git show $SHA:src/f.py'", "deny"),
+        ("post-body-long-option",
+         "zsh -c \"=git grep -E 'harness\\\\b' -- README.md\" --no-equals",
+         "deny"),
+        ("post-body-split-pcre",
+         "zsh -c \"=git grep -P 'harness\\\\b' -- README.md\" -o NO_EQUALS",
+         None),
+        ("post-body-stdin-control",
+         ("zsh -fc '/usr/bin/printf command-only' -s 0<<< "
+          "\"git grep -E 'harness\\b' -- README.md\""), None),
+        ("clustered-separated-stdin-option",
+         "zsh -fo NO_EQUALS <<'EOF'\n"
+         "git grep -E 'harness\\b' -- README.md\nEOF\n", "deny"),
+        ("clustered-separated-stdin-rev",
+         "zsh -fo NO_EQUALS <<'EOF'\n"
+         "SHA=x; git show $SHA:src/f.py\nEOF\n", "deny"),
+        ("here-string-ask-later-deny",
+         ("sh 0<<< \"=git grep -E 'harness\\b' -- README.md\"; "
+          "zsh 0<<< \"=git grep -E 'harness\\b' -- README.md\""), "deny"),
+        ("here-string-deny-later-ask",
+         ("zsh 0<<< \"=git grep -E 'harness\\b' -- README.md\"; "
+          "sh 0<<< \"=git grep -E 'harness\\b' -- README.md\""), "deny"),
+        ("here-string-rev-ask-later-deny",
+         ("sh 0<<< 'SHA=x; =git show $SHA:src/f.py'; "
+          "zsh 0<<< 'SHA=x; =git show $SHA:src/f.py'"), "deny"),
+        ("command-p-child-heredoc-equals",
+         "command -p zsh <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n",
+         "deny"),
+        ("command-p-child-rev",
+         "command -p zsh -c 'SHA=x; =git show $SHA:src/f.py'", "deny"),
+        ("command-p-rev",
+         "SHA=x; command -p git show $SHA:src/f.py", "deny"),
+        ("env-clean-rev", "SHA=x; env -i git show $SHA:src/f.py", "deny"),
+        ("env-unset-rev",
+         "SHA=x; env --unset=PATH git show $SHA:src/f.py", "deny"),
+        ("sudo-rev", "SHA=x; sudo git show $SHA:src/f.py", "deny"),
         ("noequals-grep",
          "setopt noequals; =git grep -E 'harness\\b' -- README.md", "ask"),
         ("noequals-rev",
@@ -422,8 +572,47 @@ def selftest():
         ("child-zsh-equals",
          "setopt noequals; zsh -c \"=git grep -E 'harness\\\\b' -- README.md\"",
          "deny"),
+        ("set-o-noequals",
+         "set -o noequals; =git grep -E 'harness\\b' -- README.md", "ask"),
+        ("emulate-sh-noequals",
+         "emulate sh; =git grep -E 'harness\\b' -- README.md", "ask"),
+        ("child-zsh-option-noequals",
+         "zsh -o NO_EQUALS -c \"=git grep -E 'harness\\\\b' -- README.md\"",
+         "ask"),
+        ("child-zsh-attached-noequals",
+         "zsh -oNO_EQUALS -c \"=git grep -E 'harness\\\\b' -- README.md\"",
+         "ask"),
+        ("child-zsh-long-noequals",
+         "zsh --no-equals -c \"=git grep -E 'harness\\\\b' -- README.md\"",
+         "ask"),
+        ("uncalled-function-equals",
+         "f(){ unsetopt equals; }; =git grep -E 'harness\\b' -- README.md", "deny"),
+        ("subshell-equals",
+         "(unsetopt equals); =git grep -E 'harness\\b' -- README.md", "deny"),
+        ("command-substitution-equals",
+         "ignored=$(unsetopt equals); =git grep -E 'harness\\b' -- README.md",
+         "deny"),
+        ("outer-expanded-env-equals",
+         "env -i =git grep -E 'harness\\b' -- README.md", "deny"),
+        ("outer-expanded-command-equals",
+         "command -p =git grep -E 'harness\\b' -- README.md", "deny"),
+        ("outer-expanded-env-rev",
+         "SHA=x; env -i =git show $SHA:src/f.py", "deny"),
         ("sh-stdin-equals",
          "sh <<< \"=git grep -E 'harness\\b' -- README.md\"", "ask"),
+        ("sh-heredoc-equals",
+         "sh <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n", "ask"),
+        ("child-zsh-heredoc-noequals",
+         "zsh -o NO_EQUALS <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n",
+         "ask"),
+        ("child-zsh-heredoc-pcre",
+         "zsh <<'EOF'\n=git grep -P 'harness\\b' -- README.md\nEOF\n", None),
+        ("heredoc-deny-precedence",
+         ("sh <<'A'\n=git grep -E 'harness\\b' -- README.md\nA\n"
+          "zsh <<'B'\n=git grep -E 'harness\\b' -- README.md\nB\n"), "deny"),
+        ("child-zsh-heredoc-default",
+         "unsetopt equals; zsh <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n",
+         "deny"),
     )
     for label, command, want in hook_cases:
         raw = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
@@ -549,12 +738,126 @@ def selftest():
         ("dynamic-heredoc-consumer",
          "cat <<'END-MARK' | $SHELL\ngit grep -E 'harness\\b' -- README.md\nEND-MARK\n"),
         ("alternate-git-status", "/nonexistent/bin/git status --short"),
+        ("command-p-authority", "command -p git status --short"),
+        ("env-clean-authority", "env -i git status --short"),
+        ("env-unset-path-authority", "env --unset=PATH git status --short"),
+        ("sudo-authority", "sudo -i git status --short"),
+        ("nested-env-clean-authority", "env -i sh -c 'git status --short'"),
+        ("nested-env-unset-authority", "env -u PATH sh -c 'git status --short'"),
+        ("nested-sudo-authority", "sudo sh -c 'git status --short'"),
+        ("stdin-env-clean-authority", "env -i sh 0<<< 'git status --short'"),
+        ("heredoc-env-clean-authority",
+         "env -i sh <<'EOF'\ngit status --short\nEOF\n"),
+        ("shell-alias-env-clean-authority",
+         "git -c 'alias.x=!env -i sh -c \"git status --short\"' x"),
+        ("shell-alias-env-eval-authority",
+         "git -c 'alias.x=!env -i sh -c \"eval git\\ status\\ --short\"' x"),
+        ("shell-alias-env-stdin-authority",
+         "git -c 'alias.x=!env -i sh 0<<< \"git status --short\"' x"),
+        ("shell-alias-path-child-authority",
+         "git -c 'alias.x=!PATH=/usr/bin; sh -c \"git status --short\"' x"),
+        ("shell-alias-path-stdin-authority",
+         "git -c 'alias.x=!PATH=/usr/bin; sh 0<<< \"git status --short\"' x"),
+        ("prior-path-authority",
+         "PATH=/usr/bin; =git grep -P harness -- README.md"),
+        ("prior-path-missing",
+         "PATH=/definitely-missing; =git grep -E 'harness\\b' -- README.md"),
+        ("prior-path-stdin-authority",
+         "PATH=/usr/bin; sh 0<<< 'git status --short'"),
+        ("prior-line-path-heredoc",
+         "PATH=/usr/bin\nzsh <<'EOF'\n"
+         "=git grep -P 'harness\\b' -- README.md\nEOF\n"),
+        ("prior-line-path-here-string",
+         "PATH=/usr/bin\nzsh 0<<< \"=git grep -P 'harness\\b' -- README.md\""),
+        ("prior-line-path-rev-heredoc",
+         "PATH=/usr/bin\nzsh <<'EOF'\n"
+         "SHA=x; =git show ${SHA}:src/f.py\nEOF\n"),
+        ("prior-line-path-rev-here-string",
+         "PATH=/usr/bin\nzsh 0<<< 'SHA=x; =git show ${SHA}:src/f.py'"),
+        ("prior-path-heredoc-expansion",
+         "PATH=/usr/bin; cat <<EOF\n"
+         "$(=git grep -P 'harness\\b' -- README.md)\nEOF\n"),
+        ("command-p-child-equals",
+         "command -p zsh -c \"=git grep -E 'harness\\\\b' -- README.md\""),
+        ("command-p-stdin-equals",
+         "command -p zsh 0<<< \"=git grep -E 'harness\\b' -- README.md\""),
+        ("nested-ask-later-deny",
+         ("sh -c \"=git grep -E 'harness\\\\b' -- README.md\"; "
+          "=git grep -E 'harness\\b' -- README.md")),
+        ("direct-deny-later-ask",
+         ("=git grep -E 'harness\\b' -- README.md; "
+          "sh -c \"=git grep -E 'harness\\\\b' -- README.md\"")),
+        ("heredoc-ask-later-deny",
+         ("sh <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n"
+          "git grep -E 'harness\\b' -- README.md")),
+        ("direct-deny-later-heredoc",
+         ("git grep -E 'harness\\b' -- README.md\n"
+          "sh <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n")),
+        ("clustered-child-noequals",
+         "zsh -foNO_EQUALS -c \"=git grep -E 'harness\\\\b' -- README.md\""),
+        ("clustered-child-command-noequals",
+         "zsh -coNO_EQUALS \"=git grep -E 'harness\\\\b' -- README.md\""),
+        ("clustered-child-stdin-noequals",
+         "zsh -foNO_EQUALS 0<<< \"=git grep -E 'harness\\b' -- README.md\""),
+        ("clustered-child-heredoc-noequals",
+         "zsh -foNO_EQUALS <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n"),
+        ("post-c-long-option",
+         "zsh -c --no-equals \"git grep -E 'harness\\\\b' -- README.md\""),
+        ("post-c-split-option",
+         "zsh -c -o NO_EQUALS \"git grep -E 'harness\\\\b' -- README.md\""),
+        ("post-c-attached-option",
+         "zsh -c -oNO_EQUALS \"git grep -E 'harness\\\\b' -- README.md\""),
+        ("post-c-long-option-rev",
+         "zsh -c --no-equals 'SHA=x; git show $SHA:src/f.py'"),
+        ("post-body-long-option",
+         "zsh -c \"=git grep -E 'harness\\\\b' -- README.md\" --no-equals"),
+        ("clustered-separated-stdin-option",
+         "zsh -fo NO_EQUALS <<'EOF'\n"
+         "git grep -E 'harness\\b' -- README.md\nEOF\n"),
+        ("clustered-separated-stdin-rev",
+         "zsh -fo NO_EQUALS <<'EOF'\n"
+         "SHA=x; git show $SHA:src/f.py\nEOF\n"),
+        ("here-string-ask-later-deny",
+         ("sh 0<<< \"=git grep -E 'harness\\b' -- README.md\"; "
+          "zsh 0<<< \"=git grep -E 'harness\\b' -- README.md\"")),
+        ("here-string-deny-later-ask",
+         ("zsh 0<<< \"=git grep -E 'harness\\b' -- README.md\"; "
+          "sh 0<<< \"=git grep -E 'harness\\b' -- README.md\"")),
+        ("here-string-rev-ask-later-deny",
+         ("sh 0<<< 'SHA=x; =git show $SHA:src/f.py'; "
+          "zsh 0<<< 'SHA=x; =git show $SHA:src/f.py'")),
+        ("command-p-child-heredoc-equals",
+         "command -p zsh <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n"),
+        ("command-p-child-rev",
+         "command -p zsh -c 'SHA=x; =git show $SHA:src/f.py'"),
         ("noequals-grep",
          "setopt noequals; =git grep -E 'harness\\b' -- README.md"),
         ("function-noequals",
          "f(){ setopt noequals; }; f; =git grep -E 'harness\\b' -- README.md"),
         ("sh-stdin-equals",
          "sh <<< \"=git grep -E 'harness\\b' -- README.md\""),
+        ("sh-heredoc-equals",
+         "sh <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n"),
+        ("child-zsh-option-noequals",
+         "zsh -o NO_EQUALS -c \"=git grep -E 'harness\\\\b' -- README.md\""),
+        ("child-zsh-attached-noequals",
+         "zsh -oNO_EQUALS -c \"=git grep -E 'harness\\\\b' -- README.md\""),
+        ("child-zsh-long-noequals",
+         "zsh --no-equals -c \"=git grep -E 'harness\\\\b' -- README.md\""),
+        ("uncalled-function-equals",
+         "f(){ unsetopt equals; }; =git grep -E 'harness\\b' -- README.md"),
+        ("subshell-equals",
+         "(unsetopt equals); =git grep -E 'harness\\b' -- README.md"),
+        ("command-substitution-equals",
+         "ignored=$(unsetopt equals); =git grep -E 'harness\\b' -- README.md"),
+        ("outer-expanded-env-equals",
+         "env -i =git grep -E 'harness\\b' -- README.md"),
+        ("outer-expanded-env-rev", "SHA=x; env -i =git show $SHA:src/f.py"),
+        ("child-zsh-heredoc-noequals",
+         "zsh -o NO_EQUALS <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n"),
+        ("heredoc-deny-precedence",
+         ("sh <<'A'\n=git grep -E 'harness\\b' -- README.md\nA\n"
+          "zsh <<'B'\n=git grep -E 'harness\\b' -- README.md\nB\n")),
     )
     for label, command in codex_cases:
         raw = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
@@ -567,6 +870,30 @@ def selftest():
         failures += (not ok)
         print(f"  {'PASS' if ok else 'FAIL'} codex-json        {label:<18} "
               f"want=deny  got={got!s:<5}")
+    codex_allow_cases = (
+        ("future-path-here-string",
+         ("zsh 0<<< \"=git grep -P 'harness\\b' -- README.md\"; "
+          "PATH=/usr/bin; /bin/echo done")),
+        ("future-unset-here-string",
+         ("zsh 0<<< \"=git grep -P 'harness\\b' -- README.md\"; "
+          "unset PATH; /bin/echo done")),
+        ("future-path-heredoc",
+         ("cat <<EOF; PATH=/usr/bin; /bin/echo done\n"
+          "$(=git grep -P 'harness\\b' -- README.md)\nEOF\n")),
+        ("post-body-pcre",
+         "zsh -c \"=git grep -P 'harness\\\\b' -- README.md\" -o NO_EQUALS"),
+        ("post-body-stdin",
+         ("zsh -fc '/usr/bin/printf command-only' -s 0<<< "
+          "\"git grep -E 'harness\\b' -- README.md\"")),
+    )
+    for label, command in codex_allow_cases:
+        raw = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+        rc, stdout, stderr = run_raw(raw, runtime="codex")
+        ok = rc == 0 and not stderr and not stdout
+        total += 1
+        failures += (not ok)
+        print(f"  {'PASS' if ok else 'FAIL'} codex-json        {label:<18} "
+              f"want=allow got={'allow' if not stdout else 'decision':<8}")
     registered_started = time.monotonic()
     registered_decisions = []
     for _attempt in range(5):
@@ -583,6 +910,77 @@ def selftest():
     failures += (not ok)
     print(f"  {'PASS' if ok else 'FAIL'} hook-budget        5 public envelopes in "
           f"{registered_elapsed:.3f}s (cap 4.5s)")
+
+    slow_raw = json.dumps({
+        "tool_name": "Bash",
+        "tool_input": {"command": grep_guard._FUNCTION_PARSE_LIMIT_SOURCE},
+    })
+    for runtime, expected in (("claude", "ask"), ("codex", "deny")):
+        observations = []
+        for _attempt in range(5):
+            started = time.monotonic()
+            argv = [sys.executable, __file__]
+            if runtime == "codex":
+                argv.extend(("--runtime", "codex"))
+            result = subprocess.run(
+                argv, input=slow_raw, capture_output=True, text=True, timeout=5)
+            elapsed = time.monotonic() - started
+            emitted = json.loads(result.stdout) if result.stdout else None
+            got = ((emitted or {}).get("hookSpecificOutput", {})
+                   .get("permissionDecision"))
+            observations.append((result.returncode, result.stderr, got, elapsed))
+        ok = all(rc == 0 and not stderr and got == expected and elapsed < 4.5
+                 for rc, stderr, got, elapsed in observations)
+        total += 1
+        failures += (not ok)
+        print(f"  {'PASS' if ok else 'FAIL'} slow-hook-budget   {runtime:<6} "
+              f"5 explicit {expected} decisions; max="
+              f"{max(item[3] for item in observations):.3f}s (cap 4.5s)")
+
+    operator_raw = json.dumps({
+        "tool_name": "Bash",
+        "tool_input": {"command": grep_guard._FUNCTION_OPERATOR_BUDGET_SOURCE},
+    })
+    for runtime in ("claude", "codex"):
+        observations = []
+        for _attempt in range(5):
+            started = time.monotonic()
+            argv = [sys.executable, __file__]
+            if runtime == "codex":
+                argv.extend(("--runtime", "codex"))
+            result = subprocess.run(
+                argv, input=operator_raw, capture_output=True, text=True, timeout=5)
+            observations.append((
+                result.returncode, result.stdout, result.stderr,
+                time.monotonic() - started))
+        ok = all(rc == 0 and not stdout and not stderr and elapsed < 4.5
+                 for rc, stdout, stderr, elapsed in observations)
+        total += 1
+        failures += (not ok)
+        print(f"  {'PASS' if ok else 'FAIL'} operator-budget    {runtime:<6} "
+              f"5 explicit allow decisions; max="
+              f"{max(item[3] for item in observations):.3f}s (cap 4.5s)")
+
+    seen_deadlines = []
+    class DeadlineGuard:
+        @staticmethod
+        def decide(_command, _deadline=None):
+            seen_deadlines.append(_deadline)
+            return "allow", ""
+    original_guards = list(GUARDS)
+    GUARDS[:] = [("first", DeadlineGuard), ("second", DeadlineGuard)]
+    try:
+        shared_deadline_ok = decide("/bin/echo safe")[0] == "allow"
+    finally:
+        GUARDS[:] = original_guards
+    shared_deadline_ok = (shared_deadline_ok and len(seen_deadlines) == 2
+                          and seen_deadlines[0] is not None
+                          and seen_deadlines[0] == seen_deadlines[1])
+    total += 1
+    failures += (not shared_deadline_ok)
+    print(f"  {'PASS' if shared_deadline_ok else 'FAIL'} shared-deadline    "
+          "both predicates receive one outer monotonic deadline")
+
     oversized = "echo " + ("x" * grep_guard.MAX_COMMAND_CHARS)
     got, reason = decide(oversized)
     ok = got == "ask" and "parse limit" in reason
@@ -592,7 +990,7 @@ def selftest():
           "oversized source fails closed")
     class BrokenGuard:
         @staticmethod
-        def decide(_command):
+        def decide(_command, _deadline=None):
             raise RuntimeError("planted predicate fault")
     GUARDS.append(("planted_broken_guard", BrokenGuard))
     try:
@@ -606,7 +1004,7 @@ def selftest():
           "a broken sub-guard cannot become allow")
     class ExitingGuard:
         @staticmethod
-        def decide(_command):
+        def decide(_command, _deadline=None):
             raise SystemExit(0)
     GUARDS.append(("planted_exiting_guard", ExitingGuard))
     try:

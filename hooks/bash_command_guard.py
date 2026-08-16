@@ -1002,6 +1002,23 @@ def selftest():
     failures += (not ok)
     print(f"  {'PASS' if ok else 'FAIL'} predicate-fault    want=deny  got={got:<5} "
           "a broken sub-guard cannot become allow")
+    # Each guard now maps its own budget/parse-limit CommandParseError to `ask` before it
+    # reaches this arm, because reaching it denied a benign 768 KiB `echo`. This proves the
+    # backstop is still closed for that exact type if a future call site escapes again.
+    class ParseErrorGuard:
+        @staticmethod
+        def decide(_command, _deadline=None):
+            raise grep_guard.CommandParseError("planted escaping parse error")
+    GUARDS.append(("planted_parse_error_guard", ParseErrorGuard))
+    try:
+        got, reason = decide("echo safe")
+    finally:
+        GUARDS.pop()
+    ok = got == "deny" and "predicate failed" in reason
+    total += 1
+    failures += (not ok)
+    print(f"  {'PASS' if ok else 'FAIL'} parse-error-escape want=deny  got={got:<5} "
+          "an escaping CommandParseError cannot become allow")
     class ExitingGuard:
         @staticmethod
         def decide(_command, _deadline=None):

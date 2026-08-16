@@ -3948,6 +3948,19 @@ def conservative_allow_uncertainty(command, deadline=None):
     return None
 
 
+# Every site that can raise CommandParseError while classifying is a place the guard could
+# not finish reading the source: the closed parse limits, and the wall-clock decision
+# budget. That is the unresolved-source row of the decision contract, which is `ask`. Two
+# call sites were already wrapped and the rest were not, so an exhausted budget inside
+# zsh_equals_states escaped to bash_command_guard's `except BaseException` arm and denied a
+# benign command. Catching it here keeps the findings already proven, so an exhausted budget
+# cannot mask a deny either.
+BUDGET_EXHAUSTED_REASON = (
+    "the Bash guard could not finish classifying this command within its internal "
+    "decision budget (%s); rerun it as a smaller direct command."
+)
+
+
 def decide(command, _shell_depth=0, _deadline=None, _shell="zsh",
            _equals_state=ZSH_EQUALS_ON, _command_env=None,
            _lookup_authority_uncertain=False):
@@ -3960,6 +3973,18 @@ def decide(command, _shell_depth=0, _deadline=None, _shell="zsh",
     if _shell_depth > 4:
         return ("ask", "nested shell -c depth exceeds the git-grep guard's model; "
                 "verify the command or invoke git grep directly with -P.")
+    decisions = []
+    try:
+        _classify(command, decisions, _shell_depth, _deadline, _shell, _equals_state,
+                  _command_env, _lookup_authority_uncertain)
+    except CommandParseError as exc:
+        decisions.append(("ask", BUDGET_EXHAUSTED_REASON % exc))
+    return _strongest_decision(decisions) if decisions else ("allow", "")
+
+
+def _classify(command, decisions, _shell_depth, _deadline, _shell, _equals_state,
+              _command_env, _lookup_authority_uncertain):
+    """Append every non-allow finding for one command source to `decisions`."""
     equals_heredoc = heredoc_equals_decision(
         command, _deadline,
         classifier=lambda body, shell, state, deadline, env, lookup: decide(
@@ -3967,7 +3992,6 @@ def decide(command, _shell_depth=0, _deadline=None, _shell="zsh",
         current_shell=_shell, inherited_equals_state=_equals_state,
         command_env=_command_env,
         lookup_authority_uncertain=_lookup_authority_uncertain)
-    decisions = []
     if equals_heredoc is not None:
         decisions.append(equals_heredoc)
     try:
@@ -3977,7 +4001,7 @@ def decide(command, _shell_depth=0, _deadline=None, _shell="zsh",
         decisions.append((
             "ask", f"the Bash command cannot be parsed safely ({exc}); "
             "rewrite it as a direct command before proceeding."))
-        return _strongest_decision(decisions)
+        return
     try:
         stdin_provenance = interpreter_stdin_provenance(
             command, commands, _shell_depth, _deadline, _shell, _equals_state,
@@ -3986,7 +4010,7 @@ def decide(command, _shell_depth=0, _deadline=None, _shell="zsh",
         decisions.append((
             "ask", f"interpreter stdin provenance cannot be parsed safely ({exc}); "
             "rewrite it as one direct source before proceeding."))
-        return _strongest_decision(decisions)
+        return
     if stdin_provenance is not None:
         decisions.append((stdin_provenance.decision, stdin_provenance.reason))
     equals_states = zsh_equals_states(
@@ -4259,7 +4283,6 @@ def decide(command, _shell_depth=0, _deadline=None, _shell="zsh",
             "ask", fallback_uncertainty + "; guarded-looking text is allowed through "
             "complex input syntax only when the operation resolves to an exact trusted "
             "data-consumer path. Otherwise rewrite it as one directly classified source."))
-    return _strongest_decision(decisions) if decisions else ("allow", "")
 
 
 FIXTURES = [
@@ -6823,6 +6846,84 @@ def selftest():
     print("  %s parser-deadline checkpoint mutation accepts an expired budget" % (
         "PASS" if parser_budget_red else "FAIL"))
 
+    # The arm above proves the checkpoint is REMOVABLE; nothing proved it fires. Replacing
+    # `_check_decision_budget`'s body with `return None` left this suite, the sibling
+    # guard's and the merged Bash suite all green, which is why the two defects below
+    # shipped. These three drive the real checkpoint instead.
+    try:
+        split_commands("/bin/echo safe", _deadline=time.monotonic() - 1.0)
+        parser_budget_live = False
+    except CommandParseError:
+        parser_budget_live = True
+    bad += 0 if parser_budget_live else 1
+    print("  %s an expired budget raises from the live parser checkpoint" % (
+        "PASS" if parser_budget_live else "FAIL"))
+
+    class _ExpiringClock:
+        """A monotonic stand-in that jumps past the deadline after N readings."""
+
+        def __init__(self, readings_before_expiry):
+            self.readings_before_expiry = readings_before_expiry
+            self.readings = 0
+
+        def monotonic(self):
+            self.readings += 1
+            return 1000.0 + (
+                0.0 if self.readings <= self.readings_before_expiry else 100.0)
+
+    def _decide_with_expiry(command, readings_before_expiry):
+        """-> (decision, reason, expiry-actually-fired). An escape is the defect."""
+        clock = _ExpiringClock(readings_before_expiry)
+        real_time = globals()["time"]
+        globals()["time"] = clock
+        try:
+            decision, reason = decide(command, _deadline=1001.0)
+        except BaseException as exc:
+            decision, reason = "escaped:" + type(exc).__name__, repr(exc)
+        finally:
+            globals()["time"] = real_time
+        return decision, reason, clock.readings > readings_before_expiry
+
+    # Calibrated against the run itself rather than a literal, so a later refactor that
+    # changes how many clock readings a decision takes cannot make these vacuous.
+    benign_readings = _decide_with_expiry("/bin/echo safe", 10 ** 9)
+    full_benign = _ExpiringClock(10 ** 9)
+    real_time_module = globals()["time"]
+    globals()["time"] = full_benign
+    try:
+        decide("/bin/echo safe", _deadline=1001.0)
+    finally:
+        globals()["time"] = real_time_module
+    benign_total = full_benign.readings
+    budget_results = [
+        _decide_with_expiry("/bin/echo safe", max(1, benign_total * share // 5))
+        for share in (1, 2, 3, 4)
+    ]
+    budget_ask_ok = (benign_total > 4 and benign_readings[0] == "allow"
+                     and all(decision == "ask" and fired
+                             for decision, _reason, fired in budget_results))
+    bad += 0 if budget_ask_ok else 1
+    print("  %s budget exhaustion during classification is ask, never deny or escape "
+          "(%d readings; %s)" % (
+              "PASS" if budget_ask_ok else "FAIL", benign_total,
+              ", ".join(result[0] for result in budget_results)))
+
+    hazard_source = "git grep -E 'harness\\b' -- README.md; /bin/echo x"
+    full_hazard = _ExpiringClock(10 ** 9)
+    globals()["time"] = full_hazard
+    try:
+        decide(hazard_source, _deadline=1001.0)
+    finally:
+        globals()["time"] = real_time_module
+    deny_kept_ok = any(
+        decision == "deny" and fired
+        for decision, _reason, fired in (
+            _decide_with_expiry(hazard_source, readings)
+            for readings in range(1, full_hazard.readings)))
+    bad += 0 if deny_kept_ok else 1
+    print("  %s an exhausted budget after a proven hazard still denies" % (
+        "PASS" if deny_kept_ok else "FAIL"))
+
     original_split_commands = split_commands
     observed_parser_deadlines = []
     def record_parser_deadline(source, _parse_depth=0, _deadline=None):
@@ -7587,7 +7688,7 @@ def selftest():
     print("  %s identifier-only heredoc mutation loses dashed-delimiter deny" % (
         "PASS" if dashed_heredoc_red else "FAIL"))
 
-    checks = len(FIXTURES) + 69
+    checks = len(FIXTURES) + 72
     print("failures: %d" % bad)
     print("SELFTEST-SUMMARY suite=git_grep_engine_guard checks=%d failures=%d" % (
         checks, bad))

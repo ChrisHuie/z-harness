@@ -65,6 +65,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import git_grep_engine_guard as git_guard  # noqa: E402
 from git_grep_engine_guard import (  # noqa: E402
+    BUDGET_EXHAUSTED_REASON,
     CommandParseError, GUARD_BUDGET_SECONDS, MAX_PREFIX_DEPTH, PrefixResolution,
     nested_shell_invocation,
     nested_shell_equals_state, heredoc_equals_decision,
@@ -231,6 +232,20 @@ def decide(command, _depth=0, _shell="zsh", _equals_state=ZSH_EQUALS_ON,
     if time.monotonic() >= _deadline:
         return ("ask", "the Bash guard exhausted its internal decision budget before "
                 "the zsh rev:path command could be classified")
+    decisions = []
+    try:
+        _classify(command, decisions, _depth, _shell, _equals_state, _deadline,
+                  _command_env, _lookup_authority_uncertain)
+    except CommandParseError as exc:
+        # Same contract as the sibling guard: a source the parser could not finish
+        # reading is unresolved, not proven safe and not proven hazardous.
+        decisions.append(("ask", BUDGET_EXHAUSTED_REASON % exc))
+    return _strongest_decision(decisions) if decisions else ("allow", "")
+
+
+def _classify(command, decisions, _depth, _shell, _equals_state, _deadline,
+              _command_env, _lookup_authority_uncertain):
+    """Append every non-allow rev:path finding for one command source."""
     equals_heredoc = heredoc_equals_decision(
         command, _deadline, REV_PATH_SUBCOMMANDS,
         lambda body, shell, state, deadline, env, lookup: decide(
@@ -239,7 +254,6 @@ def decide(command, _depth=0, _shell="zsh", _equals_state=ZSH_EQUALS_ON,
         command_env=_command_env,
         lookup_authority_uncertain=_lookup_authority_uncertain,
         classify_non_direct_shell_bodies=True)
-    decisions = []
     if equals_heredoc is not None:
         decisions.append(equals_heredoc)
     for source in live_here_string_sources(command):
@@ -270,7 +284,7 @@ def decide(command, _depth=0, _shell="zsh", _equals_state=ZSH_EQUALS_ON,
         decisions.append((
             "ask", f"the Bash command cannot be parsed safely ({exc}); rewrite it "
             "as a direct command before proceeding."))
-        return _strongest_decision(decisions)
+        return
     equals_states = zsh_equals_states(
         scan_command, commands,
         _equals_state if _shell == "zsh" else ZSH_EQUALS_OFF, _deadline)
@@ -347,7 +361,6 @@ def decide(command, _depth=0, _shell="zsh", _equals_state=ZSH_EQUALS_ON,
             decisions.append((
                 "ask", "a shell -c command string is empty or dynamic, so its Git "
                 "arguments cannot be inspected before execution"))
-    return _strongest_decision(decisions) if decisions else ("allow", "")
 
 
 FIXTURES = [
@@ -1182,7 +1195,57 @@ def selftest():
     print("  %-4s heredoc composition mutation skips ordinary rev:path denial"
           % ("PASS" if heredoc_composition_red else "FAIL"))
 
-    checks = len(FIXTURES) + 10
+    # This guard's budget raises all originate in the shared parser, so the clock that has
+    # to move is the sibling module's. Without the wrap in `decide` the raise escaped into
+    # bash_command_guard's `except BaseException` arm and denied a benign command.
+    class _ExpiringClock:
+        def __init__(self, readings_before_expiry):
+            self.readings_before_expiry = readings_before_expiry
+            self.readings = 0
+
+        def monotonic(self):
+            self.readings += 1
+            return 1000.0 + (
+                0.0 if self.readings <= self.readings_before_expiry else 100.0)
+
+    def _decide_with_expiry(command, readings_before_expiry):
+        clock = _ExpiringClock(readings_before_expiry)
+        real_time, real_git_time = time, git_guard.time
+        globals()["time"] = clock
+        git_guard.time = clock
+        try:
+            decision, _reason = decide(command, _deadline=1001.0)
+        except BaseException as exc:
+            decision = "escaped:" + type(exc).__name__
+        finally:
+            globals()["time"] = real_time
+            git_guard.time = real_git_time
+        return decision, clock.readings > readings_before_expiry
+
+    budget_source = "SHA=x; git show $SHA:src/f.py"
+    full_clock = _ExpiringClock(10 ** 9)
+    real_time, real_git_time = time, git_guard.time
+    globals()["time"] = full_clock
+    git_guard.time = full_clock
+    try:
+        decide(budget_source, _deadline=1001.0)
+    finally:
+        globals()["time"] = real_time
+        git_guard.time = real_git_time
+    budget_results = [
+        _decide_with_expiry(budget_source, max(1, full_clock.readings * share // 5))
+        for share in (1, 2, 3)
+    ]
+    budget_ask_ok = (full_clock.readings > 4
+                     and all(decision == "ask" and fired
+                             for decision, fired in budget_results))
+    bad += 0 if budget_ask_ok else 1
+    print("  %-4s budget exhaustion during rev:path classification is ask, never escape "
+          "(%d readings; %s)" % (
+              "PASS" if budget_ask_ok else "FAIL", full_clock.readings,
+              ", ".join(decision for decision, _fired in budget_results)))
+
+    checks = len(FIXTURES) + 11
     print("failures: %d" % bad)
     print("SELFTEST-SUMMARY suite=zsh_rev_modifier_guard checks=%d failures=%d" % (
         checks, bad))

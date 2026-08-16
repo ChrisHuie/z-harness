@@ -3288,25 +3288,45 @@ def git_grep_argv(tokens, resolution=None, deadline=None):
     # subject contains `foob` while `-P` returns the intended one. The pattern rides an
     # option rather than sitting in argv, so it is lifted out here.
     if subcommand in GIT_LOG_GREP_SUBCOMMANDS:
+        # These three do NOT share git grep's argv grammar, and reusing it was a
+        # fail-open. Measured on git 2.46.1: `git log` takes no positional PATTERN
+        # (`git log -E 'foo\b'` is `fatal: ambiguous argument`), does not cluster short
+        # flags (`-EP`, `-Ei`: `unrecognized argument`), does not accept long-option
+        # abbreviations (`--ext`, `--extended`, `--perl`: `unrecognized argument`), and
+        # has no `--no-*-regexp` negations. So every option carrying a separated value
+        # that grep's table does not model -- `-n 5`, `-S str`, `-G re`, `-I re`,
+        # `-L range`, `--skip N`, `--since DATE`, `--glob`, `--date`, and the rest --
+        # donated that value to grep's positional-pattern slot, `pattern_declared`
+        # flipped, and the real --grep pattern was dropped. Sixteen of sixty-nine
+        # hazard-carrying spellings were allowed.
+        #
+        # Build an exact synthetic argv instead: engine tokens in source order, patterns
+        # carried by -e. Nothing else in a log argv can select an engine, so a token this
+        # loop does not recognize cannot change the verdict. Last-one-wins and
+        # grep.patternType were measured to behave the same as for grep and are handled
+        # by the shared code below.
         lifted = []
+        found_pattern_option = False
         k = 0
         while k < len(rest):
             text, quoting = rest[k]
             name, separator, value = text.partition("=")
             if name in GIT_LOG_PATTERN_OPTIONS:
+                found_pattern_option = True
                 if separator:
-                    lifted.append((value, quoting))
+                    lifted.extend((("-e", ""), (value, quoting)))
                     k += 1
                     continue
                 if k + 1 < len(rest):
-                    lifted.append(rest[k + 1])
+                    lifted.extend((("-e", ""), rest[k + 1]))
                     k += 2
                     continue
-            lifted.append((text, quoting))
+                k += 1
+                continue
+            if text in GIT_LOG_ENGINE_TOKENS:
+                lifted.append((GIT_LOG_ENGINE_TOKENS[text], ""))
             k += 1
-        if any(name in GIT_LOG_PATTERN_OPTIONS
-               for text, _q in rest
-               for name in (text.partition("=")[0],)):
+        if found_pattern_option:
             return lifted, configs, unresolved_configs
     return None
 
@@ -3316,6 +3336,18 @@ def git_grep_argv(tokens, resolution=None, deadline=None):
 # the commit whose subject contains `foob`, `-P` returns the intended one.
 GIT_LOG_GREP_SUBCOMMANDS = {"log", "shortlog", "rev-list"}
 GIT_LOG_PATTERN_OPTIONS = {"--grep", "--author", "--committer"}
+# Exact spellings only: this family accepts no clustering and no abbreviation, so a
+# prefix or a bundle is a fatal argument to git rather than something to model. Mapped to
+# the grep letters the shared engine parser below already understands. `--basic-regexp`
+# selects BRE, which this guard treats as harmless, and `-i` and `--all-match` do not
+# change the engine. `check_log_grammar_against_git` re-derives all of this from the
+# installed git.
+GIT_LOG_ENGINE_TOKENS = {
+    "-E": "-E", "--extended-regexp": "-E",
+    "-F": "-F", "--fixed-strings": "-F",
+    "-P": "-P", "--perl-regexp": "-P",
+    "--basic-regexp": "-G",
+}
 
 CONFIG_ENGINE = {"extended": "E", "ere": "E", "perl": "P", "pcre": "P",
                  "fixed": "F", "basic": "B", "default": "B"}
@@ -4974,6 +5006,129 @@ def check_option_grammar_against_git(argv_mutator=None):
     return failures
 
 
+def check_log_grammar_against_git():
+    """Ground the log family's OWN argv grammar, which is not git grep's.
+
+    `measure_git_short_options` probes `git grep -<letter> x` outside a repository, where
+    git parses options before looking for `.git`. That trick does not transfer: `git log`
+    accepts every ASCII letter there, so the grep probe can never cover three of the four
+    subcommands whose argv this guard parses. This one uses the engine itself as the
+    oracle -- a two-commit repository where ERE and PCRE select different commits.
+    """
+    failures = []
+    pattern = "foo" + chr(92) + "b"
+    try:
+        with tempfile.TemporaryDirectory(prefix="z-harness-log-grammar-") as repo:
+            env = dict(os.environ, GIT_AUTHOR_EMAIL="a@b", GIT_COMMITTER_EMAIL="a@b",
+                       GIT_CONFIG_NOSYSTEM="1")
+            initialized = subprocess.run(
+                ["git", "init", "--quiet"], cwd=repo, env=env,
+                capture_output=True, text=True, timeout=10)
+            if initialized.returncode:
+                return ["cannot initialize the temporary Git log-grammar fixture: "
+                        + (initialized.stderr or "no diagnostic").strip()]
+            for index, subject in enumerate(("fix foob handling", "fix foo bar handling")):
+                with open(os.path.join(repo, "f%d.txt" % index), "w",
+                          encoding="utf-8") as stream:
+                    stream.write("x\n")
+                author = "foob" if index == 0 else "foo bar"
+                committed = subprocess.run(
+                    ["git", "commit", "--quiet", "--allow-empty", "-m", subject],
+                    cwd=repo, capture_output=True, text=True, timeout=10,
+                    env=dict(env, GIT_AUTHOR_NAME=author, GIT_COMMITTER_NAME=author))
+                if committed.returncode:
+                    return ["cannot commit the temporary Git log-grammar fixture: "
+                            + (committed.stderr or "no diagnostic").strip()]
+
+            def observe(flags, subcommand="log"):
+                """-> 'ERE' | 'INTENDED' | 'UNFILTERED' | 'NONE' | 'ERROR'.
+
+                Both subjects present means the pattern never reached the walker -- an
+                option ahead of it consumed `--grep` as its own value, which `-I` and
+                `-O` both do. Reading that as ERE because the decoy is in the output is
+                how a naive oracle invents a gap.
+                """
+                argv = ["git", subcommand, "--oneline", *flags, "--grep=" + pattern]
+                result = subprocess.run(argv, cwd=repo, capture_output=True,
+                                        text=True, timeout=10, env=env)
+                if result.returncode:
+                    return "ERROR"
+                decoy = "fix foob handling" in result.stdout
+                intended = "fix foo bar handling" in result.stdout
+                if decoy and intended:
+                    return "UNFILTERED"
+                if decoy:
+                    return "ERE"
+                if intended:
+                    return "INTENDED"
+                return "NONE"
+
+            for label, argv, expected in (
+                    ("a positional pattern", ["log", "--oneline", "-E", pattern], "ERROR"),
+                    ("a clustered -EP", ["log", "--oneline", "-EP",
+                                         "--grep=" + pattern], "ERROR"),
+                    ("a clustered -Ei", ["log", "--oneline", "-Ei",
+                                         "--grep=" + pattern], "ERROR"),
+                    ("the --ext abbreviation", ["log", "--oneline", "--ext",
+                                                "--grep=" + pattern], "ERROR"),
+                    ("the --extended abbreviation", ["log", "--oneline", "--extended",
+                                                     "--grep=" + pattern], "ERROR"),
+                    ("the --perl abbreviation", ["log", "--oneline", "--perl",
+                                                 "--grep=" + pattern], "ERROR"),
+                    ("--no-extended-regexp", ["log", "--oneline", "--no-extended-regexp",
+                                              "--grep=" + pattern], "ERROR"),
+                    ("--no-perl-regexp", ["log", "--oneline", "--no-perl-regexp",
+                                          "--grep=" + pattern], "ERROR")):
+                observed = subprocess.run(["git", *argv], cwd=repo, capture_output=True,
+                                          text=True, timeout=10, env=env)
+                if (observed.returncode == 0) == (expected == "ERROR"):
+                    failures.append(
+                        "installed Git accepts %s in a log argv, so the guard's exact-token "
+                        "model is no longer sound (rc=%d, stdout=%r, stderr=%r)"
+                        % (label, observed.returncode, observed.stdout,
+                           observed.stderr.strip()[:120]))
+
+            for token, expected in (("-E", "ERE"), ("--extended-regexp", "ERE"),
+                                    ("-P", "INTENDED"), ("--perl-regexp", "INTENDED"),
+                                    ("--basic-regexp", "INTENDED"),
+                                    ("-F", "NONE"), ("--fixed-strings", "NONE")):
+                seen = observe([token])
+                if seen != expected:
+                    failures.append(
+                        "installed Git read log engine token %r as %s, the table models %s"
+                        % (token, seen, expected))
+            for flags, expected in ((["-P", "-E"], "ERE"), (["-E", "-P"], "INTENDED"),
+                                    (["-F", "-E"], "ERE")):
+                seen = observe(flags)
+                if seen != expected:
+                    failures.append(
+                        "installed Git did not apply last-one-wins to log %r (%s, expected %s)"
+                        % (flags, seen, expected))
+            for subcommand in ("shortlog", "rev-list"):
+                argv = ["git", subcommand, "-E", "--grep=" + pattern, "HEAD"]
+                observed = subprocess.run(argv, cwd=repo, capture_output=True,
+                                          text=True, timeout=10, env=env)
+                if observed.returncode or not observed.stdout.strip():
+                    failures.append(
+                        "installed Git did not run `%s -E --grep` (rc=%d, stderr=%r)"
+                        % (subcommand, observed.returncode,
+                           observed.stderr.strip()[:120]))
+            # Gap direction: a letter this git accepts that flips the engine to ERE and
+            # is not in the table would ride through the synthetic argv unnoticed.
+            modelled = set(GIT_LOG_ENGINE_TOKENS)
+            for char in string.ascii_letters:
+                token = "-" + char
+                if token in modelled:
+                    continue
+                if observe([token]) == "ERE":
+                    failures.append(
+                        "installed Git lets the unmodelled log flag %r select ERE; add it "
+                        "to GIT_LOG_ENGINE_TOKENS in the same commit" % token)
+    except (OSError, subprocess.SubprocessError) as exc:
+        failures.append("installed Git log-grammar probe failed closed: %r" % (exc,))
+    return failures
+
+
 def check_pcre_constructs_against_git():
     """Ground each modeled PCRE construct and the escaped-group equality control."""
     failures = []
@@ -5947,6 +6102,36 @@ FIXTURES += [
      r"""git -c 'alias.sl=shortlog -E' sl --grep='harness\b'""", "deny"),
     ("RED ALIAS: alias reaches rev-list pattern parsing",
      r"""git -c 'alias.rl=rev-list -E' rl --grep='harness\b' HEAD""", "deny"),
+    # Every RED row below was allowed while the log family was parsed with git grep's
+    # option table: the option ahead of the pattern carried a separated value, that value
+    # took grep's positional-PATTERN slot, and the real --grep pattern was dropped. Each
+    # was re-derived from git 2.46.1 against a two-commit repository whose subjects are
+    # `fix foob handling` (matched by ERE, because `\b` is a literal `b` there) and
+    # `fix foo bar handling` (matched by PCRE); each RED row returns the first.
+    ("RED LOG: a short count option ahead of the pattern does not hide the engine",
+     r"""git log --oneline -n 5 -E '--grep=foo\b'""", "deny"),
+    ("RED LOG: a rename-limit option ahead of the pattern does not hide the engine",
+     r"""git log --oneline -l 1 -E '--grep=foo\b'""", "deny"),
+    ("RED LOG: a date option ahead of the pattern does not hide the engine",
+     r"""git log --oneline --since 2000-01-01 -E '--grep=foo\b'""", "deny"),
+    ("RED LOG: a format option ahead of the pattern does not hide the engine",
+     r"""git log --oneline --date iso -E '--grep=foo\b'""", "deny"),
+    ("RED LOG: a skip option ahead of the pattern does not hide the engine",
+     r"""git log --oneline --skip 0 -E '--grep=foo\b'""", "deny"),
+    ("RED LOG: shortlog behind a separated-value option keeps its engine",
+     r"""git shortlog --since 2000-01-01 -E '--grep=foo\b' HEAD""", "deny"),
+    ("RED LOG: rev-list behind a separated-value option keeps its engine",
+     r"""git rev-list --skip 0 -E '--grep=foo\b' HEAD""", "deny"),
+    ("GREEN LOG: the same shape with the PCRE engine is correct",
+     r"""git log --oneline -n 5 -P '--grep=foo\b'""", "allow"),
+    ("GREEN LOG: shortlog with the PCRE engine is correct",
+     r"""git shortlog --since 2000-01-01 -P '--grep=foo\b' HEAD""", "allow"),
+    ("GREEN LOG: a separated-value option with no PCRE atom stays allowed",
+     r"""git log --oneline -n 5 --grep=fix""", "allow"),
+    ("GREEN LOG: an attached format value is not read as an engine or a pattern",
+     r"""git log --oneline --format='%h %s' --grep=fix""", "allow"),
+    ("ASK  LOG: no command-resolved engine with a live atom is still a question",
+     r"""git log --oneline --pretty=oneline '--grep=foo\b'""", "ask"),
     ("ASK ALIAS: recursive cycle cannot become allow",
      r"""git -c alias.a=b -c alias.b=a a 'harness\b'""", "ask"),
     ("ASK ALIAS: malformed quoted alias cannot become allow",
@@ -6304,6 +6489,14 @@ def selftest():
             print("  FAIL option grammar vs installed git: %s" % failure)
     else:
         print("  PASS numeric, optional-value, negated-engine, and -- grammar matches installed git")
+    log_grammar_failures = check_log_grammar_against_git()
+    bad += len(log_grammar_failures)
+    if log_grammar_failures:
+        for failure in log_grammar_failures:
+            print("  FAIL log-family grammar vs installed git: %s" % failure)
+    else:
+        print("  PASS log family takes no positional pattern, no cluster, no abbreviation "
+              "and no negation, and its engine tokens match the installed git")
     construct_failures = check_pcre_constructs_against_git()
     bad += len(construct_failures)
     if construct_failures:
@@ -7793,7 +7986,7 @@ def selftest():
     print("  %s identifier-only heredoc mutation loses dashed-delimiter deny" % (
         "PASS" if dashed_heredoc_red else "FAIL"))
 
-    checks = len(FIXTURES) + 74
+    checks = len(FIXTURES) + 75
     print("failures: %d" % bad)
     print("SELFTEST-SUMMARY suite=git_grep_engine_guard checks=%d failures=%d" % (
         checks, bad))

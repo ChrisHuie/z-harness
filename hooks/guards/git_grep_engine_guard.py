@@ -13,6 +13,14 @@ Standalone registration, only if bash_command_guard.py is ever removed:
 `if:` filters are prefix rules; 268/271 recorded cases are `cd X && git grep ...`,
 which a `Bash(git grep *)` prefix rule would NOT match. Matcher must stay bare "Bash".
 
+THE REGISTERED TIMEOUT IS A FAIL-OPEN BOUNDARY, measured rather than assumed. On Claude
+Code 2.1.233 a PreToolUse `type: "command"` hook that does not answer within its timeout
+does not block: the tool call runs. Observed in an isolated scratch project, 5 of 5 runs,
+against a control in the same harness whose hook answered immediately with `deny` and DID
+block. So exceeding the five seconds is not slowness, it is the guard not applying, and
+`GUARD_BUDGET_SECONDS` below is what keeps the process inside it. Anything that makes a
+legal command take longer than the budget is a hole, not a delay.
+
 MEASURED FACT the guard encodes (git 2.46.1, macOS, this host):
     git grep -E 'x = \\d'     -> rc=1, ZERO hits   (\\d is literal 'd')
     git grep -E 'a\\s\\s='     -> rc=1, ZERO hits

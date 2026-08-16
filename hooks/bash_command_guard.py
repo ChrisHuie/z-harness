@@ -614,13 +614,13 @@ def selftest():
          "unsetopt equals; zsh <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n",
          "deny"),
     )
+    # These run through `hook_mode` in this process. Each one used to be a real
+    # interpreter spawn: 218 of them cost 63.5 ms each, about 14 s of the suite's
+    # runtime, to re-prove the same process boundary 218 times. The boundary itself is
+    # proved once per shape by PROCESS_BOUNDARY_SAMPLE below, which does spawn.
     for label, command, want in hook_cases:
         raw = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
-        result = subprocess.run(
-            [sys.executable, __file__], input=raw, capture_output=True, text=True,
-            timeout=5,
-        )
-        rc, stdout, stderr = result.returncode, result.stdout, result.stderr
+        rc, stdout, stderr = run_raw(raw)
         emitted = json.loads(stdout) if stdout else None
         got = ((emitted or {}).get("hookSpecificOutput", {})
                .get("permissionDecision"))
@@ -629,6 +629,42 @@ def selftest():
         failures += (not ok)
         print(f"  {'PASS' if ok else 'FAIL'} json-stdin         {label:<18} "
               f"want={want!s:<5} got={got!s:<5}")
+    # One real spawn per shape the in-process path cannot reach: argv parsing, actual
+    # stdin, the exit code the runtime reads, and the stderr channel.
+    process_boundary_sample = (
+        ("deny", "claude", "git grep -E 'harness\\b' -- README.md", 0, "deny", False),
+        ("ask", "claude", "git grep 'harness\\b' -- README.md", 0, "ask", False),
+        ("allow", "claude", "git status --short", 0, None, False),
+        ("codex-deny", "codex", "git grep -E 'harness\\b' -- README.md", 0, "deny",
+         False),
+        ("codex-ask-maps", "codex", "git grep 'harness\\b' -- README.md", 0, "deny",
+         False),
+        ("codex-allow", "codex", "git status --short", 0, None, False),
+        ("non-bash-tool", "claude", None, 0, None, False),
+        ("broken-envelope", "claude", "", 2, None, True),
+    )
+    for label, runtime, command, want_rc, want_decision, want_stderr in (
+            process_boundary_sample):
+        if command is None:
+            raw = json.dumps({"tool_name": "Read", "tool_input": {"file_path": "/x"}})
+        elif command == "":
+            raw = json.dumps({"tool_name": "Bash", "tool_input": {}})
+        else:
+            raw = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+        argv = [sys.executable, __file__]
+        if runtime == "codex":
+            argv.extend(("--runtime", "codex"))
+        result = subprocess.run(argv, input=raw, capture_output=True, text=True,
+                                timeout=15)
+        emitted = json.loads(result.stdout) if result.stdout.strip() else None
+        got = ((emitted or {}).get("hookSpecificOutput", {})
+               .get("permissionDecision"))
+        ok = (result.returncode == want_rc and got == want_decision
+              and bool(result.stderr.strip()) == want_stderr)
+        total += 1
+        failures += (not ok)
+        print(f"  {'PASS' if ok else 'FAIL'} process-boundary   {label:<18} "
+              f"rc={result.returncode} decision={got!s:<5} stderr={bool(result.stderr.strip())}")
     codex_cases = (
         ("alternate-git-ere",
          "/nonexistent/bin/git grep -E 'harness\\b' -- README.md"),

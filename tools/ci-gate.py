@@ -36,7 +36,7 @@ EVAL_SKILL_FLOOR = 6
 SUITE_FLOORS = {
     "harness_check": 75,
     "render-packages": 192,
-    "bash_command_guard": 1078,
+    "bash_command_guard": 1086,
     "git_grep_engine_guard": 569,
     "zsh_rev_modifier_guard": 239,
 }
@@ -148,14 +148,25 @@ def workflow_error(data: str) -> Optional[str]:
     return None
 
 
+CHILD_TIMEOUT_SECONDS = 120
+
+
 def run_command(argv: Sequence[str]) -> Result:
-    completed = subprocess.run(
-        list(argv),
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
+    try:
+        completed = subprocess.run(
+            list(argv),
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=CHILD_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as expired:
+        # Uncaught, this left the gate with a traceback and no receipt, which reads as a
+        # tooling crash rather than as the child that ran out of time.
+        return Result(
+            1, "",
+            f"child exceeded {CHILD_TIMEOUT_SECONDS}s: {' '.join(argv)}\n"
+            f"{(expired.stderr or b'').decode('utf-8', 'replace')[-2000:]}")
     return Result(completed.returncode, completed.stdout, completed.stderr)
 
 
@@ -418,6 +429,20 @@ def selftest() -> int:
         hook_budget_error(settings_data=reordered) == ""
         and retime_bash_hook(reordered, 4) == 1
         and hook_budget_error(settings_data=reordered) != "",
+    )
+    timed_out = run_command([sys.executable, "-c",
+                             "import time; time.sleep(3)"] )
+    expect("a child that runs to completion is not reported as a timeout",
+           timed_out.returncode == 0 and "exceeded" not in timed_out.stderr)
+    original_child_timeout = CHILD_TIMEOUT_SECONDS
+    globals()["CHILD_TIMEOUT_SECONDS"] = 0.2
+    try:
+        slow = run_command([sys.executable, "-c", "import time; time.sleep(3)"])
+    finally:
+        globals()["CHILD_TIMEOUT_SECONDS"] = original_child_timeout
+    expect(
+        "a child that exceeds its timeout becomes a receipt failure, not a traceback",
+        slow.returncode != 0 and "exceeded" in slow.stderr,
     )
     expect(
         "hook budget contract rejects a sub-second margin",

@@ -118,7 +118,16 @@ SELFTEST_SUITES = [
 # The public Bash-guard selftest intentionally runs five independent process-level timing
 # observations for each runtime. Give that aggregate suite enough wall-clock without
 # weakening the five-second deadline each individual hook process must meet.
-SELFTEST_TIMEOUTS = {"bash_command_guard": 90}
+# Registered where the 15 s default leaves no headroom for a slower runner. Measured
+# on the authoring host: bash_command_guard 27 s, git_grep_engine_guard 7.3 s (its
+# byte-cap, token and subcommand fixtures parse real megabyte-scale sources, and it
+# probes the installed git and zsh), ci-gate 6 s. C1 requires each to finish inside
+# SELFTEST_TIMEOUT_MARGIN of its budget, so these are ceilings with room, not targets.
+SELFTEST_TIMEOUTS = {
+    "bash_command_guard": 90,
+    "git_grep_engine_guard": 60,
+    "ci-gate": 30,
+}
 DEFAULT_SELFTEST_TIMEOUT = 15
 # A suite may use this much of its registered timeout before C1 says so. Without it the
 # timeout was a number nothing checked: setting the Bash suite's to 15 -- below its

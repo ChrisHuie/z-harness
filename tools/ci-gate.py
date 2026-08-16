@@ -482,7 +482,7 @@ def selftest() -> int:
         and hook_budget_error(settings_data=reordered) != "",
     )
     timed_out = run_command([sys.executable, "-c",
-                             "import time; time.sleep(3)"] )
+                             "import time; time.sleep(0.3)"])
     expect("a child that runs to completion is not reported as a timeout",
            timed_out.returncode == 0 and "exceeded" not in timed_out.stderr)
     original_child_timeout = CHILD_TIMEOUT_SECONDS

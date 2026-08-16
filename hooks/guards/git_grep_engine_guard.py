@@ -170,6 +170,10 @@ class GitAuthority(NamedTuple):
     exec_path: str
     builtins: frozenset
     main: frozenset
+    # False when the command names a Git other than the one PATH resolves. The
+    # inventories still come from the trusted Git and the named binary is never executed,
+    # so only the cross-version builtin floor may be classified while this is False.
+    candidate_trusted: bool = True
 
 
 class HereStringSource(NamedTuple):
@@ -1698,9 +1702,6 @@ def trusted_git_authority(executable="git", deadline=None, *, runner=None, clock
         raise GitAuthorityError("the Git executable cannot be resolved")
     trusted = os.path.realpath(trusted)
     candidate = os.path.realpath(candidate)
-    if candidate != trusted:
-        raise GitAuthorityError(
-            "the command selects a Git executable other than the PATH-trusted Git")
     if trusted not in _GIT_AUTHORITY_CACHE:
         try:
             exec_path_result = runner(
@@ -1729,10 +1730,64 @@ def trusted_git_authority(executable="git", deadline=None, *, runner=None, clock
         _GIT_AUTHORITY_CACHE[trusted] = GitAuthority(
             trusted, os.path.realpath(exec_path), builtins, main,
         )
-    return _GIT_AUTHORITY_CACHE[trusted]
+    authority = _GIT_AUTHORITY_CACHE[trusted]
+    if candidate != trusted:
+        # Naming a second Git is uncertainty about WHICH binary runs, never proof of the
+        # guarded hazard, and stock macOS carries two. The candidate is still never
+        # executed; `authorize_git_subcommand` narrows what may be classified from an
+        # inventory that was read from a different binary.
+        return authority._replace(candidate_trusted=False)
+    return authority
 
 
-def authorize_git_subcommand(subcommand, authority, effective_exec_path):
+# Builtin in every Git this harness is grounded against. Measured, not recalled: git
+# 2.46.1 and Apple Git 2.39.5 share 139 builtin names, and the three that differ --
+# `bisect`, `refs`, `replay` -- are excluded, because `git -c alias.refs=... refs` does run
+# the alias on the Git that lacks it. Every subcommand either guard reasons about is
+# builtin in both. git-config(1) states that aliases hiding existing Git commands are
+# ignored, so a name in this set cannot be redirected by ambient config in any of them,
+# which is what makes it classifiable without reading a second binary's inventory.
+# `check_builtin_floor_against_installed_gits` re-derives this against every `git` on
+# PATH and fails on drift in either direction.
+CROSS_VERSION_BUILTINS = frozenset({
+    "add", "archive", "blame", "branch", "cat-file", "checkout", "commit", "config",
+    "diff", "fetch", "gc", "grep", "log", "ls-tree", "maintenance", "pull", "push",
+    "restore", "rev-list", "rev-parse", "shortlog", "show", "stash", "status",
+})
+GIT_UNSETTLED_EXECUTABLE_ERROR = (
+    "Git subcommand %r is outside the cross-version builtin floor while the executing Git "
+    "binary is not settled, so ambient alias or config may redirect it"
+)
+_GIT_GLOBAL_OPTIONS_WITH_VALUES = {
+    "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix",
+    "--exec-path", "--config-env", "--attr-source",
+}
+
+
+def _git_subcommand_word(words):
+    """Return the subcommand token of a `git ...` tail, or None when argv cannot say."""
+    index = 0
+    while index < len(words) and words[index].startswith("-"):
+        if words[index] == "--":
+            index += 1
+            break
+        if words[index] in _GIT_GLOBAL_OPTIONS_WITH_VALUES:
+            index += 2
+            continue
+        index += 1
+    return words[index] if index < len(words) else None
+
+
+def authorize_git_subcommand(subcommand, authority, effective_exec_path,
+                             lookup_authority_uncertain=False):
+    # Two separate ways the executing binary can be unknown: the command named a different
+    # path, or a wrapper changed executable lookup. Neither is proof of the hazard, and
+    # both mean an inventory read from the PATH-trusted Git does not transfer -- so the
+    # floor above is what may be classified, and nothing else.
+    if not authority.candidate_trusted or lookup_authority_uncertain:
+        if subcommand in CROSS_VERSION_BUILTINS:
+            return None
+        return GIT_UNSETTLED_EXECUTABLE_ERROR % subcommand
     if subcommand in authority.builtins:
         # git-config(1): aliases that hide existing Git commands are ignored. This holds
         # only because `trusted_git_authority` already proved the executable identity.
@@ -2333,29 +2388,10 @@ def _split_env_string(value):
     return [(word, "") for word in words]
 
 
-GIT_LOOKUP_AUTHORITY_ERROR = (
-    "Git executable lookup or configuration authority changes across a wrapper, so "
-    "the PATH-trusted Git inventory cannot be transferred"
-)
 ZSH_EQUALS_LOOKUP_AUTHORITY_ERROR = (
     "zsh EQUALS executable lookup could not be resolved from the effective shell "
     "environment"
 )
-
-
-def changed_git_lookup_authority_error(executable, lookup_authority_uncertain):
-    """Reject Git authority transfer across wrappers that change executable lookup."""
-    if (os.path.basename(executable) == "git" and os.sep not in executable
-            and lookup_authority_uncertain):
-        return GIT_LOOKUP_AUTHORITY_ERROR
-    return ""
-
-
-def only_changed_git_lookup_authority_error(resolution):
-    """True when prefix parsing resolved Git but could not transfer its authority."""
-    return (bool(resolution.errors)
-            and all(error == GIT_LOOKUP_AUTHORITY_ERROR
-                    for error in resolution.errors))
 
 
 def only_changed_zsh_equals_lookup_authority_error(resolution):
@@ -2647,13 +2683,14 @@ def unwrap_command_prefix(tokens, shell="zsh", equals_state=ZSH_EQUALS_ON,
         if executable == "eval":
             break
 
-        lookup_error = changed_git_lookup_authority_error(
-            executable_text, lookup_authority_uncertain)
-        if lookup_error:
-            errors.append(lookup_error)
-            guarded_prefix_hazard = True
-            break
-
+        # A wrapper that changes executable lookup used to stop the walk here with an
+        # error. It changes WHICH Git runs, not what the argv means, and
+        # `authorize_git_subcommand` now decides what an unsettled executable permits --
+        # the cross-version builtin floor and nothing else -- on the same rule as a named
+        # alternate binary. Keeping the arm as well questioned `sudo git status` and
+        # downgraded `sudo git grep -E 'harness\b'` from a proven deny to a question.
+        # With the floor rule in place it decided nothing: neutering it moved no verdict
+        # across the 745-command fixture corpus.
         explicit_harmless = (
             executable_text in TRUSTED_EXTERNAL_NON_FORWARDING_COMMANDS
             or (bypasses_shell_identity and executable_text == executable
@@ -3091,7 +3128,8 @@ def _shell_alias_guard_state(source, aliases, seen=(), depth=0,
 
 def resolve_git_alias(
         subcommand, tail, aliases, authority, effective_exec_path, deadline=None,
-        command_env=None, lookup_authority_uncertain=False):
+        command_env=None, lookup_authority_uncertain=False,
+        executable_lookup_uncertain=False):
     """Resolve standard Git aliases with bounded recursive closure.
 
     Return ``(subcommand, argv, error, derived-config)``. A harmless shell alias has no subcommand;
@@ -3105,7 +3143,8 @@ def resolve_git_alias(
     for _depth in range(MAX_ALIAS_DEPTH + 1):
         if current not in aliases:
             authority_error = authorize_git_subcommand(
-                current, authority, effective_exec_path)
+                current, authority, effective_exec_path,
+                executable_lookup_uncertain)
             if authority_error is None:
                 return current, argv, None, derived_configs
             return None, [], authority_error, derived_configs
@@ -3176,9 +3215,12 @@ def git_grep_argv(tokens, resolution=None, deadline=None):
         return None
     if os.path.basename(words[j]) != "git":
         return None
-    if (os.sep not in words[j]
-            and command_env.get("PATH", os.environ.get("PATH")) != os.environ.get("PATH")):
-        return [], [], ["PATH changes which Git executable would run"]
+    # A changed PATH selects a different Git; `authorize_git_subcommand` decides what that
+    # permits, on the same floor rule as a named alternate binary, rather than refusing
+    # before the subcommand is even read.
+    path_changed = (
+        os.sep not in words[j]
+        and command_env.get("PATH", os.environ.get("PATH")) != os.environ.get("PATH"))
     authority = trusted_git_authority(words[j], deadline=deadline)
     effective_exec_path = command_env.get("GIT_EXEC_PATH", authority.exec_path)
     j += 1
@@ -3272,7 +3314,8 @@ def git_grep_argv(tokens, resolution=None, deadline=None):
     subcommand, rest, alias_error, alias_configs = resolve_git_alias(
         words[j], items[j + 1:], _alias_table(configs), authority,
         effective_exec_path, deadline, command_env,
-        resolution.descendant_lookup_authority_uncertain)
+        resolution.descendant_lookup_authority_uncertain,
+        resolution.lookup_authority_uncertain or path_changed)
     configs.extend(alias_configs)
     if alias_error:
         unresolved_configs.append(alias_error)
@@ -4559,12 +4602,12 @@ FIXTURES = [
      """git grep -EZe'harness\\b' -- README.md""", "allow"),
     # Prefix peeling is shared with the zsh guard, so a launcher missing from that table
     # hid the same invocation from both.
-    ("ASK WRAPPER: sudo changes Git execution authority",
-     """sudo git grep -nE 'harness\\b' -- README.md""", "ask"),
-    ("ASK WRAPPER: sudo user selection changes Git execution authority",
-     """sudo -u root git grep -nE 'harness\\b' -- README.md""", "ask"),
-    ("ASK WRAPPER: command -p uses a different executable search path",
-     """command -p git grep -nE 'harness\\b' -- README.md""", "ask"),
+    ("RED WRAPPER: sudo changes which Git runs, not what -E means",
+     """sudo git grep -nE 'harness\\b' -- README.md""", "deny"),
+    ("RED WRAPPER: sudo -u cannot launder the ERE hazard either",
+     """sudo -u root git grep -nE 'harness\\b' -- README.md""", "deny"),
+    ("RED WRAPPER: command -p searches differently and still reaches ERE",
+     """command -p git grep -nE 'harness\\b' -- README.md""", "deny"),
     ("RED WRAPPER: command -- still executes git",
      "command -- git grep -Ee'harness\\b' -- README.md", "deny"),
     ("RED WRAPPER: builtin command -- still executes git",
@@ -4690,8 +4733,8 @@ FIXTURES = [
      """nice -n 5 git grep -nE 'harness\\b' -- README.md""", "deny"),
     ("RED  ROUND 9: shell -c command is recursively inspected",
      """sh -c \"git grep -nE 'harness\\b' -- README.md\"""", "deny"),
-    ("ASK  ROUND 9: a different absolute Git path fails authority discovery closed",
-     """/nonexistent/bin/git grep -nE 'harness\\b' -- README.md""", "ask"),
+    ("RED  ROUND 9: a different absolute Git path still carries the ERE hazard",
+     """/nonexistent/bin/git grep -nE 'harness\\b' -- README.md""", "deny"),
     ("ASK  ROUND 9: valueless grep.patternType fails closed",
      """git -c grep.patternType grep -n 'harness\\b' -- README.md""", "ask"),
     ("RED  ROUND 9: env -S command splitting is parsed before git",
@@ -5004,6 +5047,70 @@ def check_option_grammar_against_git(argv_mutator=None):
     except (OSError, subprocess.SubprocessError) as exc:
         failures.append(f"installed Git grammar probe failed closed: {exc!r}")
     return failures
+
+
+def installed_git_binaries():
+    """Every distinct `git` the inherited PATH can select, in PATH order."""
+    binaries = []
+    seen = set()
+    for directory in (os.environ.get("PATH") or "").split(os.pathsep):
+        if not directory:
+            continue
+        resolved = shutil.which("git", path=directory)
+        if not resolved:
+            continue
+        real = os.path.realpath(resolved)
+        if real not in seen:
+            seen.add(real)
+            binaries.append(real)
+    return tuple(binaries)
+
+
+def check_builtin_floor_against_installed_gits():
+    """-> (failures, scan-set description). Re-derive the floor against each Git on PATH.
+
+    `authorize_git_subcommand` classifies a name on an unsettled executable using
+    CROSS_VERSION_BUILTINS alone. That is sound only while every Git the machine can
+    select treats those names as builtins, because git-config(1)'s "aliases that hide
+    existing Git commands are ignored" is a per-binary rule. Transferring one Git's
+    builtin list to another is exactly the unsoundness this floor replaces: `refs` and
+    `replay` are builtin in git 2.46.1 and absent from Apple Git 2.39.5, where
+    `git -c alias.refs=... refs` does run the alias.
+    """
+    failures = []
+    binaries = installed_git_binaries()
+    if not binaries:
+        return (["no `git` on PATH, so the cross-version builtin floor is unverified"],
+                "0 binaries")
+    described = []
+    for binary in binaries:
+        try:
+            version = subprocess.run([binary, "--version"], capture_output=True,
+                                     text=True, timeout=10)
+            listed = subprocess.run([binary, "--list-cmds=builtins"],
+                                    capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError) as exc:
+            failures.append("cannot enumerate %s: %r" % (binary, exc))
+            continue
+        if version.returncode or listed.returncode or not listed.stdout.split():
+            failures.append(
+                "%s did not report a builtin inventory (rc=%d, stderr=%r)"
+                % (binary, listed.returncode, listed.stderr.strip()[:100]))
+            continue
+        described.append("%s (%s)" % (binary, version.stdout.strip()))
+        missing = sorted(CROSS_VERSION_BUILTINS - set(listed.stdout.split()))
+        if missing:
+            failures.append(
+                "%s does not carry %r as builtins, so an ambient alias can redirect them "
+                "there; remove each from CROSS_VERSION_BUILTINS in the same commit"
+                % (binary, missing))
+    ungrounded = sorted(GIT_HAZARD_SUBCOMMANDS - CROSS_VERSION_BUILTINS)
+    if ungrounded:
+        failures.append(
+            "guarded subcommand(s) %r are outside the cross-version builtin floor, so a "
+            "wrapper or an alternate binary turns a provable verdict into a question"
+            % ungrounded)
+    return failures, "%d binary/binaries: %s" % (len(binaries), "; ".join(described))
 
 
 def check_log_grammar_against_git():
@@ -5725,50 +5832,56 @@ FIXTURES += [
     ("ASK LAUNCHER: xargs ahead of git grep", "xargs git grep -E 'x'", "ask"),
 ]
 
-# A machine can carry more than one real Git. The command inventory, aliases, system
-# configuration, and helper path of the PATH-selected Git are not authority for another
-# executable. The path is nonexistent so it cannot equal the trusted Git on any host and
-# the test never executes it.
+# A machine can carry more than one real Git -- Homebrew's and Apple's /usr/bin/git are
+# both present on stock macOS. Naming the one PATH does not resolve is uncertainty about
+# WHICH binary runs, never proof of the guarded hazard, so it may not reach `deny` on its
+# own; and it is not proof of safety either, so a name outside the cross-version builtin
+# floor stays a question. What does NOT depend on the binary is the regex engine: `-E` with
+# a live PCRE-only atom returns the wrong line on git 2.46.1 and on Apple Git 2.39.5
+# alike -- `harness\b` matches `harnessb` under -E and the intended line under -P on both.
+# The path below is absolute and nonexistent, so it is never the trusted Git on any host,
+# which keeps this group's contribution to `checks` the same everywhere, and it is never
+# executed.
 _UNTRUSTED_GIT = "/nonexistent/bin/git"
 FIXTURES += [
-    ("ASK  AUTHORITY: an alternate Git builtin has no transferred authority",
-     f"{_UNTRUSTED_GIT} status --short", "ask"),
-    ("ASK  AUTHORITY: an alternate Git staging command has no transferred authority",
-     f"{_UNTRUSTED_GIT} add -A", "ask"),
-    ("ASK  AUTHORITY: an alternate Git PCRE command is still a different authority",
-     f"{_UNTRUSTED_GIT} grep -P 'harness\\b' -- README.md", "ask"),
-    ("ASK  AUTHORITY: an alternate Git ERE command is not inspected speculatively",
-     f"{_UNTRUSTED_GIT} grep -E 'harness\\b' -- README.md", "ask"),
+    ("GREEN AUTHORITY: an alternate Git running a floor builtin is not the hazard",
+     f"{_UNTRUSTED_GIT} status --short", "allow"),
+    ("GREEN AUTHORITY: an alternate Git staging files is not the hazard",
+     f"{_UNTRUSTED_GIT} add -A", "allow"),
+    ("GREEN AUTHORITY: an alternate Git with the PCRE engine stays allowed",
+     f"{_UNTRUSTED_GIT} grep -P 'harness\\b' -- README.md", "allow"),
+    ("RED  AUTHORITY: an alternate Git does not launder the ERE hazard",
+     f"{_UNTRUSTED_GIT} grep -E 'harness\\b' -- README.md", "deny"),
     ("ASK  AUTHORITY: an alternate Git non-builtin has no transferred authority",
      f"{_UNTRUSTED_GIT} submodule status", "ask"),
     ("ASK  AUTHORITY: an alternate Git unknown command has no transferred authority",
      f"{_UNTRUSTED_GIT} project-helper --version", "ask"),
-    ("ASK AUTHORITY: command -p cannot transfer PATH-selected Git authority",
-     "command -p git status --short", "ask"),
-    ("ASK AUTHORITY: builtin command -p has the same alternate search path",
-     "builtin command -p git status --short", "ask"),
-    ("ASK AUTHORITY: env -i removes executable-search authority",
-     "env -i git status --short", "ask"),
-    ("ASK AUTHORITY: long env ignore-environment removes executable-search authority",
-     "env --ignore-environment git status --short", "ask"),
-    ("ASK AUTHORITY: env -u PATH removes executable-search authority",
-     "env -u PATH git status --short", "ask"),
-    ("ASK AUTHORITY: env --unset PATH removes executable-search authority",
-     "env --unset=PATH git status --short", "ask"),
-    ("ASK AUTHORITY: sudo changes identity and executable-search authority",
-     "sudo -i git status --short", "ask"),
-    ("ASK AUTHORITY: env-clean authority persists into a shell -c body",
-     "env -i sh -c 'git status --short'", "ask"),
-    ("ASK AUTHORITY: env-unset authority persists into a shell -c body",
-     "env -u PATH sh -c 'git status --short'", "ask"),
-    ("ASK AUTHORITY: sudo authority persists into a shell -c body",
-     "sudo sh -c 'git status --short'", "ask"),
-    ("ASK AUTHORITY: env-clean uncertainty survives an explicit PCRE spelling",
-     "env -i sh -c \"git grep -P 'harness\\b' -- README.md\"", "ask"),
-    ("ASK AUTHORITY: env-clean authority persists into a shell here-string",
-     "env -i sh 0<<< 'git status --short'", "ask"),
-    ("ASK AUTHORITY: env-clean authority persists into a shell heredoc",
-     "env -i sh <<'EOF'\ngit status --short\nEOF\n", "ask"),
+    ("GREEN AUTHORITY: command -p ahead of a floor builtin is not the hazard",
+     "command -p git status --short", "allow"),
+    ("GREEN AUTHORITY: builtin command -p ahead of a floor builtin is the same",
+     "builtin command -p git status --short", "allow"),
+    ("GREEN AUTHORITY: env -i ahead of a floor builtin is not the hazard",
+     "env -i git status --short", "allow"),
+    ("GREEN AUTHORITY: env --ignore-environment reads the same way",
+     "env --ignore-environment git status --short", "allow"),
+    ("GREEN AUTHORITY: env -u PATH ahead of a floor builtin is not the hazard",
+     "env -u PATH git status --short", "allow"),
+    ("GREEN AUTHORITY: env --unset=PATH reads the same way",
+     "env --unset=PATH git status --short", "allow"),
+    ("GREEN AUTHORITY: sudo -i ahead of a floor builtin is not the hazard",
+     "sudo -i git status --short", "allow"),
+    ("GREEN AUTHORITY: an env-cleared shell body running a floor builtin is allowed",
+     "env -i sh -c 'git status --short'", "allow"),
+    ("GREEN AUTHORITY: an env-unset shell body running a floor builtin is allowed",
+     "env -u PATH sh -c 'git status --short'", "allow"),
+    ("GREEN AUTHORITY: a sudo shell body running a floor builtin is allowed",
+     "sudo sh -c 'git status --short'", "allow"),
+    ("GREEN AUTHORITY: an env-cleared shell body with the PCRE engine is allowed",
+     "env -i sh -c \"git grep -P 'harness\\b' -- README.md\"", "allow"),
+    ("GREEN AUTHORITY: an env-cleared here-string running a floor builtin is allowed",
+     "env -i sh 0<<< 'git status --short'", "allow"),
+    ("GREEN AUTHORITY: an env-cleared heredoc running a floor builtin is allowed",
+     "env -i sh <<'EOF'\ngit status --short\nEOF\n", "allow"),
     ("GREEN AUTHORITY: an environment-cleared harmless shell body stays harmless",
      "env -i sh -c '/bin/echo safe'", "allow"),
 ]
@@ -5847,8 +5960,8 @@ FIXTURES += [
     # path component of the raw word as `git` before any `=` handling runs, so this
     # denies a command that cannot execute. Same safe-direction over-approximation as the
     # nested non-zsh body, pinned here so it is a recorded decision and not a surprise.
-    ("ASK EQUALS: a doubled equals alternate Git remains unresolved",
-     "==/nonexistent/bin/git grep -E 'harness\\b' -- README.md", "ask"),
+    ("RED EQUALS: a doubled equals on a PATH is over-approximated as Git",
+     "==/nonexistent/bin/git grep -E 'harness\\b' -- README.md", "deny"),
     ("ASK  EQUALS: quoting suppresses the expansion, leaving an unproven identity",
      "'=git' grep -E 'harness\\b' -- README.md", "ask"),
     ("ASK  EQUALS: double quoting suppresses it the same way",
@@ -5907,16 +6020,16 @@ FIXTURES += [
 # state to the command that actually consumes it instead of letting one parser re-entry
 # borrow the ambient process or letting an earlier question mask a later denial.
 FIXTURES += [
-    ("ASK ALIAS AUTHORITY: env-clean state survives shell-alias -c traversal",
-     "git -c 'alias.x=!env -i sh -c \"git status --short\"' x", "ask"),
-    ("ASK ALIAS AUTHORITY: env-clean state survives shell-alias eval traversal",
-     "git -c 'alias.x=!env -i sh -c \"eval git\\ status\\ --short\"' x", "ask"),
-    ("ASK ALIAS AUTHORITY: env-clean state survives shell-alias here-string traversal",
-     "git -c 'alias.x=!env -i sh 0<<< \"git status --short\"' x", "ask"),
-    ("ASK ALIAS AUTHORITY: prior PATH survives shell-alias -c traversal",
-     "git -c 'alias.x=!PATH=/usr/bin; sh -c \"git status --short\"' x", "ask"),
-    ("ASK ALIAS AUTHORITY: prior PATH survives shell-alias here-string traversal",
-     "git -c 'alias.x=!PATH=/usr/bin; sh 0<<< \"git status --short\"' x", "ask"),
+    ("GREEN ALIAS AUTHORITY: a shell alias reaching a floor builtin is allowed",
+     "git -c 'alias.x=!env -i sh -c \"git status --short\"' x", "allow"),
+    ("GREEN ALIAS AUTHORITY: the same through an alias eval body",
+     "git -c 'alias.x=!env -i sh -c \"eval git\\ status\\ --short\"' x", "allow"),
+    ("GREEN ALIAS AUTHORITY: the same through an alias here-string",
+     "git -c 'alias.x=!env -i sh 0<<< \"git status --short\"' x", "allow"),
+    ("GREEN ALIAS AUTHORITY: a prior PATH ahead of a floor builtin is allowed",
+     "git -c 'alias.x=!PATH=/usr/bin; sh -c \"git status --short\"' x", "allow"),
+    ("GREEN ALIAS AUTHORITY: a prior PATH through an alias here-string",
+     "git -c 'alias.x=!PATH=/usr/bin; sh 0<<< \"git status --short\"' x", "allow"),
     ("ASK PATH STATE: an earlier PATH selects an alternate Git",
      "PATH=/usr/bin; =git grep -P harness -- README.md", "ask"),
     ("ASK PATH STATE: an unavailable earlier PATH cannot inherit ambient Git",
@@ -5925,8 +6038,8 @@ FIXTURES += [
      "PATH=/definitely-missing =git grep -P harness -- README.md", "allow"),
     ("ASK PATH STATE: conditional mutation is not straight-line authority",
      "if true; then PATH=/usr/bin; fi; =git grep -P harness -- README.md", "ask"),
-    ("ASK PATH STATE: prior PATH reaches a directly associated shell here-string",
-     "PATH=/usr/bin; sh 0<<< 'git status --short'", "ask"),
+    ("GREEN PATH STATE: a prior PATH ahead of a floor builtin is allowed",
+     "PATH=/usr/bin; sh 0<<< 'git status --short'", "allow"),
     ("ASK PATH STATE: prior-line PATH reaches a child zsh heredoc",
      "PATH=/usr/bin\nzsh <<'EOF'\n=git grep -P 'harness\\b' -- README.md\nEOF\n",
      "ask"),
@@ -6365,8 +6478,8 @@ FIXTURES += [
      "git --exec-path=/tmp/untrusted status --short", "allow"),
     ("ASK GIT: an unknown subcommand may be an ambient alias",
      "git project-helper --version", "ask"),
-    ("ASK GIT: a command-local PATH may select a different Git executable",
-     "PATH=/tmp git status --short", "ask"),
+    ("GREEN GIT: a command-local PATH ahead of a floor builtin is not the hazard",
+     "PATH=/tmp git status --short", "allow"),
     ("RED HEREDOC: a shell interpreter executes its stdin body",
      "sh <<'EOF'\ngit grep -E 'harness\\b' -- README.md\nEOF\n", "deny"),
     ("RED HEREDOC: explicit shell -s reads stdin despite positional arguments",
@@ -6489,6 +6602,14 @@ def selftest():
             print("  FAIL option grammar vs installed git: %s" % failure)
     else:
         print("  PASS numeric, optional-value, negated-engine, and -- grammar matches installed git")
+    floor_failures, floor_scan_set = check_builtin_floor_against_installed_gits()
+    bad += len(floor_failures)
+    if floor_failures:
+        for failure in floor_failures:
+            print("  FAIL cross-version builtin floor: %s" % failure)
+    else:
+        print("  PASS cross-version builtin floor holds on every Git this PATH selects "
+              "[%s]" % floor_scan_set)
     log_grammar_failures = check_log_grammar_against_git()
     bad += len(log_grammar_failures)
     if log_grammar_failures:
@@ -6594,7 +6715,8 @@ def selftest():
     original_alias = resolve_git_alias
     globals()["resolve_git_alias"] = (
         lambda subcommand, tail, _aliases, _authority, _exec_path, _deadline=None,
-        _command_env=None, _lookup_authority_uncertain=False:
+        _command_env=None, _lookup_authority_uncertain=False,
+        _executable_lookup_uncertain=False:
         (subcommand.lower(), list(tail), None, [])
     )
     try:
@@ -6743,10 +6865,12 @@ def selftest():
         "PASS" if backtick_arithmetic_red else "FAIL"))
 
     original_authorize = authorize_git_subcommand
-    def admit_unknown(subcommand, authority, effective_exec_path):
+    def admit_unknown(subcommand, authority, effective_exec_path,
+                      lookup_authority_uncertain=False):
         if subcommand == "project-helper":
             return None
-        return original_authorize(subcommand, authority, effective_exec_path)
+        return original_authorize(subcommand, authority, effective_exec_path,
+                                  lookup_authority_uncertain)
     globals()["authorize_git_subcommand"] = admit_unknown
     try:
         unknown_subcommand_red = decide("git project-helper --version")[0] != "ask"
@@ -6780,51 +6904,49 @@ def selftest():
     print("  %s trusted-Git inventory drift loses standard submodule allow" % (
         "PASS" if drift_red else "FAIL"))
 
-    # An alternate executable must fail before any subprocess is attempted. Querying the
-    # candidate in order to decide whether to trust it would execute attacker-selected code.
-    candidate_calls = []
+    # The candidate is never executed, whatever its path: asking a binary the command
+    # chose what it can do, in order to decide whether to trust it, would run
+    # attacker-selected code to answer the trust question. Discovery is allowed to run --
+    # it no longer raises for an alternate path -- but every argv it spawns must belong to
+    # the PATH-trusted Git.
+    spawned = []
+
+    def recording_runner(argv, **kwargs):
+        spawned.append(list(argv))
+        return subprocess.run(argv, **kwargs)
+
+    saved_authority_cache = dict(_GIT_AUTHORITY_CACHE)
+    _GIT_AUTHORITY_CACHE.clear()
     try:
-        original_discovery(
-            "/nonexistent/bin/git",
-            runner=lambda *args, **kwargs: candidate_calls.append((args, kwargs)),
-        )
-        alternate_preprobe_ok = False
+        alternate_authority = original_discovery(
+            "/nonexistent/bin/git", runner=recording_runner)
+        alternate_preprobe_ok = (
+            alternate_authority.candidate_trusted is False
+            and bool(spawned)
+            and all(argv[0] == alternate_authority.executable for argv in spawned))
     except GitAuthorityError:
-        alternate_preprobe_ok = not candidate_calls
+        alternate_preprobe_ok = False
+    finally:
+        _GIT_AUTHORITY_CACHE.clear()
+        _GIT_AUTHORITY_CACHE.update(saved_authority_cache)
     bad += 0 if alternate_preprobe_ok else 1
-    print("  %s alternate Git is rejected before candidate execution" % (
+    print("  %s an alternate Git is classified without ever executing the candidate" % (
         "PASS" if alternate_preprobe_ok else "FAIL"))
 
+    # `submodule` is a main command in every Git this suite already asserts, and it is
+    # outside the cross-version builtin floor, so it is exactly the name whose verdict
+    # turns on candidate_trusted.
     globals()["trusted_git_authority"] = (
         lambda _executable="git", deadline=None: trusted_authority
     )
     try:
         alternate_callsite_red = decide(
-            "/nonexistent/bin/git status --short")[0] != "ask"
+            "/nonexistent/bin/git submodule status")[0] != "ask"
     finally:
         globals()["trusted_git_authority"] = original_discovery
     bad += 0 if alternate_callsite_red else 1
-    print("  %s alternate-Git authority callsite mutation loses fail-closed ask" % (
+    print("  %s forcing candidate_trusted admits a non-floor command on another Git" % (
         "PASS" if alternate_callsite_red else "FAIL"))
-
-    original_lookup_authority = changed_git_lookup_authority_error
-    globals()["changed_git_lookup_authority_error"] = (
-        lambda _executable, _uncertain: "")
-    try:
-        lookup_authority_red = all(decide(source)[0] != "ask" for source in (
-            "command -p git status --short",
-            "builtin command -p git status --short",
-            "env -i git status --short",
-            "env --ignore-environment git status --short",
-            "env -u PATH git status --short",
-            "env --unset=PATH git status --short",
-            "sudo -i git status --short",
-        ))
-    finally:
-        globals()["changed_git_lookup_authority_error"] = original_lookup_authority
-    bad += 0 if lookup_authority_red else 1
-    print("  %s wrapper lookup-authority mutation transfers PATH Git authority" % (
-        "PASS" if lookup_authority_red else "FAIL"))
 
     original_nested_invocation = nested_shell_invocation
     def drop_nested_authority(resolution, current_shell="sh", deadline=None):
@@ -7582,9 +7704,11 @@ def selftest():
         "PASS" if heredoc_composition_red else "FAIL"))
 
     globals()["authorize_git_subcommand"] = (
-        lambda subcommand, authority, effective_exec_path:
+        lambda subcommand, authority, effective_exec_path,
+        lookup_authority_uncertain=False:
         None if subcommand == "submodule"
-        else original_authorize(subcommand, authority, effective_exec_path)
+        else original_authorize(subcommand, authority, effective_exec_path,
+                                lookup_authority_uncertain)
     )
     try:
         env_exec_red = decide(

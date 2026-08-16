@@ -72,7 +72,6 @@ from git_grep_engine_guard import (  # noqa: E402
     live_here_string_sources, direct_here_string_invocation,
     ZSH_EQUALS_OFF, ZSH_EQUALS_ON,
     fixture_pair_duplicates,
-    only_changed_git_lookup_authority_error,
     only_changed_zsh_equals_lookup_authority_error,
     source_has_dynamic_command_word, source_has_git_hazard_hint,
     split_commands, command_without_heredoc_payloads,
@@ -296,9 +295,8 @@ def _classify(command, decisions, _depth, _shell, _equals_state, _deadline,
         resolution = unwrap_command_prefix(
             tokens, _shell, equals_state, command_env, lookup_uncertain)
         rev_path_resolution = resolution
-        git_lookup_only = only_changed_git_lookup_authority_error(resolution)
         equals_lookup_only = only_changed_zsh_equals_lookup_authority_error(resolution)
-        if git_lookup_only or equals_lookup_only:
+        if equals_lookup_only:
             # `sudo`, `command -p`, and environment-clearing wrappers change which Git
             # executable is trusted, so the sibling Git guard must ask. They do not move
             # zsh expansion inside the wrapper: the outer zsh still consumes `$SHA:src`
@@ -1144,27 +1142,6 @@ def selftest():
     print("  %-4s zsh-stdin argv mutation loses clustered option value"
           % ("PASS" if clustered_stdin_red else "FAIL"))
 
-    original_lookup_error = only_changed_git_lookup_authority_error
-    globals()["only_changed_git_lookup_authority_error"] = lambda _resolution: False
-    try:
-        lookup_error_red = all(
-            decide(source)[0] != "deny"
-            for source in (
-                "SHA=x; sudo git show $SHA:src/f.py",
-                "SHA=x; command -p git show $SHA:src/f.py",
-                "SHA=x; builtin command -p git show $SHA:src/f.py",
-                "SHA=x; env -i git show $SHA:src/f.py",
-                "SHA=x; env --ignore-environment git show $SHA:src/f.py",
-                "SHA=x; env -u PATH git show $SHA:src/f.py",
-                "SHA=x; env --unset=PATH git show $SHA:src/f.py",
-            )
-        )
-    finally:
-        globals()["only_changed_git_lookup_authority_error"] = original_lookup_error
-    bad += 0 if lookup_error_red else 1
-    print("  %-4s zsh rev:path proof remains live across Git lookup-authority errors"
-          % ("PASS" if lookup_error_red else "FAIL"))
-
     original_equals_lookup_error = only_changed_zsh_equals_lookup_authority_error
     globals()["only_changed_zsh_equals_lookup_authority_error"] = (
         lambda _resolution: False)
@@ -1245,7 +1222,7 @@ def selftest():
               "PASS" if budget_ask_ok else "FAIL", full_clock.readings,
               ", ".join(decision for decision, _fired in budget_results)))
 
-    checks = len(FIXTURES) + 11
+    checks = len(FIXTURES) + 10
     print("failures: %d" % bad)
     print("SELFTEST-SUMMARY suite=zsh_rev_modifier_guard checks=%d failures=%d" % (
         checks, bad))

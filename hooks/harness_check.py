@@ -98,7 +98,7 @@ DESC_CAP = 400                # house cap (spec ceiling is 1024)
 # checks=111, so a suite can be gutted with nothing failing. Raise a floor in the same
 # commit that adds the checks; lowering one is a deliberate, reviewable edit.
 SELFTEST_SUITES = [
-    ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"], 1065),
+    ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"], 1066),
     ("askq_timeout_guard", ["hooks/askq_timeout_guard.py", "--selftest"], 13),
     ("harness_report", ["hooks/harness_report.py", "--selftest"], 12),
     ("cc-cost", ["tools/cc-cost.py", "--selftest"], 8),
@@ -112,7 +112,7 @@ SELFTEST_SUITES = [
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
     ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 16),
     ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 556),
-    ("zsh_rev_modifier_guard", ["hooks/guards/zsh_rev_modifier_guard.py", "--selftest"], 240),
+    ("zsh_rev_modifier_guard", ["hooks/guards/zsh_rev_modifier_guard.py", "--selftest"], 239),
 ]
 # The public Bash-guard selftest intentionally runs five independent process-level timing
 # observations for each runtime. Give that aggregate suite enough wall-clock without

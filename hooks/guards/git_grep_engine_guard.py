@@ -2583,6 +2583,12 @@ def unwrap_command_prefix(tokens, shell="zsh", equals_state=ZSH_EQUALS_ON,
                     if env_splits > MAX_ENV_SPLITS:
                         errors.append(
                             f"env -S nesting exceeds the limit of {MAX_ENV_SPLITS}")
+                        # Stopping here leaves a split-string blob this walk never read,
+                        # and the outer tokens do not mention Git, so `hazard_hint` from
+                        # the original argv is False. Without this the caller's
+                        # `errors and hazard_hint` arm never fired and a fifth `env -S`
+                        # layer wrapping a live `git grep -E 'harness\b'` was ALLOWED.
+                        guarded_prefix_hazard = True
                         break
                     try:
                         items = _split_env_string(split_value) + items
@@ -5122,8 +5128,16 @@ def check_log_grammar_against_git():
     subcommands whose argv this guard parses. This one uses the engine itself as the
     oracle -- a two-commit repository where ERE and PCRE select different commits.
     """
+    # `\b` is not a portable engine oracle -- Git's regex backend reads it as a word
+    # boundary under ERE on Linux and as a literal `b` on macOS, which is why the sibling
+    # grep probe already avoids it and why the first draft of this one passed here and
+    # failed on ubuntu-24.04. These two patterns turn on SYNTAX instead. `a{2}b` is an
+    # interval under ERE and PCRE and five literal characters under BRE and fixed-strings;
+    # `(?:aab)` is a non-capturing group under PCRE and an invalid repeat under ERE, which
+    # git rejects outright on every platform.
     failures = []
-    pattern = "foo" + chr(92) + "b"
+    interval = "a{2}b"
+    group = "(?:aab)"
     try:
         with tempfile.TemporaryDirectory(prefix="z-harness-log-grammar-") as repo:
             env = dict(os.environ, GIT_AUTHOR_EMAIL="a@b", GIT_COMMITTER_EMAIL="a@b",
@@ -5134,58 +5148,59 @@ def check_log_grammar_against_git():
             if initialized.returncode:
                 return ["cannot initialize the temporary Git log-grammar fixture: "
                         + (initialized.stderr or "no diagnostic").strip()]
-            for index, subject in enumerate(("fix foob handling", "fix foo bar handling")):
-                with open(os.path.join(repo, "f%d.txt" % index), "w",
-                          encoding="utf-8") as stream:
-                    stream.write("x\n")
-                author = "foob" if index == 0 else "foo bar"
+            # LITERAL carries the interval as five plain characters, INTERVAL carries
+            # what an interval expands to. A BRE or fixed-strings engine selects the
+            # first; ERE and PCRE select the second.
+            literal_subject = "subject a{2}b here"
+            interval_subject = "subject aab here"
+            for subject in (literal_subject, interval_subject):
                 committed = subprocess.run(
                     ["git", "commit", "--quiet", "--allow-empty", "-m", subject],
                     cwd=repo, capture_output=True, text=True, timeout=10,
-                    env=dict(env, GIT_AUTHOR_NAME=author, GIT_COMMITTER_NAME=author))
+                    env=dict(env, GIT_AUTHOR_NAME="probe", GIT_COMMITTER_NAME="probe"))
                 if committed.returncode:
                     return ["cannot commit the temporary Git log-grammar fixture: "
                             + (committed.stderr or "no diagnostic").strip()]
 
-            def observe(flags, subcommand="log"):
-                """-> 'ERE' | 'INTENDED' | 'UNFILTERED' | 'NONE' | 'ERROR'.
+            def observe(flags, pattern=interval, subcommand="log"):
+                """-> 'LITERAL' | 'INTERVAL' | 'UNFILTERED' | 'NONE' | 'ERROR'.
 
                 Both subjects present means the pattern never reached the walker -- an
                 option ahead of it consumed `--grep` as its own value, which `-I` and
-                `-O` both do. Reading that as ERE because the decoy is in the output is
-                how a naive oracle invents a gap.
+                `-O` both do. Reading that as an engine choice is how a naive oracle
+                invents a gap.
                 """
                 argv = ["git", subcommand, "--oneline", *flags, "--grep=" + pattern]
                 result = subprocess.run(argv, cwd=repo, capture_output=True,
                                         text=True, timeout=10, env=env)
                 if result.returncode:
                     return "ERROR"
-                decoy = "fix foob handling" in result.stdout
-                intended = "fix foo bar handling" in result.stdout
-                if decoy and intended:
+                literal = literal_subject in result.stdout
+                expanded = interval_subject in result.stdout
+                if literal and expanded:
                     return "UNFILTERED"
-                if decoy:
-                    return "ERE"
-                if intended:
-                    return "INTENDED"
+                if literal:
+                    return "LITERAL"
+                if expanded:
+                    return "INTERVAL"
                 return "NONE"
 
             for label, argv, expected in (
-                    ("a positional pattern", ["log", "--oneline", "-E", pattern], "ERROR"),
+                    ("a positional pattern", ["log", "--oneline", "-E", interval], "ERROR"),
                     ("a clustered -EP", ["log", "--oneline", "-EP",
-                                         "--grep=" + pattern], "ERROR"),
+                                         "--grep=" + interval], "ERROR"),
                     ("a clustered -Ei", ["log", "--oneline", "-Ei",
-                                         "--grep=" + pattern], "ERROR"),
+                                         "--grep=" + interval], "ERROR"),
                     ("the --ext abbreviation", ["log", "--oneline", "--ext",
-                                                "--grep=" + pattern], "ERROR"),
+                                                "--grep=" + interval], "ERROR"),
                     ("the --extended abbreviation", ["log", "--oneline", "--extended",
-                                                     "--grep=" + pattern], "ERROR"),
+                                                     "--grep=" + interval], "ERROR"),
                     ("the --perl abbreviation", ["log", "--oneline", "--perl",
-                                                 "--grep=" + pattern], "ERROR"),
+                                                 "--grep=" + interval], "ERROR"),
                     ("--no-extended-regexp", ["log", "--oneline", "--no-extended-regexp",
-                                              "--grep=" + pattern], "ERROR"),
+                                              "--grep=" + interval], "ERROR"),
                     ("--no-perl-regexp", ["log", "--oneline", "--no-perl-regexp",
-                                          "--grep=" + pattern], "ERROR")):
+                                          "--grep=" + interval], "ERROR")):
                 observed = subprocess.run(["git", *argv], cwd=repo, capture_output=True,
                                           text=True, timeout=10, env=env)
                 if (observed.returncode == 0) == (expected == "ERROR"):
@@ -5195,24 +5210,35 @@ def check_log_grammar_against_git():
                         % (label, observed.returncode, observed.stdout,
                            observed.stderr.strip()[:120]))
 
-            for token, expected in (("-E", "ERE"), ("--extended-regexp", "ERE"),
-                                    ("-P", "INTENDED"), ("--perl-regexp", "INTENDED"),
-                                    ("--basic-regexp", "INTENDED"),
-                                    ("-F", "NONE"), ("--fixed-strings", "NONE")):
+            for token, expected in (("-E", "INTERVAL"),
+                                    ("--extended-regexp", "INTERVAL"),
+                                    ("-P", "INTERVAL"), ("--perl-regexp", "INTERVAL"),
+                                    ("--basic-regexp", "LITERAL"),
+                                    ("-F", "LITERAL"), ("--fixed-strings", "LITERAL")):
                 seen = observe([token])
                 if seen != expected:
                     failures.append(
                         "installed Git read log engine token %r as %s, the table models %s"
                         % (token, seen, expected))
-            for flags, expected in ((["-P", "-E"], "ERE"), (["-E", "-P"], "INTENDED"),
-                                    (["-F", "-E"], "ERE")):
-                seen = observe(flags)
+            if observe([]) != "LITERAL":
+                failures.append(
+                    "installed Git no longer defaults `git log --grep` to a basic engine "
+                    "(%s), so an unflagged pattern is not the harmless row this guard "
+                    "models" % observe([]))
+            # ERE vs PCRE needs a syntax only one of them accepts: `(?:aab)` is a
+            # non-capturing group under PCRE and an invalid repeat under ERE, which git
+            # rejects. That also makes last-one-wins observable without relying on any
+            # platform's regex extensions.
+            for flags, expected in ((["-P"], "INTERVAL"), (["-E"], "ERROR"),
+                                    (["-E", "-P"], "INTERVAL"), (["-P", "-E"], "ERROR"),
+                                    (["-F", "-E"], "ERROR")):
+                seen = observe(flags, group)
                 if seen != expected:
                     failures.append(
-                        "installed Git did not apply last-one-wins to log %r (%s, expected %s)"
-                        % (flags, seen, expected))
+                        "installed Git read log %r over a PCRE-only group as %s, expected "
+                        "%s" % (flags, seen, expected))
             for subcommand in ("shortlog", "rev-list"):
-                argv = ["git", subcommand, "-E", "--grep=" + pattern, "HEAD"]
+                argv = ["git", subcommand, "-E", "--grep=" + interval, "HEAD"]
                 observed = subprocess.run(argv, cwd=repo, capture_output=True,
                                           text=True, timeout=10, env=env)
                 if observed.returncode or not observed.stdout.strip():
@@ -5227,9 +5253,10 @@ def check_log_grammar_against_git():
                 token = "-" + char
                 if token in modelled:
                     continue
-                if observe([token]) == "ERE":
+                if observe([token]) == "INTERVAL":
                     failures.append(
-                        "installed Git lets the unmodelled log flag %r select ERE; add it "
+                        "installed Git lets the unmodelled log flag %r select an interval "
+                        "engine; add it "
                         "to GIT_LOG_ENGINE_TOKENS in the same commit" % token)
     except (OSError, subprocess.SubprocessError) as exc:
         failures.append("installed Git log-grammar probe failed closed: %r" % (exc,))
@@ -6005,11 +6032,90 @@ FIXTURES += [
 _BYTE_LIMIT_SOURCE = "/bin/echo " + "x" * (MAX_COMMAND_CHARS - 11)
 _FUNCTION_PARSE_LIMIT_SOURCE = (
     "f(){ git status --short; }; f;" * (MAX_FUNCTION_DECLARATIONS + 1))
+
+
+def _nested_env_split_source(depth, inner):
+    source = inner
+    for _ in range(depth):
+        source = 'env -S "%s"' % source.replace("\\", "\\\\").replace('"', '\\"')
+    return source
+
+
+def _nested_substitution_source(depth, inner):
+    source = inner
+    for _ in range(depth):
+        source = "$(%s)" % source
+    return "/bin/echo " + source
+
+
+def _nested_shell_source(depth, inner):
+    source = inner
+    for _ in range(depth):
+        source = "sh -c '%s'" % source.replace("'", "'\\''")
+    return source
+
+
+# Each closed limit gets a pair: at the limit the source must still be classified, past it
+# the guard must say so. Four of these limits had no control at all -- MAX_TOKENS,
+# MAX_SUBCOMMANDS, MAX_PREFIX_DEPTH and MAX_ENV_SPLITS could each be raised to effectively
+# unbounded with every suite green -- and writing the MAX_ENV_SPLITS pair is what found
+# that exceeding it ALLOWED a live `git grep -E 'harness\b'`, because the walk stopped
+# with an unread blob and set no hazard hint.
+#
+# The sizes below are LITERALS, deliberately. Building them from the constants they test
+# makes the fixture move with the mutation: raising MAX_PREFIX_DEPTH to 800 also produced
+# an 800-wrapper fixture, and the pair stayed green. `_CLOSED_LIMITS` is the drift check --
+# change a limit and it reddens, so these sources are re-derived on purpose rather than
+# following along silently.
+_CLOSED_LIMITS = {
+    "MAX_TOKENS": 65536,
+    "MAX_SUBCOMMANDS": 16384,
+    "MAX_PREFIX_DEPTH": 8,
+    "MAX_ENV_SPLITS": 4,
+    "MAX_SOURCE_DEPTH": 16,
+}
+_GUARDED_GREP = r"""git grep -E 'harness\b' -- README.md"""
+_TOKEN_LIMIT_SOURCE = "/bin/echo " + " ".join(["x"] * 65535)
+_TOKEN_OVERFLOW_SOURCE = "/bin/echo " + " ".join(["x"] * 65537)
+_SUBCOMMAND_LIMIT_SOURCE = "; ".join(["/bin/echo x"] * 16384)
+_SUBCOMMAND_OVERFLOW_SOURCE = "; ".join(["/bin/echo x"] * 16385)
+_PREFIX_LIMIT_SOURCE = "nice " * 8 + "git show $SHA:src/f.py"
+_PREFIX_OVERFLOW_SOURCE = "nice " * 9 + "git show $SHA:src/f.py"
+_ENV_SPLIT_LIMIT_SOURCE = _nested_env_split_source(4, _GUARDED_GREP)
+_ENV_SPLIT_OVERFLOW_SOURCE = _nested_env_split_source(5, _GUARDED_GREP)
+_SOURCE_DEPTH_LIMIT_SOURCE = _nested_substitution_source(16, _GUARDED_GREP)
+_SOURCE_DEPTH_OVERFLOW_SOURCE = _nested_substitution_source(18, _GUARDED_GREP)
+_SHELL_DEPTH_LIMIT_SOURCE = _nested_shell_source(4, _GUARDED_GREP)
+_SHELL_DEPTH_OVERFLOW_SOURCE = _nested_shell_source(6, _GUARDED_GREP)
 _FUNCTION_OPERATOR_BUDGET_SOURCE = (
     "f(){ /bin/echo safe; }; f;" + "( : );" * 16000)
 FIXTURES += [
     ("GREEN LIMIT: a legal source at the byte cap is classified inside the budget",
      _BYTE_LIMIT_SOURCE, "allow"),
+    ("GREEN LIMIT: a token count at the cap is still classified",
+     _TOKEN_LIMIT_SOURCE, "allow"),
+    ("ASK LIMIT: a token count past the cap says so instead of guessing",
+     _TOKEN_OVERFLOW_SOURCE, "ask"),
+    ("GREEN LIMIT: a subcommand count at the cap is still classified",
+     _SUBCOMMAND_LIMIT_SOURCE, "allow"),
+    ("ASK LIMIT: a subcommand count past the cap says so instead of guessing",
+     _SUBCOMMAND_OVERFLOW_SOURCE, "ask"),
+    ("GREEN LIMIT: wrapper nesting at the cap is still unwrapped",
+     _PREFIX_LIMIT_SOURCE, "allow"),
+    ("ASK LIMIT: wrapper nesting past the cap leaves the executable unresolved",
+     _PREFIX_OVERFLOW_SOURCE, "ask"),
+    ("RED  LIMIT: env -S nesting at the cap still reaches the ERE hazard",
+     _ENV_SPLIT_LIMIT_SOURCE, "deny"),
+    ("ASK LIMIT: env -S nesting past the cap leaves a blob the walk never read",
+     _ENV_SPLIT_OVERFLOW_SOURCE, "ask"),
+    ("RED  LIMIT: substitution nesting at the cap still reaches the ERE hazard",
+     _SOURCE_DEPTH_LIMIT_SOURCE, "deny"),
+    ("ASK LIMIT: substitution nesting past the cap cannot be classified",
+     _SOURCE_DEPTH_OVERFLOW_SOURCE, "ask"),
+    ("RED  LIMIT: shell -c nesting at the cap still reaches the ERE hazard",
+     _SHELL_DEPTH_LIMIT_SOURCE, "deny"),
+    ("ASK LIMIT: shell -c nesting past the cap cannot be classified",
+     _SHELL_DEPTH_OVERFLOW_SOURCE, "ask"),
     ("ASK LIMIT: too many function declarations cannot consume the hook timeout",
      _FUNCTION_PARSE_LIMIT_SOURCE, "ask"),
     ("GREEN LIMIT: operator-heavy source remains inside the public hook budget",
@@ -6602,6 +6708,14 @@ def selftest():
             print("  FAIL option grammar vs installed git: %s" % failure)
     else:
         print("  PASS numeric, optional-value, negated-engine, and -- grammar matches installed git")
+    limit_drift = {
+        name: (value, globals()[name])
+        for name, value in _CLOSED_LIMITS.items() if globals()[name] != value
+    }
+    bad += 0 if not limit_drift else 1
+    print("  %s the limit fixtures' literal sizes still match the closed limits (%s)" % (
+        "PASS" if not limit_drift else "FAIL", limit_drift or "no drift"))
+
     floor_failures, floor_scan_set = check_builtin_floor_against_installed_gits()
     bad += len(floor_failures)
     if floor_failures:
@@ -8110,7 +8224,7 @@ def selftest():
     print("  %s identifier-only heredoc mutation loses dashed-delimiter deny" % (
         "PASS" if dashed_heredoc_red else "FAIL"))
 
-    checks = len(FIXTURES) + 75
+    checks = len(FIXTURES) + 76
     print("failures: %d" % bad)
     print("SELFTEST-SUMMARY suite=git_grep_engine_guard checks=%d failures=%d" % (
         checks, bad))

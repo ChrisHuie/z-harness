@@ -292,6 +292,53 @@ def hook_budget_error(*, settings_data=None, codex_data=None, budget=None) -> st
         return f"cannot verify hook-budget contract: {exc!r}"
 
 
+DECISION_GOLDEN = ROOT / "contracts/goldens/guard-decisions.json"
+
+
+def decision_golden_error(golden_data=None, decide=None) -> str:
+    """Return drift between the recorded guard verdicts and what the guards now return.
+
+    Source digests pin bytes and floors ratchet counts; neither notices a DECISION
+    reversal, because a fixture and the code it grades move together. Forty-three fixture
+    expectations were rewritten on this branch with every suite green. A verdict change
+    now has to appear here too, one reviewable line per command.
+    """
+    try:
+        if golden_data is None:
+            golden_data = json.loads(DECISION_GOLDEN.read_text(encoding="utf-8"))
+        recorded = golden_data.get("decisions") or {}
+        if not recorded:
+            return "the decision golden records no commands, which is not a clean verdict"
+        if decide is None:
+            for path in (ROOT / "hooks", ROOT / "hooks" / "guards"):
+                if str(path) not in sys.path:
+                    sys.path.insert(0, str(path))
+            spec = importlib.util.spec_from_file_location(
+                "_ci_gate_bash_guard", ROOT / "hooks/bash_command_guard.py")
+            if spec is None or spec.loader is None:
+                return "cannot load bash_command_guard.py for the decision golden"
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            decide = module.decide
+    except Exception as exc:
+        return f"cannot verify the decision golden: {exc!r}"
+    drift = []
+    for command, expected in recorded.items():
+        try:
+            observed = decide(command)[0]
+        except BaseException as exc:
+            observed = f"raised {type(exc).__name__}"
+        if observed != expected:
+            drift.append((command, expected, observed))
+    if not drift:
+        return ""
+    shown = "; ".join(f"{command[:60]!r}: {was} -> {now}" for command, was, now in drift[:6])
+    return (f"guard decisions drifted from the recorded golden on {len(drift)} of "
+            f"{len(recorded)} commands ({shown}"
+            f"{'; ...' if len(drift) > 6 else ''}). If the change is intended, run "
+            f"tools/write-decision-golden.py in the same commit and review that diff")
+
+
 def gate(
     runner: Callable[[Sequence[str]], Result] = run_command,
     *,
@@ -325,6 +372,10 @@ def gate(
     print(f"  {'FAIL' if budget_problem else 'PASS'} hook-budget")
     if budget_problem:
         failures.append(budget_problem)
+    decision_problem = decision_golden_error()
+    print(f"  {'FAIL' if decision_problem else 'PASS'} decision-golden")
+    if decision_problem:
+        failures.append(decision_problem)
     completed = 1
     with tempfile.TemporaryDirectory(prefix="z-harness-ci-gate-") as raw:
         render_root = Path(raw) / "rendered"
@@ -443,6 +494,17 @@ def selftest() -> int:
     expect(
         "a child that exceeds its timeout becomes a receipt failure, not a traceback",
         slow.returncode != 0 and "exceeded" in slow.stderr,
+    )
+    expect("recorded guard decisions match the guards", decision_golden_error() == "")
+    expect(
+        "an empty decision golden is a failure, not a clean verdict",
+        decision_golden_error(golden_data={"decisions": {}}) != "",
+    )
+    expect(
+        "a reversed verdict in the golden is reported with both sides",
+        "deny -> allow" in decision_golden_error(
+            golden_data={"decisions": {"git status --short": "deny"}},
+            decide=lambda _command: ("allow", "")),
     )
     expect(
         "hook budget contract rejects a sub-second margin",

@@ -46,6 +46,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 
 VERSION = "3.1.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -86,7 +87,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 73
+SELFTEST_FLOOR = 75
 
 AUTHORING_SKILLS = {"craft-prompt", "craft-skill", "craft-context-file", "review-prompt"}
 BODY_CHAR_CAP = 5000          # chars after frontmatter — the builders' instrument
@@ -119,6 +120,11 @@ SELFTEST_SUITES = [
 # weakening the five-second deadline each individual hook process must meet.
 SELFTEST_TIMEOUTS = {"bash_command_guard": 90}
 DEFAULT_SELFTEST_TIMEOUT = 15
+# A suite may use this much of its registered timeout before C1 says so. Without it the
+# timeout was a number nothing checked: setting the Bash suite's to 15 -- below its
+# measured runtime -- left the whole harness selftest green, because the only assertion
+# re-derived the expected value from this table.
+SELFTEST_TIMEOUT_MARGIN = 0.6
 # The only non-aggregated selftest is this recursive meta-suite itself.
 SELFTEST_EXEMPTIONS = {
     "hooks/harness_check.py": "recursive meta-suite",
@@ -487,13 +493,25 @@ class Run:
                     continue
             try:
                 timeout = SELFTEST_TIMEOUTS.get(name, DEFAULT_SELFTEST_TIMEOUT)
+                started = time.monotonic()
                 p = subprocess.run(
                     [sys.executable, os.path.join(self.root, cmd[0])] + cmd[1:],
                     capture_output=True, cwd=self.root, timeout=timeout,
                 )
+                elapsed = time.monotonic() - started
             except subprocess.TimeoutExpired:
                 self.result("C1", False,
                             f"selftest {name}: exceeded {timeout}s")
+                continue
+            # A registered timeout is a claim about the suite, and nothing checked it
+            # against the suite. Requiring the margin on the host that actually runs it
+            # is the non-circular form: a suite that grows into its budget reddens here
+            # instead of timing out on the first slower runner.
+            if elapsed > timeout * SELFTEST_TIMEOUT_MARGIN:
+                self.result("C1", False,
+                            f"selftest {name}: took {elapsed:.1f}s of its registered "
+                            f"{timeout}s, past the {SELFTEST_TIMEOUT_MARGIN:.0%} margin; "
+                            f"make the suite faster or raise the timeout deliberately")
                 continue
             receipts = re.findall(
                 rb"^SELFTEST-SUMMARY suite=([a-z0-9_-]+) checks=(\d+) failures=(\d+)$",
@@ -1256,10 +1274,53 @@ def selftest():
                 sources=planted_sources("bash_command_guard", stub_suite))
         finally:
             subprocess.run = original_subprocess_run
+        # 90 is a literal here on purpose. Reading it back out of SELFTEST_TIMEOUTS
+        # re-derived the expected value from the table under test: setting the Bash
+        # suite's timeout to 15 -- below its measured runtime -- left this green.
         expect_red(
             "C1 gives the process-level Bash timing suite its registered aggregate timeout",
-            lambda: observed_timeouts == [SELFTEST_TIMEOUTS["bash_command_guard"]]
-            and not c1_timeout.failures,
+            lambda: observed_timeouts == [90] and not c1_timeout.failures,
+        )
+        expect_red(
+            "the registered Bash timeout is still the one this check asserts",
+            lambda: SELFTEST_TIMEOUTS["bash_command_guard"] == 90,
+        )
+
+        slow_timeouts = []
+        def slow_run(*args, **kwargs):
+            slow_timeouts.append(kwargs.get("timeout"))
+            time.sleep(0.05)
+            return subprocess.CompletedProcess(
+                args[0], 0,
+                b"SELFTEST-SUMMARY suite=bash_command_guard checks=1 failures=0\n",
+                b"")
+        subprocess.run = slow_run
+        try:
+            c1_margin = Run(td, ci=True)
+            c1_margin.c1_selftests(
+                [("bash_command_guard", [stub_suite], 1)],
+                sources=planted_sources("bash_command_guard", stub_suite),
+                )
+        finally:
+            subprocess.run = original_subprocess_run
+        margin_clean = not c1_margin.failures
+        original_margin = globals()["SELFTEST_TIMEOUT_MARGIN"]
+        original_registered = SELFTEST_TIMEOUTS["bash_command_guard"]
+        subprocess.run = slow_run
+        SELFTEST_TIMEOUTS["bash_command_guard"] = 0.05
+        try:
+            c1_tight = Run(td, ci=True)
+            c1_tight.c1_selftests(
+                [("bash_command_guard", [stub_suite], 1)],
+                sources=planted_sources("bash_command_guard", stub_suite))
+        finally:
+            subprocess.run = original_subprocess_run
+            SELFTEST_TIMEOUTS["bash_command_guard"] = original_registered
+            globals()["SELFTEST_TIMEOUT_MARGIN"] = original_margin
+        expect_red(
+            "C1 reddens when a suite grows into its registered timeout",
+            lambda: margin_clean and bool(c1_tight.failures)
+            and any("margin" in detail for _check, detail in c1_tight.failures),
         )
 
         os.makedirs(os.path.join(td, "tools"))

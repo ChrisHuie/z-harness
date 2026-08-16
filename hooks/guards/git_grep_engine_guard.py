@@ -2436,11 +2436,13 @@ def unwrap_command_prefix(tokens, shell="zsh", equals_state=ZSH_EQUALS_ON,
         command_bypass_next = False
         executable_text = items[0][0]
         if _equals_expansion_is_live(*items[0]) and shell == "zsh":
-            # Write the resolved name back so every downstream reader -- this loop, the
-            # grep guard's argv walk and the zsh guard's rev:path gate -- sees the command
-            # zsh will actually run rather than the `=` form. Quoting suppresses the
-            # expansion, so a quoted `=git` keeps its literal name and falls to the
-            # generic identity check below like any other unproven command word.
+            # Reaching here means `_resolve_outer_zsh_equals` did NOT rewrite this word:
+            # it resolves a live `=name` to its realpath before the walk starts, so every
+            # downstream reader sees the command zsh will run. What is left is a live `=`
+            # whose name PATH cannot resolve, or an EQUALS state that is off or unknown --
+            # unresolved either way, never a clean verdict. Quoting suppresses the
+            # expansion, so a quoted `=git` never enters this branch at all and falls to
+            # the generic identity check below like any other unproven command word.
             if equals_state == ZSH_EQUALS_ON:
                 errors.append(ZSH_EQUALS_LOOKUP_AUTHORITY_ERROR)
                 break

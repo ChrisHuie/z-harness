@@ -34,7 +34,7 @@ EVAL_SKILL_FLOOR = 6
 # 165 here and 178 in harness_check -- and a fake that hardcodes its own number tests the
 # literal rather than the contract.
 SUITE_FLOORS = {
-    "harness_check": 73,
+    "harness_check": 75,
     "render-packages": 192,
     "bash_command_guard": 1078,
     "git_grep_engine_guard": 569,
@@ -383,17 +383,41 @@ def selftest() -> int:
         floor_registry_error() == "",
     )
     expect("hook timeout and internal budget contract matches", hook_budget_error() == "")
+    def retime_bash_hook(data: dict, seconds: int) -> int:
+        """Set the Bash guard hook's timeout by identity, not by list position.
+
+        Indexing PreToolUse[0] assumed the Bash matcher comes first: reordering
+        settings.json so Agent|Task leads mutated the spawn guard instead, the contract
+        saw no change, and this check went red on an edit that changed nothing about the
+        hook it names.
+        """
+        touched = 0
+        for entry in data.get("hooks", {}).get("PreToolUse", []):
+            for hook in entry.get("hooks", []):
+                if "bash_command_guard.py" in hook.get("command", ""):
+                    hook["timeout"] = seconds
+                    touched += 1
+        return touched
+
     settings_fixture = json.loads((ROOT / "settings.json").read_text(encoding="utf-8"))
-    settings_fixture["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"] = 4
+    settings_touched = retime_bash_hook(settings_fixture, 4)
     expect(
         "hook budget contract rejects a Claude timeout mutation",
-        hook_budget_error(settings_data=settings_fixture) != "",
+        settings_touched == 1 and hook_budget_error(settings_data=settings_fixture) != "",
     )
     codex_fixture = json.loads((ROOT / "hooks/hooks.json").read_text(encoding="utf-8"))
-    codex_fixture["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"] = 4
+    codex_touched = retime_bash_hook(codex_fixture, 4)
     expect(
         "hook budget contract rejects a Codex timeout mutation",
-        hook_budget_error(codex_data=codex_fixture) != "",
+        codex_touched == 1 and hook_budget_error(codex_data=codex_fixture) != "",
+    )
+    reordered = json.loads((ROOT / "settings.json").read_text(encoding="utf-8"))
+    reordered["hooks"]["PreToolUse"].reverse()
+    expect(
+        "hook budget contract is indifferent to PreToolUse ordering",
+        hook_budget_error(settings_data=reordered) == ""
+        and retime_bash_hook(reordered, 4) == 1
+        and hook_budget_error(settings_data=reordered) != "",
     )
     expect(
         "hook budget contract rejects a sub-second margin",

@@ -37,7 +37,7 @@ def branch_fixture_commands():
         ["git", "-C", str(ROOT), "rev-list", f"{BASE}..HEAD"],
         capture_output=True, text=True, check=True).stdout.split() + [BASE]
     seen, commands, oversized = set(), [], 0
-    computed = 0
+    computed = set()
     for revision in revisions:
         for path in SOURCES:
             blob = subprocess.run(["git", "-C", str(ROOT), "show", f"{revision}:{path}"],
@@ -62,7 +62,7 @@ def branch_fixture_commands():
                             and isinstance(node.elts[0], ast.Constant)
                             and isinstance(node.elts[0].value, str)
                             and isinstance(node.elts[1], ast.Name)):
-                        computed += 1
+                        computed.add(node.elts[0].value)
                     continue
                 label, command, expected = values
                 if not (isinstance(label, str) and isinstance(command, str)):
@@ -76,7 +76,7 @@ def branch_fixture_commands():
                     oversized += 1
                     continue
                 commands.append(command)
-    return commands, oversized, computed
+    return commands, oversized, len(computed)
 
 
 def live_fixture_commands():

@@ -3,7 +3,7 @@
  "corpus": "every command the guards fixture now, plus every command any\ncommit on this branch or its base ever fixtured as a literal",
  "excluded_over_chars": 2000,
  "excluded_oversized": 8,
- "excluded_computed_at_import": 58,
+ "excluded_computed_at_import": 15,
  "decisions": {
   "\"=git\" grep -E 'harness\\b' -- README.md": "ask",
   "$TOOL grep -nE 'harness\\b' -- README.md": "ask",
@@ -57,6 +57,8 @@
   "/nonexistent/bin/git grep -P 'harness\\b' -- README.md": "allow",
   "/nonexistent/bin/git grep -nE 'harness\\b' -- README.md": "deny",
   "/nonexistent/bin/git project-helper --version": "ask",
+  "/nonexistent/bin/git restore .": "ask",
+  "/nonexistent/bin/git stash list": "allow",
   "/nonexistent/bin/git status --short": "allow",
   "/nonexistent/bin/git submodule status": "ask",
   "/tmp/echo git grep -E 'harness\\b' -- README.md": "ask",

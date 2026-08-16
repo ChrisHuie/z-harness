@@ -180,7 +180,7 @@ class GitAuthority(NamedTuple):
     main: frozenset
     # False when the command names a Git other than the one PATH resolves. The
     # inventories still come from the trusted Git and the named binary is never executed,
-    # so only the cross-version builtin floor may be classified while this is False.
+    # so only the cross-version alias-proof set may be classified while this is False.
     candidate_trusted: bool = True
 
 
@@ -1748,23 +1748,30 @@ def trusted_git_authority(executable="git", deadline=None, *, runner=None, clock
     return authority
 
 
-# Builtin in every Git this harness is grounded against. Measured, not recalled: git
-# 2.46.1 and Apple Git 2.39.5 share 139 builtin names, and the three that differ --
-# `bisect`, `refs`, `replay` -- are excluded, because `git -c alias.refs=... refs` does run
-# the alias on the Git that lacks it. Every subcommand either guard reasons about is
-# builtin in both. git-config(1) states that aliases hiding existing Git commands are
-# ignored, so a name in this set cannot be redirected by ambient config in any of them,
-# which is what makes it classifiable without reading a second binary's inventory.
-# `check_builtin_floor_against_installed_gits` re-derives this against every `git` on
-# PATH and fails on drift in either direction.
-CROSS_VERSION_BUILTINS = frozenset({
+# Names an ambient alias cannot redirect in ANY Git this harness is grounded against, which
+# is what lets the guard classify one on a binary it never executes. git-config(1): aliases
+# hiding existing Git commands are ignored.
+#
+# The property is "the name exists as a command in that Git", NOT "the name is builtin".
+# Those differ, and the difference is load-bearing: on git 2.20.4 `stash` is not a builtin
+# and still cannot be shadowed, while `restore` and `maintenance` -- which are builtins on
+# 2.46.1 -- did not exist yet and DO run the alias there. An earlier draft of this set was
+# derived from `--list-cmds=builtins` and admitted all three, which is the same unsound
+# transfer as reading one binary's inventory for another.
+#
+# Measured by asking each Git the question directly -- `git -c alias.N='!printf ALIAS-RAN' N`
+# -- across git 2.7.4, 2.15.4, 2.17.1, 2.20.4, 2.30.6, 2.39.5, 2.45.4 and 2.46.1: only
+# `restore` and `maintenance` are ever shadowed, and only below 2.23 and 2.29 respectively.
+# `check_alias_shadowing_against_installed_gits` re-runs that probe against every `git` on
+# PATH. It does not depend on `--list-cmds`, which only exists since 2.18.
+CROSS_VERSION_ALIAS_PROOF = frozenset({
     "add", "archive", "blame", "branch", "cat-file", "checkout", "commit", "config",
-    "diff", "fetch", "gc", "grep", "log", "ls-tree", "maintenance", "pull", "push",
-    "restore", "rev-list", "rev-parse", "shortlog", "show", "stash", "status",
+    "diff", "fetch", "gc", "grep", "log", "ls-tree", "pull", "push",
+    "rev-list", "rev-parse", "shortlog", "show", "stash", "status",
 })
 GIT_UNSETTLED_EXECUTABLE_ERROR = (
-    "Git subcommand %r is outside the cross-version builtin floor while the executing Git "
-    "binary is not settled, so ambient alias or config may redirect it"
+    "Git subcommand %r is not alias-proof across supported Git versions while the executing "
+    "Git binary is not settled, so ambient alias or config may redirect it"
 )
 _GIT_GLOBAL_OPTIONS_WITH_VALUES = {
     "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix",
@@ -1791,9 +1798,9 @@ def authorize_git_subcommand(subcommand, authority, effective_exec_path,
     # Two separate ways the executing binary can be unknown: the command named a different
     # path, or a wrapper changed executable lookup. Neither is proof of the hazard, and
     # both mean an inventory read from the PATH-trusted Git does not transfer -- so the
-    # floor above is what may be classified, and nothing else.
+    # alias-proof set above is what may be classified, and nothing else.
     if not authority.candidate_trusted or lookup_authority_uncertain:
-        if subcommand in CROSS_VERSION_BUILTINS:
+        if subcommand in CROSS_VERSION_ALIAS_PROOF:
             return None
         return GIT_UNSETTLED_EXECUTABLE_ERROR % subcommand
     if subcommand in authority.builtins:
@@ -2702,7 +2709,7 @@ def unwrap_command_prefix(tokens, shell="zsh", equals_state=ZSH_EQUALS_ON,
         # A wrapper that changes executable lookup used to stop the walk here with an
         # error. It changes WHICH Git runs, not what the argv means, and
         # `authorize_git_subcommand` now decides what an unsettled executable permits --
-        # the cross-version builtin floor and nothing else -- on the same rule as a named
+        # the cross-version alias-proof set and nothing else -- same rule as a named
         # alternate binary. Keeping the arm as well questioned `sudo git status` and
         # downgraded `sudo git grep -E 'harness\b'` from a proven deny to a question.
         # With the floor rule in place it decided nothing: neutering it moved no verdict
@@ -5082,51 +5089,77 @@ def installed_git_binaries():
     return tuple(binaries)
 
 
-def check_builtin_floor_against_installed_gits():
-    """-> (failures, scan-set description). Re-derive the floor against each Git on PATH.
+def check_alias_shadowing_against_installed_gits():
+    """-> (failures, scan-set). Ask each installed Git whether an alias can redirect a name.
 
-    `authorize_git_subcommand` classifies a name on an unsettled executable using
-    CROSS_VERSION_BUILTINS alone. That is sound only while every Git the machine can
-    select treats those names as builtins, because git-config(1)'s "aliases that hide
-    existing Git commands are ignored" is a per-binary rule. Transferring one Git's
-    builtin list to another is exactly the unsoundness this floor replaces: `refs` and
-    `replay` are builtin in git 2.46.1 and absent from Apple Git 2.39.5, where
-    `git -c alias.refs=... refs` does run the alias.
+    `authorize_git_subcommand` classifies a name on an executable it never runs, using
+    CROSS_VERSION_ALIAS_PROOF alone. That is sound only while ambient config cannot
+    redirect those names in any Git the machine can select, and git-config(1)'s "aliases
+    that hide existing Git commands are ignored" is a per-binary rule.
+
+    This asks the question directly rather than inferring it from `--list-cmds=builtins`,
+    for two reasons. The inference is wrong: on git 2.20.4 `stash` is not a builtin and
+    still cannot be shadowed, while `restore` and `maintenance` are builtins on 2.46.1 and
+    DO run the alias on 2.20.4, because the command did not exist yet. And `--list-cmds`
+    only exists since git 2.18, so it cannot answer for anything older at all.
     """
     failures = []
     binaries = installed_git_binaries()
     if not binaries:
-        return (["no `git` on PATH, so the cross-version builtin floor is unverified"],
-                "0 binaries")
+        return (["no `git` on PATH, so the alias-proof set is unverified"], "0 binaries")
     described = []
+    marker = "ZHAR-ALIAS-RAN"
     for binary in binaries:
         try:
             version = subprocess.run([binary, "--version"], capture_output=True,
                                      text=True, timeout=10)
-            listed = subprocess.run([binary, "--list-cmds=builtins"],
-                                    capture_output=True, text=True, timeout=10)
         except (OSError, subprocess.SubprocessError) as exc:
-            failures.append("cannot enumerate %s: %r" % (binary, exc))
+            failures.append("cannot run %s: %r" % (binary, exc))
             continue
-        if version.returncode or listed.returncode or not listed.stdout.split():
-            failures.append(
-                "%s did not report a builtin inventory (rc=%d, stderr=%r)"
-                % (binary, listed.returncode, listed.stderr.strip()[:100]))
+        if version.returncode or not version.stdout.strip():
+            failures.append("%s did not report a version" % binary)
             continue
         described.append("%s (%s)" % (binary, version.stdout.strip()))
-        missing = sorted(CROSS_VERSION_BUILTINS - set(listed.stdout.split()))
-        if missing:
-            failures.append(
-                "%s does not carry %r as builtins, so an ambient alias can redirect them "
-                "there; remove each from CROSS_VERSION_BUILTINS in the same commit"
-                % (binary, missing))
-    ungrounded = sorted(GIT_HAZARD_SUBCOMMANDS - CROSS_VERSION_BUILTINS)
-    if ungrounded:
-        failures.append(
-            "guarded subcommand(s) %r are outside the cross-version builtin floor, so a "
-            "wrapper or an alternate binary turns a provable verdict into a question"
-            % ungrounded)
-    return failures, "%d binary/binaries: %s" % (len(binaries), "; ".join(described))
+        try:
+            with tempfile.TemporaryDirectory(prefix="z-harness-alias-proof-") as repo:
+                env = dict(os.environ, GIT_CONFIG_NOSYSTEM="1",
+                           GIT_CONFIG_GLOBAL=os.devnull,
+                           GIT_AUTHOR_NAME="probe", GIT_AUTHOR_EMAIL="a@b",
+                           GIT_COMMITTER_NAME="probe", GIT_COMMITTER_EMAIL="a@b")
+                started = subprocess.run([binary, "init", "--quiet", "."], cwd=repo,
+                                         env=env, capture_output=True, text=True,
+                                         timeout=10, stdin=subprocess.DEVNULL)
+                if started.returncode:
+                    failures.append("cannot initialize an alias-proof fixture for %s: %s"
+                                    % (binary, started.stderr.strip()[:100]))
+                    continue
+                shadowed = []
+                for name in sorted(CROSS_VERSION_ALIAS_PROOF):
+                    # stdin closed: `git shortlog` with no operand reads it and would
+                    # otherwise hang the probe rather than answer the question.
+                    probe = subprocess.run(
+                        [binary, "-c", "alias.%s=!printf %s" % (name, marker), name],
+                        cwd=repo, env=env, capture_output=True, text=True, timeout=20,
+                        stdin=subprocess.DEVNULL)
+                    if marker in probe.stdout:
+                        shadowed.append(name)
+                if shadowed:
+                    failures.append(
+                        "%s lets an ambient alias redirect %r, so classifying those names "
+                        "on an executable this guard never runs is unsound; remove each "
+                        "from CROSS_VERSION_ALIAS_PROOF in the same commit"
+                        % (binary, shadowed))
+        except (OSError, subprocess.SubprocessError) as exc:
+            failures.append("alias-proof probe failed closed for %s: %r" % (binary, exc))
+    if not CROSS_VERSION_ALIAS_PROOF:
+        failures.append("the alias-proof set is empty, which is not a clean verdict")
+    # Not a failure: a guarded subcommand outside the set costs a question on an
+    # unsettled executable, which is the fail-closed direction. Reported so the cost is
+    # visible rather than discovered.
+    questioned = sorted(GIT_HAZARD_SUBCOMMANDS - CROSS_VERSION_ALIAS_PROOF)
+    scan_set = "%d binary/binaries: %s; guarded-but-not-alias-proof: %s" % (
+        len(binaries), "; ".join(described), questioned or "none")
+    return failures, scan_set
 
 
 def check_log_grammar_against_git():
@@ -5885,6 +5918,10 @@ FIXTURES += [
      f"{_UNTRUSTED_GIT} status --short", "allow"),
     ("GREEN AUTHORITY: an alternate Git staging files is not the hazard",
      f"{_UNTRUSTED_GIT} add -A", "allow"),
+    ("ASK  AUTHORITY: a guarded subcommand outside the alias-proof set is unresolved",
+     f"{_UNTRUSTED_GIT} restore .", "ask"),
+    ("GREEN AUTHORITY: an alias-proof non-guarded name on an alternate Git is allowed",
+     f"{_UNTRUSTED_GIT} stash list", "allow"),
     ("GREEN AUTHORITY: an alternate Git with the PCRE engine stays allowed",
      f"{_UNTRUSTED_GIT} grep -P 'harness\\b' -- README.md", "allow"),
     ("RED  AUTHORITY: an alternate Git does not launder the ERE hazard",
@@ -6726,14 +6763,14 @@ def selftest():
     print("  %s the limit fixtures' literal sizes still match the closed limits (%s)" % (
         "PASS" if not limit_drift else "FAIL", limit_drift or "no drift"))
 
-    floor_failures, floor_scan_set = check_builtin_floor_against_installed_gits()
+    floor_failures, floor_scan_set = check_alias_shadowing_against_installed_gits()
     bad += len(floor_failures)
     if floor_failures:
         for failure in floor_failures:
-            print("  FAIL cross-version builtin floor: %s" % failure)
+            print("  FAIL alias-proof set vs installed git: %s" % failure)
     else:
-        print("  PASS cross-version builtin floor holds on every Git this PATH selects "
-              "[%s]" % floor_scan_set)
+        print("  PASS no ambient alias can redirect an alias-proof name on any Git this "
+              "PATH selects [%s]" % floor_scan_set)
     log_grammar_failures = check_log_grammar_against_git()
     bad += len(log_grammar_failures)
     if log_grammar_failures:

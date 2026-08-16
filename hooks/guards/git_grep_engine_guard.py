@@ -778,6 +778,12 @@ def _heredoc_expansion_sources(body):
 
 def _find_heredoc_operator(line):
     """Return (offset, strip-tabs) for one live heredoc operator in a header."""
+    # A line with no `<<` can only produce one other outcome here, the unclosed-quote
+    # raise, so a line with no quote characters either has nothing to find. Two C-level
+    # substring tests replace a per-character walk that probed four prefixes per byte:
+    # this function alone cost 1.23 s over three calls on a 600 KiB single-token line.
+    if "<<" not in line and '"' not in line and "'" not in line:
+        return None
     quote = ""
     index = 0
     arithmetic_depth = 0
@@ -1031,6 +1037,11 @@ def command_without_heredoc_payloads(command, deadline=None):
 
 def _function_scope_pairs(cmd, records, deadline=None):
     """Return ordinary subshell/command-source pairs outside declaration bodies."""
+    # No parenthesis means no pair and no arithmetic depth; no quote means the trailing
+    # unclosed-quote raise cannot fire either. Both closers are required in the test
+    # because a bare `)` is itself the unmatched-subshell error.
+    if not any(char in cmd for char in "()'\""):
+        return ()
     by_start = {record.start: record for record in records}
     pairs = []
     stack = []
@@ -1819,6 +1830,12 @@ def _equals_expansion_is_live(text, quoting):
     return quoting == ""
 
 
+# One PATH walk per (name, PATH) per guard process. A live `=name` may repeat across an
+# argv, and each miss stats every PATH entry: 20,000 repeats cost 36.9 s and 60,000 did not
+# finish inside a 90 s bound, both under MAX_TOKENS.
+_EQUALS_LOOKUP_CACHE = {}
+
+
 def _resolve_outer_zsh_equals(tokens, shell, equals_state, command_env,
                               lookup_authority_uncertain):
     """Resolve live ``=name`` words before command wrappers change the environment.
@@ -1839,9 +1856,14 @@ def _resolve_outer_zsh_equals(tokens, shell, equals_state, command_env,
         if not _equals_expansion_is_live(text, quoting):
             continue
         name = _equals_expanded(text)
-        resolved = shutil.which(name, path=search_path)
+        key = (name, search_path)
+        if key not in _EQUALS_LOOKUP_CACHE:
+            resolved = shutil.which(name, path=search_path)
+            _EQUALS_LOOKUP_CACHE[key] = (
+                os.path.realpath(resolved) if resolved else None)
+        resolved = _EQUALS_LOOKUP_CACHE[key]
         if resolved:
-            prepared[index] = (os.path.realpath(resolved), quoting)
+            prepared[index] = (resolved, quoting)
     return prepared
 
 
@@ -1897,6 +1919,10 @@ def _zsh_equals_option_action(tokens):
 
 def _zsh_option_skeleton(source, deadline=None):
     """Blank quoted bytes while preserving source offsets for option-state events."""
+    # With no quote and no backslash there is nothing to blank, so the skeleton is the
+    # source. This runs twice per decision over the whole command.
+    if not any(char in source for char in "'\"\\"):
+        return source
     live = []
     quote = ""
     index = 0
@@ -2186,14 +2212,30 @@ def _literal_git_word(word):
             or bool(re.search(r"(?:^|\s)(?:/[^\s]*/)?=?git(?:\s|$)", word)))
 
 
+def _guarded_subcommand_after(words):
+    """index -> whether a guarded subcommand occupies a LATER index.
+
+    One backward pass, so the two tail predicates below are linear in the token count.
+    Rescanning the tail per candidate word was quadratic: `echo git git ...` with 20,000
+    `git` words -- 60 KiB, well inside MAX_COMMAND_CHARS -- spent 32 s in
+    `os.path.basename` alone, and `unwrap_command_prefix` never consults the deadline, so
+    nothing stopped it inside a hook registered with a five-second timeout.
+    """
+    later = [False] * (len(words) + 1)
+    for index in range(len(words) - 1, -1, -1):
+        later[index] = (later[index + 1]
+                        or os.path.basename(words[index]) in GIT_HAZARD_SUBCOMMANDS)
+    return later
+
+
 def has_literal_guarded_git_tail(tokens):
     """Whether argv visibly contains `git` followed by a guarded subcommand."""
     words = [text for text, _quoting in tokens]
+    guarded_after = _guarded_subcommand_after(words)
     for index, word in enumerate(words):
         if os.path.basename(_equals_expanded(word)) != "git":
             continue
-        if any(os.path.basename(tail) in GIT_HAZARD_SUBCOMMANDS
-               for tail in words[index + 1:]):
+        if guarded_after[index + 1]:
             return True
     return False
 
@@ -2268,11 +2310,11 @@ def source_has_dynamic_command_word(source, deadline=None):
 def has_dynamic_guarded_command_tail(tokens):
     """Whether a live expansion may choose an executable before a guarded operation."""
     words = [text for text, _quoting in tokens]
+    guarded_after = _guarded_subcommand_after(words)
     for index, token in enumerate(tokens):
         if not _token_has_live_unresolved(token):
             continue
-        if any(os.path.basename(word) in GIT_HAZARD_SUBCOMMANDS
-               for word in words[index + 1:]):
+        if guarded_after[index + 1]:
             return True
     return False
 
@@ -3443,6 +3485,9 @@ def _parse_shell_input_word(line, start):
 
 
 def live_here_string_sources(command):
+    # Every source this returns, and every parse error it can raise, begins at a `<<<`.
+    if "<<<" not in command:
+        return ()
     sources = []
     offset = 0
     for raw_line in command.splitlines(keepends=True):
@@ -3493,6 +3538,9 @@ def live_here_string_sources(command):
 
 def live_file_input_sources(command):
     """Return live plain file-input redirects without confusing shell arithmetic."""
+    # Same shape: no `<` means no redirect to find and no input word to fail parsing.
+    if "<" not in command:
+        return ()
     sources = []
     for line in command.splitlines():
         quote = ""
@@ -5680,11 +5728,20 @@ FIXTURES += [
       "sh <<'B'\n=git grep -E 'harness\\b' -- README.md\nB\n"), "deny"),
 ]
 
+# A legal source one byte under the declared cap, as a cost control expressed as a
+# decision: exhausting the internal budget returns `ask`, so this stays `allow` only while
+# a maximum-size command can still be classified inside the budget on the host running it.
+# It reddens where the declared limit stops being reachable, which is what makes the limit
+# a claim rather than a number. Margin measured on the authoring host after this commit's
+# work: 2.3 s against a 4.0 s budget, from 4.05 s and a denial before it.
+_BYTE_LIMIT_SOURCE = "/bin/echo " + "x" * (MAX_COMMAND_CHARS - 11)
 _FUNCTION_PARSE_LIMIT_SOURCE = (
     "f(){ git status --short; }; f;" * (MAX_FUNCTION_DECLARATIONS + 1))
 _FUNCTION_OPERATOR_BUDGET_SOURCE = (
     "f(){ /bin/echo safe; }; f;" + "( : );" * 16000)
 FIXTURES += [
+    ("GREEN LIMIT: a legal source at the byte cap is classified inside the budget",
+     _BYTE_LIMIT_SOURCE, "allow"),
     ("ASK LIMIT: too many function declarations cannot consume the hook timeout",
      _FUNCTION_PARSE_LIMIT_SOURCE, "ask"),
     ("GREEN LIMIT: operator-heavy source remains inside the public hook budget",
@@ -6846,6 +6903,54 @@ def selftest():
     print("  %s parser-deadline checkpoint mutation accepts an expired budget" % (
         "PASS" if parser_budget_red else "FAIL"))
 
+    # Cost, counted rather than timed, so the check means the same thing on every host and
+    # fails fast when it fails. Rescanning the tail per candidate word was quadratic:
+    # `echo git git ...` with 20,000 words cost 32 s in one hook process, and 60,000 `=git`
+    # words did not finish inside 90 s, both under MAX_TOKENS and both inside a hook
+    # registered with a five-second timeout. Four times the tokens must cost about four
+    # times the work, not sixteen.
+    original_basename = os.path.basename
+    basename_counts = []
+    for word_count in (1000, 4000):
+        counted = [0]
+
+        def counting_basename(path, _counted=counted, _original=original_basename):
+            _counted[0] += 1
+            return _original(path)
+
+        os.path.basename = counting_basename
+        try:
+            repeated = [("git", "")] * word_count
+            has_literal_guarded_git_tail(repeated)
+            has_dynamic_guarded_command_tail(repeated)
+        finally:
+            os.path.basename = original_basename
+        basename_counts.append(counted[0])
+    tail_linear_ok = (basename_counts[0] > 0
+                      and basename_counts[1] < basename_counts[0] * 8)
+    bad += 0 if tail_linear_ok else 1
+    print("  %s guarded-tail predicates stay linear (%d -> %d basename reads for 4x "
+          "tokens)" % ("PASS" if tail_linear_ok else "FAIL", *basename_counts))
+
+    original_which = shutil.which
+    which_names = []
+
+    def counting_which(*args, **kwargs):
+        which_names.append(args[0] if args else kwargs.get("cmd"))
+        return original_which(*args, **kwargs)
+
+    _EQUALS_LOOKUP_CACHE.clear()
+    shutil.which = counting_which
+    try:
+        unwrap_command_prefix([("=git", "")] * 500 + [("show", "")])
+    finally:
+        shutil.which = original_which
+        _EQUALS_LOOKUP_CACHE.clear()
+    equals_cache_ok = len(which_names) == 1
+    bad += 0 if equals_cache_ok else 1
+    print("  %s a repeated live `=name` costs one PATH walk, not one per word (%d)" % (
+        "PASS" if equals_cache_ok else "FAIL", len(which_names)))
+
     # The arm above proves the checkpoint is REMOVABLE; nothing proved it fires. Replacing
     # `_check_decision_budget`'s body with `return None` left this suite, the sibling
     # guard's and the merged Bash suite all green, which is why the two defects below
@@ -7688,7 +7793,7 @@ def selftest():
     print("  %s identifier-only heredoc mutation loses dashed-delimiter deny" % (
         "PASS" if dashed_heredoc_red else "FAIL"))
 
-    checks = len(FIXTURES) + 72
+    checks = len(FIXTURES) + 74
     print("failures: %d" % bad)
     print("SELFTEST-SUMMARY suite=git_grep_engine_guard checks=%d failures=%d" % (
         checks, bad))

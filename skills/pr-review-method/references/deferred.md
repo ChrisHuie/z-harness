@@ -125,6 +125,34 @@ A security-workflow change can move **which events it runs on** and relocate the
 outside the repo. Diff triggers against BASE and ask what still blocks a fresh,
 never-commented request.
 
+## gate the deliverable
+
+A gate on an **intermediate** artifact reads as coverage of the **deliverable** produced from
+it. Every edit after the gate ran — a compression pass, a "just the important ones" redraft, a
+reduction once new information arrives — is unexamined, and the upstream pass is what makes it
+look examined. Gate what actually ships; the transform between the two is the drop channel, and
+it is invisible precisely because both ends look accounted for. Seen: a graded report cleared
+its checks, a brevity pass then cut a should-fix item from the comment, and nothing inspected the
+comment because the gate had already held upstream. Generalises past compression to any
+notes→issue or findings→handover step where the check ran on the wrong end. The body's "diff your
+working-note citations against the delivered artifact" is the level below this one: it compares
+notes to the artifact, and stops where the artifact becomes something else.
+
+## regrading
+
+A severity that arrives **attached to a finding** is not yours to lower. Keep the raising party's
+rating and record your disagreement beside it — a consolidator permitted to demote on a stated
+basis will always have a basis, and the disagreement is the part worth preserving anyway.
+Promotion is the direction that needs their evidence quoted. Nothing in this tree covers reducing
+— the anti-inflation rules are written for a consolidator who *raises* severity — and reducing is
+precisely what a request for brevity asks for. "Below the bar for this artifact", applied
+silently, is indistinguishable from having examined it, and is how a live production defect
+leaves a review. The body's "unify same-concept findings at max member severity" governs
+**unification**, where findings combine and the floor applies; dropping or reducing for length is
+the other operation, where nothing combines and the floor never fires. Same shape on a different
+axis as applying a delegated claim as a verified one — an upstream grade dropped downstream
+because nothing carried it.
+
 ---
 
 ## Also displaced, rank B/C — full text in the registry, not reproduced here

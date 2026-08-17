@@ -16,7 +16,7 @@
 | `GREP_LONG_OPTIONAL_VALUE` | git_grep_engine_guard.py | 2 | 0 | 0 | `--color`, `--open-files-in-pager` |
 | `GREP_LONG_OPTION_NAMES` | git_grep_engine_guard.py | 6 | 0 | 2 | `--and`, `--index`, `--no-index`, `--not`, `--or` |
 | `GREP_LONG_REQUIRED_VALUE` | git_grep_engine_guard.py | 6 | 1 | 1 | `--after-context`, `--before-context`, `--context`, `--max-count`, `--max-depth`, `--threads` |
-| `GREP_SHORT_ENGINE` | git_grep_engine_guard.py | 4 | 3 | 184 | `F`, `G` |
+| `GREP_SHORT_ENGINE` | git_grep_engine_guard.py | 4 | 3 | 196 | `F`, `G` |
 | `GREP_SHORT_NOARG` | git_grep_engine_guard.py | 17 | 1 | 51 | `H`, `I`, `L`, `a`, `h`, `i`, and 6 more |
 | `GREP_SHORT_OPTIONAL_VALUE` | git_grep_engine_guard.py | 1 | 1 | 1 | `O` |
 | `GREP_SHORT_PATTERN_ARG` | git_grep_engine_guard.py | 2 | 4 | 22 | `f` |
@@ -24,7 +24,7 @@
 | `MODS` | zsh_rev_modifier_guard.py | 13 | 1 | 78 | `A`, `P`, `Q`, `c`, `h`, `q` |
 | `MOD_MEANING` | zsh_rev_modifier_guard.py | 13 | 0 | 0 | `A`, `P`, `Q`, `a`, `c`, `e`, and 7 more |
 | `MOD_PREFIXES` | zsh_rev_modifier_guard.py | 4 | 1 | 6 | `F` |
-| `PCRE_ESCAPE_LETTERS` | git_grep_engine_guard.py | 21 | 0 | 194 | `A`, `B`, `D`, `H`, `R`, `S`, and 6 more |
+| `PCRE_ESCAPE_LETTERS` | git_grep_engine_guard.py | 21 | 1 | 194 | `A`, `B`, `D`, `E`, `H`, `Q`, and 10 more |
 | `REV_PATH_SUBCOMMANDS` | zsh_rev_modifier_guard.py | 15 | 0 | 94 | `archive`, `blame`, `checkout`, `diff`, `grep`, `log`, and 3 more |
 | `SHELLS` | git_grep_engine_guard.py | 5 | 0 | 37 | `dash`, `ksh` |
 | `SHELL_NON_FORWARDING_COMMANDS` | git_grep_engine_guard.py | 2 | 1 | 4 | `printf` |

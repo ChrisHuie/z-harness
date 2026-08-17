@@ -108,11 +108,11 @@ SELFTEST_SUITES = [
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 8),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
-    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 28),
+    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 53),
     ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 63),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
     ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 16),
-    ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 571),
+    ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 583),
     ("zsh_rev_modifier_guard", ["hooks/guards/zsh_rev_modifier_guard.py", "--selftest"], 239),
 ]
 # The public Bash-guard selftest intentionally runs five independent process-level timing

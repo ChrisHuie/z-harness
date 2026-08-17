@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import hashlib
 import importlib.util
 import json
 import re
@@ -37,7 +38,7 @@ SUITE_FLOORS = {
     "harness_check": 75,
     "render-packages": 192,
     "bash_command_guard": 1088,
-    "git_grep_engine_guard": 571,
+    "git_grep_engine_guard": 583,
     "zsh_rev_modifier_guard": 239,
 }
 EXPECTED_WORKFLOW = """name: harness-check
@@ -356,13 +357,15 @@ MARGIN_EXEMPT_SETS = {
                       "removing it removes the check that would redden",
 }
 
-# The full sweep measured 172 elements of decision-input sets below the target. Flooring
-# each set at its own measured minimum would write `0` twenty times over, and a floor of
-# zero asserts nothing -- it reads as a guarantee while permitting everything. So the
-# ratchet is the DEBT ITSELF: the number of elements below target may shrink and never
-# grow. A new set element with no coverage raises the count and fails here, and every
-# fixture that closes a gap lowers this number in a reviewed diff.
-ELEMENT_MARGIN_DEBT_CEILING = 172
+# Flooring each set at its own measured minimum would write `0` twenty times over, and a
+# floor of zero asserts nothing -- it reads as a guarantee while permitting everything. So
+# the ratchet is the DEBT ITSELF, and the debt is the total SHORTFALL rather than a count of
+# elements below target: `sum(target - margin)`. Counting elements instead hid real work --
+# twelve PCRE_ESCAPE_LETTERS fixtures moved twelve elements from a margin of zero to one and
+# left an element count unchanged at 172, so a contributor closing genuine gaps saw the gate
+# register nothing. Shortfall moves with every improvement. It may shrink and never grow: a
+# new set element with no coverage raises it by the full target and fails here.
+ELEMENT_MARGIN_DEBT_CEILING = 275
 
 
 def mutation_receipt_error(receipt_data=None, declared=None, ceiling=None,
@@ -382,6 +385,9 @@ def mutation_receipt_error(receipt_data=None, declared=None, ceiling=None,
         ceiling = ELEMENT_MARGIN_DEBT_CEILING
     if exempt is None:
         exempt = MARGIN_EXEMPT_SETS
+    # A caller supplying its own declaration is probing this function's arithmetic, not
+    # the tree; only the real invocation can meaningfully compare source bytes.
+    synthetic = declared is not None
     try:
         if receipt_data is None:
             receipt_data = json.loads(MUTATION_RECEIPT.read_text(encoding="utf-8"))
@@ -421,19 +427,34 @@ def mutation_receipt_error(receipt_data=None, declared=None, ceiling=None,
         # importing or ran past its bound. Both are caught harder than any check count,
         # so they clear the target rather than failing a numeric comparison against it.
         if name not in exempt:
-            debt += sum(1 for element, entry in margins.items()
+            debt += sum(ELEMENT_MARGIN_TARGET - entry["failures"]
+                        for element, entry in margins.items()
                         if element in declared[name]
                         and isinstance(entry.get("failures"), int)
                         and entry["failures"] < ELEMENT_MARGIN_TARGET)
     if debt > ceiling:
         problems.append(
-            f"{debt} elements sit below a margin of {ELEMENT_MARGIN_TARGET}, above the "
-            f"recorded ceiling of {ceiling}; coverage of the guarded sets got thinner. "
+            f"margin shortfall against a target of {ELEMENT_MARGIN_TARGET} is {debt}, above "
+            f"the recorded ceiling of {ceiling}; coverage of the guarded sets got thinner. "
             f"Lower the ceiling only in a commit that raises the coverage")
     stale_exemptions = sorted(set(exempt) - set(declared))
     if stale_exemptions:
         problems.append(
             f"margin-exempt sets the guards no longer declare: {stale_exemptions}")
+    if not synthetic:
+        measured = receipt_data.get("measured_against") or {}
+        if not measured:
+            problems.append(
+                "the receipt records no source digests, so a receipt describing an older "
+                "guard cannot be told from a current one; regenerate it")
+        moved = sorted(
+            relative for relative, digest in measured.items()
+            if not (ROOT / relative).is_file()
+            or hashlib.sha256((ROOT / relative).read_bytes()).hexdigest() != digest)
+        if moved:
+            problems.append(
+                f"guards changed since the receipt was measured: {moved}; every recorded "
+                "margin describes the older source, so rerun tools/write-mutation-receipt.py")
     survivors = receipt_data.get("site_survivors") or []
     if survivors:
         problems.append(f"site mutations no check catches: {survivors}")
@@ -762,19 +783,19 @@ def selftest() -> int:
             declared_probe),
     )
     expect(
-        "margin debt above the recorded ceiling is a failure",
+        "margin shortfall above the recorded ceiling is a failure",
         "above the recorded ceiling" in mutation_receipt_error(
             {"sets": {"PROBE": {"margins": {
                 "a": {"failures": 1}, "b": {"failures": 0}}}}},
-            declared_probe, ceiling=1),
+            declared_probe, ceiling=2),
     )
     expect(
-        "margin debt at the recorded ceiling clears",
+        "margin shortfall at the recorded ceiling clears",
         mutation_receipt_error(
             {"sets": {"PROBE": {"margins": {
                 "a": {"failures": 1}, "b": {"failures": 0}}}},
              "site_survivors": [], "selector_drift": []},
-            declared_probe, ceiling=2, exempt={}) == "",
+            declared_probe, ceiling=3, exempt={}) == "",
     )
     expect(
         "an exempt set contributes no debt, so its zeros cannot fail the ceiling",
@@ -818,6 +839,17 @@ def selftest() -> int:
             dict(receipt_probe, selector_drift=["PROBE.a: 571 -> 570"]), declared_probe),
     )
 
+    real_receipt = json.loads(MUTATION_RECEIPT.read_text(encoding="utf-8"))
+    expect(
+        "a receipt measured against different guard bytes is stale, not clean",
+        "changed since the receipt was measured" in mutation_receipt_error(
+            dict(real_receipt, measured_against={"hooks/bash_command_guard.py": "0" * 64})),
+    )
+    expect(
+        "a receipt recording no source digests is not a clean verdict",
+        "no source digests" in mutation_receipt_error(
+            {k: v for k, v in real_receipt.items() if k != "measured_against"}),
+    )
     expect("outbound review text matches the sources it includes", review_include_error() == "")
     with tempfile.TemporaryDirectory(prefix="z-harness-review-") as raw:
         review = Path(raw)

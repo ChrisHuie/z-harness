@@ -379,6 +379,14 @@ def main() -> int:
     survivors = sorted(label for label, r in site_results.items() if r["failures"] == 0)
     payload = {
         "note": "what the guards' suites CATCH, measured by breaking them",
+        # Every margin here describes the source it was measured against. Set membership
+        # alone cannot detect a change that only moves margins -- adding a fixture leaves
+        # the declared sets identical while every number below shifts -- so the gate needs
+        # the bytes to tell a current receipt from one describing an older guard.
+        "measured_against": {
+            relative: hashlib.sha256((ROOT / relative).read_bytes()).hexdigest()
+            for relative in (GREP, ZSH, BASH)
+        },
         "baseline": {relative: {"checks": c, "failures": f}
                      for relative, (c, f) in baseline.items()},
         "sweep_exclusions": skipped,

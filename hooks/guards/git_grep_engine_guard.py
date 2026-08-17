@@ -6686,6 +6686,38 @@ FIXTURES += [
       "literal\nB\n"), "deny"),
 ]
 
+# One fixture per PCRE_ESCAPE_LETTERS member that no check held. A per-element sweep found
+# twelve of the twenty-one letters at a margin of zero, while `\b` carried 194 checks because
+# it is the atom everyone reaches for. Dropping an unheld letter moves its atom from proven to
+# uncertain, taking the command from deny to ask with every suite still green -- measured, not
+# inferred. Each fixture below reddens on removal of the one letter it names.
+FIXTURES += [
+    ("RED PCRE ATOM: \\B (non-word-boundary) is not POSIX ERE",
+     r"""git grep -E 'harness\B' -- README.md""", "deny"),
+    ("RED PCRE ATOM: \\D (non-digit) is not POSIX ERE",
+     r"""git grep -E 'harness\D' -- README.md""", "deny"),
+    ("RED PCRE ATOM: \\S (non-space) is not POSIX ERE",
+     r"""git grep -E 'harness\S' -- README.md""", "deny"),
+    ("RED PCRE ATOM: \\W (non-word) is not POSIX ERE",
+     r"""git grep -E 'harness\W' -- README.md""", "deny"),
+    ("RED PCRE ATOM: \\A (subject start) is not POSIX ERE",
+     r"""git grep -E 'harness\A' -- README.md""", "deny"),
+    ("RED PCRE ATOM: \\Z (subject end before a final newline) is not POSIX ERE",
+     r"""git grep -E 'harness\Z' -- README.md""", "deny"),
+    ("RED PCRE ATOM: \\z (absolute subject end) is not POSIX ERE",
+     r"""git grep -E 'harness\z' -- README.md""", "deny"),
+    ("RED PCRE ATOM: \\h (horizontal space) is not POSIX ERE",
+     r"""git grep -E 'harness\h' -- README.md""", "deny"),
+    ("RED PCRE ATOM: \\H (non-horizontal-space) is not POSIX ERE",
+     r"""git grep -E 'harness\H' -- README.md""", "deny"),
+    ("RED PCRE ATOM: \\v (vertical space) is not POSIX ERE",
+     r"""git grep -E 'harness\v' -- README.md""", "deny"),
+    ("RED PCRE ATOM: \\V (non-vertical-space) is not POSIX ERE",
+     r"""git grep -E 'harness\V' -- README.md""", "deny"),
+    ("RED PCRE ATOM: \\R (newline sequence) is not POSIX ERE",
+     r"""git grep -E 'harness\R' -- README.md""", "deny"),
+]
+
 # Keep the depth boundary generated from the same constant the resolver enforces.
 FIXTURES.append((
     "ASK ALIAS: expansion beyond the bounded closure cannot become allow",

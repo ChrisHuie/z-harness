@@ -1,8 +1,13 @@
 {
  "note": "what the guards' suites CATCH, measured by breaking them",
+ "measured_against": {
+  "hooks/guards/git_grep_engine_guard.py": "46a42754561b734a97355f4781c4a2a07363ddd1bb43f8c19fe7178b2bbbafde",
+  "hooks/guards/zsh_rev_modifier_guard.py": "c82bde1d7897a248ee0b44412317c2ecf1061b2cccf606cab72e44a05751f68d",
+  "hooks/bash_command_guard.py": "47ff743cfab9b4a81ea4c1aec5ad2c1d762a19fa38fbad394475d8d529007e31"
+ },
  "baseline": {
   "hooks/guards/git_grep_engine_guard.py": {
-   "checks": 571,
+   "checks": 583,
    "failures": 0
   },
   "hooks/guards/zsh_rev_modifier_guard.py": {
@@ -747,14 +752,14 @@
    "kind": "dict",
    "elements": 4,
    "min": 3,
-   "max": 184,
+   "max": 196,
    "at_minimum": [
     "F",
     "G"
    ],
    "margins": {
     "E": {
-     "failures": 184
+     "failures": 196
     },
     "F": {
      "failures": 3
@@ -903,20 +908,24 @@
    "module": "hooks/guards/git_grep_engine_guard.py",
    "kind": "charset",
    "elements": 21,
-   "min": 0,
+   "min": 1,
    "max": 194,
    "at_minimum": [
     "A",
     "B",
     "D",
+    "E",
     "H",
+    "Q",
     "R",
     "S",
     "V",
     "W",
     "Z",
+    "d",
     "h",
     "v",
+    "w",
     "z"
    ],
    "margins": {
@@ -924,61 +933,49 @@
      "failures": 194
     },
     "B": {
-     "failures": 0,
-     "merged_failures": 0
+     "failures": 1
     },
     "d": {
      "failures": 1
     },
     "D": {
-     "failures": 0,
-     "merged_failures": 0
+     "failures": 1
     },
     "s": {
      "failures": 4
     },
     "S": {
-     "failures": 0,
-     "merged_failures": 0
+     "failures": 1
     },
     "w": {
      "failures": 1
     },
     "W": {
-     "failures": 0,
-     "merged_failures": 0
+     "failures": 1
     },
     "A": {
-     "failures": 0,
-     "merged_failures": 0
+     "failures": 1
     },
     "Z": {
-     "failures": 0,
-     "merged_failures": 0
+     "failures": 1
     },
     "z": {
-     "failures": 0,
-     "merged_failures": 0
+     "failures": 1
     },
     "h": {
-     "failures": 0,
-     "merged_failures": 0
+     "failures": 1
     },
     "H": {
-     "failures": 0,
-     "merged_failures": 0
+     "failures": 1
     },
     "v": {
-     "failures": 0,
-     "merged_failures": 0
+     "failures": 1
     },
     "V": {
-     "failures": 0,
-     "merged_failures": 0
+     "failures": 1
     },
     "R": {
-     "failures": 0,
-     "merged_failures": 0
+     "failures": 1
     },
     "Q": {
      "failures": 1

@@ -1,4 +1,4 @@
-Head: `3113c67e1fd71666492a00749d72a1e9fb8d21cf` for every figure below. Later commits on this branch add
+Head: `fdee797cbea14542145cff3b039b378d77f69f04` for every figure below. Later commits on this branch add
 only review documents under `contracts/review/`, changing no guard, tool or contract.
 
 ## Summary
@@ -87,11 +87,11 @@ classifies inside the budget.
 
 ## Verification
 
-At `3113c67e1fd71666492a00749d72a1e9fb8d21cf`, with zero workspace changes:
+At `fdee797cbea14542145cff3b039b378d77f69f04`, with zero workspace changes:
 
 - `python3 tools/ci-gate.py`: 10 suites, 0 failures;
 - harness CI 225 checks, harness selftest 75, renderer 192;
-- Bash guard 1,100; Git guard 583; zsh guard 239; ci-gate 53;
+- Bash guard 1,100; Git guard 583; zsh guard 239; ci-gate 55;
 - skill-eval validation 22 scenarios across 6 skills; fresh render and verify 5 targets.
 
 `contracts/goldens/guard-decisions.json` records the verdict for 752 commands — 233 allow,

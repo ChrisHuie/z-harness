@@ -1,10 +1,10 @@
 ## Review roll-up
 
 Evidence heads. The gate, CI and clean-clone results below were taken at
-`3113c67e1fd71666492a00749d72a1e9fb8d21cf`. The mutation figures were measured at that same
+`fdee797cbea14542145cff3b039b378d77f69f04`. The mutation figures were measured at that same
 head: `contracts/goldens/mutation-receipt.json` records a sha256 of each guard source it was
 swept against, and the gate rejects the receipt when those bytes no longer match. Any commit
-after `3113c67` on this branch adds this document and changes no guard, tool or contract.
+after `fdee797` on this branch adds this document and changes no guard, tool or contract.
 
 The seven inline threads carry each finding and its disposition; this comment carries only
 evidence with no single anchor, and is edited in place rather than reposted.
@@ -203,7 +203,8 @@ Not swept, and why: `ALIAS_GUARDED` (a repeated character, so an enum value spel
 
 ### Verified elsewhere
 
-The full gate runs green on macOS 15 and on git 2.47.3 under linux/arm64. A first draft of
+The full gate runs green on macOS 15 and on ubuntu-24.04 in CI, and the guard suites run
+green on linux/arm64 under zsh 5.9 and git 2.43.0. A first draft of
 the log-grammar probe used `\b` as its engine oracle and failed on ubuntu-24.04: Git reads it
 as a word boundary under ERE on Linux and as a literal `b` on macOS. It turns on syntax now —
 `a{2}b` is an interval under ERE and PCRE and five literal characters under BRE, and
@@ -212,9 +213,9 @@ as a word boundary under ERE on Linux and as a literal `b` on macOS. It turns on
 ### Verified from a clean clone
 
 `tools/ci-gate.py` was run from a fresh `git clone` of this head, not the authoring
-worktree: 10 suites / 0 failures on macOS 15.6.1 with git 2.46.1. The linux/arm64 run under
-git 2.47.3 was made at an earlier head and is not repeated here; the two exact-head CI runs
-cover Linux at this one. Eight
+worktree: 10 suites / 0 failures on macOS 15.6.1 with git 2.46.1. The two exact-head CI runs
+cover ubuntu-24.04 and macos-15 from their own fresh checkouts, and the guard suites were run
+separately on linux/arm64. Eight
 equivalence properties check each optimisation against the implementation it replaced,
 including the two tail predicates exhaustively for argvs up to length 3 and over 4,000
 random ones. Twenty-four `--grep`/`--author`/`--committer` shapes were checked for a
@@ -228,7 +229,7 @@ From a clean clone, `python3` and `git` only:
 
 ```
 git clone https://github.com/ChrisHuie/z-harness && cd z-harness
-git checkout 3113c67e1fd71666492a00749d72a1e9fb8d21cf
+git checkout fdee797cbea14542145cff3b039b378d77f69f04
 python3 tools/ci-gate.py                                    # 10 suites / 0 failures
 python3 hooks/harness_check.py --selftest                   # 75
 python3 hooks/guards/git_grep_engine_guard.py --selftest    # 583
@@ -256,12 +257,15 @@ re-measured rows, so they can be repeated:
 - **`is_rev_path_git`** — insert `return True` as the function's first statement.
 - **`MODS`** — delete one character from the `MODS` string literal, once per letter.
 
-Produced by Claude Opus 5 at max reasoning effort.
-
-Ran: `tools/ci-gate.py` (10 suites / 0 failures) from a clean clone on macOS 15 and
-linux/arm64; the three guard suites and the harness suite; three of the twenty battery rows re-measured at this head, the other seventeen not; the
-equivalence properties; the 731-command differential against `654be2a2`; the alias-shadow
-probe across git 2.7.4–2.47.3; the hook-timeout experiment on Claude Code 2.1.233.
-Not-run: the seventeen unverified battery rows; interception inside a live session; Codex's hook-timeout behaviour; the shipped
-alias check under Git older than 2.22.5; Git or shell versions outside git 2.7.4–2.47.3,
-Apple Git 2.39.5, zsh 5.9 and the CI images; `-f PATTERNFILE` contents.
+Ran: `tools/ci-gate.py` (10 suites / 0 failures) from a clean clone on macOS 15, and on
+ubuntu-24.04 and macos-15 in CI from their own fresh checkouts; the three guard suites and
+the harness suite; the guard suites on linux/arm64; three of the twenty battery rows
+re-measured at this head, the other seventeen not; the equivalence properties; the
+731-command differential against `654be2a2`; the alias-shadow probe, which re-runs against
+every `git` on `PATH` and so covered 2.46.1 and Apple 2.39.5 locally, 2.43.0 on linux/arm64
+and 2.54.0 and 2.55.0 on the CI images; the modifier enumeration against zsh 5.9 as built for
+arm64-apple-darwin, x86_64-ubuntu-linux and aarch64-unknown-linux; the hook-timeout
+experiment on Claude Code 2.1.233.
+Not-run: the seventeen unverified battery rows; interception inside a live session; Codex's
+hook-timeout behaviour; the shipped alias check under Git older than 2.22.5; Git or shell
+versions outside those named above; `-f PATTERNFILE` contents.

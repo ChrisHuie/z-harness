@@ -134,7 +134,9 @@ look examined. Gate what actually ships; the transform between the two is the dr
 it is invisible precisely because both ends look accounted for. Seen: a graded report cleared
 its checks, a brevity pass then cut a should-fix item from the comment, and nothing inspected the
 comment because the gate had already held upstream. Generalises past compression to any
-notes→issue or findings→handover step where the check ran on the wrong end.
+notes→issue or findings→handover step where the check ran on the wrong end. The body's "diff your
+working-note citations against the delivered artifact" is the level below this one: it compares
+notes to the artifact, and stops where the artifact becomes something else.
 
 ## regrading
 
@@ -144,8 +146,11 @@ keep their rating and surface the disagreement. Anti-inflation rules do not cove
 are written for the direction where a consolidator *raises* severity, so the reducing direction
 has no counterweight, and reducing is what a request for brevity asks for. "Below the bar for
 this artifact", applied silently, is indistinguishable from having examined it and is how a live
-production defect leaves a review. Same shape on a different axis as applying a delegated claim
-as a verified one — an upstream grade dropped downstream because nothing carried it.
+production defect leaves a review. The body's "unify same-concept findings at max member severity" governs
+**unification** — combining findings without lowering the result. This is the other operation:
+dropping or reducing for length, where nothing combines and the max-severity rule never fires.
+Same shape on a different axis as applying a delegated claim as a verified one — an upstream grade
+dropped downstream because nothing carried it.
 
 ---
 

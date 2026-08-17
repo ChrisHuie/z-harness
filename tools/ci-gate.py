@@ -64,6 +64,9 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: 3.13.14
+      - name: install zsh where the runner image omits it
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh && zsh --version
       - name: complete offline gate
         run: python3 tools/ci-gate.py
 
@@ -145,7 +148,8 @@ def workflow_error(data: str) -> Optional[str]:
         return (
             "workflow differs from the closed contract: two explicit OS targets, Python "
             "3.13.14, full action SHAs, read-only permissions, non-persisted checkout "
-            "credentials, one ci-gate command, and one conformance command"
+            "credentials, a Linux-only zsh install whose own version call proves it "
+            "landed, one ci-gate command, and one conformance command"
         )
     return None
 

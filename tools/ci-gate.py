@@ -9,6 +9,7 @@ import hashlib
 import importlib.util
 import json
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -576,6 +577,39 @@ def review_include_error(review_root=None) -> str:
     return ""
 
 
+def gated_environment(which=None, runner=None) -> str:
+    """Name the interpreters this run's verdicts were measured against.
+
+    Two guard probes reduce to a skip when zsh is missing -- the 52-letter modifier
+    enumeration and nine shell-boundary probe groups -- and both hold their check counts
+    fixed on purpose, so the shrink-only floor does not read a zsh-less host as a gutted
+    suite. A suite's receipt is therefore byte-identical whether those probes ran or were
+    skipped wholesale, and only a child's LAST line survives this gate, which drops the
+    printed SKIP. Without this line nothing in the record distinguishes the two, so a
+    claim about zsh could go unverified on a runner with no zsh and read as proven.
+
+    Reported, never asserted: a host without zsh may still run the gate. What it may not
+    do is leave no trace that the zsh-dependent claims were not checked.
+    """
+    which = shutil.which if which is None else which
+    runner = subprocess.run if runner is None else runner
+    parts = []
+    for name in ("git", "zsh"):
+        path = which(name)
+        if not path:
+            parts.append(f"{name}=absent")
+            continue
+        try:
+            result = runner([path, "--version"], capture_output=True, text=True,
+                            timeout=10)
+            reported = result.stdout.strip().splitlines()
+            version = reported[0] if reported else "unreported"
+        except (OSError, subprocess.SubprocessError):
+            version = "unreported"
+        parts.append(f"{name}={path} ({version})")
+    return "CI-GATE-ENV " + " ".join(parts)
+
+
 def gate(
     runner: Callable[[Sequence[str]], Result] = run_command,
     *,
@@ -642,6 +676,7 @@ def gate(
     code = 1 if failures else 0
     for failure in failures:
         print(f"  - {failure}")
+    print(gated_environment())
     print(
         f"CI-GATE-SUMMARY suites={completed} failures={len(failures)} exit={code}"
     )
@@ -916,6 +951,20 @@ def selftest() -> int:
     expect(
         "a missing review directory is a failure, not a clean verdict",
         review_include_error(review) != "",
+    )
+
+    env_line = gated_environment()
+    expect(
+        "the gate names both interpreters its verdicts were measured against",
+        env_line.startswith("CI-GATE-ENV ")
+        and "git=" in env_line and "zsh=" in env_line,
+    )
+    expect(
+        "an absent interpreter is recorded as absent rather than omitted",
+        "zsh=absent" in gated_environment(
+            which=lambda name: None if name == "zsh" else f"/usr/bin/{name}",
+            runner=lambda *a, **k: subprocess.CompletedProcess(
+                a[0], 0, "git version 9.9.9\n", "")),
     )
 
     fake_calls: List[Sequence[str]] = []

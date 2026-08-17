@@ -125,6 +125,28 @@ A security-workflow change can move **which events it runs on** and relocate the
 outside the repo. Diff triggers against BASE and ask what still blocks a fresh,
 never-commented request.
 
+## gate the deliverable
+
+A gate on an **intermediate** artifact reads as coverage of the **deliverable** produced from
+it. Every edit after the gate ran — a compression pass, a "just the important ones" redraft, a
+reduction once new information arrives — is unexamined, and the upstream pass is what makes it
+look examined. Gate what actually ships; the transform between the two is the drop channel, and
+it is invisible precisely because both ends look accounted for. Seen: a graded report cleared
+its checks, a brevity pass then cut a should-fix item from the comment, and nothing inspected the
+comment because the gate had already held upstream. Generalises past compression to any
+notes→issue or findings→handover step where the check ran on the wrong end.
+
+## regrading
+
+A severity that arrives **attached to a finding** does not survive you unless you carry it.
+Demoting one needs the same stated basis as promoting it: quote the raising party's evidence, or
+keep their rating and surface the disagreement. Anti-inflation rules do not cover this — they
+are written for the direction where a consolidator *raises* severity, so the reducing direction
+has no counterweight, and reducing is what a request for brevity asks for. "Below the bar for
+this artifact", applied silently, is indistinguishable from having examined it and is how a live
+production defect leaves a review. Same shape on a different axis as applying a delegated claim
+as a verified one — an upstream grade dropped downstream because nothing carried it.
+
 ---
 
 ## Also displaced, rank B/C — full text in the registry, not reproduced here

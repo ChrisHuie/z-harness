@@ -85,6 +85,15 @@ one of the sections below. All seven headings are name-cited from the body; they
 
 ## Assertion shapes `[body]`
 
+- **R289** An oracle can pass or fail for a reason **adjacent to the one it claims to test**.
+  R117, R119 and R122 are three instances (emptiness, type-not-value, lockstep derivation); the
+  general form is the discriminator — name the neighbour the check rules out, and state what it
+  would have to observe in order to fail. Two shapes in one session: a positive control chosen at
+  the wrong **depth** was used to license an absence claim about nesting, so it could only ever
+  prove the instrument worked at the depth already searched; and a fixture reddened a **different
+  channel of the same tool** than the assertion named, which is indistinguishable from the named
+  channel working. Both read as evidence at the time, and one of them was one step from a public
+  accusation that an author had invented a citation.
 - **R118** Assert on the **parsed structure**, never a substring of the stringified error, and
   never on another layer's framework-internal error text — the echoed request body satisfies
   the substring.

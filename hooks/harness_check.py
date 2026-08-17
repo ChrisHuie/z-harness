@@ -87,7 +87,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 75
+SELFTEST_FLOOR = 76
 
 AUTHORING_SKILLS = {"craft-prompt", "craft-skill", "craft-context-file", "review-prompt"}
 BODY_CHAR_CAP = 5000          # chars after frontmatter — the builders' instrument
@@ -109,7 +109,7 @@ SELFTEST_SUITES = [
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
     ("ci-gate", ["tools/ci-gate.py", "--selftest"], 55),
-    ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 63),
+    ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 65),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
     ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 16),
     ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 583),
@@ -213,6 +213,25 @@ def suite_source_golden(root=None):
     except (OSError, ValueError):
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def child_faults(stdout, limit=2):
+    """-> the failing child's own FAIL lines, so a red suite says WHICH check failed.
+
+    This layer keeps a suite's receipt and drops its stdout, so `failures=1` reached the
+    record with nothing naming the check behind it. A suite that improves its own failure
+    text gains nothing in CI while that text is captured here and never printed: one
+    occurrence read as `failures=1` in the log while the guard's explanation sat in a
+    buffer nobody emitted, and attributing it cost a source read and a reproduction.
+    """
+    lines = [line.decode("utf-8", "replace").strip()
+             for line in stdout.splitlines()
+             if line.strip().startswith(b"FAIL")]
+    if not lines:
+        return ""
+    shown = "; ".join(line[:220] for line in lines[:limit])
+    more = f"; and {len(lines) - limit} more" if len(lines) > limit else ""
+    return f"; child reported: {shown}{more}"
 
 
 # C6/C8 scan set: everything tracked EXCEPT these. Written down rather than implied by a
@@ -552,7 +571,10 @@ class Run:
                            f"final={final_line.startswith(b'SELFTEST-SUMMARY ')}")
                 if int(receipts[0][1]) < floor:
                     detail += " below-floor"
-            self.result("C1", p.returncode == 0 and receipt_ok, detail)
+            passed = p.returncode == 0 and receipt_ok
+            if not passed:
+                detail += child_faults(p.stdout)
+            self.result("C1", passed, detail)
 
     def c1_selftest_inventory(self, suites=None, exemptions=None):
         """Every script exposing --selftest is aggregated or explicitly classified."""
@@ -1157,6 +1179,23 @@ def selftest():
             return
         print(f"  {'PASS' if ok else 'FAIL'} {label}")
         bad += (not ok)
+
+    # A suite reports `failures=1` and this layer kept only that. The child's own FAIL line
+    # is the diagnosis and was being dropped, so improving a suite's failure text bought
+    # nothing where it is read.
+    expect_red(
+        "a failing child's own FAIL line reaches the C1 detail",
+        lambda: (
+            "operator-budget" in child_faults(
+                b"  PASS unrelated\n"
+                b"  FAIL operator-budget claude decided ask; budget exhausted\n"
+                b"SELFTEST-SUMMARY suite=x checks=1 failures=1\n")
+            and child_faults(
+                b"  PASS all good\nSELFTEST-SUMMARY suite=x checks=1 failures=0\n") == ""
+            and "and 1 more" in child_faults(
+                b"  FAIL one\n  FAIL two\n  FAIL three\n", limit=2)
+        ),
+    )
 
     with tempfile.TemporaryDirectory() as td:
         # minimal planted-defect tree

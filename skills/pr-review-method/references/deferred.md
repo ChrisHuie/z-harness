@@ -140,17 +140,18 @@ notes to the artifact, and stops where the artifact becomes something else.
 
 ## regrading
 
-A severity that arrives **attached to a finding** does not survive you unless you carry it.
-Demoting one needs the same stated basis as promoting it: quote the raising party's evidence, or
-keep their rating and surface the disagreement. Anti-inflation rules do not cover this — they
-are written for the direction where a consolidator *raises* severity, so the reducing direction
-has no counterweight, and reducing is what a request for brevity asks for. "Below the bar for
-this artifact", applied silently, is indistinguishable from having examined it and is how a live
-production defect leaves a review. The body's "unify same-concept findings at max member severity" governs
-**unification** — combining findings without lowering the result. This is the other operation:
-dropping or reducing for length, where nothing combines and the max-severity rule never fires.
-Same shape on a different axis as applying a delegated claim as a verified one — an upstream grade
-dropped downstream because nothing carried it.
+A severity that arrives **attached to a finding** is not yours to lower. Keep the raising party's
+rating and record your disagreement beside it — a consolidator permitted to demote on a stated
+basis will always have a basis, and the disagreement is the part worth preserving anyway.
+Promotion is the direction that needs their evidence quoted. Nothing in this tree covers reducing
+— the anti-inflation rules are written for a consolidator who *raises* severity — and reducing is
+precisely what a request for brevity asks for. "Below the bar for this artifact", applied
+silently, is indistinguishable from having examined it, and is how a live production defect
+leaves a review. The body's "unify same-concept findings at max member severity" governs
+**unification**, where findings combine and the floor applies; dropping or reducing for length is
+the other operation, where nothing combines and the floor never fires. Same shape on a different
+axis as applying a delegated claim as a verified one — an upstream grade dropped downstream
+because nothing carried it.
 
 ---
 

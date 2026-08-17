@@ -87,7 +87,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 76
+SELFTEST_FLOOR = 77
 
 AUTHORING_SKILLS = {"craft-prompt", "craft-skill", "craft-context-file", "review-prompt"}
 BODY_CHAR_CAP = 5000          # chars after frontmatter — the builders' instrument
@@ -223,13 +223,24 @@ def child_faults(stdout, limit=2):
     text gains nothing in CI while that text is captured here and never printed: one
     occurrence read as `failures=1` in the log while the guard's explanation sat in a
     buffer nobody emitted, and attributing it cost a source read and a reproduction.
+
+    Cut at a word boundary. A slice cut a child's reason at "internal decision " and dropped
+    `budget`, the one word naming the cause, and this is the copy CI records -- the suite's
+    own line does not survive to the log at all.
     """
+    def clip(text, limit=220):
+        text = " ".join(text.split())
+        if len(text) <= limit:
+            return text
+        cut = text[:limit].rsplit(" ", 1)[0]
+        return f"{cut or text[:limit]}..."
+
     lines = [line.decode("utf-8", "replace").strip()
              for line in stdout.splitlines()
              if line.strip().startswith(b"FAIL")]
     if not lines:
         return ""
-    shown = "; ".join(line[:220] for line in lines[:limit])
+    shown = "; ".join(clip(line) for line in lines[:limit])
     more = f"; and {len(lines) - limit} more" if len(lines) > limit else ""
     return f"; child reported: {shown}{more}"
 
@@ -1195,6 +1206,14 @@ def selftest():
             and "and 1 more" in child_faults(
                 b"  FAIL one\n  FAIL two\n  FAIL three\n", limit=2)
         ),
+    )
+    # The cut lands on a whole word or the one word naming the cause is what gets dropped.
+    expect_red(
+        "a surfaced child line is cut at a word boundary, never mid-word",
+        lambda: (
+            lambda body: body.endswith("...") and body[:-3].rstrip().endswith("alpha")
+        )(child_faults(b"  FAIL " + b"alpha " * 80 + b"budget\n")
+          .split("child reported: ", 1)[1]),
     )
 
     with tempfile.TemporaryDirectory() as td:

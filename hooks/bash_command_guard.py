@@ -93,7 +93,7 @@ def _emitted_decision(stdout):
     try:
         block = (json.loads(stdout) or {}).get("hookSpecificOutput", {})
     except ValueError:
-        return "unparseable output", stdout.strip()[:90]
+        return "unparseable output", _clipped(stdout, 90)
     return block.get("permissionDecision"), block.get("permissionDecisionReason") or ""
 
 

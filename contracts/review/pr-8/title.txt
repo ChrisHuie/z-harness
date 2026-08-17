@@ -1,0 +1,1 @@
+Harden the Bash guards across Git and nested shell sources, and pin what their suites catch

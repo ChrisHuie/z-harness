@@ -27,11 +27,21 @@ from the same run.
 
 ## Layout
 
-    contracts/review/pr-<number>/rollup.md    the one roll-up comment, edited in place
+    contracts/review/pr-<number>/rollup.md         the one roll-up comment, edited in place
+    contracts/review/pr-<number>/description.md    the pull request body
+    contracts/review/pr-<number>/title.txt         the pull request title
 
 One roll-up per pull request, edited rather than reposted. Individual findings are inline
 `path:line` threads and are not drafted here: a finding in a roll-up has no lifecycle and
 drops out unaddressed.
+
+The description and title live here for the same reason the roll-up does: both carry measured
+figures, and a figure edited on GitHub is outside every check in this repository. Build each
+by editing the file and posting from it, never by retyping a number into the web form.
+
+A document that revises published text is built by splicing the published body, not by
+retyping the parts that are unchanged. Retyping is how a wrong figure enters, so it is not
+the method for removing one.
 
 ## What does not go here
 

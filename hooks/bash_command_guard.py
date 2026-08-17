@@ -86,6 +86,69 @@ def decide(command, _deadline=None):
     return worst, "\n\n".join(reasons)
 
 
+def _emitted_decision(stdout):
+    """-> (decision, reason) a hook process emitted, or (None, "") when it emitted nothing."""
+    if not stdout:
+        return None, ""
+    try:
+        block = (json.loads(stdout) or {}).get("hookSpecificOutput", {})
+    except ValueError:
+        return "unparseable output", stdout.strip()[:90]
+    return block.get("permissionDecision"), block.get("permissionDecisionReason") or ""
+
+
+def _clipped(text, limit=150):
+    """-> text cut at a word boundary, so a truncated reason does not end mid-word."""
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0]
+    return f"{cut or text[:limit]}..."
+
+
+def _budget_faults(observations, expected, cap):
+    """-> why these hook observations failed, one entry per run, or [] when every one held.
+
+    Each budget check below tests four things and used to print only the elapsed time. That
+    is unreadable exactly when it matters: the internal decision budget sits BELOW the cap,
+    so a loaded host fail-safes mid-parse and the run then finishes EARLY, and the line
+    reported a comfortable number beside the word FAIL with no timing problem in sight.
+    Diagnosing one occurrence cost a source read and a reproduction. The guard states its own
+    reason when it bails, so that sentence is the diagnosis and belongs in the line.
+
+    Entries carry no run index, so identical faults collapse in `_budget_note`: five runs
+    failing the same way is one fact, not five.
+    """
+    faults = []
+    for rc, stdout, stderr, elapsed in observations:
+        decision, reason = _emitted_decision(stdout)
+        if rc != 0:
+            faults.append(f"exited {rc}")
+        elif stderr:
+            faults.append(f"wrote stderr {_clipped(stderr, 90)!r}")
+        elif decision != expected:
+            faults.append(
+                f"decided {decision or 'nothing'} where {expected or 'nothing'} was "
+                f"expected" + (f": {_clipped(reason)}" if reason else ""))
+        elif elapsed >= cap:
+            faults.append(f"exceeded the {cap}s cap")
+    return faults
+
+
+def _budget_note(faults, runs):
+    """-> the trailing clause naming what failed, empty when nothing did."""
+    if not faults:
+        return ""
+    distinct = []
+    for fault in faults:
+        if fault not in distinct:
+            distinct.append(fault)
+    shown = [f"{faults.count(fault)} of {runs} runs {fault}" for fault in distinct[:2]]
+    if len(distinct) > 2:
+        shown.append(f"and {len(distinct) - 2} other faults")
+    return "; " + "; ".join(shown)
+
+
 def selftest():
     """Run every sub-guard's own suite. Fails if any fails, or if a suite is empty."""
     total = failures = 0
@@ -940,14 +1003,18 @@ def selftest():
         rc, stdout, stderr = run_raw(raw)
         registered_decisions.append((rc, stdout, stderr))
     registered_elapsed = time.monotonic() - registered_started
-    ok = (registered_elapsed < 4.5 and all(
-        rc == 0 and not stdout and not stderr
-        for rc, stdout, stderr in registered_decisions
-    ))
+    faults = _budget_faults(
+        [(rc, stdout, stderr, 0.0) for rc, stdout, stderr in registered_decisions],
+        None, 4.5)
+    note = _budget_note(faults, len(registered_decisions))
+    over_cap = registered_elapsed >= 4.5
+    if over_cap:
+        note += "; the five envelopes together exceeded the 4.5s cap"
+    ok = not faults and not over_cap
     total += 1
     failures += (not ok)
     print(f"  {'PASS' if ok else 'FAIL'} hook-budget        5 public envelopes in "
-          f"{registered_elapsed:.3f}s (cap 4.5s)")
+          f"{registered_elapsed:.3f}s (cap 4.5s){note}")
 
     slow_raw = json.dumps({
         "tool_name": "Bash",
@@ -963,17 +1030,16 @@ def selftest():
             result = subprocess.run(
                 argv, input=slow_raw, capture_output=True, text=True, timeout=5)
             elapsed = time.monotonic() - started
-            emitted = json.loads(result.stdout) if result.stdout else None
-            got = ((emitted or {}).get("hookSpecificOutput", {})
-                   .get("permissionDecision"))
-            observations.append((result.returncode, result.stderr, got, elapsed))
-        ok = all(rc == 0 and not stderr and got == expected and elapsed < 4.5
-                 for rc, stderr, got, elapsed in observations)
+            observations.append(
+                (result.returncode, result.stdout, result.stderr, elapsed))
+        faults = _budget_faults(observations, expected, 4.5)
+        ok = not faults
         total += 1
         failures += (not ok)
         print(f"  {'PASS' if ok else 'FAIL'} slow-hook-budget   {runtime:<6} "
               f"5 explicit {expected} decisions; max="
-              f"{max(item[3] for item in observations):.3f}s (cap 4.5s)")
+              f"{max(item[3] for item in observations):.3f}s (cap 4.5s)"
+              f"{_budget_note(faults, len(observations))}")
 
     operator_raw = json.dumps({
         "tool_name": "Bash",
@@ -991,13 +1057,14 @@ def selftest():
             observations.append((
                 result.returncode, result.stdout, result.stderr,
                 time.monotonic() - started))
-        ok = all(rc == 0 and not stdout and not stderr and elapsed < 4.5
-                 for rc, stdout, stderr, elapsed in observations)
+        faults = _budget_faults(observations, None, 4.5)
+        ok = not faults
         total += 1
         failures += (not ok)
         print(f"  {'PASS' if ok else 'FAIL'} operator-budget    {runtime:<6} "
               f"5 explicit allow decisions; max="
-              f"{max(item[3] for item in observations):.3f}s (cap 4.5s)")
+              f"{max(item[3] for item in observations):.3f}s (cap 4.5s)"
+              f"{_budget_note(faults, len(observations))}")
 
     seen_deadlines = []
     class DeadlineGuard:

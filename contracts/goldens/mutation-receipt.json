@@ -3,7 +3,7 @@
  "measured_against": {
   "hooks/guards/git_grep_engine_guard.py": "46a42754561b734a97355f4781c4a2a07363ddd1bb43f8c19fe7178b2bbbafde",
   "hooks/guards/zsh_rev_modifier_guard.py": "c82bde1d7897a248ee0b44412317c2ecf1061b2cccf606cab72e44a05751f68d",
-  "hooks/bash_command_guard.py": "47ff743cfab9b4a81ea4c1aec5ad2c1d762a19fa38fbad394475d8d529007e31"
+  "hooks/bash_command_guard.py": "3c8935277153b64da7e2331f82dd8d69bf2ddf3849adfadce650d2bbd97dbec3"
  },
  "baseline": {
   "hooks/guards/git_grep_engine_guard.py": {

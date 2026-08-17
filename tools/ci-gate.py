@@ -339,6 +339,222 @@ def decision_golden_error(golden_data=None, decide=None) -> str:
             f"tools/write-decision-golden.py in the same commit and review that diff")
 
 
+MUTATION_RECEIPT = ROOT / "contracts/goldens/mutation-receipt.json"
+# Every element of a guarded set should be held by at least this many checks: at a margin of
+# one, deleting the element is a silent fail-open the suites still pass; at zero it is not
+# even a fail-open the suites could notice.
+ELEMENT_MARGIN_TARGET = 2
+
+# A set is exempt only when removing an element cannot change a DECISION, and the reason
+# names what its elements feed instead. Both entries were settled by reading every Load
+# reference to the name, not by how the set looked. Adding to this dict is a claim that
+# must be re-established the same way.
+MARGIN_EXEMPT_SETS = {
+    "MOD_MEANING": "read only by _deny_hits, through .get(mod, mod), so a missing entry "
+                   "changes reason text and no decision",
+    "_CLOSED_LIMITS": "read only by selftest, where the entry IS the drift check, so "
+                      "removing it removes the check that would redden",
+}
+
+# The full sweep measured 172 elements of decision-input sets below the target. Flooring
+# each set at its own measured minimum would write `0` twenty times over, and a floor of
+# zero asserts nothing -- it reads as a guarantee while permitting everything. So the
+# ratchet is the DEBT ITSELF: the number of elements below target may shrink and never
+# grow. A new set element with no coverage raises the count and fails here, and every
+# fixture that closes a gap lowers this number in a reviewed diff.
+ELEMENT_MARGIN_DEBT_CEILING = 172
+
+
+def mutation_receipt_error(receipt_data=None, declared=None, ceiling=None,
+                           exempt=None) -> str:
+    """Return drift between recorded mutation evidence and the sets the guards declare.
+
+    `tools/write-mutation-receipt.py` measures the receipt by running every mutation, which
+    is far too slow to repeat on every gate run. What this proves instead is the property
+    that actually failed on this branch: every element the guards declare RIGHT NOW carries
+    recorded evidence, nothing recorded is stale, no site mutation survives, no mutation
+    moved the check count, and no more elements sit below the margin target than the
+    recorded ceiling allows. Adding a name to a guarded set without regenerating fails here,
+    because the new element has no recorded margin -- which is what makes the slow tool
+    unskippable.
+    """
+    if ceiling is None:
+        ceiling = ELEMENT_MARGIN_DEBT_CEILING
+    if exempt is None:
+        exempt = MARGIN_EXEMPT_SETS
+    try:
+        if receipt_data is None:
+            receipt_data = json.loads(MUTATION_RECEIPT.read_text(encoding="utf-8"))
+        if declared is None:
+            spec = importlib.util.spec_from_file_location(
+                "_ci_gate_mutation", ROOT / "tools/write-mutation-receipt.py")
+            if spec is None or spec.loader is None:
+                return "cannot load write-mutation-receipt.py for the mutation receipt"
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            declared = {}
+            for relative in module.GUARDS:
+                for name, (_kind, elements) in module.declared_sets(relative).items():
+                    if name not in module.SWEEP_EXCLUSIONS:
+                        declared[name] = set(elements)
+    except Exception as exc:
+        return f"cannot verify the mutation receipt: {exc!r}"
+    recorded = receipt_data.get("sets") or {}
+    if not recorded or not declared:
+        return "the mutation receipt records no swept sets, which is not a clean verdict"
+    problems, debt = [], 0
+    missing_sets = sorted(set(declared) - set(recorded))
+    stale_sets = sorted(set(recorded) - set(declared))
+    if missing_sets:
+        problems.append(f"declared but never swept: {missing_sets}")
+    if stale_sets:
+        problems.append(f"swept but no longer declared: {stale_sets}")
+    for name in sorted(set(declared) & set(recorded)):
+        margins = recorded[name].get("margins") or {}
+        missing = sorted(declared[name] - set(margins))
+        stale = sorted(set(margins) - declared[name])
+        if missing:
+            problems.append(f"{name} elements with no recorded margin: {missing}")
+        if stale:
+            problems.append(f"{name} recorded margins for absent elements: {stale}")
+        # A non-integer failure count means removing the element stopped the module
+        # importing or ran past its bound. Both are caught harder than any check count,
+        # so they clear the target rather than failing a numeric comparison against it.
+        if name not in exempt:
+            debt += sum(1 for element, entry in margins.items()
+                        if element in declared[name]
+                        and isinstance(entry.get("failures"), int)
+                        and entry["failures"] < ELEMENT_MARGIN_TARGET)
+    if debt > ceiling:
+        problems.append(
+            f"{debt} elements sit below a margin of {ELEMENT_MARGIN_TARGET}, above the "
+            f"recorded ceiling of {ceiling}; coverage of the guarded sets got thinner. "
+            f"Lower the ceiling only in a commit that raises the coverage")
+    stale_exemptions = sorted(set(exempt) - set(declared))
+    if stale_exemptions:
+        problems.append(
+            f"margin-exempt sets the guards no longer declare: {stale_exemptions}")
+    survivors = receipt_data.get("site_survivors") or []
+    if survivors:
+        problems.append(f"site mutations no check catches: {survivors}")
+    drift = receipt_data.get("selector_drift") or []
+    if drift:
+        problems.append(f"mutations that moved the check COUNT: {drift[:4]}")
+    for suite, floor in SUITE_FLOORS.items():
+        for relative, counts in (receipt_data.get("baseline") or {}).items():
+            if relative.endswith(f"{suite}.py") and counts.get("checks", 0) < floor:
+                problems.append(
+                    f"receipt baseline for {suite} records {counts.get('checks')} checks, "
+                    f"below the floor of {floor}; the receipt predates the current suite")
+    if not problems:
+        return ""
+    return ("mutation receipt does not match the guards as they stand: "
+            + "; ".join(problems[:6])
+            + ("; ..." if len(problems) > 6 else "")
+            + ". If the change is intended, run tools/write-mutation-receipt.py in the "
+              "same commit and review that diff")
+
+
+REVIEW_ROOT = ROOT / "contracts/review"
+INCLUDE_OPEN = "<!-- include: "
+INCLUDE_CLOSE = "<!-- end include -->"
+FENCE_MARKERS = ("```", "~~~")
+
+
+def include_blocks(lines):
+    """(header, close, name) per include block, ignoring blocks inside a code fence.
+
+    The include syntax has to be DOCUMENTED somewhere, and the only place it belongs is
+    contracts/review/README.md -- inside a fence, as an example. A scanner blind to fences
+    reads that example as a live include and reports the README as drifted from a file the
+    example never claimed to copy, so the convention's own documentation cannot satisfy it.
+
+    A block's body is skipped wholesale rather than scanned, so a fence in INCLUDED content
+    -- a generated table may carry one -- cannot leave the scanner stuck in a fence and
+    silently blind to every later include.
+    """
+    found, fence, index = [], None, 0
+    while index < len(lines):
+        stripped = lines[index].lstrip()
+        marker = next((m for m in FENCE_MARKERS if stripped.startswith(m)), None)
+        if fence is not None:
+            fence = None if marker == fence else fence
+        elif marker:
+            fence = marker
+        elif INCLUDE_OPEN in lines[index]:
+            head = lines[index].split(INCLUDE_OPEN, 1)[1]
+            name = head.split("-->")[0].strip() if "-->" in head else ""
+            close = next((j for j in range(index + 1, len(lines))
+                          if INCLUDE_CLOSE in lines[j]), None)
+            found.append((index, close, name))
+            if close is None:
+                break
+            index = close + 1
+            continue
+        index += 1
+    return found
+
+
+def review_path_label(path):
+    """Repo-relative where that reads better, absolute where relative_to would raise.
+
+    A document outside the repo only appears in this check's own fixtures, but raising
+    ValueError while BUILDING a failure message turns a reported problem into a crash.
+    """
+    try:
+        return path.relative_to(ROOT)
+    except ValueError:
+        return path
+
+
+def review_include_error(review_root=None) -> str:
+    """Return any outbound review file whose included block drifted from its source.
+
+    Every number this branch published wrong was retyped into a GitHub comment from a
+    failure list, where no gate could see it. Outbound review text lives under
+    contracts/review/ so it is inside a gate at all, and a block marked as included must be
+    byte-identical to the file it names -- so a generated table cannot go stale in the copy
+    a reviewer actually reads.
+
+    A missing directory and an empty one are failures, not clean verdicts: this check
+    asserts that outbound text is gated, and it cannot assert that over nothing.
+    """
+    root = REVIEW_ROOT if review_root is None else Path(review_root)
+    if not root.is_dir():
+        return (f"{REVIEW_ROOT.name}/ does not exist, so no outbound review text is gated; "
+                "this check asserts nothing without it")
+    documents = sorted(root.rglob("*.md"))
+    if not documents:
+        return (f"no markdown under {root}, so the review-include check scanned nothing, "
+                "which is not a clean verdict")
+    problems, blocks = [], 0
+    for document in documents:
+        lines = document.read_text(encoding="utf-8").splitlines()
+        for header, close, name in include_blocks(lines):
+            blocks += 1
+            if close is None:
+                problems.append(f"{review_path_label(document)}: unterminated include")
+                continue
+            if not name:
+                problems.append(f"{review_path_label(document)}: include names no file")
+                continue
+            source = ROOT / name
+            if not source.is_file():
+                problems.append(f"{review_path_label(document)} includes {name}, "
+                                "which does not exist")
+                continue
+            embedded = "\n".join(lines[header + 1:close])
+            if embedded.strip("\n") != source.read_text(encoding="utf-8").strip("\n"):
+                problems.append(
+                    f"{review_path_label(document)} has a stale copy of {name}; "
+                    "regenerate it before posting")
+    if problems:
+        return (f"outbound review text drifted from its sources "
+                f"(scanned {len(documents)} files, {blocks} include blocks under "
+                f"{root}): " + "; ".join(problems[:5]))
+    return ""
+
+
 def gate(
     runner: Callable[[Sequence[str]], Result] = run_command,
     *,
@@ -376,6 +592,14 @@ def gate(
     print(f"  {'FAIL' if decision_problem else 'PASS'} decision-golden")
     if decision_problem:
         failures.append(decision_problem)
+    mutation_problem = mutation_receipt_error()
+    print(f"  {'FAIL' if mutation_problem else 'PASS'} mutation-receipt")
+    if mutation_problem:
+        failures.append(mutation_problem)
+    review_problem = review_include_error()
+    print(f"  {'FAIL' if review_problem else 'PASS'} review-includes")
+    if review_problem:
+        failures.append(review_problem)
     completed = 1
     with tempfile.TemporaryDirectory(prefix="z-harness-ci-gate-") as raw:
         render_root = Path(raw) / "rendered"
@@ -509,6 +733,157 @@ def selftest() -> int:
     expect(
         "hook budget contract rejects a sub-second margin",
         hook_budget_error(budget=4.01) != "",
+    )
+
+    declared_probe = {"PROBE": {"a", "b"}}
+    receipt_probe = {
+        "sets": {"PROBE": {"margins": {"a": {"failures": 3}, "b": {"failures": 2}}}},
+        "baseline": {}, "site_survivors": [], "selector_drift": [],
+    }
+    expect("recorded mutation evidence matches the guards", mutation_receipt_error() == "")
+    expect(
+        "a receipt covering every declared element clears",
+        mutation_receipt_error(receipt_probe, declared_probe, exempt={}) == "",
+    )
+    expect(
+        "an empty mutation receipt is a failure, not a clean verdict",
+        mutation_receipt_error({"sets": {}}, declared_probe) != "",
+    )
+    expect(
+        "an element added to a guarded set without regenerating is named",
+        "no recorded margin" in mutation_receipt_error(
+            {"sets": {"PROBE": {"margins": {"a": {"failures": 3}}}}}, declared_probe),
+    )
+    expect(
+        "a recorded margin for an element the source no longer declares is named",
+        "absent elements" in mutation_receipt_error(
+            {"sets": {"PROBE": {"margins": {
+                "a": {"failures": 3}, "b": {"failures": 2}, "gone": {"failures": 9}}}}},
+            declared_probe),
+    )
+    expect(
+        "margin debt above the recorded ceiling is a failure",
+        "above the recorded ceiling" in mutation_receipt_error(
+            {"sets": {"PROBE": {"margins": {
+                "a": {"failures": 1}, "b": {"failures": 0}}}}},
+            declared_probe, ceiling=1),
+    )
+    expect(
+        "margin debt at the recorded ceiling clears",
+        mutation_receipt_error(
+            {"sets": {"PROBE": {"margins": {
+                "a": {"failures": 1}, "b": {"failures": 0}}}},
+             "site_survivors": [], "selector_drift": []},
+            declared_probe, ceiling=2, exempt={}) == "",
+    )
+    expect(
+        "an exempt set contributes no debt, so its zeros cannot fail the ceiling",
+        mutation_receipt_error(
+            {"sets": {"MOD_MEANING": {"margins": {
+                "a": {"failures": 0}, "b": {"failures": 0}}}},
+             "site_survivors": [], "selector_drift": []},
+            {"MOD_MEANING": {"a", "b"}}, ceiling=0,
+            exempt={"MOD_MEANING": "probe"}) == "",
+    )
+    expect(
+        "an exemption for a set the guards no longer declare is named",
+        "no longer declare" in mutation_receipt_error(
+            dict(receipt_probe, sets={"PROBE": {"margins": {
+                "a": {"failures": 3}, "b": {"failures": 2}}}}),
+            declared_probe),
+    )
+    expect(
+        "an element whose removal breaks the import clears the target",
+        mutation_receipt_error(
+            {"sets": {"PROBE": {"margins": {
+                "a": {"failures": 3},
+                "b": {"failures": "module failed to load: KeyError"}}}},
+             "site_survivors": [], "selector_drift": []},
+            declared_probe, exempt={}) == "",
+    )
+    expect(
+        "a declared set that was never swept is named",
+        "never swept" in mutation_receipt_error(
+            {"sets": {"OTHER": {"margins": {"x": {"failures": 9}}}}},
+            {"PROBE": {"a"}, "OTHER": {"x"}}),
+    )
+    expect(
+        "a site mutation no check catches is a failure",
+        "no check catches" in mutation_receipt_error(
+            dict(receipt_probe, site_survivors=["budget wrap deleted"]), declared_probe),
+    )
+    expect(
+        "a mutation that moved the check COUNT rather than a verdict is a failure",
+        "moved the check" in mutation_receipt_error(
+            dict(receipt_probe, selector_drift=["PROBE.a: 571 -> 570"]), declared_probe),
+    )
+
+    expect("outbound review text matches the sources it includes", review_include_error() == "")
+    with tempfile.TemporaryDirectory(prefix="z-harness-review-") as raw:
+        review = Path(raw)
+        document = review / "doc.md"
+        # Any tracked file with no include markers of its own. README.md cannot serve here:
+        # it DOCUMENTS the close marker, so it would terminate the block it is embedded in.
+        source_name = "contracts/goldens/digests.json"
+        body = (ROOT / source_name).read_text(encoding="utf-8").strip("\n")
+
+        def review_doc(text: str) -> str:
+            document.write_text(text, encoding="utf-8")
+            return review_include_error(review)
+
+        live = f"{INCLUDE_OPEN}{source_name} -->\n{body}\n{INCLUDE_CLOSE}\n"
+        expect(
+            "an include block byte-identical to its source clears",
+            review_doc(f"# outbound\n\n{live}") == "",
+        )
+        expect(
+            "an included copy that drifted from its source is caught",
+            "stale copy" in review_doc(f"# outbound\n\n{live}".replace(body, body + "\nx")),
+        )
+        expect(
+            "an include naming a file that does not exist is caught",
+            "does not exist" in review_doc(
+                f"{INCLUDE_OPEN}contracts/goldens/absent.md -->\nx\n{INCLUDE_CLOSE}\n"),
+        )
+        expect(
+            "an include with no closing marker is caught",
+            "unterminated" in review_doc(f"{INCLUDE_OPEN}{source_name} -->\n{body}\n"),
+        )
+        # The convention's own README has to document this syntax, and the only way to show
+        # it is inside a fence. A scanner blind to fences reads that example as a live
+        # include and fails on a file the example never claimed to copy, so the rule's
+        # documentation could never satisfy the rule. This pins that it can.
+        fenced = ("# outbound\n\n```\n"
+                  f"{INCLUDE_OPEN}contracts/goldens/absent.md -->\n"
+                  f"...a byte-identical copy of that file...\n{INCLUDE_CLOSE}\n```\n")
+        expect(
+            "an include shown as a fenced example is not read as a live include",
+            review_doc(fenced) == "",
+        )
+        expect(
+            "a live include after a fenced example is still checked",
+            "stale copy" in review_doc(fenced + "\n" + live.replace(body, "drifted")),
+        )
+        # A block whose BODY carries a fence -- a generated table may. Walking back into the
+        # body instead of resuming past the close marker toggles fence state on that line
+        # and goes blind to every include after it, so the later block must still be seen.
+        # The first block is stale either way; only the SECOND one discriminates.
+        carries_fence = (f"{INCLUDE_OPEN}{source_name} -->\n"
+                         f"drifted\n```\nstill inside the body\n{INCLUDE_CLOSE}\n")
+        expect(
+            "a fence inside included content does not hide a later include",
+            "does not exist" in review_doc(
+                carries_fence + "\n"
+                + f"{INCLUDE_OPEN}contracts/goldens/absent.md -->\nx\n{INCLUDE_CLOSE}\n"),
+        )
+        document.unlink()
+        expect(
+            "a review directory holding no markdown is a failure, not a clean verdict",
+            review_include_error(review) != "",
+        )
+    expect(
+        "a missing review directory is a failure, not a clean verdict",
+        review_include_error(review) != "",
     )
 
     fake_calls: List[Sequence[str]] = []

@@ -134,9 +134,14 @@ DEFAULT_SELFTEST_TIMEOUT = 15
 # measured runtime -- left the whole harness selftest green, because the only assertion
 # re-derived the expected value from this table.
 SELFTEST_TIMEOUT_MARGIN = 0.6
-# The only non-aggregated selftest is this recursive meta-suite itself.
+# Non-aggregated, and why. The discovery above matches any file carrying the STRING
+# "--selftest", which cannot tell a script that exposes one from a script that invokes
+# one. Both entries here are the second kind or the recursive case; anything else that
+# lands in this dict is a suite dodging aggregation.
 SELFTEST_EXEMPTIONS = {
     "hooks/harness_check.py": "recursive meta-suite",
+    "tools/write-mutation-receipt.py": "runs the guards' selftests against mutated source "
+                                       "to measure them; exposes no suite of its own",
 }
 PRODUCTION_CHECKS = (
     ("C1", "c1_selftests"),

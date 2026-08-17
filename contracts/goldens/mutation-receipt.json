@@ -1,0 +1,1444 @@
+{
+ "note": "what the guards' suites CATCH, measured by breaking them",
+ "baseline": {
+  "hooks/guards/git_grep_engine_guard.py": {
+   "checks": 571,
+   "failures": 0
+  },
+  "hooks/guards/zsh_rev_modifier_guard.py": {
+   "checks": 239,
+   "failures": 0
+  }
+ },
+ "sweep_exclusions": {
+  "ZSH_EQUALS_OFF": "a repeated character, so an enum value spelled as a word rather than a membership charset",
+  "ZSH_EQUALS_UNKNOWN": "a repeated character, so an enum value spelled as a word rather than a membership charset",
+  "ALIAS_HARMLESS": "a repeated character, so an enum value spelled as a word rather than a membership charset",
+  "ALIAS_GUARDED": "a repeated character, so an enum value spelled as a word rather than a membership charset",
+  "ALIAS_UNCERTAIN": "a repeated character, so an enum value spelled as a word rather than a membership charset"
+ },
+ "selector_drift": [],
+ "site_survivors": [],
+ "sets": {
+  "CONFIG_ENGINE": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "kind": "dict",
+   "elements": 7,
+   "min": 0,
+   "max": 14,
+   "at_minimum": [
+    "basic",
+    "default",
+    "ere",
+    "fixed",
+    "pcre"
+   ],
+   "margins": {
+    "extended": {
+     "failures": 14
+    },
+    "ere": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "perl": {
+     "failures": 2
+    },
+    "pcre": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "fixed": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "basic": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "default": {
+     "failures": 0,
+     "merged_failures": 0
+    }
+   }
+  },
+  "CONTROL_KEYWORDS": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "kind": "set",
+   "elements": 11,
+   "min": 0,
+   "max": 1,
+   "at_minimum": [
+    "do",
+    "elif",
+    "else",
+    "nocorrect",
+    "noglob",
+    "until",
+    "while"
+   ],
+   "margins": {
+    "!": {
+     "failures": 1
+    },
+    "do": {
+     "failures": 0,
+     "merged_failures": 1
+    },
+    "then": {
+     "failures": 1
+    },
+    "else": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "elif": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "if": {
+     "failures": 1
+    },
+    "while": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "until": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "time": {
+     "failures": 1
+    },
+    "nocorrect": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "noglob": {
+     "failures": 0,
+     "merged_failures": 0
+    }
+   }
+  },
+  "CROSS_VERSION_ALIAS_PROOF": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "kind": "set",
+   "elements": 22,
+   "min": 0,
+   "max": 15,
+   "at_minimum": [
+    "archive",
+    "blame",
+    "branch",
+    "cat-file",
+    "checkout",
+    "commit",
+    "config",
+    "diff",
+    "fetch",
+    "gc",
+    "log",
+    "ls-tree",
+    "pull",
+    "push",
+    "rev-list",
+    "rev-parse",
+    "shortlog",
+    "show"
+   ],
+   "margins": {
+    "add": {
+     "failures": 1
+    },
+    "archive": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "blame": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "branch": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "cat-file": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "checkout": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "commit": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "config": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "diff": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "fetch": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "gc": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "grep": {
+     "failures": 13
+    },
+    "log": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "ls-tree": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "pull": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "push": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "rev-list": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "rev-parse": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "shortlog": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "show": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "stash": {
+     "failures": 1
+    },
+    "status": {
+     "failures": 15
+    }
+   }
+  },
+  "EXEC_WRAPPERS": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "kind": "dict",
+   "elements": 6,
+   "min": 1,
+   "max": 6,
+   "at_minimum": [
+    "setsid"
+   ],
+   "margins": {
+    "nohup": {
+     "failures": 4
+    },
+    "timeout": {
+     "failures": 2
+    },
+    "stdbuf": {
+     "failures": 2
+    },
+    "setsid": {
+     "failures": 1
+    },
+    "caffeinate": {
+     "failures": 6
+    },
+    "sudo": {
+     "failures": 3
+    }
+   }
+  },
+  "GIT_HAZARD_SUBCOMMANDS": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "kind": "set",
+   "elements": 13,
+   "min": 0,
+   "max": 37,
+   "at_minimum": [
+    "archive",
+    "blame",
+    "cat-file",
+    "checkout",
+    "diff",
+    "ls-tree",
+    "restore",
+    "rev-list",
+    "rev-parse",
+    "shortlog"
+   ],
+   "margins": {
+    "grep": {
+     "failures": 37
+    },
+    "show": {
+     "failures": 2
+    },
+    "diff": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "cat-file": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "log": {
+     "failures": 1
+    },
+    "ls-tree": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "archive": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "checkout": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "restore": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "rev-parse": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "blame": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "shortlog": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "rev-list": {
+     "failures": 0,
+     "merged_failures": 0
+    }
+   }
+  },
+  "GIT_LOG_ENGINE_TOKENS": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "kind": "dict",
+   "elements": 7,
+   "min": 0,
+   "max": 15,
+   "at_minimum": [
+    "--basic-regexp",
+    "--fixed-strings",
+    "--perl-regexp",
+    "-F"
+   ],
+   "margins": {
+    "-E": {
+     "failures": 15
+    },
+    "--extended-regexp": {
+     "failures": 1
+    },
+    "-F": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--fixed-strings": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "-P": {
+     "failures": 4
+    },
+    "--perl-regexp": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--basic-regexp": {
+     "failures": 0,
+     "merged_failures": 0
+    }
+   }
+  },
+  "GIT_LOG_GREP_SUBCOMMANDS": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "kind": "set",
+   "elements": 3,
+   "min": 2,
+   "max": 12,
+   "at_minimum": [
+    "rev-list"
+   ],
+   "margins": {
+    "log": {
+     "failures": 12
+    },
+    "shortlog": {
+     "failures": 3
+    },
+    "rev-list": {
+     "failures": 2
+    }
+   }
+  },
+  "GIT_LOG_PATTERN_OPTIONS": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "kind": "set",
+   "elements": 3,
+   "min": 0,
+   "max": 16,
+   "at_minimum": [
+    "--committer"
+   ],
+   "margins": {
+    "--grep": {
+     "failures": 16
+    },
+    "--author": {
+     "failures": 1
+    },
+    "--committer": {
+     "failures": 0,
+     "merged_failures": 0
+    }
+   }
+  },
+  "GREP_LONG_BOOLEAN_OPTIONS": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "kind": "set",
+   "elements": 37,
+   "min": 0,
+   "max": 6,
+   "at_minimum": [
+    "--all-match",
+    "--break",
+    "--cached",
+    "--color",
+    "--column",
+    "--count",
+    "--exclude-standard",
+    "--files-with-matches",
+    "--files-without-match",
+    "--full-name",
+    "--function-context",
+    "--heading",
+    "--ignore-case",
+    "--invert-match",
+    "--line-number",
+    "--name-only",
+    "--null",
+    "--only-matching",
+    "--open-files-in-pager",
+    "--quiet",
+    "--recurse-submodules",
+    "--recursive",
+    "--show-function",
+    "--text",
+    "--textconv",
+    "--untracked",
+    "--word-regexp"
+   ],
+   "margins": {
+    "--cached": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--untracked": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--exclude-standard": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--recurse-submodules": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--invert-match": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--ignore-case": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--word-regexp": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--text": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--textconv": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--recursive": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--basic-regexp": {
+     "failures": 1
+    },
+    "--extended-regexp": {
+     "failures": 6
+    },
+    "--fixed-strings": {
+     "failures": 1
+    },
+    "--perl-regexp": {
+     "failures": 4
+    },
+    "--line-number": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--column": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--full-name": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--files-with-matches": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--name-only": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--files-without-match": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--null": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--only-matching": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--count": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--color": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--break": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--heading": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--context": {
+     "failures": 1
+    },
+    "--before-context": {
+     "failures": 1
+    },
+    "--after-context": {
+     "failures": 1
+    },
+    "--threads": {
+     "failures": 1
+    },
+    "--show-function": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--function-context": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--quiet": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--all-match": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--open-files-in-pager": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--ext-grep": {
+     "failures": 1
+    },
+    "--max-count": {
+     "failures": 2
+    }
+   }
+  },
+  "GREP_LONG_ENGINE": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "kind": "dict",
+   "elements": 4,
+   "min": 0,
+   "max": 5,
+   "at_minimum": [
+    "--basic-regexp",
+    "--fixed-strings",
+    "--perl-regexp"
+   ],
+   "margins": {
+    "--basic-regexp": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--extended-regexp": {
+     "failures": 5
+    },
+    "--fixed-strings": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--perl-regexp": {
+     "failures": 0,
+     "merged_failures": 0
+    }
+   }
+  },
+  "GREP_LONG_NEGATED_ENGINE": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "kind": "set",
+   "elements": 4,
+   "min": 1,
+   "max": 2,
+   "at_minimum": [
+    "--no-basic-regexp",
+    "--no-extended-regexp",
+    "--no-fixed-strings"
+   ],
+   "margins": {
+    "--no-basic-regexp": {
+     "failures": 1
+    },
+    "--no-extended-regexp": {
+     "failures": 1
+    },
+    "--no-fixed-strings": {
+     "failures": 1
+    },
+    "--no-perl-regexp": {
+     "failures": 2
+    }
+   }
+  },
+  "GREP_LONG_OPTIONAL_VALUE": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "kind": "set",
+   "elements": 2,
+   "min": 0,
+   "max": 0,
+   "at_minimum": [
+    "--color",
+    "--open-files-in-pager"
+   ],
+   "margins": {
+    "--color": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--open-files-in-pager": {
+     "failures": 0,
+     "merged_failures": 0
+    }
+   }
+  },
+  "GREP_LONG_OPTION_NAMES": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "kind": "set",
+   "elements": 6,
+   "min": 0,
+   "max": 2,
+   "at_minimum": [
+    "--and",
+    "--index",
+    "--no-index",
+    "--not",
+    "--or"
+   ],
+   "margins": {
+    "--no-index": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--index": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--max-depth": {
+     "failures": 2
+    },
+    "--and": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--or": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--not": {
+     "failures": 0,
+     "merged_failures": 0
+    }
+   }
+  },
+  "GREP_LONG_REQUIRED_VALUE": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "kind": "set",
+   "elements": 6,
+   "min": 1,
+   "max": 1,
+   "at_minimum": [
+    "--after-context",
+    "--before-context",
+    "--context",
+    "--max-count",
+    "--max-depth",
+    "--threads"
+   ],
+   "margins": {
+    "--max-depth": {
+     "failures": 1
+    },
+    "--threads": {
+     "failures": 1
+    },
+    "--max-count": {
+     "failures": 1
+    },
+    "--after-context": {
+     "failures": 1
+    },
+    "--before-context": {
+     "failures": 1
+    },
+    "--context": {
+     "failures": 1
+    }
+   }
+  },
+  "GREP_SHORT_ENGINE": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "kind": "dict",
+   "elements": 4,
+   "min": 3,
+   "max": 184,
+   "at_minimum": [
+    "F",
+    "G"
+   ],
+   "margins": {
+    "E": {
+     "failures": 184
+    },
+    "F": {
+     "failures": 3
+    },
+    "G": {
+     "failures": 3
+    },
+    "P": {
+     "failures": 37
+    }
+   }
+  },
+  "GREP_SHORT_NOARG": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "kind": "charset",
+   "elements": 17,
+   "min": 1,
+   "max": 51,
+   "at_minimum": [
+    "H",
+    "I",
+    "L",
+    "a",
+    "h",
+    "i",
+    "l",
+    "q",
+    "r",
+    "v",
+    "w",
+    "z"
+   ],
+   "margins": {
+    "a": {
+     "failures": 1
+    },
+    "c": {
+     "failures": 2
+    },
+    "h": {
+     "failures": 1
+    },
+    "i": {
+     "failures": 1
+    },
+    "l": {
+     "failures": 1
+    },
+    "n": {
+     "failures": 51
+    },
+    "o": {
+     "failures": 2
+    },
+    "p": {
+     "failures": 2
+    },
+    "q": {
+     "failures": 1
+    },
+    "r": {
+     "failures": 1
+    },
+    "v": {
+     "failures": 1
+    },
+    "w": {
+     "failures": 1
+    },
+    "z": {
+     "failures": 1
+    },
+    "H": {
+     "failures": 1
+    },
+    "I": {
+     "failures": 1
+    },
+    "L": {
+     "failures": 1
+    },
+    "W": {
+     "failures": 2
+    }
+   }
+  },
+  "GREP_SHORT_OPTIONAL_VALUE": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "kind": "set",
+   "elements": 1,
+   "min": 1,
+   "max": 1,
+   "at_minimum": [
+    "O"
+   ],
+   "margins": {
+    "O": {
+     "failures": 1
+    }
+   }
+  },
+  "GREP_SHORT_PATTERN_ARG": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "kind": "set",
+   "elements": 2,
+   "min": 4,
+   "max": 22,
+   "at_minimum": [
+    "f"
+   ],
+   "margins": {
+    "e": {
+     "failures": 22
+    },
+    "f": {
+     "failures": 4
+    }
+   }
+  },
+  "GREP_SHORT_VALUE": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "kind": "charset",
+   "elements": 4,
+   "min": 3,
+   "max": 5,
+   "at_minimum": [
+    "B",
+    "C"
+   ],
+   "margins": {
+    "m": {
+     "failures": 5
+    },
+    "A": {
+     "failures": 4
+    },
+    "B": {
+     "failures": 3
+    },
+    "C": {
+     "failures": 3
+    }
+   }
+  },
+  "PCRE_ESCAPE_LETTERS": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "kind": "charset",
+   "elements": 21,
+   "min": 0,
+   "max": 194,
+   "at_minimum": [
+    "A",
+    "B",
+    "D",
+    "H",
+    "R",
+    "S",
+    "V",
+    "W",
+    "Z",
+    "h",
+    "v",
+    "z"
+   ],
+   "margins": {
+    "b": {
+     "failures": 194
+    },
+    "B": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "d": {
+     "failures": 1
+    },
+    "D": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "s": {
+     "failures": 4
+    },
+    "S": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "w": {
+     "failures": 1
+    },
+    "W": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "A": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "Z": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "z": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "h": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "H": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "v": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "V": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "R": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "Q": {
+     "failures": 1
+    },
+    "E": {
+     "failures": 1
+    },
+    "X": {
+     "failures": 2
+    },
+    "N": {
+     "failures": 2
+    },
+    "K": {
+     "failures": 2
+    }
+   }
+  },
+  "SHELLS": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "kind": "set",
+   "elements": 5,
+   "min": 0,
+   "max": 37,
+   "at_minimum": [
+    "dash",
+    "ksh"
+   ],
+   "margins": {
+    "sh": {
+     "failures": 32
+    },
+    "bash": {
+     "failures": 5
+    },
+    "zsh": {
+     "failures": 37
+    },
+    "dash": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "ksh": {
+     "failures": 0,
+     "merged_failures": 0
+    }
+   }
+  },
+  "SHELL_NON_FORWARDING_COMMANDS": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "kind": "set",
+   "elements": 2,
+   "min": 1,
+   "max": 4,
+   "at_minimum": [
+    "printf"
+   ],
+   "margins": {
+    "echo": {
+     "failures": 4
+    },
+    "printf": {
+     "failures": 1
+    }
+   }
+  },
+  "TRUSTED_EXTERNAL_NON_FORWARDING_COMMANDS": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "kind": "set",
+   "elements": 3,
+   "min": 1,
+   "max": 3,
+   "at_minimum": [
+    "/usr/bin/printf"
+   ],
+   "margins": {
+    "/bin/cat": {
+     "failures": 3
+    },
+    "/bin/echo": {
+     "failures": 2
+    },
+    "/usr/bin/printf": {
+     "failures": 1
+    }
+   }
+  },
+  "WRAPPER_TERMINAL_OPTIONS": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "kind": "set",
+   "elements": 2,
+   "min": 0,
+   "max": 1,
+   "at_minimum": [
+    "--version"
+   ],
+   "margins": {
+    "--help": {
+     "failures": 1
+    },
+    "--version": {
+     "failures": 0,
+     "merged_failures": 0
+    }
+   }
+  },
+  "_CLOSED_LIMITS": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "kind": "dict",
+   "elements": 5,
+   "min": 0,
+   "max": 0,
+   "at_minimum": [
+    "MAX_ENV_SPLITS",
+    "MAX_PREFIX_DEPTH",
+    "MAX_SOURCE_DEPTH",
+    "MAX_SUBCOMMANDS",
+    "MAX_TOKENS"
+   ],
+   "margins": {
+    "MAX_TOKENS": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "MAX_SUBCOMMANDS": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "MAX_PREFIX_DEPTH": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "MAX_ENV_SPLITS": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "MAX_SOURCE_DEPTH": {
+     "failures": 0,
+     "merged_failures": 0
+    }
+   }
+  },
+  "_GIT_GLOBAL_OPTIONS_WITH_VALUES": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "kind": "set",
+   "elements": 9,
+   "min": 0,
+   "max": 0,
+   "at_minimum": [
+    "--attr-source",
+    "--config-env",
+    "--exec-path",
+    "--git-dir",
+    "--namespace",
+    "--super-prefix",
+    "--work-tree",
+    "-C",
+    "-c"
+   ],
+   "margins": {
+    "-C": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "-c": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--git-dir": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--work-tree": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--namespace": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--super-prefix": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--exec-path": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--config-env": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "--attr-source": {
+     "failures": 0,
+     "merged_failures": 0
+    }
+   }
+  },
+  "MODS": {
+   "module": "hooks/guards/zsh_rev_modifier_guard.py",
+   "kind": "charset",
+   "elements": 13,
+   "min": 1,
+   "max": 78,
+   "at_minimum": [
+    "A",
+    "P",
+    "Q",
+    "c",
+    "h",
+    "q"
+   ],
+   "margins": {
+    "a": {
+     "failures": 3
+    },
+    "A": {
+     "failures": 1
+    },
+    "c": {
+     "failures": 1
+    },
+    "e": {
+     "failures": 3
+    },
+    "h": {
+     "failures": 1
+    },
+    "l": {
+     "failures": 2
+    },
+    "P": {
+     "failures": 1
+    },
+    "q": {
+     "failures": 1
+    },
+    "Q": {
+     "failures": 1
+    },
+    "r": {
+     "failures": 8
+    },
+    "s": {
+     "failures": 78
+    },
+    "t": {
+     "failures": 12
+    },
+    "u": {
+     "failures": 4
+    }
+   }
+  },
+  "MOD_MEANING": {
+   "module": "hooks/guards/zsh_rev_modifier_guard.py",
+   "kind": "dict",
+   "elements": 13,
+   "min": 0,
+   "max": 0,
+   "at_minimum": [
+    "A",
+    "P",
+    "Q",
+    "a",
+    "c",
+    "e",
+    "h",
+    "l",
+    "q",
+    "r",
+    "s",
+    "t",
+    "u"
+   ],
+   "margins": {
+    "a": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "A": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "c": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "e": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "h": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "l": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "P": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "q": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "Q": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "r": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "s": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "t": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "u": {
+     "failures": 0,
+     "merged_failures": 0
+    }
+   }
+  },
+  "MOD_PREFIXES": {
+   "module": "hooks/guards/zsh_rev_modifier_guard.py",
+   "kind": "charset",
+   "elements": 4,
+   "min": 1,
+   "max": 6,
+   "at_minimum": [
+    "F"
+   ],
+   "margins": {
+    "g": {
+     "failures": 6
+    },
+    "f": {
+     "failures": 5
+    },
+    "w": {
+     "failures": 3
+    },
+    "F": {
+     "failures": 1
+    }
+   }
+  },
+  "REV_PATH_SUBCOMMANDS": {
+   "module": "hooks/guards/zsh_rev_modifier_guard.py",
+   "kind": "set",
+   "elements": 15,
+   "min": 0,
+   "max": 94,
+   "at_minimum": [
+    "archive",
+    "blame",
+    "checkout",
+    "diff",
+    "grep",
+    "log",
+    "ls-tree",
+    "restore",
+    "rev-parse"
+   ],
+   "margins": {
+    "show": {
+     "failures": 94
+    },
+    "diff": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "cat-file": {
+     "failures": 1
+    },
+    "log": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "ls-tree": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "archive": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "checkout": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "restore": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "grep": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "rev-parse": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "blame": {
+     "failures": 0,
+     "merged_failures": 0
+    },
+    "push": {
+     "failures": 2
+    },
+    "fetch": {
+     "failures": 1
+    },
+    "pull": {
+     "failures": 1
+    },
+    "difftool": {
+     "failures": 1
+    }
+   }
+  }
+ },
+ "sites": {
+  "budget wrap deleted": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "anchor_sha256": "a83ef1af3fcdd293",
+   "failures": 1
+  },
+  "decision-budget checkpoint neutered": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "anchor_sha256": "f7cafa02542b79ca",
+   "failures": 3
+  },
+  "guarded-tail predicate rescans per word": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "anchor_sha256": "4b7fedb6b0058c51",
+   "failures": "timed out",
+   "timeout_seconds": 180
+  },
+  "equals PATH-lookup cache dropped": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "anchor_sha256": "217c3421226d2239",
+   "failures": 1
+  },
+  "candidate_trusted forced true": {
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "anchor_sha256": "3edd24d373d2c013",
+   "failures": 2
+  },
+  "is_rev_path_git forced true": {
+   "module": "hooks/guards/zsh_rev_modifier_guard.py",
+   "anchor_sha256": "00246acff6af5b58",
+   "failures": 50
+  }
+ }
+}

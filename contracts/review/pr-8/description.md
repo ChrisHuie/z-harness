@@ -1,4 +1,4 @@
-Head: `e5d508db0d76000fc963a7aa9d3f3e95129ebc39` for every figure below. Later commits on this branch add
+Head: `3113c67e1fd71666492a00749d72a1e9fb8d21cf` for every figure below. Later commits on this branch add
 only review documents under `contracts/review/`, changing no guard, tool or contract.
 
 ## Summary
@@ -87,11 +87,11 @@ classifies inside the budget.
 
 ## Verification
 
-At `e5d508db0d76000fc963a7aa9d3f3e95129ebc39`, with zero workspace changes:
+At `3113c67e1fd71666492a00749d72a1e9fb8d21cf`, with zero workspace changes:
 
 - `python3 tools/ci-gate.py`: 10 suites, 0 failures;
 - harness CI 225 checks, harness selftest 75, renderer 192;
-- Bash guard 1,088; Git guard 571; zsh guard 239; ci-gate 51;
+- Bash guard 1,100; Git guard 583; zsh guard 239; ci-gate 53;
 - skill-eval validation 22 scenarios across 6 skills; fresh render and verify 5 targets.
 
 `contracts/goldens/guard-decisions.json` records the verdict for 752 commands — 233 allow,
@@ -107,10 +107,13 @@ survives and none moved a check count, so the mutations broke behaviour rather t
 selector.
 
 Element margins are uneven. 172 of the 251 elements are held by fewer than two checks and
-132 by none; for those, removing the element leaves both the owning suite and the merged
+103 by none; for those, removing the element leaves both the owning suite and the merged
 Bash suite green. `MOD_MEANING` and `_CLOSED_LIMITS` are excluded, the first being read
-only to build reason text and the second being the drift check itself. That count is a
-shrink-only ceiling in `tools/ci-gate.py`: it can fall, and cannot rise without failing.
+only to build reason text and the second being the drift check itself. The shrink-only
+ceiling in `tools/ci-gate.py` is the shortfall those margins leave against a target of two,
+`sum(target - margin)` and currently 275, rather than the number of elements below it: an
+element moving from no checks to one leaves that count unchanged, so a closed gap did not
+register. The shortfall can fall, and cannot rise without failing.
 
 Behavioural footprint against `654be2a2`, over a 731-command fixture corpus: 414
 commands change decision — 182 allow→deny and 187 allow→ask, all carrying hazard text
@@ -118,13 +121,13 @@ except 38; 29 deny→allow and 11 deny→ask where the branch point was over-str
 ask→allow and 2 ask→deny. No hazard-free command becomes `deny`.
 
 GitHub completed both exact-head workflow events successfully. `pr-delivery-state.py --pr 8`
-reports zero workspace changes, local head equal to PR head, 6/6 checks, 2/2 exact-head
-runs, merge state `CLEAN`, verdict `PUBLISHED_AND_GREEN`.
+reports PR head equal to this commit, 6/6 checks passed, 2/2 exact-head runs passed, and
+merge state `CLEAN`.
 
 ## Limits and not run
 
-The margin ceiling records current coverage rather than a target met: 172 elements are held by
-fewer than two checks. Raising them is not attempted here.
+The margin ceiling records current coverage rather than a target met: the recorded shortfall is
+275, with 172 elements held by fewer than two checks. Raising them is not attempted here.
 
 This is a conservative model of relevant shell grammar, not a complete shell interpreter.
 Non-shell interpreter bodies — `python3 -c`, `perl -e`, `ruby -e`, `node -e`, `awk` program

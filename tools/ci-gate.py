@@ -37,7 +37,7 @@ EVAL_SKILL_FLOOR = 6
 SUITE_FLOORS = {
     "harness_check": 75,
     "render-packages": 192,
-    "bash_command_guard": 1088,
+    "bash_command_guard": 1100,
     "git_grep_engine_guard": 583,
     "zsh_rev_modifier_guard": 239,
 }

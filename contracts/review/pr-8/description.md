@@ -1,4 +1,4 @@
-Head: `8a711a4e1e07c21370f3ade7b83a208a3bbf9a8d` for every figure below. Later commits on this branch add
+Head: `37c288d57a0acfeac158aeb9e32781418a9c6e73` for every figure below. Later commits on this branch add
 only review documents under `contracts/review/`, changing no guard, tool or contract.
 
 ## Summary
@@ -87,10 +87,10 @@ classifies inside the budget.
 
 ## Verification
 
-At `8a711a4e1e07c21370f3ade7b83a208a3bbf9a8d`, with zero workspace changes:
+At `37c288d57a0acfeac158aeb9e32781418a9c6e73`, with zero workspace changes:
 
 - `python3 tools/ci-gate.py`: 10 suites, 0 failures;
-- harness CI 225 checks, harness selftest 76, renderer 192;
+- harness CI 225 checks, harness selftest 77, renderer 192;
 - Bash guard 1,100; Git guard 583; zsh guard 239; ci-gate 55;
 - skill-eval validation 22 scenarios across 6 skills; fresh render and verify 5 targets.
 

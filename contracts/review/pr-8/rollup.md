@@ -1,10 +1,10 @@
 ## Review roll-up
 
 Evidence heads. The gate, CI and clean-clone results below were taken at
-`37c288d57a0acfeac158aeb9e32781418a9c6e73`. The mutation figures were measured at that same
+`6f9fe03d288e6bb27dc3d589b06b9c34c067a9ed`. The mutation figures were measured at that same
 head: `contracts/goldens/mutation-receipt.json` records a sha256 of each guard source it was
 swept against, and the gate rejects the receipt when those bytes no longer match. Any commit
-after `37c288d` on this branch adds this document and changes no guard, tool or contract.
+after `6f9fe03` on this branch adds this document and changes no guard, tool or contract.
 
 The seven inline threads carry each finding and its disposition; this comment carries only
 evidence with no single anchor, and is edited in place rather than reposted.
@@ -229,11 +229,11 @@ From a clean clone, `python3` and `git` only:
 
 ```
 git clone https://github.com/ChrisHuie/z-harness && cd z-harness
-git checkout 37c288d57a0acfeac158aeb9e32781418a9c6e73
+git checkout 6f9fe03d288e6bb27dc3d589b06b9c34c067a9ed
 python3 tools/ci-gate.py                                    # 10 suites / 0 failures
 python3 hooks/harness_check.py --selftest                   # 77
-python3 hooks/guards/git_grep_engine_guard.py --selftest    # 583
-python3 hooks/guards/zsh_rev_modifier_guard.py --selftest   # 239
+python3 hooks/guards/git_grep_engine_guard.py --selftest    # 603
+python3 hooks/guards/zsh_rev_modifier_guard.py --selftest   # 240
 python3 hooks/bash_command_guard.py --selftest              # 1100
 ```
 

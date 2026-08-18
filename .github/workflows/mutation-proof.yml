@@ -1,0 +1,70 @@
+name: mutation-proof
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  mutations:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: 3.13.14
+      - name: install zsh and assert the exact pull-request head
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zsh
+          zsh --version
+          git rev-parse HEAD | grep -Fx '${{ github.event.pull_request.head.sha }}'
+      - name: run mutation shard
+        run: >-
+          python3 tools/write-mutation-receipt.py
+          --shard-index ${{ matrix.shard }}
+          --shard-count 6
+          --fragment mutation-fragment-${{ matrix.shard }}.json
+          --expected-head '${{ github.event.pull_request.head.sha }}'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mutation-fragment-${{ matrix.shard }}
+          path: mutation-fragment-${{ matrix.shard }}.json
+          if-no-files-found: error
+          retention-days: 7
+
+  aggregate:
+    if: always()
+    needs: mutations
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: 3.13.14
+      - name: install zsh and assert the exact pull-request head
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zsh
+          zsh --version
+          git rev-parse HEAD | grep -Fx '${{ github.event.pull_request.head.sha }}'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: mutation-fragment-*
+          path: mutation-fragments
+          merge-multiple: true
+      - name: reject incomplete evidence and compare the tracked receipt
+        run: >-
+          python3 tools/write-mutation-receipt.py
+          --aggregate mutation-fragments/*.json

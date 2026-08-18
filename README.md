@@ -154,14 +154,28 @@ python3 tools/ci-gate.py
 meta-selftest, the renderer and guard selftests, eval validation, and a fresh render/verify pair. It
 accepts each child only when the process result and one terminal, suite-qualified receipt agree.
 The workflow pins its action commits and Python patch version, grants only read access to contents,
-does not persist checkout credentials, and runs that gate using fixed Ubuntu and macOS runner labels;
-GitHub still manages the image contents behind those labels. A separate
+does not persist checkout credentials, and first runs `hooks/harness_check.py --ci` before the
+complete gate on fixed Ubuntu and macOS runner labels. The harness binds the reviewed `ci-gate.py`
+source and the gate independently binds the reviewed harness source, so replacing either runner in
+isolation fails before its claimed receipt is accepted when the declared workflow invokes both.
+The in-repository workflow files are trust roots: a workflow-only edit can bypass those runners,
+and coordinated edits to both workflows can fabricate both in-repo job classes. Reviewer inspection
+or an externally administered required workflow must govern that boundary. GitHub still manages the
+image contents behind those labels. A pull-request-only `mutation-proof`
+workflow explicitly checks out `github.event.pull_request.head.sha`, runs the deterministic mutation
+plan in six private-tree shards, and aggregates raw artifacts with `if: always()`. The aggregator
+rejects missing, duplicate, overlapping, foreign, or stale mutation IDs, recomputes each raw outcome,
+schema-compares the canonical tracked receipt, and byte-compares the tracked summary. The offline gate validates that receipt against
+the current plan and sources, derives the canonical summary bytes from the strict receipt, and then
+checks the outbound include copies; it does not rerun the expensive mutation plan locally. A separate
 declared Ubuntu job runs `tools/portable-conformance.py`. It resolves locked wheel filenames through
 live PyPI metadata, requires the published digest to equal the lock, hash-verifies every downloaded
 artifact, derives the vendored Agent Plugins schema and license URLs from their pinned repository
 revision and paths, and verifies a signed, hash-pinned Claude Code release before validating a fresh render.
 Network failure is red, never skipped. The repository workflow does not itself prove that either job
-is a branch-protection required check.
+is a branch-protection required check. `tools/pr-delivery-state.py` proves generic exact-head check
+and workflow presence; final mutation evidence additionally requires the named mutation workflow,
+six nonempty shard artifacts, and its successful aggregate job to be inspected explicitly.
 
 Local `harness_check.py` mode adds machine-specific Claude anchors. `--selftest` plants defects and
 proves each check family can turn red; a zero-input scan is an error, not a clean verdict. C1 requires

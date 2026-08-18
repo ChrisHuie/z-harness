@@ -249,13 +249,25 @@ python3 tools/render-packages.py --selftest
 python3 tools/ci-gate.py --selftest
 ```
 
-The workflow runs the offline gate on fixed Ubuntu and macOS runner labels with an exact Python patch
-version; GitHub manages the image contents behind those labels. It also declares a separate Ubuntu
+The workflow first runs the source-bound harness bootstrap and then the offline gate on fixed Ubuntu
+and macOS runner labels with an exact Python patch version. The harness binds `ci-gate.py`, and the
+gate binds the harness, so an isolated replacement of either runner fails when the declared workflow
+invokes both. The in-repository workflow files are trust roots: a workflow-only edit can bypass the
+runners, and edits to both workflows can fabricate both in-repo job classes. Reviewer inspection or
+an externally administered required workflow must govern that boundary. GitHub manages the image
+contents behind those labels. It also declares a separate Ubuntu
 job running `tools/portable-conformance.py` with a hash-pinned Agent Skills reference-validator
 closure and signature- and hash-pinned Claude Code binary. Network or upstream failure is red. The
 workflow alone does not prove either job is a branch-protection required check. Actual document
 provenance scans and headless model scenarios remain manual because they require a selected
 document/transcript or spend API budget.
+
+A separate pull-request-only `mutation-proof` workflow checks out the exact pull-request head and
+runs six deterministic mutation shards in private trees. Its `if: always()` aggregate job rejects
+missing, duplicated, overlapping, foreign, or stale fragment IDs, independently recomputes each raw
+suite classification, and compares the aggregate with the tracked mutation receipt and summary. The
+offline gate validates those tracked artifacts and the workflow bytes but does not execute the full
+mutation plan.
 
 For an active PR, run the live publication gate after the push:
 
@@ -266,7 +278,9 @@ python3 tools/pr-delivery-state.py --pr <number> --repo <owner/repo>
 The command exits zero only when there are no workspace changes, local HEAD equals the GitHub PR
 head, the PR is non-conflicting, and both exact-head check and workflow-run lists are non-empty and
 successful. Pending CI exits 3; unpublished, conflicting, or failed state exits 1; missing evidence
-exits 2.
+exits 2. This generic command does not require a workflow by name or enumerate mutation shard jobs
+and artifacts. Before publication, separately require the final-head `mutation-proof` run, all six
+successful shard jobs, exactly six nonempty shard artifacts, and its successful aggregate job.
 
 Validate the package manifest with the bundled Codex plugin validator when available:
 

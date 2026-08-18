@@ -47,6 +47,20 @@ GUARDS = [
     ("git_grep_engine", grep_guard),
 ]
 RANK = {"allow": 0, "ask": 1, "deny": 2}
+PROCESS_GREP_COMMAND = "git grep -E 'harness\\b' -- README.md"
+PROCESS_SOURCE_EXPLOIT_COMMAND = (
+    "source <(/usr/bin/printf '%s\\n' \"git grep -E "
+    "'harness\\\\b' -- README.md; /bin/echo EXECUTED\")"
+)
+# The process-boundary tuple carries runtime/exit metadata and is not a decision-fixture
+# shape.  Export its two unique commands explicitly so the decision-golden generator's
+# exact live corpus cannot silently omit the public envelope exercised below.
+DECISION_FIXTURES = (
+    ("RED PROCESS: public envelope retains the direct grep decision",
+     PROCESS_GREP_COMMAND, "deny"),
+    ("ASK PROCESS: public envelope retains executable source uncertainty",
+     PROCESS_SOURCE_EXPLOIT_COMMAND, "ask"),
+)
 
 
 class EnvelopeError(ValueError):
@@ -195,6 +209,36 @@ def selftest():
           "unsupported confirmation maps to deny")
     hook_cases = (
         ("command-terminator", "command -- git grep -Ee'harness\\b' -- README.md", "deny"),
+        ("builtin-trap-source", "builtin trap 'source \"$FILE\"' EXIT", "ask"),
+        ("exec-single-dash-source", "exec - source \"$FILE\"", "ask"),
+        ("alias-exec-source",
+         "eval 'alias s=\"exec source\"'; eval 's \"$FILE\"'", "ask"),
+        ("alias-source-chain",
+         "eval 'alias a=b'; eval 'alias b=source'; eval 'a \"$FILE\"'", "ask"),
+        ("alias-embedded-source",
+         "eval 'alias s=\"source $FILE; /bin/echo done\"'; eval s", "ask"),
+        ("invoked-alias-installs-source",
+         ("eval 'alias a=\"builtin alias s=source\"'; eval a; "
+          "eval 's \"$FILE\"'"), "ask"),
+        ("repeat-alias-source",
+         "repeat 1 builtin alias s=source; eval 's \"$FILE\"'", "ask"),
+        ("function-alias-source",
+         "f(){ builtin alias s=source; }; f; eval 's \"$FILE\"'", "ask"),
+        ("debug-trap-alias-source",
+         "trap 'builtin alias s=source; trap - DEBUG' DEBUG; eval 's \"$FILE\"'",
+         "ask"),
+        ("alias-command-source",
+         "eval 'alias s=\"command source\"'; eval 's \"$FILE\"'", None),
+        ("quoted-alias-data", "/bin/echo 'alias s=source; s \"$FILE\"'", None),
+        ("repeat-zero-alias-source",
+         "repeat 0 builtin alias s=source; eval 's \"$FILE\"'", None),
+        ("uncalled-function-alias-source",
+         "f(){ builtin alias s=source; }; eval 's \"$FILE\"'", None),
+        ("exit-trap-alias-source",
+         "trap 'builtin alias s=source' EXIT; eval 's \"$FILE\"'", None),
+        ("invoked-alias-removes-source",
+         ("eval 'alias a=\"builtin alias s=source; unalias s\"'; eval a; "
+          "eval 's \"$FILE\"'"), None),
         ("exec-argv0", "SHA=x; exec -a harmless git show $SHA:src/f.py", "deny"),
         ("env-s-pcre", "env -S \"git grep -Pe'harness\\b' -- README.md\"", None),
         ("mixed-shell-dynamic", "sh -c 'zsh -c \"git show $SHA:src/f.py\"'", "deny"),
@@ -676,6 +720,46 @@ def selftest():
         ("child-zsh-heredoc-default",
          "unsetopt equals; zsh <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n",
          "deny"),
+        ("source-process",
+         "source <(/usr/bin/printf '%s\\n' '/bin/echo safe')", "ask"),
+        ("source-variable", 'source "$FILE"', "ask"),
+        ("source-producer-deny",
+         "source <(git grep -E 'harness\\b' -- README.md)", "deny"),
+        ("source-literal", "source ./script.sh", None),
+        ("source-data-consumer", "/bin/cat <(printf safe)", None),
+        ("ordinary-alias-rev",
+         "alias g='SHA=x; git show $SHA:src/f.py'; eval g", "ask"),
+        ("ordinary-alias-grep",
+         r'''alias q='git grep -E '"'"'harness\b'"'"' -- README.md'; eval q''',
+         "ask"),
+        ("global-alias-rev",
+         ("alias -g X='; git show $SHA:src/f.py'; "
+          "eval 'SHA=x; print -r -- BEFORE X'"), "ask"),
+        ("suffix-alias-rev",
+         "alias -s x='git show'; eval 'SHA=x; file.x $SHA:src/f.py'", "ask"),
+        ("prefixed-w-rev", "SHA=x; git show $SHA:gW@/@h", "ask"),
+        ("ordinary-alias-status", "alias g='git status --short'; eval g", None),
+        ("builtin-alias-bypass",
+         ("eval 'alias t=source'; eval 'alias s=\"builtin t\"'; "
+          "eval 's \"$FILE\"'"), None),
+        ("called-function-alias-rev",
+         "f(){ alias g='git show $SHA:src/f.py'; }; f; eval g", "ask"),
+        ("called-function-helper-alias-rev",
+         ("setalias(){ alias g='git show $SHA:src/f.py'; }; "
+          "f(){ setalias; }; f; eval g"), "ask"),
+        ("uncalled-function-alias-rev",
+         "f(){ alias g='git show $SHA:src/f.py'; }; eval g", None),
+        ("exit-trap-alias-rev",
+         "trap \"alias g='git show $SHA:src/f.py'\" EXIT; eval g", None),
+        ("unused-global-alias-rev",
+         "alias -g X='; git show $SHA:src/f.py'; print -r -- BEFORE", None),
+        ("redefined-global-alias-rev",
+         ("alias -g X='; git show $SHA:src/f.py'; alias X='print safe'; "
+          "eval 'print -r -- BEFORE X'"), None),
+        ("alias-bare-git-forward",
+         "git -c 'alias.x=!git' x show $SHA:src/f.py", "ask"),
+        ("alias-shell-cycle", "git -c 'alias.x=!git x' x", "ask"),
+        ("git-terminal-query", "git --exec-path $SHA:src/f.py", None),
     )
     # These run through `hook_mode` in this process. Each one used to be a real
     # interpreter spawn: 218 of them cost 63.5 ms each, about 14 s of the suite's
@@ -695,14 +779,37 @@ def selftest():
     # One real spawn per shape the in-process path cannot reach: argv parsing, actual
     # stdin, the exit code the runtime reads, and the stderr channel.
     process_boundary_sample = (
-        ("deny", "claude", "git grep -E 'harness\\b' -- README.md", 0, "deny", False),
+        ("deny", "claude", PROCESS_GREP_COMMAND, 0, "deny", False),
         ("ask", "claude", "git grep 'harness\\b' -- README.md", 0, "ask", False),
         ("allow", "claude", "git status --short", 0, None, False),
-        ("codex-deny", "codex", "git grep -E 'harness\\b' -- README.md", 0, "deny",
+        ("codex-deny", "codex", PROCESS_GREP_COMMAND, 0, "deny",
          False),
         ("codex-ask-maps", "codex", "git grep 'harness\\b' -- README.md", 0, "deny",
          False),
         ("codex-allow", "codex", "git status --short", 0, None, False),
+        ("ordinary-alias-rev", "claude",
+         "alias g='SHA=x; git show $SHA:src/f.py'; eval g", 0, "ask", False),
+        ("called-function-alias-rev", "claude",
+         "f(){ alias g='git show $SHA:src/f.py'; }; f; eval g",
+         0, "ask", False),
+        ("prefixed-w-rev", "claude", "SHA=x; git show $SHA:gW@/@h",
+         0, "ask", False),
+        ("source-ask", "claude",
+         "source <(/usr/bin/printf '%s\\n' '/bin/echo safe')", 0, "ask", False),
+        ("source-codex-ask", "codex",
+         "source <(/usr/bin/printf '%s\\n' '/bin/echo safe')", 0, "deny", False),
+        ("source-grep-exploit", "claude", PROCESS_SOURCE_EXPLOIT_COMMAND,
+         0, "ask", False),
+        ("source-grep-codex", "codex", PROCESS_SOURCE_EXPLOIT_COMMAND,
+         0, "deny", False),
+        ("source-rev-exploit", "claude",
+         ("SHA=HEAD; source <(/usr/bin/printf '%s\\n' "
+          "\"git show \\$SHA:src/f.py 2>/dev/null; /bin/echo AFTER\")"),
+         0, "ask", False),
+        ("source-rev-codex", "codex",
+         ("SHA=HEAD; source <(/usr/bin/printf '%s\\n' "
+          "\"git show \\$SHA:src/f.py 2>/dev/null; /bin/echo AFTER\")"),
+         0, "deny", False),
         ("non-bash-tool", "claude", None, 0, None, False),
         ("broken-envelope", "claude", "", 2, None, True),
     )
@@ -729,6 +836,15 @@ def selftest():
         print(f"  {'PASS' if ok else 'FAIL'} process-boundary   {label:<18} "
               f"rc={result.returncode} decision={got!s:<5} stderr={bool(result.stderr.strip())}")
     codex_cases = (
+        ("source-process",
+         "source <(/usr/bin/printf '%s\\n' '/bin/echo safe')"),
+        ("ordinary-alias-rev",
+         "alias g='SHA=x; git show $SHA:src/f.py'; eval g"),
+        ("called-function-alias-rev",
+         "f(){ alias g='git show $SHA:src/f.py'; }; f; eval g"),
+        ("prefixed-w-rev", "SHA=x; git show $SHA:gW@/@h"),
+        ("alias-bare-git-forward",
+         "git -c 'alias.x=!git' x show $SHA:src/f.py"),
         ("alternate-git-ere",
          "/nonexistent/bin/git grep -E 'harness\\b' -- README.md"),
         ("pcre-quote", "git grep -E '^\\Qabc\\E$' -- fixture.txt"),
@@ -949,6 +1065,14 @@ def selftest():
         print(f"  {'PASS' if ok else 'FAIL'} codex-json        {label:<18} "
               f"want=deny  got={got!s:<5}")
     codex_allow_cases = (
+        ("ordinary-alias-status", "alias g='git status --short'; eval g"),
+        ("uncalled-function-alias-rev",
+         "f(){ alias g='git show $SHA:src/f.py'; }; eval g"),
+        ("exit-trap-alias-rev",
+         "trap \"alias g='git show $SHA:src/f.py'\" EXIT; eval g"),
+        ("builtin-alias-bypass",
+         ("eval 'alias t=source'; eval 'alias s=\"builtin t\"'; "
+          "eval 's \"$FILE\"'")),
         ("alternate-git-status", "/nonexistent/bin/git status --short"),
         ("command-p-authority", "command -p git status --short"),
         ("env-clean-authority", "env -i git status --short"),

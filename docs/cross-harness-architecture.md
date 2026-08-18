@@ -211,9 +211,21 @@ runtime behavior, promotion, or publication authority.
 meta-selftest, the renderer and guard selftests, eval-contract validation, and a fresh render/verify
 pair. Each process must emit one terminal suite-qualified receipt with a nonzero count and a result
 consistent with its exit status. The workflow itself is an exact checked contract, grants read-only
-contents permission, disables persisted checkout credentials, and runs the gate on fixed Ubuntu and
-macOS runner labels with a pinned Python patch version. GitHub manages the image contents behind
-those labels, and this repository cannot prove that the jobs are required by branch protection.
+contents permission, disables persisted checkout credentials, and runs a source-bound harness
+bootstrap before the gate on fixed Ubuntu and macOS runner labels with a pinned Python patch version.
+The harness binds the gate source and the gate binds the harness source, which rejects an isolated
+replacement of either runner when the declared workflow invokes both. The in-repository workflow
+files are trust roots: a workflow-only edit can bypass the runners, and edits to both workflows can
+fabricate both in-repo job classes. Reviewer inspection or an externally administered required
+workflow must govern that boundary. GitHub manages the image contents behind those labels, and this
+repository cannot prove that the jobs are required by branch protection.
+
+The pull-request-only `mutation-proof` workflow explicitly checks out the pull-request head and runs
+the deterministic guard-mutation plan in six private-tree shards. Its `if: always()` aggregate job
+rejects missing, duplicated, overlapping, foreign, or stale fragment IDs, recomputes the raw suite
+outcomes, schema-compares the canonical tracked receipt, and byte-compares the tracked summary. The offline gate
+validates that receipt against the current source and plan, derives the canonical summary from that
+strict receipt, and then checks the outbound include copies; it does not rerun the full mutation plan.
 
 The workflow also declares an Ubuntu `portable-conformance` job. It is networked and fail-closed,
 and its lock pins the Agent Skills source archive, `skills-ref` sources and dependency-wheel closure,

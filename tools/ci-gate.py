@@ -19,12 +19,13 @@ from typing import Callable, List, Optional, Sequence, Tuple
 VERSION = "1.0.0"
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github/workflows/check.yml"
+MUTATION_WORKFLOW = ROOT / ".github/workflows/mutation-proof.yml"
 WORKFLOW_DIR = ROOT / ".github/workflows"
 # The contract pinned one file byte-for-byte and nothing enumerated the directory, so a
 # SECOND workflow -- `permissions: write-all`, `pull_request_target`, arbitrary steps --
 # ran on every push with the gate reporting the workflow contract satisfied. A CI
 # configuration is the set of files, not the one file we happen to name.
-EXPECTED_WORKFLOW_FILES = ("check.yml",)
+EXPECTED_WORKFLOW_FILES = ("check.yml", "mutation-proof.yml")
 # Every selftest suite carries a numeric floor; the eval corpus was floored only at zero,
 # so cutting 22 scenarios across 6 skills down to a single semantically empty one left the
 # whole gate green. Lower these in the commit that removes the scenarios.
@@ -36,11 +37,11 @@ EVAL_SKILL_FLOOR = 6
 # 165 here and 178 in harness_check -- and a fake that hardcodes its own number tests the
 # literal rather than the contract.
 SUITE_FLOORS = {
-    "harness_check": 77,
+    "harness_check": 78,
     "render-packages": 192,
-    "bash_command_guard": 1100,
-    "git_grep_engine_guard": 603,
-    "zsh_rev_modifier_guard": 240,
+    "bash_command_guard": 1337,
+    "git_grep_engine_guard": 1144,
+    "zsh_rev_modifier_guard": 487,
 }
 EXPECTED_WORKFLOW = """name: harness-check
 on:
@@ -61,14 +62,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: 3.13.14
       - name: install zsh where the runner image omits it
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y zsh && zsh --version
-      - name: complete offline gate
-        run: python3 tools/ci-gate.py
+      - name: source-bound bootstrap and complete offline gate
+        run: |
+          python3 hooks/harness_check.py --ci
+          python3 tools/ci-gate.py
 
   portable-conformance:
     runs-on: ubuntu-24.04
@@ -81,6 +85,77 @@ jobs:
           python-version: 3.13.14
       - name: pinned upstream conformance
         run: python3 tools/portable-conformance.py
+"""
+EXPECTED_MUTATION_WORKFLOW = """name: mutation-proof
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  mutations:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: 3.13.14
+      - name: install zsh and assert the exact pull-request head
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zsh
+          zsh --version
+          git rev-parse HEAD | grep -Fx '${{ github.event.pull_request.head.sha }}'
+      - name: run mutation shard
+        run: >-
+          python3 tools/write-mutation-receipt.py
+          --shard-index ${{ matrix.shard }}
+          --shard-count 6
+          --fragment mutation-fragment-${{ matrix.shard }}.json
+          --expected-head '${{ github.event.pull_request.head.sha }}'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mutation-fragment-${{ matrix.shard }}
+          path: mutation-fragment-${{ matrix.shard }}.json
+          if-no-files-found: error
+          retention-days: 7
+
+  aggregate:
+    if: always()
+    needs: mutations
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: 3.13.14
+      - name: install zsh and assert the exact pull-request head
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zsh
+          zsh --version
+          git rev-parse HEAD | grep -Fx '${{ github.event.pull_request.head.sha }}'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: mutation-fragment-*
+          path: mutation-fragments
+          merge-multiple: true
+      - name: reject incomplete evidence and compare the tracked receipt
+        run: >-
+          python3 tools/write-mutation-receipt.py
+          --aggregate mutation-fragments/*.json
 """
 
 
@@ -109,6 +184,20 @@ def _success_receipt(match: re.Match[str], returncode: int) -> Optional[str]:
     return None
 
 
+def expected_selftest_checks(suite: str) -> Optional[int]:
+    """Read the exact variable-environment count from the harness registry SSOT."""
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "_ci_gate_harness_counts", ROOT / "hooks/harness_check.py")
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.expected_selftest_checks(suite)
+    except Exception:
+        return None
+
+
 def selftest_receipt(suite: str, floor: int) -> ReceiptSpec:
     pattern = re.compile(
         rf"^SELFTEST-SUMMARY suite=(?P<suite>[a-z0-9_-]+) "
@@ -120,6 +209,9 @@ def selftest_receipt(suite: str, floor: int) -> ReceiptSpec:
             return f"wrong suite id {match.group('suite')!r}, expected {suite!r}"
         checks = int(match.group("checks"))
         failures = int(match.group("failures"))
+        exact = expected_selftest_checks(suite)
+        if exact is not None and checks != exact:
+            return f"checks={checks}, expected exact execution count={exact}"
         if checks < floor:
             return f"checks={checks} below floor={floor}"
         if failures != 0 or returncode != 0:
@@ -143,13 +235,21 @@ def validate_receipt(result: Result, spec: ReceiptSpec) -> Optional[str]:
     return spec.validate(matches[0], result.returncode)
 
 
-def workflow_error(data: str) -> Optional[str]:
+def workflow_error(data: str, mutation_data: Optional[str] = None) -> Optional[str]:
+    if mutation_data is None:
+        mutation_data = EXPECTED_MUTATION_WORKFLOW
     if data != EXPECTED_WORKFLOW:
         return (
             "workflow differs from the closed contract: two explicit OS targets, Python "
             "3.13.14, full action SHAs, read-only permissions, non-persisted checkout "
             "credentials, a Linux-only zsh install whose own version call proves it "
             "landed, one ci-gate command, and one conformance command"
+        )
+    if mutation_data != EXPECTED_MUTATION_WORKFLOW:
+        return (
+            "mutation workflow differs from the closed contract: pull-request-only, "
+            "exact head checkout, six deterministic shards, read-only permissions, "
+            "immutable actions, artifact aggregation, and tracked-receipt comparison"
         )
     return None
 
@@ -299,17 +399,100 @@ def hook_budget_error(*, settings_data=None, codex_data=None, budget=None) -> st
 
 
 DECISION_GOLDEN = ROOT / "contracts/goldens/guard-decisions.json"
-# The golden was floored only at zero: 752 commands and 1 command both read as a clean
-# verdict, and `752` appeared nowhere in this repository. `write-decision-golden.py` unions
-# fixture commands across every revision in `rev-list BASE..HEAD`, so the corpus does not
-# shrink on the normal regeneration path -- but that protection lives in the generator,
-# where this gate cannot see it, and the gate validates whatever golden it is handed. The
-# eval corpus earned EVAL_SCENARIO_FLOOR for exactly this shape. Lower this only in the
-# commit that retires the commands.
-DECISION_CORPUS_FLOOR = 752
+DECISION_WRITER = ROOT / "tools/write-decision-golden.py"
+RETAINED_DECISION_COMMANDS = ROOT / "contracts/goldens/retained-guard-commands.json"
+SUITE_SOURCE_GOLDEN = ROOT / "contracts/goldens/suite-sources.json"
+HARNESS_SOURCE = ROOT / "hooks/harness_check.py"
+DECISION_CORPUS_FLOOR = 947
+DECISION_WRITER_SHA256 = "8c4180468fc05a88c69fafba3a79f2387f5df2d1aa728def1670f5497a442e9d"
+RETAINED_DECISION_SCHEMA_VERSION = 1
+RETAINED_DECISION_NOTE = (
+    "reviewed decision commands retained after their originating fixtures left the "
+    "current source; append-only unless a deliberate retirement changes the independent "
+    "gate contract"
+)
+EXPECTED_RETAINED_DECISION_COMMANDS = (
+    "=/usr/bin/git grep -E 'harness\\b' -- README.md",
+    "==/usr/bin/git grep -E 'harness\\b' -- README.md",
+    "printf '%s\\n' 'printf() { git \"$@\"; }' git grep -E 'harness\\b' -- README.md",
+    "printf '%s\\n' 'printf() { git \"$@\"; }' git grep -nE 'harness\\b' -- README.md",
+    "printf '%s\\n' 'printf() { git \"$@\"; }' git show HEAD:README.md",
+)
 
 
-def decision_golden_error(golden_data=None, decide=None, corpus_floor=None) -> str:
+def _json_without_duplicate_keys(path: Path):
+    """Load JSON while rejecting duplicate object keys hidden by ordinary json.loads."""
+    def unique_object(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"duplicate JSON object key {key!r}")
+            value[key] = item
+        return value
+
+    return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_object)
+
+
+def decision_writer_source_error(source_bytes=None) -> str:
+    """Bind corpus derivation to the independently reviewed writer implementation."""
+    try:
+        source = DECISION_WRITER.read_bytes() if source_bytes is None else source_bytes
+    except OSError as exc:
+        return f"cannot read decision writer source: {exc}"
+    actual = hashlib.sha256(source).hexdigest()
+    if actual != DECISION_WRITER_SHA256:
+        return "tools/write-decision-golden.py differs from its reviewed source digest"
+    return ""
+
+
+def retained_decision_commands_error(data=None) -> str:
+    """Validate the topology-independent retained corpus against a closed set."""
+    try:
+        if data is None:
+            data = _json_without_duplicate_keys(RETAINED_DECISION_COMMANDS)
+    except (OSError, ValueError) as exc:
+        return f"cannot read retained decision commands: {exc}"
+    if not isinstance(data, dict):
+        return "retained decision command manifest is not an object"
+    required = {"schema_version", "note", "commands"}
+    if set(data) != required:
+        return "retained decision command manifest fields differ from the closed schema"
+    if data.get("schema_version") != RETAINED_DECISION_SCHEMA_VERSION:
+        return "retained decision command schema version differs"
+    if data.get("note") != RETAINED_DECISION_NOTE:
+        return "retained decision command note differs"
+    commands = data.get("commands")
+    if not isinstance(commands, list) or tuple(commands) != EXPECTED_RETAINED_DECISION_COMMANDS:
+        return "retained decision commands differ from the independent closed inventory"
+    return ""
+
+
+def harness_source_error(golden_data=None, source_bytes=None) -> str:
+    """Bind the harness this gate executes to the reviewed source registry.
+
+    ``harness_check.py`` cannot aggregate its own selftest without recursing, so its
+    source is absent from that script's C1 loop.  The outer gate executes both its
+    production and selftest modes and must bind those receipts independently; otherwise
+    a two-receipt stub can erase C2-C11 while preserving every process-level check here.
+    """
+    try:
+        if golden_data is None:
+            golden_data = _json_without_duplicate_keys(SUITE_SOURCE_GOLDEN)
+        suites = golden_data.get("suites") if isinstance(golden_data, dict) else None
+        expected = suites.get("harness_check") if isinstance(suites, dict) else None
+        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+            return "suite source registry has no valid harness_check digest"
+        current = HARNESS_SOURCE.read_bytes() if source_bytes is None else source_bytes
+        actual = hashlib.sha256(current).hexdigest()
+    except (OSError, ValueError) as exc:
+        return f"cannot verify harness_check source: {exc}"
+    if actual != expected:
+        return "hooks/harness_check.py differs from its reviewed suite source digest"
+    return ""
+
+
+def decision_golden_error(golden_data=None, decide=None, snapshot=None,
+                          contract=None, minimum_commands=None) -> str:
     """Return drift between the recorded guard verdicts and what the guards now return.
 
     Source digests pin bytes and floors ratchet counts; neither notices a DECISION
@@ -317,21 +500,34 @@ def decision_golden_error(golden_data=None, decide=None, corpus_floor=None) -> s
     expectations were rewritten on this branch with every suite green. A verdict change
     now has to appear here too, one reviewable line per command.
     """
+    production_contract = snapshot is None or contract is None
     try:
-        # A caller supplying its own golden is probing this function's logic, not the tree;
-        # only the real invocation can meaningfully compare the corpus against its floor.
-        synthetic = golden_data is not None
-        floor = (corpus_floor if corpus_floor is not None
-                 else (None if synthetic else DECISION_CORPUS_FLOOR))
         if golden_data is None:
-            golden_data = json.loads(DECISION_GOLDEN.read_text(encoding="utf-8"))
-        recorded = golden_data.get("decisions") or {}
-        if not recorded:
-            return "the decision golden records no commands, which is not a clean verdict"
-        if floor is not None and len(recorded) < floor:
-            return (f"the decision corpus shrank to {len(recorded)} commands, below the "
-                    f"recorded floor of {floor}; a smaller corpus reads as the same clean "
-                    f"verdict while pinning fewer verdicts")
+            golden_data = _json_without_duplicate_keys(DECISION_GOLDEN)
+        if production_contract:
+            writer_problem = decision_writer_source_error()
+            if writer_problem:
+                return writer_problem
+            retained_problem = retained_decision_commands_error()
+            if retained_problem:
+                return retained_problem
+            writer_spec = importlib.util.spec_from_file_location(
+                "_ci_gate_decision_writer", DECISION_WRITER)
+            if writer_spec is None or writer_spec.loader is None:
+                return "cannot load write-decision-golden.py for corpus comparison"
+            writer = importlib.util.module_from_spec(writer_spec)
+            writer_spec.loader.exec_module(writer)
+            snapshot = writer.corpus_snapshot()
+            contract = {
+                "schema_version": writer.SCHEMA_VERSION,
+                "generated_by": writer.GENERATED_BY,
+                "note": writer.NOTE,
+                "corpus": writer.CORPUS_DESCRIPTION,
+                "top_level_keys": tuple(writer.TOP_LEVEL_KEYS),
+                "exclusion_keys": tuple(writer.EXCLUSION_KEYS),
+            }
+        if minimum_commands is None:
+            minimum_commands = DECISION_CORPUS_FLOOR if production_contract else 1
         if decide is None:
             for path in (ROOT / "hooks", ROOT / "hooks" / "guards"):
                 if str(path) not in sys.path:
@@ -345,8 +541,62 @@ def decision_golden_error(golden_data=None, decide=None, corpus_floor=None) -> s
             decide = module.decide
     except Exception as exc:
         return f"cannot verify the decision golden: {exc!r}"
+
+    if not isinstance(golden_data, dict):
+        return "the decision golden root is not an object"
+    problems = []
+    required = set(contract["top_level_keys"])
+    actual = set(golden_data)
+    if actual != required:
+        problems.append(
+            f"top-level fields missing={sorted(required - actual)} "
+            f"unexpected={sorted(actual - required)}")
+    for field in ("schema_version", "generated_by", "note", "corpus"):
+        if golden_data.get(field) != contract[field]:
+            problems.append(f"{field} does not match the closed generator contract")
+    exclusions = golden_data.get("exclusions")
+    if not isinstance(exclusions, dict):
+        problems.append("exclusions is not an object")
+    else:
+        expected_exclusion_fields = set(contract["exclusion_keys"])
+        actual_exclusion_fields = set(exclusions)
+        if actual_exclusion_fields != expected_exclusion_fields:
+            problems.append(
+                "exclusion fields "
+                f"missing={sorted(expected_exclusion_fields - actual_exclusion_fields)} "
+                f"unexpected={sorted(actual_exclusion_fields - expected_exclusion_fields)}")
+        if exclusions != snapshot["exclusions"]:
+            problems.append("recorded exclusions differ from the exact generated corpus")
+    recorded = golden_data.get("decisions")
+    if not isinstance(recorded, dict) or not recorded:
+        problems.append("the decision golden records no commands")
+        recorded = {}
+    expected_commands = set(snapshot["commands"])
+    recorded_commands = set(recorded)
+    if len(expected_commands) < minimum_commands:
+        problems.append(
+            f"generated decision corpus {len(expected_commands)} is below floor "
+            f"{minimum_commands}")
+    missing_commands = sorted(expected_commands - recorded_commands, key=repr)
+    foreign_commands = sorted(recorded_commands - expected_commands, key=repr)
+    if missing_commands or foreign_commands:
+        problems.append(
+            f"decision corpus missing={missing_commands[:4]} "
+            f"foreign={foreign_commands[:4]}")
+    invalid = sorted(
+        (repr(command), repr(outcome)) for command, outcome in recorded.items()
+        if not isinstance(command, str)
+        or not isinstance(outcome, str)
+        or outcome not in {"allow", "ask", "deny"}
+    )
+    if invalid:
+        problems.append(f"invalid decision entries={invalid[:4]}")
+    if problems:
+        return "decision golden schema/corpus mismatch: " + "; ".join(problems[:8])
+
     drift = []
-    for command, expected in recorded.items():
+    for command in snapshot["commands"]:
+        expected = recorded[command]
         try:
             observed = decide(command)[0]
         except BaseException as exc:
@@ -363,145 +613,353 @@ def decision_golden_error(golden_data=None, decide=None, corpus_floor=None) -> s
 
 
 MUTATION_RECEIPT = ROOT / "contracts/goldens/mutation-receipt.json"
-# Every element of a guarded set should be held by at least this many checks: at a margin of
-# one, deleting the element is a silent fail-open the suites still pass; at zero it is not
-# even a fail-open the suites could notice.
-ELEMENT_MARGIN_TARGET = 2
-
-# A set is exempt only when removing an element cannot change a DECISION, and the reason
-# names what its elements feed instead. Both entries were settled by reading every Load
-# reference to the name, not by how the set looked. Adding to this dict is a claim that
-# must be re-established the same way.
-MARGIN_EXEMPT_SETS = {
-    "MOD_MEANING": "read only by _deny_hits, through .get(mod, mod), so a missing entry "
-                   "changes reason text and no decision",
-    "_CLOSED_LIMITS": "read only by selftest, where the entry IS the drift check, so "
-                      "removing it removes the check that would redden",
+MUTATION_SUMMARY = ROOT / "contracts/goldens/mutation-summary.md"
+MUTATION_SURVIVOR_DEBT_CEILING = 89
+MUTATION_PLAN_FLOOR = 307
+EXPECTED_MUTATION_COLLECTIONS = {
+    ("hooks/bash_command_guard.py", "GUARDS"): 2,
+    ("hooks/bash_command_guard.py", "RANK"): 3,
+    ("hooks/bash_command_guard.py", "RUNTIMES"): 2,
+    ("hooks/guards/git_grep_engine_guard.py", "CONFIG_ENGINE"): 7,
+    ("hooks/guards/git_grep_engine_guard.py", "CONTROL_KEYWORDS"): 12,
+    ("hooks/guards/git_grep_engine_guard.py", "CROSS_VERSION_ALIAS_PROOF"): 22,
+    ("hooks/guards/git_grep_engine_guard.py", "EXEC_WRAPPERS"): 6,
+    ("hooks/guards/git_grep_engine_guard.py", "GIT_HAZARD_SUBCOMMANDS"): 17,
+    ("hooks/guards/git_grep_engine_guard.py", "GIT_LOG_ENGINE_TOKENS"): 7,
+    ("hooks/guards/git_grep_engine_guard.py", "GIT_LOG_GREP_SUBCOMMANDS"): 3,
+    ("hooks/guards/git_grep_engine_guard.py", "GIT_LOG_PATTERN_OPTIONS"): 3,
+    ("hooks/guards/git_grep_engine_guard.py", "GREP_LONG_BOOLEAN_OPTIONS"): 37,
+    ("hooks/guards/git_grep_engine_guard.py", "GREP_LONG_ENGINE"): 4,
+    ("hooks/guards/git_grep_engine_guard.py", "GREP_LONG_NEGATED_ENGINE"): 4,
+    ("hooks/guards/git_grep_engine_guard.py", "GREP_LONG_OPTIONAL_VALUE"): 2,
+    ("hooks/guards/git_grep_engine_guard.py", "GREP_LONG_OPTION_NAMES"): 6,
+    ("hooks/guards/git_grep_engine_guard.py", "GREP_LONG_REQUIRED_VALUE"): 6,
+    ("hooks/guards/git_grep_engine_guard.py", "GREP_SHORT_ENGINE"): 4,
+    ("hooks/guards/git_grep_engine_guard.py", "GREP_SHORT_NOARG"): 17,
+    ("hooks/guards/git_grep_engine_guard.py", "GREP_SHORT_OPTIONAL_VALUE"): 1,
+    ("hooks/guards/git_grep_engine_guard.py", "GREP_SHORT_PATTERN_ARG"): 2,
+    ("hooks/guards/git_grep_engine_guard.py", "GREP_SHORT_VALUE"): 4,
+    ("hooks/guards/git_grep_engine_guard.py", "PCRE_ESCAPE_LETTERS"): 21,
+    ("hooks/guards/git_grep_engine_guard.py", "REV_PATH_SUBCOMMANDS"): 15,
+    ("hooks/guards/git_grep_engine_guard.py", "SHELLS"): 5,
+    ("hooks/guards/git_grep_engine_guard.py", "SHELL_NON_FORWARDING_COMMANDS"): 2,
+    ("hooks/guards/git_grep_engine_guard.py", "TRUSTED_EXTERNAL_NON_FORWARDING_COMMANDS"): 3,
+    ("hooks/guards/git_grep_engine_guard.py", "WRAPPER_TERMINAL_OPTIONS"): 2,
+    ("hooks/guards/git_grep_engine_guard.py", "_CLOSED_LIMITS"): 5,
+    ("hooks/guards/git_grep_engine_guard.py", "_GIT_GLOBAL_OPTIONS_WITH_VALUES"): 9,
+    ("hooks/guards/zsh_rev_modifier_guard.py", "MODS"): 13,
+    ("hooks/guards/zsh_rev_modifier_guard.py", "MOD_MEANING"): 13,
+    ("hooks/guards/zsh_rev_modifier_guard.py", "MOD_PREFIXES"): 4,
+    ("hooks/guards/zsh_rev_modifier_guard.py", "MOD_UNMODELLED"): 1,
+}
+EXPECTED_MUTATION_SITES = {
+    ("hooks/guards/git_grep_engine_guard.py", "attached exec argv-zero grammar dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "builtin trap wrapper adoption dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "budget wrap deleted"),
+    ("hooks/guards/git_grep_engine_guard.py", "candidate authority forced trusted"),
+    ("hooks/guards/git_grep_engine_guard.py", "decision-budget checkpoint neutered"),
+    ("hooks/guards/git_grep_engine_guard.py", "dynamic source adoption removed"),
+    ("hooks/guards/git_grep_engine_guard.py", "dynamic source command identity dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "exec single-dash terminator dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "git config count cap dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "git config loop budget dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "git hazard union adoption dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "guarded-tail predicate rescans per word"),
+    ("hooks/guards/git_grep_engine_guard.py",
+     "invoked alias body state transition dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "native command checked after alias"),
+    ("hooks/guards/git_grep_engine_guard.py", "nested source shell identity dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "process substitution loses typed operand"),
+    ("hooks/guards/git_grep_engine_guard.py", "shell alias cycle context reset"),
+    ("hooks/guards/git_grep_engine_guard.py", "shell alias forwarding dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "source alias invocation dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "source alias wrapper resolution dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "source alias body traversal dropped"),
+    ("hooks/guards/git_grep_engine_guard.py",
+     "ordinary shell alias Git classification dropped"),
+    ("hooks/guards/git_grep_engine_guard.py",
+     "executed alias Git traversal dropped"),
+    ("hooks/guards/git_grep_engine_guard.py",
+     "nonordinary alias mode tracking dropped"),
+    ("hooks/guards/git_grep_engine_guard.py",
+     "nonordinary alias use detection dropped"),
+    ("hooks/guards/git_grep_engine_guard.py",
+     "declared helper function alias traversal dropped"),
+    ("hooks/guards/git_grep_engine_guard.py",
+     "source alias embedded operand classification dropped"),
+    ("hooks/guards/git_grep_engine_guard.py",
+     "source alias dynamic command detection dropped"),
+    ("hooks/guards/git_grep_engine_guard.py",
+     "source alias invocation lookup bypass dropped"),
+    ("hooks/guards/git_grep_engine_guard.py",
+     "source alias state lookup bypass dropped"),
+    ("hooks/guards/git_grep_engine_guard.py",
+     "same-shell alias mutation wrapper resolution dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "called function alias state dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "TRAPDEBUG function alias state dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "DEBUG trap alias state dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "repeat zero execution boundary dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "source command wrapper omitted"),
+    ("hooks/guards/git_grep_engine_guard.py", "source exec wrapper omitted"),
+    ("hooks/guards/git_grep_engine_guard.py", "trap action traversal dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "zsh trap function source traversal dropped"),
+    ("hooks/guards/zsh_rev_modifier_guard.py", "zsh shared resolver bypassed"),
+    ("hooks/guards/zsh_rev_modifier_guard.py", "zsh trap function traversal dropped"),
+    ("hooks/guards/zsh_rev_modifier_guard.py", "zsh unmodelled modifier uncertainty dropped"),
+    ("hooks/guards/zsh_rev_modifier_guard.py",
+     "zsh unmodelled modifier prefix grammar dropped"),
+}
+EXPECTED_MUTATION_SITE_DIGEST = (
+    "89b6b244a3bdedc0a0620b1c5af359182888cc0d32e5396b9a43f1caa6b482f5"
+)
+EXPECTED_MUTATION_EXCLUSIONS = {
+    "hooks/guards/git_grep_engine_guard.py::ALIAS_GUARDED":
+        "repeated characters identify an enum word, not a membership charset",
+    "hooks/guards/git_grep_engine_guard.py::ALIAS_HARMLESS":
+        "repeated characters identify an enum word, not a membership charset",
+    "hooks/guards/git_grep_engine_guard.py::ALIAS_UNCERTAIN":
+        "repeated characters identify an enum word, not a membership charset",
+    "hooks/guards/git_grep_engine_guard.py::FIXTURES":
+        "fixture corpus; removing a fixture measures the grader",
+    "hooks/guards/git_grep_engine_guard.py::GREP_LONG_PATTERN_ARG":
+        "empty grammar collection has no element mutation; absence is fixture-pinned",
+    "hooks/guards/git_grep_engine_guard.py::ZSH_EQUALS_OFF":
+        "repeated characters identify an enum word, not a membership charset",
+    "hooks/guards/git_grep_engine_guard.py::ZSH_EQUALS_UNKNOWN":
+        "repeated characters identify an enum word, not a membership charset",
+    "hooks/guards/git_grep_engine_guard.py::_EQUALS_LOOKUP_CACHE":
+        "runtime memoization map, not a guarded membership collection",
+    "hooks/guards/git_grep_engine_guard.py::_GIT_AUTHORITY_CACHE":
+        "runtime memoization map, not a guarded membership collection",
+    "hooks/guards/zsh_rev_modifier_guard.py::FIXTURES":
+        "fixture corpus; removing a fixture measures the grader",
+    "hooks/guards/zsh_rev_modifier_guard.py::UNRESOLVED_GIT":
+        "repeated characters identify an enum word, not a membership charset",
 }
 
-# Flooring each set at its own measured minimum would write `0` twenty times over, and a
-# floor of zero asserts nothing -- it reads as a guarantee while permitting everything. So
-# the ratchet is the DEBT ITSELF, and the debt is the total SHORTFALL rather than a count of
-# elements below target: `sum(target - margin)`. Counting elements instead hid real work --
-# twelve PCRE_ESCAPE_LETTERS fixtures moved twelve elements from a margin of zero to one and
-# left an element count unchanged at 172, so a contributor closing genuine gaps saw the gate
-# register nothing. Shortfall moves with every improvement. It may shrink and never grow: a
-# new set element with no coverage raises it by the full target and fails here.
-ELEMENT_MARGIN_DEBT_CEILING = 275
+
+def mutation_site_policy_digest(descriptors) -> str:
+    """Hash every semantic site field under a stable, reviewable framing."""
+    records = []
+    for descriptor in descriptors:
+        records.append({
+            "module": descriptor["module"],
+            "label": descriptor["label"],
+            "anchor_sha256": descriptor["anchor_sha256"],
+            "replacement_sha256": descriptor["replacement_sha256"],
+            "allowed_statuses": list(descriptor["allowed_statuses"]),
+        })
+    records.sort(key=lambda item: (item["module"], item["label"]))
+    framed = json.dumps(
+        records, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(framed).hexdigest()
 
 
-def mutation_receipt_error(receipt_data=None, declared=None, ceiling=None,
-                           exempt=None) -> str:
-    """Return drift between recorded mutation evidence and the sets the guards declare.
+def mutation_policy_error(plan, exclusions, policy) -> str:
+    """Validate the plan against a closed inventory independent of its generator."""
+    collection_counts = {}
+    site_identities = []
+    site_descriptors = []
+    semantic_targets = []
+    ids = []
+    problems = []
+    for descriptor in plan:
+        if not isinstance(descriptor, dict):
+            return "mutation plan contains a non-object descriptor"
+        ids.append(descriptor.get("id"))
+        if descriptor.get("kind") == "set-element":
+            identity = (descriptor.get("module"), descriptor.get("name"))
+            collection_counts[identity] = collection_counts.get(identity, 0) + 1
+        elif descriptor.get("kind") == "site":
+            module = descriptor.get("module")
+            label = descriptor.get("label")
+            anchor = descriptor.get("anchor_sha256")
+            replacement = descriptor.get("replacement_sha256")
+            allowed = descriptor.get("allowed_statuses")
+            site_identities.append((module, label))
+            if (not isinstance(module, str) or not isinstance(label, str)
+                    or not isinstance(anchor, str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", anchor)
+                    or not isinstance(replacement, str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", replacement)
+                    or not isinstance(allowed, (list, tuple))
+                    or any(not isinstance(status, str) for status in allowed)):
+                problems.append(f"site descriptor fields are invalid for {(module, label)}")
+                continue
+            normalized = {
+                "module": module, "label": label,
+                "anchor_sha256": anchor,
+                "replacement_sha256": replacement,
+                "allowed_statuses": tuple(allowed),
+            }
+            site_descriptors.append(normalized)
+            semantic_targets.append((module, anchor, replacement))
+        else:
+            return f"mutation plan contains unknown kind {descriptor.get('kind')!r}"
+    if collection_counts != policy["collections"]:
+        problems.append(
+            f"collection inventory differs: observed={collection_counts} "
+            f"required={policy['collections']}")
+    if len(site_identities) != len(set(site_identities)):
+        problems.append("site inventory contains duplicate module/label identities")
+    if set(site_identities) != policy["sites"]:
+        problems.append(
+            f"site inventory differs: observed={set(site_identities)} "
+            f"required={policy['sites']}")
+    if len(semantic_targets) != len(set(semantic_targets)):
+        problems.append("site inventory contains duplicate semantic mutation targets")
+    if (len(site_descriptors) == len(site_identities)
+            and mutation_site_policy_digest(site_descriptors)
+            != policy["site_digest"]):
+        problems.append("site descriptor semantics differ from the independent digest")
+    if exclusions != policy["exclusions"]:
+        problems.append("sweep exclusions differ from the independent closed inventory")
+    if len(plan) < policy["floor"]:
+        problems.append(
+            f"plan cardinality {len(plan)} is below floor {policy['floor']}")
+    if len(ids) != len(set(ids)) or any(not isinstance(item, str) for item in ids):
+        problems.append("mutation IDs are missing or duplicated")
+    return "; ".join(problems)
 
-    `tools/write-mutation-receipt.py` measures the receipt by running every mutation, which
-    is far too slow to repeat on every gate run. What this proves instead is the property
-    that actually failed on this branch: every element the guards declare RIGHT NOW carries
-    recorded evidence, nothing recorded is stale, no site mutation survives, no mutation
-    moved the check count, and no more elements sit below the margin target than the
-    recorded ceiling allows. Adding a name to a guarded set without regenerating fails here,
-    because the new element has no recorded margin -- which is what makes the slow tool
-    unskippable.
-    """
-    if ceiling is None:
-        ceiling = ELEMENT_MARGIN_DEBT_CEILING
-    if exempt is None:
-        exempt = MARGIN_EXEMPT_SETS
-    # A caller supplying its own declaration is probing this function's arithmetic, not
-    # the tree; only the real invocation can meaningfully compare source bytes.
-    synthetic = declared is not None
+
+def mutation_receipt_error(receipt_data=None, plan=None, exclusions=None,
+                           contract=None, current_sources=None, ceiling=None,
+                           policy=None) -> str:
+    """Validate exact mutation schema, plan coverage, and every derived field."""
     try:
+        production_contract = plan is None or exclusions is None or contract is None
         if receipt_data is None:
-            receipt_data = json.loads(MUTATION_RECEIPT.read_text(encoding="utf-8"))
-        if declared is None:
+            receipt_data = _json_without_duplicate_keys(MUTATION_RECEIPT)
+        if plan is None or exclusions is None or contract is None:
             spec = importlib.util.spec_from_file_location(
                 "_ci_gate_mutation", ROOT / "tools/write-mutation-receipt.py")
             if spec is None or spec.loader is None:
                 return "cannot load write-mutation-receipt.py for the mutation receipt"
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
-            declared = {}
-            for relative in module.GUARDS:
-                for name, (_kind, elements) in module.declared_sets(relative).items():
-                    if name not in module.SWEEP_EXCLUSIONS:
-                        declared[name] = set(elements)
+            plan, exclusions = module.mutation_plan()
+            contract = {
+                "schema_version": module.SCHEMA_VERSION,
+                "generated_by": (
+                    f"{module.GENERATOR} --aggregate ... --accept-receipt-changes"),
+                "note": module.NOTE,
+                "keys": tuple(module.RECEIPT_KEYS),
+                "generator_sha256": module.file_sha256(ROOT / module.GENERATOR),
+                "guards": tuple(module.GUARDS),
+                "plan_sha256": module.digest(plan),
+            }
+            current_sources = module.source_digests()
+        if policy is None and production_contract:
+            policy = {
+                "collections": EXPECTED_MUTATION_COLLECTIONS,
+                "sites": EXPECTED_MUTATION_SITES,
+                "site_digest": EXPECTED_MUTATION_SITE_DIGEST,
+                "exclusions": EXPECTED_MUTATION_EXCLUSIONS,
+                "floor": MUTATION_PLAN_FLOOR,
+            }
+        if ceiling is None:
+            ceiling = MUTATION_SURVIVOR_DEBT_CEILING
     except Exception as exc:
         return f"cannot verify the mutation receipt: {exc!r}"
-    recorded = receipt_data.get("sets") or {}
-    if not recorded or not declared:
-        return "the mutation receipt records no swept sets, which is not a clean verdict"
-    problems, debt = [], 0
-    missing_sets = sorted(set(declared) - set(recorded))
-    stale_sets = sorted(set(recorded) - set(declared))
-    if missing_sets:
-        problems.append(f"declared but never swept: {missing_sets}")
-    if stale_sets:
-        problems.append(f"swept but no longer declared: {stale_sets}")
-    for name in sorted(set(declared) & set(recorded)):
-        margins = recorded[name].get("margins") or {}
-        missing = sorted(declared[name] - set(margins))
-        stale = sorted(set(margins) - declared[name])
-        if missing:
-            problems.append(f"{name} elements with no recorded margin: {missing}")
-        if stale:
-            problems.append(f"{name} recorded margins for absent elements: {stale}")
-        # A non-integer failure count means removing the element stopped the module
-        # importing or ran past its bound. Both are caught harder than any check count,
-        # so they clear the target rather than failing a numeric comparison against it.
-        if name not in exempt:
-            debt += sum(ELEMENT_MARGIN_TARGET - entry["failures"]
-                        for element, entry in margins.items()
-                        if element in declared[name]
-                        and isinstance(entry.get("failures"), int)
-                        and entry["failures"] < ELEMENT_MARGIN_TARGET)
-    if debt > ceiling:
+    if not isinstance(receipt_data, dict):
+        return "mutation receipt root is not an object"
+    problems = []
+    if policy is not None:
+        policy_problem = mutation_policy_error(plan, exclusions, policy)
+        if policy_problem:
+            problems.append("closed mutation policy: " + policy_problem)
+    expected_fields = set(contract["keys"])
+    actual_fields = set(receipt_data)
+    if actual_fields != expected_fields:
         problems.append(
-            f"margin shortfall against a target of {ELEMENT_MARGIN_TARGET} is {debt}, above "
-            f"the recorded ceiling of {ceiling}; coverage of the guarded sets got thinner. "
-            f"Lower the ceiling only in a commit that raises the coverage")
-    stale_exemptions = sorted(set(exempt) - set(declared))
-    if stale_exemptions:
+            f"top-level fields missing={sorted(expected_fields - actual_fields)} "
+            f"unexpected={sorted(actual_fields - expected_fields)}")
+    for field in ("schema_version", "generated_by", "note", "generator_sha256",
+                  "plan_sha256"):
+        expected = contract[field]
+        if receipt_data.get(field) != expected:
+            problems.append(f"{field} differs from the generator contract")
+    if receipt_data.get("source_digests") != current_sources:
+        problems.append("source digests do not equal all current guard sources")
+    if receipt_data.get("baseline") != {
+            relative: "passed" for relative in contract["guards"]}:
+        problems.append("baseline does not prove all three guard suites passed")
+    if receipt_data.get("sweep_exclusions") != exclusions:
+        problems.append("module-qualified sweep exclusions differ from the exact scan")
+    plan_by_id = {item["id"]: item for item in plan}
+    results = receipt_data.get("results")
+    if not isinstance(results, dict) or not results:
+        problems.append("results are empty or not an object")
+        results = {}
+    missing = sorted(set(plan_by_id) - set(results))
+    foreign = sorted(set(results) - set(plan_by_id))
+    if missing or foreign:
+        problems.append(f"result inventory missing={missing[:4]} foreign={foreign[:4]}")
+    observed_survivors = []
+    site_survivors = []
+    for mutation_id in sorted(set(plan_by_id) & set(results)):
+        expected = dict(plan_by_id[mutation_id])
+        expected.pop("allowed_statuses", None)
+        recorded = results[mutation_id]
+        if not isinstance(recorded, dict):
+            problems.append(f"result {mutation_id} is not an object")
+            continue
+        outcome = recorded.get("outcome")
+        if outcome not in {"caught", "survived"}:
+            problems.append(f"result {mutation_id} has invalid outcome {outcome!r}")
+            continue
+        expected["outcome"] = outcome
+        if recorded != expected:
+            problems.append(f"result {mutation_id} fields do not match its planned mutation")
+        if outcome == "survived":
+            observed_survivors.append(mutation_id)
+            if expected["kind"] == "site":
+                site_survivors.append(mutation_id)
+    if receipt_data.get("survivors") != observed_survivors:
+        problems.append("survivor IDs are not exactly derived from results")
+    if receipt_data.get("total") != len(plan_by_id):
+        problems.append("total is not the exact mutation-plan cardinality")
+    if receipt_data.get("caught") != len(plan_by_id) - len(observed_survivors):
+        problems.append("caught is not derived from total minus survivors")
+    if site_survivors:
+        problems.append(f"site mutations survived: {site_survivors[:4]}")
+    if len(observed_survivors) > ceiling:
         problems.append(
-            f"margin-exempt sets the guards no longer declare: {stale_exemptions}")
-    if not synthetic:
-        measured = receipt_data.get("measured_against") or {}
-        if not measured:
-            problems.append(
-                "the receipt records no source digests, so a receipt describing an older "
-                "guard cannot be told from a current one; regenerate it")
-        moved = sorted(
-            relative for relative, digest in measured.items()
-            if not (ROOT / relative).is_file()
-            or hashlib.sha256((ROOT / relative).read_bytes()).hexdigest() != digest)
-        if moved:
-            problems.append(
-                f"guards changed since the receipt was measured: {moved}; every recorded "
-                "margin describes the older source, so rerun tools/write-mutation-receipt.py")
-    survivors = receipt_data.get("site_survivors") or []
-    if survivors:
-        problems.append(f"site mutations no check catches: {survivors}")
-    drift = receipt_data.get("selector_drift") or []
-    if drift:
-        problems.append(f"mutations that moved the check COUNT: {drift[:4]}")
-    for suite, floor in SUITE_FLOORS.items():
-        for relative, counts in (receipt_data.get("baseline") or {}).items():
-            if relative.endswith(f"{suite}.py") and counts.get("checks", 0) < floor:
-                problems.append(
-                    f"receipt baseline for {suite} records {counts.get('checks')} checks, "
-                    f"below the floor of {floor}; the receipt predates the current suite")
-    if not problems:
-        return ""
-    return ("mutation receipt does not match the guards as they stand: "
-            + "; ".join(problems[:6])
-            + ("; ..." if len(problems) > 6 else "")
-            + ". If the change is intended, run tools/write-mutation-receipt.py in the "
-              "same commit and review that diff")
+            f"survivor debt {len(observed_survivors)} exceeds ceiling {ceiling}")
+    return ("mutation receipt mismatch: " + "; ".join(problems[:8])) if problems else ""
+
+
+def mutation_summary_error(receipt_data=None, summary_bytes=None) -> str:
+    """Require the canonical summary bytes to be derived from the strict receipt."""
+    try:
+        if receipt_data is None:
+            receipt_data = _json_without_duplicate_keys(MUTATION_RECEIPT)
+        receipt_problem = mutation_receipt_error(receipt_data=receipt_data)
+        if receipt_problem:
+            return "cannot derive mutation summary from an invalid receipt: " + receipt_problem
+        spec = importlib.util.spec_from_file_location(
+            "_ci_gate_mutation_summary", ROOT / "tools/write-mutation-receipt.py")
+        if spec is None or spec.loader is None:
+            return "cannot load write-mutation-receipt.py for summary derivation"
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        expected = module.summary_text(receipt_data).encode("utf-8")
+        actual = MUTATION_SUMMARY.read_bytes() if summary_bytes is None else summary_bytes
+    except Exception as exc:
+        return f"cannot verify mutation summary derivation: {exc!r}"
+    if actual != expected:
+        return "contracts/goldens/mutation-summary.md is not derived from the strict receipt"
+    return ""
 
 
 REVIEW_ROOT = ROOT / "contracts/review"
 INCLUDE_OPEN = "<!-- include: "
 INCLUDE_CLOSE = "<!-- end include -->"
 FENCE_MARKERS = ("```", "~~~")
+REQUIRED_REVIEW_INCLUDES = {
+    "pr-8/description.md": ("contracts/goldens/mutation-summary.md",),
+    "pr-8/rollup.md": ("contracts/goldens/mutation-summary.md",),
+}
 
 
 def include_blocks(lines):
@@ -550,7 +1008,7 @@ def review_path_label(path):
         return path
 
 
-def review_include_error(review_root=None) -> str:
+def review_include_error(review_root=None, required_inventory=None) -> str:
     """Return any outbound review file whose included block drifted from its source.
 
     Every number this branch published wrong was retyped into a GitHub comment from a
@@ -563,6 +1021,9 @@ def review_include_error(review_root=None) -> str:
     asserts that outbound text is gated, and it cannot assert that over nothing.
     """
     root = REVIEW_ROOT if review_root is None else Path(review_root)
+    enforce_inventory = review_root is None if required_inventory is None else True
+    required_inventory = (
+        REQUIRED_REVIEW_INCLUDES if required_inventory is None else required_inventory)
     if not root.is_dir():
         return (f"{REVIEW_ROOT.name}/ does not exist, so no outbound review text is gated; "
                 "this check asserts nothing without it")
@@ -570,27 +1031,52 @@ def review_include_error(review_root=None) -> str:
     if not documents:
         return (f"no markdown under {root}, so the review-include check scanned nothing, "
                 "which is not a clean verdict")
-    problems, blocks = [], 0
+    problems, blocks, observed_inventory = [], 0, {}
     for document in documents:
-        lines = document.read_text(encoding="utf-8").splitlines()
+        try:
+            document_bytes = document.read_bytes()
+            lines = document_bytes.decode("utf-8").splitlines()
+            raw_lines = document_bytes.splitlines(keepends=True)
+        except UnicodeDecodeError as exc:
+            problems.append(
+                f"{review_path_label(document)} is not UTF-8 ({exc})")
+            continue
         for header, close, name in include_blocks(lines):
             blocks += 1
+            relative_document = str(document.relative_to(root))
+            observed_inventory.setdefault(relative_document, []).append(name)
             if close is None:
                 problems.append(f"{review_path_label(document)}: unterminated include")
                 continue
             if not name:
                 problems.append(f"{review_path_label(document)}: include names no file")
                 continue
-            source = ROOT / name
+            source = (ROOT / name).resolve()
+            try:
+                source.relative_to(ROOT.resolve())
+            except ValueError:
+                problems.append(
+                    f"{review_path_label(document)} includes {name}, which is outside "
+                    "the repository")
+                continue
             if not source.is_file():
                 problems.append(f"{review_path_label(document)} includes {name}, "
                                 "which does not exist")
                 continue
-            embedded = "\n".join(lines[header + 1:close])
-            if embedded.strip("\n") != source.read_text(encoding="utf-8").strip("\n"):
+            embedded = b"".join(raw_lines[header + 1:close])
+            expected = source.read_bytes()
+            if embedded != expected:
                 problems.append(
                     f"{review_path_label(document)} has a stale copy of {name}; "
                     "regenerate it before posting")
+    if enforce_inventory:
+        observed = {document: tuple(sorted(names))
+                    for document, names in observed_inventory.items()}
+        required = {document: tuple(sorted(names))
+                    for document, names in required_inventory.items()}
+        if observed != required:
+            problems.append(
+                f"live include inventory differs: observed={observed} required={required}")
     if problems:
         return (f"outbound review text drifted from its sources "
                 f"(scanned {len(documents)} files, {blocks} include blocks under "
@@ -601,13 +1087,12 @@ def review_include_error(review_root=None) -> str:
 def gated_environment(which=None, runner=None) -> str:
     """Name the interpreters this run's verdicts were measured against.
 
-    Two guard probes reduce to a skip when zsh is missing -- the 52-letter modifier
-    enumeration and nine shell-boundary probe groups -- and both hold their check counts
-    fixed on purpose, so the shrink-only floor does not read a zsh-less host as a gutted
-    suite. A suite's receipt is therefore byte-identical whether those probes ran or were
-    skipped wholesale, and only a child's LAST line survives this gate, which drops the
-    printed SKIP. Without this line nothing in the record distinguishes the two, so a
-    claim about zsh could go unverified on a runner with no zsh and read as proven.
+    Two probe corpora reduce to skips when zsh is missing -- 105 modifier probes and 46
+    zsh-dependent shell-boundary probes -- and both preserve their planned check counts.
+    A suite's receipt is therefore byte-identical whether those probes ran or were skipped,
+    and only a child's LAST line survives this gate, which drops the printed SKIP. Without
+    this line nothing in the record distinguishes the two, so a claim about zsh could go
+    unverified on a runner with no zsh and read as proven.
 
     Reported, never asserted: a host without zsh may still run the gate. What it may not
     do is leave no trace that the zsh-dependent claims were not checked.
@@ -638,7 +1123,11 @@ def gate(
 ) -> int:
     failures: List[str] = []
     workflow = WORKFLOW.read_text(encoding="utf-8") if WORKFLOW.is_file() else ""
-    problem = workflow_error(workflow)
+    mutation_workflow = (
+        MUTATION_WORKFLOW.read_text(encoding="utf-8")
+        if MUTATION_WORKFLOW.is_file() else ""
+    )
+    problem = workflow_error(workflow, mutation_workflow)
     print(f"  {'FAIL' if problem else 'PASS'} workflow-contract")
     if problem:
         failures.append(problem)
@@ -660,6 +1149,10 @@ def gate(
     print(f"  {'FAIL' if floor_problem else 'PASS'} floor-registry")
     if floor_problem:
         failures.append(floor_problem)
+    harness_source_problem = harness_source_error()
+    print(f"  {'FAIL' if harness_source_problem else 'PASS'} harness-source")
+    if harness_source_problem:
+        failures.append(harness_source_problem)
     budget_problem = hook_budget_error()
     print(f"  {'FAIL' if budget_problem else 'PASS'} hook-budget")
     if budget_problem:
@@ -672,6 +1165,10 @@ def gate(
     print(f"  {'FAIL' if mutation_problem else 'PASS'} mutation-receipt")
     if mutation_problem:
         failures.append(mutation_problem)
+    summary_problem = mutation_summary_error()
+    print(f"  {'FAIL' if summary_problem else 'PASS'} mutation-summary")
+    if summary_problem:
+        failures.append(summary_problem)
     review_problem = review_include_error()
     print(f"  {'FAIL' if review_problem else 'PASS'} review-includes")
     if review_problem:
@@ -723,10 +1220,114 @@ def selftest() -> int:
     expect("below-floor count fails", validate_receipt(Result(0, good.replace("checks=5", "checks=4")), spec) is not None)
     expect("reported failure fails", validate_receipt(Result(0, good.replace("failures=0", "failures=1")), spec) is not None)
     expect("nonzero process with green receipt fails", validate_receipt(Result(1, good), spec) is not None)
+    git_exact = expected_selftest_checks("git_grep_engine_guard")
+    git_spec = selftest_receipt("git_grep_engine_guard", SUITE_FLOORS["git_grep_engine_guard"])
+    git_good = ("SELFTEST-SUMMARY suite=git_grep_engine_guard "
+                f"checks={git_exact} failures=0\n")
+    expect(
+        "execution-derived Git count clears at the exact environment cardinality",
+        validate_receipt(Result(0, git_good), git_spec) is None,
+    )
+    expect(
+        "deleting one Git check fails even while the floor still clears",
+        validate_receipt(
+            Result(0, git_good.replace(f"checks={git_exact}",
+                                       f"checks={git_exact - 1}")),
+            git_spec,
+        ) is not None,
+    )
     expect("workflow baseline matches exact contract", workflow_error(EXPECTED_WORKFLOW) is None)
-    expect("workflow command mutation fails", workflow_error(EXPECTED_WORKFLOW.replace(
+    expect(
+        "ordinary full-gate checkout must retain the fixed decision-corpus base",
+        workflow_error(EXPECTED_WORKFLOW.replace("          fetch-depth: 0\n", "", 1))
+        is not None,
+    )
+    expect(
+        "the decision writer matches its independently reviewed source digest",
+        decision_writer_source_error() == "",
+    )
+    expect(
+        "changing the decision writer invalidates its source binding",
+        decision_writer_source_error(
+            DECISION_WRITER.read_bytes() + b"\n# planted source drift\n") != "",
+    )
+    retained_probe = _json_without_duplicate_keys(RETAINED_DECISION_COMMANDS)
+    expect(
+        "the retained decision manifest matches the closed command inventory",
+        retained_decision_commands_error(retained_probe) == "",
+    )
+    expect(
+        "a retained decision command cannot disappear self-consistently",
+        retained_decision_commands_error(dict(
+            retained_probe, commands=retained_probe["commands"][:-1])) != "",
+    )
+    decision_writer_spec = importlib.util.spec_from_file_location(
+        "_ci_gate_topology_probe", DECISION_WRITER)
+    decision_writer = importlib.util.module_from_spec(decision_writer_spec)
+    decision_writer_spec.loader.exec_module(decision_writer)
+    topology_calls = []
+
+    def base_only_runner(argv, **_kwargs):
+        topology_calls.append(tuple(argv))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    original_decision_runner = decision_writer.subprocess.run
+    decision_writer.subprocess.run = base_only_runner
+    try:
+        decision_writer.base_and_worktree_fixture_commands()
+    finally:
+        decision_writer.subprocess.run = original_decision_runner
+    expect(
+        "decision corpus derivation reads the fixed base but never branch HEAD history",
+        len(topology_calls) == len(decision_writer.SOURCES)
+        and all(call[-2] == "show"
+                and call[-1].startswith(decision_writer.BASE + ":")
+                for call in topology_calls),
+    )
+    expect(
+        "mutation workflow baseline matches exact contract",
+        workflow_error(EXPECTED_WORKFLOW, EXPECTED_MUTATION_WORKFLOW) is None,
+    )
+    expect(
+        "mutation workflow rejects a merge-ref checkout",
+        workflow_error(
+            EXPECTED_WORKFLOW,
+            EXPECTED_MUTATION_WORKFLOW.replace(
+                "          ref: ${{ github.event.pull_request.head.sha }}\n", "", 1),
+        ) is not None,
+    )
+    expect(
+        "mutation workflow remains pull-request-only",
+        workflow_error(
+            EXPECTED_WORKFLOW,
+            EXPECTED_MUTATION_WORKFLOW.replace(
+                "on:\n  pull_request:\n", "on:\n  push:\n  pull_request:\n", 1),
+        ) is not None,
+    )
+    expect(
+        "mutation aggregator must run even when a shard fails",
+        workflow_error(
+            EXPECTED_WORKFLOW,
+            EXPECTED_MUTATION_WORKFLOW.replace("    if: always()\n", "", 1),
+        ) is not None,
+    )
+    expect(
+        "workflow source-bound bootstrap removal fails",
+        workflow_error(EXPECTED_WORKFLOW.replace(
+            "          python3 hooks/harness_check.py --ci\n", "", 1)) is not None,
+    )
+    expect("workflow gate command mutation fails", workflow_error(EXPECTED_WORKFLOW.replace(
         "python3 tools/ci-gate.py", "python3 hooks/harness_check.py --ci", 1
     )) is not None)
+    expect(
+        "workflow source-bound bootstrap must precede the complete gate",
+        workflow_error(EXPECTED_WORKFLOW.replace(
+            "          python3 hooks/harness_check.py --ci\n"
+            "          python3 tools/ci-gate.py\n",
+            "          python3 tools/ci-gate.py\n"
+            "          python3 hooks/harness_check.py --ci\n",
+            1)) is not None,
+    )
     expect("workflow unknown feature fails", workflow_error(EXPECTED_WORKFLOW + "permissions: {}\n") is not None)
     expect(
         "workflow permission widening fails",
@@ -744,6 +1345,25 @@ def selftest() -> int:
     expect(
         "gate floors agree with harness_check's imported registry",
         floor_registry_error() == "",
+    )
+    expect(
+        "the executed harness matches its reviewed source digest",
+        harness_source_error() == "",
+    )
+    expect(
+        "changing the executed harness invalidates its source digest",
+        harness_source_error(
+            source_bytes=HARNESS_SOURCE.read_bytes() + b"# planted mutation\n") != "",
+    )
+    source_registry = _json_without_duplicate_keys(SUITE_SOURCE_GOLDEN)
+    without_harness = dict(source_registry)
+    without_harness["suites"] = {
+        name: value for name, value in source_registry["suites"].items()
+        if name != "harness_check"
+    }
+    expect(
+        "removing the harness source digest is not permission to skip the binding",
+        harness_source_error(golden_data=without_harness) != "",
     )
     expect("hook timeout and internal budget contract matches", hook_budget_error() == "")
     def retime_bash_hook(data: dict, seconds: int) -> int:
@@ -797,126 +1417,480 @@ def selftest() -> int:
         slow.returncode != 0 and "exceeded" in slow.stderr,
     )
     expect("recorded guard decisions match the guards", decision_golden_error() == "")
+    decision_contract = {
+        "schema_version": 1,
+        "generated_by": "probe-writer",
+        "note": "probe-note",
+        "corpus": "probe-corpus",
+        "top_level_keys": (
+            "schema_version", "generated_by", "note", "corpus", "exclusions",
+            "decisions",
+        ),
+        "exclusion_keys": (
+            "max_command_chars", "oversized", "computed_at_import",
+        ),
+    }
+    decision_snapshot = {
+        "commands": ("git status --short",),
+        "exclusions": {
+            "max_command_chars": 2000,
+            "oversized": [],
+            "computed_at_import": [],
+        },
+    }
+    decision_probe = {
+        "schema_version": 1,
+        "generated_by": "probe-writer",
+        "note": "probe-note",
+        "corpus": "probe-corpus",
+        "exclusions": decision_snapshot["exclusions"],
+        "decisions": {"git status --short": "allow"},
+    }
+    decision_args = {
+        "snapshot": decision_snapshot,
+        "contract": decision_contract,
+        "decide": lambda _command: ("allow", ""),
+    }
+    expect(
+        "an exact synthetic decision golden clears",
+        decision_golden_error(golden_data=decision_probe, **decision_args) == "",
+    )
+    expect(
+        "a matching nonempty decision corpus below its independent floor fails",
+        decision_golden_error(
+            golden_data=decision_probe, minimum_commands=2, **decision_args) != "",
+    )
     expect(
         "an empty decision golden is a failure, not a clean verdict",
-        decision_golden_error(golden_data={"decisions": {}}) != "",
-    )
-    expect(
-        "a shrunken decision corpus is a failure, not the same clean verdict",
-        "corpus shrank" in decision_golden_error(
-            golden_data={"decisions": {"git status --short": "allow"}},
-            decide=lambda _command: ("allow", ""), corpus_floor=5),
-    )
-    expect(
-        "a corpus at its recorded floor clears",
         decision_golden_error(
-            golden_data={"decisions": {"git status --short": "allow"}},
-            decide=lambda _command: ("allow", ""), corpus_floor=1) == "",
+            golden_data=dict(decision_probe, decisions={}), **decision_args) != "",
     )
     expect(
         "a reversed verdict in the golden is reported with both sides",
         "deny -> allow" in decision_golden_error(
-            golden_data={"decisions": {"git status --short": "deny"}},
-            decide=lambda _command: ("allow", "")),
+            golden_data=dict(
+                decision_probe, decisions={"git status --short": "deny"}),
+            **decision_args),
     )
+    for field in decision_contract["top_level_keys"]:
+        without = {key: value for key, value in decision_probe.items() if key != field}
+        expect(
+            f"decision golden rejects a missing {field} field",
+            decision_golden_error(golden_data=without, **decision_args) != "",
+        )
+    expect(
+        "decision golden rejects an unexpected top-level field",
+        decision_golden_error(
+            golden_data=dict(decision_probe, invented=True), **decision_args) != "",
+    )
+    expect(
+        "decision golden rejects a command missing from the recorded corpus",
+        decision_golden_error(
+            golden_data=dict(decision_probe, decisions={}), **decision_args) != "",
+    )
+    expect(
+        "decision golden rejects a command foreign to the generated corpus",
+        decision_golden_error(
+            golden_data=dict(decision_probe, decisions={
+                "git status --short": "allow", "git invented": "allow"}),
+            **decision_args) != "",
+    )
+    expect(
+        "decision golden rejects a non-outcome verdict",
+        decision_golden_error(
+            golden_data=dict(
+                decision_probe, decisions={"git status --short": "maybe"}),
+            **decision_args) != "",
+    )
+    expect(
+        "decision golden rejects altered exclusion metadata",
+        decision_golden_error(
+            golden_data=dict(decision_probe, exclusions=dict(
+                decision_snapshot["exclusions"], max_command_chars=1999)),
+            **decision_args) != "",
+    )
+    with tempfile.TemporaryDirectory(prefix="z-harness-json-keys-") as raw:
+        duplicate_json = Path(raw) / "duplicate.json"
+        duplicate_json.write_text('{"decisions": {}, "decisions": {}}\n',
+                                  encoding="utf-8")
+        try:
+            _json_without_duplicate_keys(duplicate_json)
+            duplicate_rejected = False
+        except ValueError:
+            duplicate_rejected = True
+        expect("duplicate JSON object keys are rejected", duplicate_rejected)
     expect(
         "hook budget contract rejects a sub-second margin",
         hook_budget_error(budget=4.01) != "",
     )
 
-    declared_probe = {"PROBE": {"a", "b"}}
-    receipt_probe = {
-        "sets": {"PROBE": {"margins": {"a": {"failures": 3}, "b": {"failures": 2}}}},
-        "baseline": {}, "site_survivors": [], "selector_drift": [],
+    set_mutation = {
+        "version": 1, "kind": "set-element", "module": "guard-a.py",
+        "name": "TOKENS", "collection_kind": "set", "element": "x", "id": "set-id",
     }
+    site_mutation = {
+        "version": 1, "kind": "site", "module": "guard-b.py", "label": "site probe",
+        "anchor_sha256": "a" * 64, "replacement_sha256": "b" * 64,
+        "allowed_statuses": [], "id": "site-id",
+    }
+    mutation_plan_probe = [set_mutation, site_mutation]
+    mutation_contract = {
+        "schema_version": 2,
+        "generated_by": (
+            "tools/write-mutation-receipt.py --aggregate ... --accept-receipt-changes"),
+        "note": "probe-note", "generator_sha256": "c" * 64,
+        "plan_sha256": "d" * 64,
+        "keys": (
+            "schema_version", "generated_by", "note", "generator_sha256",
+            "source_digests", "plan_sha256", "baseline", "sweep_exclusions",
+            "results", "survivors", "caught", "total",
+        ),
+        "guards": ("guard-a.py", "guard-b.py", "guard-c.py"),
+    }
+    mutation_sources = {name: str(index) * 64 for index, name in enumerate(
+        mutation_contract["guards"], 1)}
+    set_result = dict(set_mutation, outcome="survived")
+    site_result = {key: value for key, value in site_mutation.items()
+                   if key != "allowed_statuses"}
+    site_result["outcome"] = "caught"
+    mutation_probe = {
+        "schema_version": 2,
+        "generated_by": mutation_contract["generated_by"],
+        "note": "probe-note",
+        "generator_sha256": "c" * 64,
+        "source_digests": mutation_sources,
+        "plan_sha256": "d" * 64,
+        "baseline": {name: "passed" for name in mutation_contract["guards"]},
+        "sweep_exclusions": {"guard-a.py::FIXTURES": "fixture corpus"},
+        "results": {"set-id": set_result, "site-id": site_result},
+        "survivors": ["set-id"], "caught": 1, "total": 2,
+    }
+    mutation_args = {
+        "plan": mutation_plan_probe,
+        "exclusions": mutation_probe["sweep_exclusions"],
+        "contract": mutation_contract,
+        "current_sources": mutation_sources,
+        "ceiling": 1,
+        "policy": {
+            "collections": {("guard-a.py", "TOKENS"): 1},
+            "sites": {("guard-b.py", "site probe")},
+            "site_digest": mutation_site_policy_digest([site_mutation]),
+            "exclusions": mutation_probe["sweep_exclusions"],
+            "floor": 2,
+        },
+    }
+    writer_spec = importlib.util.spec_from_file_location(
+        "_ci_gate_mutation_writer_selftest",
+        ROOT / "tools/write-mutation-receipt.py")
+    assert writer_spec is not None and writer_spec.loader is not None
+    writer = importlib.util.module_from_spec(writer_spec)
+    writer_spec.loader.exec_module(writer)
+    original_writer_which = writer.shutil.which
+    writer.shutil.which = (
+        lambda name: None if name == "zsh" else original_writer_which(name))
+    try:
+        try:
+            writer.baseline_results(ROOT)
+            missing_zsh_rejected = False
+        except ValueError as exc:
+            missing_zsh_rejected = "zsh is required" in str(exc)
+    finally:
+        writer.shutil.which = original_writer_which
+    expect(
+        "mutation baselines reject a host that skipped the zsh runtime probes",
+        missing_zsh_rejected,
+    )
+    raw_baseline = {
+        relative: {
+            "status": "completed", "returncode": 0,
+            "checks": 10, "failures": 0,
+        }
+        for relative in writer.GUARDS
+    }
+    raw_descriptor = {
+        "id": "raw-probe", "kind": "set-element", "module": writer.GREP,
+        "allowed_statuses": ["invalid-receipt"],
+    }
+    raw_survivor = {
+        "owner": raw_baseline[writer.GREP],
+        "merged": raw_baseline[writer.BASH],
+        "outcome": "survived", "reason": "survived",
+    }
+    expect(
+        "fragment aggregation independently recomputes a truthful raw outcome",
+        writer.recompute_raw_result(
+            raw_survivor, raw_descriptor, raw_baseline) == ("survived", "survived"),
+    )
+    try:
+        writer.recompute_raw_result(
+            dict(raw_survivor, outcome="caught", reason="suite-failure"),
+            raw_descriptor, raw_baseline)
+        forged_raw_rejected = False
+    except ValueError:
+        forged_raw_rejected = True
+    expect(
+        "fragment aggregation rejects a forged self-reported outcome",
+        forged_raw_rejected,
+    )
+    malformed_owner = dict(raw_baseline[writer.GREP], invented=True)
+    try:
+        writer.recompute_raw_result(
+            dict(raw_survivor, owner=malformed_owner), raw_descriptor, raw_baseline)
+        malformed_raw_rejected = False
+    except ValueError:
+        malformed_raw_rejected = True
+    expect(
+        "fragment aggregation rejects an extra raw suite field",
+        malformed_raw_rejected,
+    )
+    invalid_receipt = {
+        "status": "invalid-receipt", "returncode": 1,
+        "receipt_count": 0, "stderr_tail": "mutated receipt",
+    }
+    expect(
+        "a declared set mutation may be killed by an invalid terminal receipt",
+        writer.recompute_raw_result(
+            {
+                "owner": invalid_receipt, "merged": None,
+                "outcome": "caught", "reason": "invalid-receipt",
+            },
+            raw_descriptor, raw_baseline,
+        ) == ("caught", "invalid-receipt"),
+    )
+    original_apply_mutation = writer.apply_mutation
+    original_run_suite = writer.run_suite
+    with tempfile.TemporaryDirectory(prefix="z-harness-merged-kill-") as raw:
+        target = Path(raw) / "guard.py"
+        target.write_text("pristine\n", encoding="utf-8")
+        writer.apply_mutation = lambda _tree, _descriptor: (target, "pristine\n")
+        writer.run_suite = lambda _tree, relative: (
+            raw_baseline[writer.GREP] if relative == writer.GREP else invalid_receipt)
+        try:
+            try:
+                propagated_kill = writer.execute_mutation(
+                    Path(raw), raw_descriptor, raw_baseline)
+            except ValueError:
+                propagated_kill = None
+        finally:
+            writer.apply_mutation = original_apply_mutation
+            writer.run_suite = original_run_suite
+        expect(
+            "declared kill modes propagate to the merged public-envelope suite",
+            propagated_kill is not None
+            and propagated_kill["outcome"] == "caught"
+            and propagated_kill["reason"] == "invalid-receipt"
+            and propagated_kill["merged"] == invalid_receipt,
+        )
+    expect(
+        "aggregation preserves declared kill modes for the merged suite",
+        writer.recompute_raw_result(
+            {
+                "owner": raw_baseline[writer.GREP],
+                "merged": invalid_receipt,
+                "outcome": "caught", "reason": "invalid-receipt",
+            },
+            raw_descriptor, raw_baseline,
+        ) == ("caught", "invalid-receipt"),
+    )
+    context_fragment = {"head_sha": "head-a", "baseline": raw_baseline}
+    expect(
+        "aggregate context accepts the exact head and fresh baseline",
+        writer.aggregate_context_error(
+            context_fragment, "head-a", raw_baseline) == "",
+    )
+    expect(
+        "aggregate context rejects a foreign fragment head",
+        writer.aggregate_context_error(
+            context_fragment, "head-b", raw_baseline) != "",
+    )
+    changed_baseline = dict(raw_baseline)
+    changed_baseline[writer.GREP] = dict(
+        raw_baseline[writer.GREP], checks=9)
+    expect(
+        "aggregate context rejects a shard-only baseline",
+        writer.aggregate_context_error(
+            context_fragment, "head-a", changed_baseline) != "",
+    )
+    assignment_plan = [{"id": name} for name in ("a", "b", "c")]
+    assignment_fragment = {
+        "shard": {"index": 0, "count": 2},
+        "results": {"a": {}, "c": {}},
+    }
+    expect(
+        "a deterministic shard assignment clears",
+        writer.shard_assignment_error(
+            assignment_fragment, assignment_plan, 2) == "",
+    )
+    expect(
+        "a same-union fragment with the wrong shard assignment fails",
+        writer.shard_assignment_error(
+            dict(assignment_fragment, results={"a": {}}),
+            assignment_plan, 2) != "",
+    )
+    with tempfile.TemporaryDirectory(prefix="z-harness-fragment-json-") as raw:
+        duplicate_fragment = Path(raw) / "fragment.json"
+        duplicate_fragment.write_text(
+            '{"results": {}, "results": {}}\n', encoding="utf-8")
+        try:
+            writer.load_json(duplicate_fragment)
+            duplicate_fragment_rejected = False
+        except ValueError:
+            duplicate_fragment_rejected = True
+        expect(
+            "fragment JSON rejects duplicate object keys",
+            duplicate_fragment_rejected,
+        )
     expect("recorded mutation evidence matches the guards", mutation_receipt_error() == "")
     expect(
-        "a receipt covering every declared element clears",
-        mutation_receipt_error(receipt_probe, declared_probe, exempt={}) == "",
+        "an exact synthetic mutation receipt clears",
+        mutation_receipt_error(mutation_probe, **mutation_args) == "",
+    )
+    shrunk_contract = dict(mutation_contract, plan_sha256="e" * 64)
+    shrunk_probe = dict(
+        mutation_probe,
+        plan_sha256="e" * 64,
+        results={"set-id": set_result},
+        survivors=["set-id"], caught=0, total=1,
     )
     expect(
-        "an empty mutation receipt is a failure, not a clean verdict",
-        mutation_receipt_error({"sets": {}}, declared_probe) != "",
-    )
-    expect(
-        "an element added to a guarded set without regenerating is named",
-        "no recorded margin" in mutation_receipt_error(
-            {"sets": {"PROBE": {"margins": {"a": {"failures": 3}}}}}, declared_probe),
-    )
-    expect(
-        "a recorded margin for an element the source no longer declares is named",
-        "absent elements" in mutation_receipt_error(
-            {"sets": {"PROBE": {"margins": {
-                "a": {"failures": 3}, "b": {"failures": 2}, "gone": {"failures": 9}}}}},
-            declared_probe),
-    )
-    expect(
-        "margin shortfall above the recorded ceiling is a failure",
-        "above the recorded ceiling" in mutation_receipt_error(
-            {"sets": {"PROBE": {"margins": {
-                "a": {"failures": 1}, "b": {"failures": 0}}}}},
-            declared_probe, ceiling=2),
-    )
-    expect(
-        "margin shortfall at the recorded ceiling clears",
+        "a self-consistently regenerated but shrunken plan remains a failure",
         mutation_receipt_error(
-            {"sets": {"PROBE": {"margins": {
-                "a": {"failures": 1}, "b": {"failures": 0}}}},
-             "site_survivors": [], "selector_drift": []},
-            declared_probe, ceiling=3, exempt={}) == "",
+            shrunk_probe,
+            **dict(mutation_args, plan=[set_mutation], contract=shrunk_contract),
+        ) != "",
     )
     expect(
-        "an exempt set contributes no debt, so its zeros cannot fail the ceiling",
+        "a foreign site identity fails the independent closed inventory",
+        mutation_policy_error(
+            [set_mutation, dict(site_mutation, label="foreign")],
+            mutation_probe["sweep_exclusions"], mutation_args["policy"],
+        ) != "",
+    )
+    expect(
+        "a duplicate site identity fails the independent closed inventory",
+        mutation_policy_error(
+            [set_mutation, site_mutation, dict(site_mutation, id="duplicate-site")],
+            mutation_probe["sweep_exclusions"], mutation_args["policy"],
+        ) != "",
+    )
+    expect(
+        "changing a site anchor fails the independent semantic digest",
+        mutation_policy_error(
+            [set_mutation, dict(
+                site_mutation, anchor_sha256="c" * 64, id="changed-site")],
+            mutation_probe["sweep_exclusions"], mutation_args["policy"],
+        ) != "",
+    )
+    duplicate_target = dict(
+        site_mutation, label="site twin", id="duplicate-target")
+    duplicate_target_policy = dict(
+        mutation_args["policy"],
+        sites={("guard-b.py", "site probe"), ("guard-b.py", "site twin")},
+        site_digest=mutation_site_policy_digest(
+            [site_mutation, duplicate_target]),
+        floor=3,
+    )
+    expect(
+        "two labels cannot execute the same semantic site mutation",
+        mutation_policy_error(
+            [set_mutation, site_mutation, duplicate_target],
+            mutation_probe["sweep_exclusions"], duplicate_target_policy,
+        ) != "",
+    )
+    for field in mutation_contract["keys"]:
+        expect(
+            f"mutation receipt rejects a missing {field} field",
+            mutation_receipt_error(
+                {key: value for key, value in mutation_probe.items() if key != field},
+                **mutation_args) != "",
+        )
+    expect(
+        "mutation receipt rejects an unexpected top-level field",
+        mutation_receipt_error(dict(mutation_probe, invented=True), **mutation_args) != "",
+    )
+    expect(
+        "mutation receipt rejects a missing planned result",
         mutation_receipt_error(
-            {"sets": {"MOD_MEANING": {"margins": {
-                "a": {"failures": 0}, "b": {"failures": 0}}}},
-             "site_survivors": [], "selector_drift": []},
-            {"MOD_MEANING": {"a", "b"}}, ceiling=0,
-            exempt={"MOD_MEANING": "probe"}) == "",
+            dict(mutation_probe, results={"site-id": site_result}), **mutation_args) != "",
     )
     expect(
-        "an exemption for a set the guards no longer declare is named",
-        "no longer declare" in mutation_receipt_error(
-            dict(receipt_probe, sets={"PROBE": {"margins": {
-                "a": {"failures": 3}, "b": {"failures": 2}}}}),
-            declared_probe),
-    )
-    expect(
-        "an element whose removal breaks the import clears the target",
+        "mutation receipt rejects a foreign result",
         mutation_receipt_error(
-            {"sets": {"PROBE": {"margins": {
-                "a": {"failures": 3},
-                "b": {"failures": "module failed to load: KeyError"}}}},
-             "site_survivors": [], "selector_drift": []},
-            declared_probe, exempt={}) == "",
+            dict(mutation_probe, results=dict(mutation_probe["results"], foreign={})),
+            **mutation_args) != "",
     )
     expect(
-        "a declared set that was never swept is named",
-        "never swept" in mutation_receipt_error(
-            {"sets": {"OTHER": {"margins": {"x": {"failures": 9}}}}},
-            {"PROBE": {"a"}, "OTHER": {"x"}}),
+        "mutation receipt rejects an extra nested evidence field",
+        mutation_receipt_error(
+            dict(mutation_probe, results=dict(
+                mutation_probe["results"],
+                **{"set-id": dict(set_result, failures=999)})),
+            **mutation_args) != "",
     )
     expect(
-        "a site mutation no check catches is a failure",
-        "no check catches" in mutation_receipt_error(
-            dict(receipt_probe, site_survivors=["budget wrap deleted"]), declared_probe),
+        "mutation receipt recomputes survivors instead of trusting the list",
+        mutation_receipt_error(dict(mutation_probe, survivors=[]), **mutation_args) != "",
     )
     expect(
-        "a mutation that moved the check COUNT rather than a verdict is a failure",
-        "moved the check" in mutation_receipt_error(
-            dict(receipt_probe, selector_drift=["PROBE.a: 571 -> 570"]), declared_probe),
+        "mutation receipt recomputes caught and total",
+        mutation_receipt_error(
+            dict(mutation_probe, caught=999, total=999), **mutation_args) != "",
     )
-
-    real_receipt = json.loads(MUTATION_RECEIPT.read_text(encoding="utf-8"))
+    site_survived = dict(site_result, outcome="survived")
     expect(
-        "a receipt measured against different guard bytes is stale, not clean",
-        "changed since the receipt was measured" in mutation_receipt_error(
-            dict(real_receipt, measured_against={"hooks/bash_command_guard.py": "0" * 64})),
+        "a surviving site mutation is always a failure",
+        mutation_receipt_error(
+            dict(mutation_probe,
+                 results={"set-id": set_result, "site-id": site_survived},
+                 survivors=["set-id", "site-id"], caught=0),
+            **mutation_args) != "",
     )
     expect(
-        "a receipt recording no source digests is not a clean verdict",
-        "no source digests" in mutation_receipt_error(
-            {k: v for k, v in real_receipt.items() if k != "measured_against"}),
+        "survivor debt above the closed ceiling is a failure",
+        mutation_receipt_error(mutation_probe, **dict(mutation_args, ceiling=0)) != "",
+    )
+    recorded_receipt = _json_without_duplicate_keys(MUTATION_RECEIPT)
+    expect(
+        "the tracked survivor debt exactly fills the reviewed ceiling",
+        (len(recorded_receipt["survivors"])
+         == MUTATION_SURVIVOR_DEBT_CEILING),
+    )
+    regressed_receipt = json.loads(json.dumps(recorded_receipt))
+    regression_id = next(
+        mutation_id for mutation_id, result in regressed_receipt["results"].items()
+        if result["kind"] == "set-element" and result["outcome"] == "caught")
+    regressed_receipt["results"][regression_id]["outcome"] = "survived"
+    regressed_receipt["survivors"] = sorted(
+        mutation_id for mutation_id, result in regressed_receipt["results"].items()
+        if result["outcome"] == "survived")
+    regressed_receipt["caught"] -= 1
+    expect(
+        "one additional set-element survivor exceeds the production ceiling",
+        mutation_receipt_error(regressed_receipt) != "",
+    )
+    expect(
+        "a receipt missing the Bash baseline is not evidence over all guards",
+        mutation_receipt_error(
+            dict(mutation_probe, baseline={
+                "guard-a.py": "passed", "guard-b.py": "passed"}),
+            **mutation_args) != "",
+    )
+    expect(
+        "a stale guard digest invalidates the mutation receipt",
+        mutation_receipt_error(
+            dict(mutation_probe, source_digests={
+                **mutation_sources, "guard-a.py": "0" * 64}),
+            **mutation_args) != "",
+    )
+    expect(
+        "the canonical mutation summary is derived from the strict receipt",
+        mutation_summary_error() == "",
+    )
+    forged_summary = MUTATION_SUMMARY.read_bytes() + b"\nforged summary bytes\n"
+    expect(
+        "changing the summary and its outbound copies cannot bypass receipt derivation",
+        mutation_summary_error(
+            receipt_data=recorded_receipt, summary_bytes=forged_summary) != "",
     )
     expect("outbound review text matches the sources it includes", review_include_error() == "")
     with tempfile.TemporaryDirectory(prefix="z-harness-review-") as raw:
@@ -939,6 +1913,39 @@ def selftest() -> int:
         expect(
             "an included copy that drifted from its source is caught",
             "stale copy" in review_doc(f"# outbound\n\n{live}".replace(body, body + "\nx")),
+        )
+        expect(
+            "extra blank lines inside an include are not byte-identical",
+            "stale copy" in review_doc(live.replace(
+                f"\n{INCLUDE_CLOSE}", f"\n\n{INCLUDE_CLOSE}")),
+        )
+        crlf_body = (ROOT / source_name).read_bytes().replace(b"\n", b"\r\n")
+        document.write_bytes(
+            f"{INCLUDE_OPEN}{source_name} -->\n".encode()
+            + crlf_body + f"{INCLUDE_CLOSE}\n".encode())
+        expect(
+            "CRLF normalization cannot satisfy a byte-identical include",
+            "stale copy" in review_include_error(review),
+        )
+        with tempfile.NamedTemporaryFile(
+                dir=ROOT, prefix=".ci-gate-no-final-", suffix=".md",
+                delete=False) as temporary_source:
+            temporary_source.write(b"one line without newline")
+            no_final_path = Path(temporary_source.name)
+        try:
+            no_final_name = str(no_final_path.relative_to(ROOT))
+            expect(
+                "a source without a final newline cannot be line-normalized into place",
+                "stale copy" in review_doc(
+                    f"{INCLUDE_OPEN}{no_final_name} -->\n"
+                    f"one line without newline\n{INCLUDE_CLOSE}\n"),
+            )
+        finally:
+            no_final_path.unlink()
+        expect(
+            "an include cannot read a source outside the repository",
+            "outside the repository" in review_doc(
+                f"{INCLUDE_OPEN}/etc/passwd -->\nx\n{INCLUDE_CLOSE}\n"),
         )
         expect(
             "an include naming a file that does not exist is caught",
@@ -975,6 +1982,22 @@ def selftest() -> int:
             "does not exist" in review_doc(
                 carries_fence + "\n"
                 + f"{INCLUDE_OPEN}contracts/goldens/absent.md -->\nx\n{INCLUDE_CLOSE}\n"),
+        )
+        review_doc(f"# outbound\n\n{live}")
+        expect(
+            "an exact required include inventory clears",
+            review_include_error(
+                review, required_inventory={"doc.md": (source_name,)}) == "",
+        )
+        expect(
+            "removing every required include is not a clean verdict",
+            review_include_error(
+                review, required_inventory={
+                    "doc.md": (source_name,), "missing.md": (source_name,)}) != "",
+        )
+        expect(
+            "an unregistered live include is rejected by the exact inventory",
+            review_include_error(review, required_inventory={}) != "",
         )
         document.unlink()
         expect(
@@ -1013,9 +2036,9 @@ def selftest() -> int:
         if "bash_command_guard.py" in joined:
             return Result(0, f"SELFTEST-SUMMARY suite=bash_command_guard checks={SUITE_FLOORS['bash_command_guard']} failures=0\n")
         if "git_grep_engine_guard.py" in joined:
-            return Result(0, f"SELFTEST-SUMMARY suite=git_grep_engine_guard checks={SUITE_FLOORS['git_grep_engine_guard']} failures=0\n")
+            return Result(0, f"SELFTEST-SUMMARY suite=git_grep_engine_guard checks={expected_selftest_checks('git_grep_engine_guard')} failures=0\n")
         if "zsh_rev_modifier_guard.py" in joined:
-            return Result(0, f"SELFTEST-SUMMARY suite=zsh_rev_modifier_guard checks={SUITE_FLOORS['zsh_rev_modifier_guard']} failures=0\n")
+            return Result(0, f"SELFTEST-SUMMARY suite=zsh_rev_modifier_guard checks={expected_selftest_checks('zsh_rev_modifier_guard')} failures=0\n")
         if "run-skill-evals.py" in joined:
             return Result(0, f"EVAL-VALIDATE-SUMMARY scenarios={EVAL_SCENARIO_FLOOR} "
                           f"skills={EVAL_SKILL_FLOOR} failures=0 exit=0\n")

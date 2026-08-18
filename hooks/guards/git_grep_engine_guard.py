@@ -44,6 +44,7 @@ Python or awk semantics is a different guard, not a widening of this one.
 Exit codes:  0 = decision emitted on stdout (allow/deny/ask)
              2 = usage error / unknown flag / zero inputs in --selftest
 """
+import builtins
 import json
 import os
 import re
@@ -173,6 +174,13 @@ class FunctionDeclaration(NamedTuple):
     pipeline_end: int
 
 
+class FunctionInvocation(NamedTuple):
+    name: str
+    body: str
+    declarations: tuple
+    uncertain: frozenset
+
+
 class GitAuthority(NamedTuple):
     executable: str
     exec_path: str
@@ -212,6 +220,22 @@ class StdinConsumer(NamedTuple):
 class StdinProvenance(NamedTuple):
     decision: str
     reason: str
+
+
+class DynamicSourceFinding(NamedTuple):
+    operand: str
+    reason: str
+    context: str = "source"
+
+
+class EffectiveGitInvocation(NamedTuple):
+    """One Git argv after global options and bounded alias expansion."""
+
+    subcommand: object
+    argv: tuple
+    configs: tuple
+    identity_unresolved: tuple
+    pattern_config_unresolved: tuple
 
 
 class HeredocFinding(NamedTuple):
@@ -1403,7 +1427,7 @@ def function_declaration_records(cmd, deadline=None):
     return annotate_function_declarations(cmd, tuple(records), deadline)
 
 
-def _invoked_function_bodies(source, declarations, uncertain=(), deadline=None):
+def _invoked_function_contexts(source, declarations, uncertain=(), deadline=None):
     _check_decision_budget(deadline)
     if not declarations and not uncertain:
         return ()
@@ -1418,7 +1442,10 @@ def _invoked_function_bodies(source, declarations, uncertain=(), deadline=None):
             raise CommandParseError(
                 f"function {words[0]!r} is conditionally defined at this call site")
         if words and words[0] in declarations:
-            invoked.append(declarations[words[0]])
+            name = words[0]
+            invoked.append(FunctionInvocation(
+                name, declarations[name], tuple(declarations.items()),
+                frozenset(uncertain)))
             continue
         if (words and words[0] not in {"builtin", "command"}
                 and words[0] not in TRUSTED_EXTERNAL_NON_FORWARDING_COMMANDS
@@ -1472,7 +1499,7 @@ def _extract_function_region(cmd, records, start, end, scope_start,
             continue
         segment = cmd[cursor:position]
         cleaned.append(segment)
-        invoked.extend(_invoked_function_bodies(
+        invoked.extend(_invoked_function_contexts(
             segment, declarations, uncertain, deadline))
         if kind == "record":
             record = item
@@ -1503,18 +1530,32 @@ def _extract_function_region(cmd, records, start, end, scope_start,
         cursor = child_end + 1
     tail = cmd[cursor:end]
     cleaned.append(tail)
-    invoked.extend(_invoked_function_bodies(tail, declarations, uncertain, deadline))
+    invoked.extend(_invoked_function_contexts(tail, declarations, uncertain, deadline))
     return "".join(cleaned), tuple(invoked)
 
 
-def extract_function_invocations(cmd, deadline=None):
-    """Follow calls against definitions live at that point and in that shell scope."""
+def extract_function_call_contexts(cmd, deadline=None):
+    """Return calls with the declarations live at each proven invocation."""
     _check_decision_budget(deadline)
     records = function_declaration_records(cmd, deadline)
     if not records:
         return cmd, ()
     return _extract_function_region(
         cmd, records, 0, len(cmd), -1, {}, set(), None, deadline)
+
+
+def extract_function_invocations(cmd, deadline=None):
+    """Follow calls against definitions live at that point and in that shell scope."""
+    cleaned, contexts = extract_function_call_contexts(cmd, deadline)
+    return cleaned, tuple(context.body for context in contexts)
+
+
+def zsh_trap_function_sources(cmd, deadline=None):
+    """Return bodies of zsh's automatically invoked ``TRAP*`` functions."""
+    return tuple(
+        record.body for record in function_declaration_records(cmd, deadline)
+        if re.fullmatch(r"TRAP(?:EXIT|ZERR|DEBUG|[A-Z0-9]+)", record.name)
+    )
 
 
 def split_commands(cmd, _parse_depth=0, _deadline=None):
@@ -1635,6 +1676,12 @@ def split_commands(cmd, _parse_depth=0, _deadline=None):
                 embedded.extend(split_commands(source, _parse_depth + 1, _deadline))
             append_tok(text)
             continue
+        if cmd.startswith(("<(", "=("), i):
+            marker = cmd[i:i + 2]
+            body, i = _command_substitution(cmd, i)
+            embedded.extend(split_commands(body, _parse_depth + 1, _deadline))
+            append_tok(marker + "__PROCESS__)")
+            continue
         if c == "`":
             body, i = _backtick_substitution(cmd, i)
             embedded.extend(split_commands(body, _parse_depth + 1, _deadline))
@@ -1645,6 +1692,16 @@ def split_commands(cmd, _parse_depth=0, _deadline=None):
                 append_tok(cmd[i + 1], "escaped")
             i += 2
             continue
+        if c == "{":
+            brace_end = cmd.find("}", i + 1)
+            if brace_end != -1:
+                brace_body = cmd[i + 1:brace_end]
+                if (("," in brace_body or ".." in brace_body)
+                        and not any(char.isspace() or char in ";|&()"
+                                    for char in brace_body)):
+                    append_tok(cmd[i:brace_end + 1])
+                    i = brace_end + 1
+                    continue
         if cmd.startswith("&&", i) or cmd.startswith("||", i):
             flush_cmd()
             i += 2
@@ -1674,13 +1731,627 @@ def split_commands(cmd, _parse_depth=0, _deadline=None):
 
 
 CONTROL_KEYWORDS = {"!", "do", "then", "else", "elif", "if", "while", "until", "time",
-                    "nocorrect", "noglob"}
+                    "nocorrect", "noglob", "coproc"}
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
+REV_PATH_SUBCOMMANDS = {
+    "show", "diff", "cat-file", "log", "ls-tree", "archive", "checkout",
+    "restore", "grep", "rev-parse", "blame", "push", "fetch", "pull",
+    "difftool",
+}
 GIT_HAZARD_SUBCOMMANDS = {
     "grep", "show", "diff", "cat-file", "log", "ls-tree", "archive", "checkout",
     "restore", "rev-parse", "blame", "shortlog", "rev-list",
-}
+} | REV_PATH_SUBCOMMANDS
+
+
+def _consume_exec_options(items):
+    """Remove zsh ``exec`` options, returning an error for unknown grammar."""
+    while items and items[0][0].startswith("-"):
+        option = items.pop(0)[0]
+        if option in {"--", "-"}:
+            return None
+        flags = option[1:]
+        index = 0
+        while index < len(flags):
+            flag = flags[index]
+            if flag in "cl":
+                index += 1
+                continue
+            if flag == "a":
+                # zsh accepts both ``-a VALUE`` and attached argv-zero spellings,
+                # including combinations such as ``-claNAME``.  Once ``a`` is seen,
+                # the remainder of this option word is its value, not more flags.
+                if index + 1 < len(flags):
+                    index = len(flags)
+                    continue
+                if not items:
+                    return "exec -a is missing argv0"
+                items.pop(0)
+                index = len(flags)
+                continue
+            return f"unmodelled exec option {option!r}"
+    return None
+
+
+def _source_command_invocation(tokens, current_shell="zsh"):
+    """Return a wrapper-resolved command identity, remaining argv, and noglob state."""
+    items = list(tokens)
+    noglob = False
+    while items:
+        word = items[0][0]
+        if word in CONTROL_KEYWORDS or ASSIGNMENT.match(word):
+            items.pop(0)
+            noglob = noglob or word == "noglob"
+            continue
+        if word == "repeat":
+            items.pop(0)
+            if not items:
+                return None
+            count = items.pop(0)[0]
+            # A literal zero executes no following command.  Dynamic/arithmetic
+            # counts remain conservatively live because they may be positive.
+            if count == "0":
+                return None
+            continue
+        break
+    if not items:
+        return None
+    executable = items[0][0]
+    while executable in {"builtin", "command", "exec"}:
+        items.pop(0)
+        if executable == "exec":
+            if _consume_exec_options(items) is not None:
+                return None
+        elif executable == "command":
+            # zsh performs external lookup for ``command source`` and ``command .``.
+            # POSIX-family child shells execute those builtins; ``sh`` is deliberately
+            # conservative because its implementation is host-dependent.  Query options
+            # are terminal and never execute their operand.
+            if current_shell == "zsh":
+                return None
+            while items and items[0][0].startswith("-"):
+                option = items.pop(0)[0]
+                if option == "--":
+                    break
+                if (option in {"-v", "-V"}
+                        or (re.fullmatch(r"-[pvV]+", option)
+                            and any(flag in option for flag in "vV"))):
+                    return None
+                if option == "-p" or re.fullmatch(r"-p+", option):
+                    continue
+                return None
+        else:
+            while items and items[0][0].startswith("-"):
+                option = items.pop(0)[0]
+                if option == "--":
+                    break
+        if not items:
+            return None
+        executable = items[0][0]
+    if executable not in {"source", "."}:
+        items.pop(0)
+        return executable, items, noglob
+    items.pop(0)
+    return executable, items, noglob
+
+
+def _source_builtin_invocation(tokens, current_shell="zsh"):
+    """Return remaining argv and noglob state for a visible source/dot builtin."""
+    resolved = _source_command_invocation(tokens, current_shell)
+    if resolved is None:
+        return None
+    executable, items, noglob = resolved
+    if executable not in {"source", "."}:
+        return None
+    if items and items[0][0] == "--":
+        items.pop(0)
+    return items, noglob
+
+
+def _source_builtin_operand(tokens, current_shell="zsh"):
+    """Return the script operand for a visible source/dot builtin invocation."""
+    resolved = _source_builtin_invocation(tokens, current_shell)
+    if resolved is None:
+        return None
+    items, noglob = resolved
+    return (items[0], noglob) if items else None
+
+
+def _literal_eval_source(tokens, current_shell):
+    """Recover an eval body only when its pre-eval argv is statically literal."""
+    resolved = _source_command_invocation(tokens, current_shell)
+    if resolved is None:
+        return None
+    executable, items, _noglob = resolved
+    if executable != "eval":
+        return None
+    if items and items[0][0] == "--":
+        items.pop(0)
+    if not items or any(
+            _token_has_live_unresolved(token)
+            or _token_has_live_command_parameter(token)
+            for token in items):
+        return None
+    return " ".join(text for text, _quoting in items)
+
+
+def _source_operand_modes(operand):
+    text, quoting = operand
+    if quoting.startswith("mixed:"):
+        return quoting.split(":", 1)[1]
+    return {"": "U", "'": "S", '"': "D", "escaped": "E"}.get(
+        quoting, "E") * len(text)
+
+
+def _dynamic_source_operand_reason(
+        operand, noglob, current_shell, equals_state=ZSH_EQUALS_UNKNOWN):
+    """Return why one source operand is computed, or ``None`` when literal."""
+    text, _quoting = operand
+    modes = _source_operand_modes(operand)
+    marker = (text.startswith(("<(", "=("))
+              and bool(modes) and modes[0] == "U")
+    equals_path = (current_shell == "zsh"
+                   and equals_state != ZSH_EQUALS_OFF
+                   and text.startswith("=")
+                   and not text.startswith("=(")
+                   and bool(modes) and modes[0] == "U")
+    source_expansion = re.compile(r"\$(?:[A-Za-z0-9_@*?#$!\-={(^])|`")
+    computed = any(
+        any(mode in "UD" for mode in modes[match.start():match.end()])
+        for match in source_expansion.finditer(text))
+    live_initial_tilde = bool(text) and text[0] == "~" and modes[0] == "U"
+    computed = computed or live_initial_tilde or any(
+        mode == "U" and (character in "{}"
+                         or (not noglob and character in "*?["))
+        for character, mode in zip(text, modes))
+    descriptor = (text == "/dev/stdin" or text.startswith("/dev/fd/")
+                  or text.startswith("/proc/self/fd/")
+                  or bool(re.match(r"^/proc/(?:[0-9]+|\$\$)/fd/", text)))
+    if marker:
+        return "a process-substitution script operand"
+    if equals_path:
+        return "a zsh EQUALS-expanded script operand"
+    if descriptor:
+        return "a descriptor-backed script operand"
+    if computed:
+        return "a computed script operand"
+    return None
+
+
+def _literal_source_alias_state(name, aliases, current_shell, deadline, seen=()):
+    """Resolve a bounded literal alias chain to source, harmless, or unresolved."""
+    if name in seen or len(seen) >= MAX_ALIAS_DEPTH:
+        return "unresolved"
+    body = aliases.get(name)
+    if body is None:
+        return "harmless"
+    try:
+        commands = split_commands(body, _deadline=deadline)
+    except CommandParseError:
+        return "unresolved"
+    if not commands:
+        return "harmless"
+    # Invocation argv are appended to the complete alias expansion, so only the final
+    # command can receive a missing operand from the caller.  Every command can still
+    # contain its own computed source operand and must be inspected in execution order.
+    for command_index, command_tokens in enumerate(commands):
+        resolved = _source_command_invocation(command_tokens, current_shell)
+        if resolved is None:
+            continue
+        executable, items, noglob = resolved
+        source_consumer = executable in {"source", "."}
+        if not source_consumer:
+            if (executable not in aliases
+                    or _literal_alias_invocation_bypassed(command_tokens)):
+                continue
+            downstream = _literal_source_alias_state(
+                executable, aliases, current_shell, deadline, seen + (name,))
+            if downstream == "unresolved":
+                return "unresolved"
+            source_consumer = downstream == "source"
+        if not source_consumer:
+            continue
+        if items and items[0][0] == "--":
+            items.pop(0)
+        if not items:
+            if command_index == len(commands) - 1:
+                return "source"
+            continue
+        if _dynamic_source_operand_reason(
+                items[0], noglob, current_shell) is not None:
+            return "unresolved"
+    if source_has_dynamic_command_word(body, deadline):
+        return "unresolved"
+    return "harmless"
+
+
+def _alias_mutation_mode(items):
+    """Return (ordinary/global/suffix modes, remaining alias operands)."""
+    remaining = list(items)
+    modes = set()
+    while remaining and remaining[0][0].startswith("-"):
+        option = remaining.pop(0)[0]
+        if option == "--":
+            break
+        if option == "-":
+            remaining.insert(0, (option, ""))
+            break
+        if "g" in option[1:]:
+            modes.add("global")
+        if "s" in option[1:]:
+            modes.add("suffix")
+    return (modes or {"ordinary"}), remaining
+
+
+def _apply_literal_alias_mutation(executable, items, aliases):
+    """Apply one statically recoverable alias/unalias command to ``aliases``."""
+    if executable == "alias":
+        modes, operands = _alias_mutation_mode(items)
+        for text, _quoting in operands:
+            name, separator, body = text.partition("=")
+            if (separator and re.fullmatch(
+                    r"[A-Za-z_][A-Za-z0-9_]*", name)):
+                if modes & {"ordinary", "global"}:
+                    aliases.pop(name, None)
+                    aliases.pop(("global", name), None)
+                if "suffix" in modes:
+                    aliases.pop(("suffix", name), None)
+                for mode in modes:
+                    key = name if mode == "ordinary" else (mode, name)
+                    aliases[key] = body
+        return True
+    if executable == "unalias":
+        modes, operands = _alias_mutation_mode(items)
+        for text, _quoting in operands:
+            if not text.startswith("-"):
+                for mode in modes:
+                    if mode in {"ordinary", "global"}:
+                        aliases.pop(text, None)
+                        aliases.pop(("global", text), None)
+                    else:
+                        aliases.pop((mode, text), None)
+        return True
+    return False
+
+
+def _used_nonordinary_alias(tokens, alias_maps):
+    """Return a live zsh global/suffix alias use the guard does not execute."""
+    if not tokens:
+        return None
+    for text, quoting in tokens:
+        if quoting == "" and any(("global", text) in aliases
+                                  for aliases in alias_maps):
+            return "global", text
+    if _literal_alias_invocation_bypassed(tokens):
+        return None
+    command_items = list(tokens)
+    while command_items and (
+            command_items[0][0] in CONTROL_KEYWORDS
+            or ASSIGNMENT.match(command_items[0][0])):
+        command_items.pop(0)
+    if not command_items:
+        return None
+    executable, quoting = command_items[0]
+    if quoting != "" or "." not in executable:
+        return None
+    suffix = executable.rsplit(".", 1)[1]
+    if suffix and any(("suffix", suffix) in aliases for aliases in alias_maps):
+        return "suffix", suffix
+    return None
+
+
+def _literal_alias_invocation_bypassed(tokens):
+    """Whether an explicit lookup prefix prevents the later word being an alias."""
+    items = list(tokens)
+    while items:
+        word = items[0][0]
+        if word in CONTROL_KEYWORDS or ASSIGNMENT.match(word):
+            items.pop(0)
+            continue
+        if word == "repeat":
+            items.pop(0)
+            if items:
+                items.pop(0)
+            continue
+        break
+    return bool(items and items[0][0] in {"builtin", "command", "exec"})
+
+
+def _literal_alias_mutations(
+        source, current_shell, deadline, depth=0, declarations=None,
+        uncertain=(), call_stack=()):
+    """Return the final literal alias state established by one executed source."""
+    if depth > MAX_SOURCE_DEPTH:
+        raise CommandParseError("literal alias mutation exceeds the source depth bound")
+    aliases = {}
+
+    def inspect(commands, nested_depth, active_stack):
+        if nested_depth > MAX_SOURCE_DEPTH:
+            raise CommandParseError(
+                "literal alias mutation exceeds the source depth bound")
+        for tokens in commands:
+            _check_decision_budget(deadline)
+            eval_source = _literal_eval_source(tokens, current_shell)
+            if eval_source is not None:
+                inspect(split_commands(
+                    eval_source, _parse_depth=nested_depth + 1,
+                    _deadline=deadline), nested_depth + 1, active_stack)
+                continue
+            resolved = _source_command_invocation(
+                tokens, current_shell)
+            if resolved is None:
+                continue
+            executable, items, _noglob = resolved
+            _apply_literal_alias_mutation(executable, items, aliases)
+            if _literal_alias_invocation_bypassed(tokens):
+                continue
+            if executable in uncertain:
+                raise CommandParseError(
+                    f"function {executable!r} is conditionally defined")
+            if declarations is not None and executable in declarations:
+                if executable in active_stack or len(active_stack) >= MAX_SOURCE_DEPTH:
+                    raise CommandParseError(
+                        "declared function alias mutation exceeds the recursion bound")
+                inspect(split_commands(
+                    declarations[executable], _parse_depth=nested_depth + 1,
+                    _deadline=deadline), nested_depth + 1,
+                    active_stack + (executable,))
+
+    inspect(split_commands(source, _deadline=deadline), depth, call_stack)
+    return aliases
+
+
+def _debug_trap_action_sources(parsed, current_shell):
+    """Return literal actions installed for zsh's pre-command DEBUG trap."""
+    if current_shell != "zsh":
+        return ()
+    actions = []
+    for tokens in parsed:
+        resolved = _source_command_invocation(tokens, current_shell)
+        if resolved is None:
+            continue
+        executable, items, _noglob = resolved
+        if executable != "trap":
+            continue
+        while items and items[0][0].startswith("-"):
+            option = items.pop(0)[0]
+            if option == "--":
+                break
+            if option in {"-l", "-p"} or "l" in option[1:] or "p" in option[1:]:
+                items = []
+                break
+            items = []
+            break
+        if (len(items) >= 2 and items[0][0] not in {"", "-"}
+                and any(signal.upper() == "DEBUG"
+                        for signal, _quoting in items[1:])):
+            actions.append(items[0][0])
+    return tuple(actions)
+
+
+def _executed_alias_mutation_maps(command, parsed, current_shell, deadline):
+    """Return literal alias states installed by executed same-shell bodies."""
+    if current_shell != "zsh":
+        return ()
+    records = function_declaration_records(command, deadline)
+    declarations = {}
+    uncertain = set()
+    for record in records:
+        if record.scope_start != -1 or record.pipeline_start >= 0:
+            continue
+        if record.conditional or record.maybe:
+            uncertain.add(record.name)
+        else:
+            declarations[record.name] = record.body
+            uncertain.discard(record.name)
+    mutation_maps = []
+    _cleaned, call_contexts = extract_function_call_contexts(command, deadline)
+    for context in call_contexts:
+        mutation_maps.append(_literal_alias_mutations(
+            context.body, current_shell, deadline, depth=1,
+            declarations=dict(context.declarations), uncertain=context.uncertain,
+            call_stack=(context.name,)))
+    extra_sources = [record.body for record in records
+                     if record.name == "TRAPDEBUG"]
+    extra_sources.extend(_debug_trap_action_sources(parsed, current_shell))
+    for source in extra_sources:
+        mutation_maps.append(_literal_alias_mutations(
+            source, current_shell, deadline, depth=1,
+            declarations=declarations, uncertain=uncertain))
+    return tuple(mutation_maps)
+
+
+def _literal_source_alias_findings(command, parsed, current_shell, deadline):
+    """Track executed literal alias definitions and bounded source-forwarding chains."""
+    aliases = {}
+    findings = []
+    try:
+        executed_alias_maps = _executed_alias_mutation_maps(
+            command, parsed, current_shell, deadline)
+    except CommandParseError:
+        executed_alias_maps = ()
+        findings.append(DynamicSourceFinding(
+            "<executed function>",
+            "an executed function alias mutation cannot be resolved"))
+
+    def inspect(commands, depth, alias_stack=()):
+        if depth > MAX_SOURCE_DEPTH:
+            findings.append(DynamicSourceFinding(
+                "<alias eval>", "literal alias evaluation exceeds the source depth bound"))
+            return
+        for tokens in commands:
+            _check_decision_budget(deadline)
+            eval_source = _literal_eval_source(tokens, current_shell)
+            if eval_source is not None:
+                try:
+                    nested = split_commands(
+                        eval_source, _parse_depth=depth + 1, _deadline=deadline)
+                except CommandParseError:
+                    findings.append(DynamicSourceFinding(
+                        "<alias eval>", "a literal alias eval body cannot be resolved"))
+                else:
+                    inspect(nested, depth + 1, alias_stack)
+                continue
+
+            if alias_stack:
+                alias_resolution = unwrap_command_prefix(
+                    tokens, current_shell,
+                    ZSH_EQUALS_ON if current_shell == "zsh" else ZSH_EQUALS_OFF)
+                alias_git_state = _shell_alias_git_state(
+                    alias_resolution, {}, (), depth, deadline)
+                if alias_git_state != ALIAS_HARMLESS:
+                    detail = (
+                        "contains or reaches a guarded Git operation"
+                        if alias_git_state == ALIAS_GUARDED
+                        else "has unresolved Git execution semantics")
+                    findings.append(DynamicSourceFinding(
+                        alias_stack[-1],
+                        f"a literal shell alias {detail}",
+                        "guarded-git"))
+
+            resolved = _source_command_invocation(
+                tokens, current_shell)
+            if resolved is None:
+                continue
+            executable, items, _noglob = resolved
+            if _apply_literal_alias_mutation(executable, items, aliases):
+                continue
+            special_alias = _used_nonordinary_alias(
+                tokens, (aliases, *executed_alias_maps))
+            if special_alias is not None:
+                mode, name = special_alias
+                findings.append(DynamicSourceFinding(
+                    name,
+                    f"a used zsh {mode} alias has unresolved executable semantics",
+                    "guarded-git"))
+                continue
+            if executable in {"source", "."} and alias_stack:
+                source_items = list(items)
+                if source_items and source_items[0][0] == "--":
+                    source_items.pop(0)
+                if source_items:
+                    reason = _dynamic_source_operand_reason(
+                        source_items[0], _noglob, current_shell)
+                    if reason is not None:
+                        findings.append(DynamicSourceFinding(
+                            source_items[0][0], reason))
+                continue
+            bypassed = _literal_alias_invocation_bypassed(tokens)
+            body_alias_maps = (
+                tuple(alias_map for alias_map in executed_alias_maps
+                      if executable in alias_map)
+                if executable not in aliases and not bypassed else ())
+            if body_alias_maps:
+                for body_aliases in body_alias_maps:
+                    state = _literal_source_alias_state(
+                        executable, body_aliases, current_shell, deadline)
+                    if state == "unresolved":
+                        findings.append(DynamicSourceFinding(
+                            executable,
+                            "an executed same-shell alias chain cannot prove "
+                            "executable source absent"))
+                    if executable in alias_stack:
+                        findings.append(DynamicSourceFinding(
+                            executable,
+                            "an executed same-shell alias cycle is unresolved"))
+                        continue
+                    try:
+                        nested = split_commands(
+                            body_aliases[executable], _parse_depth=depth + 1,
+                            _deadline=deadline)
+                    except CommandParseError:
+                        findings.append(DynamicSourceFinding(
+                            executable,
+                            "an executed same-shell alias body cannot be resolved"))
+                        continue
+                    if items:
+                        if nested:
+                            nested[-1] = [*nested[-1], *items]
+                        else:
+                            nested = [list(items)]
+                    body_alias_stack = alias_stack + (executable,)
+                    inspect(nested, depth + 1, body_alias_stack)
+                continue
+            if executable not in aliases or bypassed:
+                continue
+            state = _literal_source_alias_state(
+                executable, aliases, current_shell, deadline)
+            if state == "unresolved":
+                findings.append(DynamicSourceFinding(
+                    executable,
+                    "a literal alias chain cannot prove executable source absent"))
+
+            # Alias expansion is executable shell state.  Resolving whether the body
+            # itself sources bytes is not enough: the body may install or remove a
+            # second alias that a later command invokes.  Walk the bounded expansion
+            # in execution order and carry the invocation argv to its final command,
+            # exactly as the shell does for an ordinary alias expansion.
+            if executable in alias_stack:
+                findings.append(DynamicSourceFinding(
+                    executable, "a literal alias execution cycle is unresolved"))
+                continue
+            try:
+                nested = split_commands(
+                    aliases[executable], _parse_depth=depth + 1,
+                    _deadline=deadline)
+            except CommandParseError:
+                findings.append(DynamicSourceFinding(
+                    executable, "a literal alias body cannot be resolved"))
+                continue
+            if items:
+                if nested:
+                    nested[-1] = [*nested[-1], *items]
+                else:
+                    nested = [list(items)]
+            inspect(nested, depth + 1, alias_stack + (executable,))
+
+    inspect(parsed, 0)
+    return tuple(findings)
+
+
+def dynamic_source_findings(
+        command, commands=None, deadline=None, current_shell="zsh",
+        equals_states=None):
+    """Find sourced script operands whose bytes are not a literal visible file.
+
+    The guard never executes a producer to discover what source code it emits. Literal
+    file operands remain outside content inspection; computed paths, process-substitution
+    paths, and descriptor-backed inputs are unresolved executable source and fail closed.
+    """
+    findings = []
+    parsed = (split_commands(command, _deadline=deadline)
+              if commands is None else commands)
+    # A live command word may resolve to ``source``/``.`` (or directly to a guarded
+    # Git command) even when no literal builtin name is present.  Executing it to learn
+    # its identity would defeat the guard, so the unresolved executable is itself an
+    # executable-source boundary.
+    if source_has_dynamic_command_word(command, deadline):
+        findings.append(DynamicSourceFinding(
+            "<dynamic executable>",
+            "a live expansion selects the command that may consume executable source"))
+    # Alias definitions are executable shell state, not data. Parse only alias commands
+    # and literal eval bodies, then resolve their RHS through the same wrapper grammar as
+    # direct source invocations. A regex over raw text both missed ``exec source`` and
+    # treated quoted data that merely mentioned ``alias`` as an executed definition.
+    findings.extend(_literal_source_alias_findings(
+        command, parsed, current_shell, deadline))
+    if equals_states is None:
+        equals_states = zsh_equals_states(
+            command, parsed,
+            ZSH_EQUALS_ON if current_shell == "zsh" else ZSH_EQUALS_OFF,
+            deadline)
+    for tokens, equals_state in zip(parsed, equals_states):
+        source_operand = _source_builtin_operand(tokens, current_shell)
+        if source_operand is None:
+            continue
+        operand, noglob = source_operand
+        reason = _dynamic_source_operand_reason(
+            operand, noglob, current_shell, equals_state)
+        if reason is None:
+            continue
+        findings.append(DynamicSourceFinding(operand[0], reason))
+    return tuple(findings)
 # Query the resolved Git's non-helper command inventory once per guard process. Names
 # outside that executing binary's inventory can be supplied by ambient alias/config or
 # git-NAME helpers, neither of which argv inspection can authorize.
@@ -2370,11 +3041,38 @@ def source_has_dynamic_command_word(source, deadline=None):
     except CommandParseError:
         return True
     for tokens in commands:
-        words = [token for token in tokens if token[0] not in CONTROL_KEYWORDS
-                 and not ASSIGNMENT.match(token[0])]
-        if words and _token_has_live_unresolved(words[0]):
+        words = []
+        skip_redirect_operand = False
+        for token in tokens:
+            text = token[0]
+            if skip_redirect_operand:
+                skip_redirect_operand = False
+                continue
+            redirect = re.match(
+                r"^(?:[0-9]+)?(?:<<<|<<-|<<|<>|<&|>&|>>|>|<)(.*)$", text)
+            if redirect:
+                skip_redirect_operand = redirect.group(1) == ""
+                continue
+            if text in CONTROL_KEYWORDS or ASSIGNMENT.match(text):
+                continue
+            words.append(token)
+        if words and (_token_has_live_unresolved(words[0])
+                      or _token_has_live_command_parameter(words[0])):
             return True
     return False
+
+
+def _token_has_live_command_parameter(token):
+    """Source-specific positional/special parameters missed by generic `$NAME`."""
+    text, quoting = token
+    if quoting in {"'", "escaped"}:
+        return False
+    modes = (quoting.split(":", 1)[1] if quoting.startswith("mixed:")
+             else {"": "U", '"': "D"}.get(quoting, "E") * len(text))
+    pattern = re.compile(
+        r"\$(?:[0-9]+|[#?*@!$-]|[=^]?[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?)")
+    return any(any(mode in "UD" for mode in modes[match.start():match.end()])
+               for match in pattern.finditer(text))
 
 
 def has_dynamic_guarded_command_tail(tokens):
@@ -2480,7 +3178,7 @@ def unwrap_command_prefix(tokens, shell="zsh", equals_state=ZSH_EQUALS_ON,
                 items.pop(0)
                 if not items:
                     break
-            if items[0][0] in {"command", "exec"}:
+            if items[0][0] in {"builtin", "command", "exec", "trap"}:
                 continue
             if items[0][0] == "eval":
                 break
@@ -2523,24 +3221,9 @@ def unwrap_command_prefix(tokens, shell="zsh", equals_state=ZSH_EQUALS_ON,
         if executable == "exec":
             wrapper_depth += 1
             items.pop(0)
-            while items:
-                word = items[0][0]
-                if word == "--":
-                    items.pop(0)
-                    break
-                if word == "-a":
-                    items.pop(0)
-                    if not items:
-                        errors.append("exec -a is missing argv0")
-                        break
-                    items.pop(0)
-                    continue
-                if word in {"-c", "-l"} or re.fullmatch(r"-[cl]+", word):
-                    items.pop(0)
-                    continue
-                if word.startswith("-"):
-                    errors.append(f"unmodelled exec option {word!r}")
-                break
+            error = _consume_exec_options(items)
+            if error is not None:
+                errors.append(error)
             if errors:
                 break
             continue
@@ -2774,6 +3457,24 @@ def nested_shell_invocation(resolution, current_shell="sh", deadline=None):
             dict(resolution.command_env),
             _descendant_lookup_authority(resolution),
         )
+    if shell == "trap":
+        args = resolution.items[1:]
+        while args and args[0][0].startswith("-"):
+            option = args.pop(0)[0]
+            if option == "--":
+                break
+            if option in {"-l", "-p"} or "l" in option[1:] or "p" in option[1:]:
+                return None
+            return None
+        if len(args) < 2 or args[0][0] in {"", "-"}:
+            return None
+        action = args[0]
+        return ShellInvocation(
+            current_shell, action[0],
+            _token_has_live_unresolved(action)
+            or _token_has_live_command_parameter(action),
+            dict(resolution.command_env),
+            _descendant_lookup_authority(resolution))
     if shell not in SHELLS:
         return None
     args = resolution.items[1:]
@@ -2938,117 +3639,23 @@ ALIAS_GUARDED = "guarded"
 ALIAS_UNCERTAIN = "uncertain"
 
 
-def _alias_guard_state(
-        name, aliases, seen=(), depth=0, deadline=None, command_env=None,
-        lookup_authority_uncertain=False):
-    """Classify a standard alias chain without collapsing uncertainty into safety."""
-    lowered = name.lower()
-    if lowered in GIT_HAZARD_SUBCOMMANDS:
-        return ALIAS_GUARDED
-    if lowered in seen:
-        return ALIAS_UNCERTAIN
-    if lowered not in aliases:
-        return ALIAS_HARMLESS
-    if depth >= MAX_ALIAS_DEPTH:
-        return ALIAS_UNCERTAIN
-    body = aliases[lowered]
-    if body.startswith("!"):
-        return _shell_alias_guard_state(
-            body[1:], aliases, seen + (lowered,), depth + 1,
-            deadline=deadline, command_env=command_env,
-            lookup_authority_uncertain=lookup_authority_uncertain)
-    try:
-        words = shlex.split(body, posix=True)
-    except ValueError:
-        return ALIAS_UNCERTAIN
-    local_aliases = dict(aliases)
-    index = 0
-    while index < len(words) and words[index] == "-c":
-        if index + 1 >= len(words):
-            return ALIAS_UNCERTAIN
-        key, separator, value = words[index + 1].partition("=")
-        normalized = key.strip().lower()
-        if separator and normalized.startswith("alias.") and len(normalized) > 6:
-            local_aliases[normalized[6:]] = value
-        index += 2
-    if index >= len(words) or words[index].startswith("-"):
-        return ALIAS_UNCERTAIN
-    return _alias_guard_state(
-        words[index], local_aliases, seen + (lowered,), depth + 1, deadline,
-        command_env, lookup_authority_uncertain)
-
-
-def _shell_alias_git_state(resolution, aliases, seen, depth, deadline=None):
+def _shell_alias_git_state(
+        resolution, aliases, seen, depth, deadline=None, forwarded_argv=()):
     """Classify one literal Git invocation reached from shell alias source."""
-    words = [word for word, _quoting in resolution.items]
-    if not words or os.path.basename(words[0]) != "git":
-        return ALIAS_HARMLESS
-    index = 1
-    local_aliases = dict(aliases)
-    parameter_configs, parameter_error = _git_config_parameter_items(
-        resolution.command_env.get("GIT_CONFIG_PARAMETERS"))
-    if parameter_error:
+    try:
+        invocation = resolve_effective_git_invocation(
+            resolution.items, resolution, deadline, aliases, seen, depth)
+    except GitAuthorityError:
         return ALIAS_UNCERTAIN
-    local_aliases.update(_alias_table(parameter_configs))
-    if any(resolution.command_env.get(name)
-           for name in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")):
-        return ALIAS_UNCERTAIN
-    count_text = resolution.command_env.get("GIT_CONFIG_COUNT")
-    if count_text is not None:
-        try:
-            count = int(count_text)
-            if count < 0:
-                raise ValueError
-        except ValueError:
-            return ALIAS_UNCERTAIN
-        for config_index in range(count):
-            key = resolution.command_env.get(f"GIT_CONFIG_KEY_{config_index}")
-            value = resolution.command_env.get(f"GIT_CONFIG_VALUE_{config_index}")
-            if key is None or value is None:
-                return ALIAS_UNCERTAIN
-            normalized = key.strip().lower()
-            if normalized.startswith("alias.") and len(normalized) > 6:
-                local_aliases[normalized[6:]] = value
-    options_with_values = {
-        "-C", "-c", "--git-dir", "--work-tree", "--namespace",
-        "--super-prefix", "--exec-path", "--config-env", "--attr-source",
-    }
-    while index < len(words) and words[index].startswith("-"):
-        if words[index] == "--":
-            index += 1
-            break
-        option = words[index]
-        if option.startswith("--config-env="):
-            configured_key = option.split("=", 1)[1].partition("=")[0].strip().lower()
-            if configured_key.startswith("alias."):
-                return ALIAS_UNCERTAIN
-        if option == "--config-env":
-            if index + 1 >= len(words):
-                return ALIAS_UNCERTAIN
-            configured_key = words[index + 1].partition("=")[0].strip().lower()
-            if configured_key.startswith("alias."):
-                return ALIAS_UNCERTAIN
-        if option == "-c":
-            if index + 1 >= len(words):
-                return ALIAS_UNCERTAIN
-            key, separator, value = words[index + 1].partition("=")
-            normalized = key.strip().lower()
-            if normalized.startswith("alias."):
-                if not separator or len(normalized) <= 6:
-                    return ALIAS_UNCERTAIN
-                local_aliases[normalized[6:]] = value
-        if option in options_with_values:
-            if index + 1 >= len(words):
-                return ALIAS_UNCERTAIN
-            index += 2
-        else:
-            index += 1
-    if index >= len(words):
+    if invocation is None:
         return ALIAS_HARMLESS
-    return _alias_guard_state(
-        words[index], local_aliases, seen, depth + 1, deadline,
-        resolution.command_env,
-        resolution.descendant_lookup_authority_uncertain)
+    if invocation.identity_unresolved:
+        return ALIAS_UNCERTAIN
+    if invocation.subcommand is None and forwarded_argv:
+        return ALIAS_UNCERTAIN
+    if invocation.subcommand in GIT_HAZARD_SUBCOMMANDS:
+        return ALIAS_GUARDED
+    return ALIAS_HARMLESS
 
 
 def _alias_authority_context(command_env, lookup_authority_uncertain):
@@ -3065,7 +3672,8 @@ def _alias_command_environment_states(
 
 def _shell_alias_guard_state(source, aliases, seen=(), depth=0,
                              current_shell="sh", deadline=None, command_env=None,
-                             lookup_authority_uncertain=False):
+                             lookup_authority_uncertain=False,
+                             forwarded_argv=()):
     """Tri-state literal shell alias traversal shared with top-level shell parsing."""
     if depth > MAX_ALIAS_DEPTH:
         return ALIAS_UNCERTAIN
@@ -3113,6 +3721,13 @@ def _shell_alias_guard_state(source, aliases, seen=(), depth=0,
         commands = split_commands(source, _deadline=deadline)
     except CommandParseError:
         return ALIAS_UNCERTAIN
+    equals_states = zsh_equals_states(
+        source, commands,
+        ZSH_EQUALS_ON if current_shell == "zsh" else ZSH_EQUALS_OFF,
+        deadline)
+    if dynamic_source_findings(
+            source, commands, deadline, current_shell, equals_states):
+        return ALIAS_UNCERTAIN
     environments = _alias_command_environment_states(
         source, commands, alias_env, lookup_authority_uncertain, deadline)
     state = ALIAS_HARMLESS
@@ -3142,7 +3757,7 @@ def _shell_alias_guard_state(source, aliases, seen=(), depth=0,
                 return ALIAS_UNCERTAIN
             continue
         command_state = _shell_alias_git_state(
-            resolution, aliases, seen, depth, deadline)
+            resolution, aliases, seen, depth, deadline, forwarded_argv)
         if command_state != ALIAS_HARMLESS:
             return command_state
         state = command_state
@@ -3152,7 +3767,7 @@ def _shell_alias_guard_state(source, aliases, seen=(), depth=0,
 def resolve_git_alias(
         subcommand, tail, aliases, authority, effective_exec_path, deadline=None,
         command_env=None, lookup_authority_uncertain=False,
-        executable_lookup_uncertain=False):
+        executable_lookup_uncertain=False, alias_seen=(), alias_depth=0):
     """Resolve standard Git aliases with bounded recursive closure.
 
     Return ``(subcommand, argv, error, derived-config)``. A harmless shell alias has no subcommand;
@@ -3161,26 +3776,32 @@ def resolve_git_alias(
     """
     current = subcommand.lower()
     argv = list(tail)
-    seen = []
+    seen = list(alias_seen)
     derived_configs = []
-    for _depth in range(MAX_ALIAS_DEPTH + 1):
+    depth = alias_depth
+    while depth <= MAX_ALIAS_DEPTH:
+        authority_error = authorize_git_subcommand(
+            current, authority, effective_exec_path,
+            executable_lookup_uncertain)
+        # Git ignores aliases that hide an existing command. Resolve command authority
+        # before consulting alias config at every recursion level, matching Git's own
+        # dispatch order rather than letting `alias.grep=status` hide native `grep` here.
+        if authority_error is None:
+            return current, argv, None, derived_configs
         if current not in aliases:
-            authority_error = authorize_git_subcommand(
-                current, authority, effective_exec_path,
-                executable_lookup_uncertain)
-            if authority_error is None:
-                return current, argv, None, derived_configs
             return None, [], authority_error, derived_configs
         if current in seen:
             return (None, [], "Git alias cycle: " + " -> ".join(seen + [current]),
                     derived_configs)
         seen.append(current)
+        depth += 1
         body = aliases[current]
         if body.startswith("!"):
             shell_state = _shell_alias_guard_state(
-                body[1:], aliases, tuple(seen), deadline=deadline,
+                body[1:], aliases, tuple(seen), depth, deadline=deadline,
                 command_env=command_env,
-                lookup_authority_uncertain=lookup_authority_uncertain)
+                lookup_authority_uncertain=lookup_authority_uncertain,
+                forwarded_argv=tuple(argv))
             if shell_state != ALIAS_HARMLESS:
                 detail = ("contains or reaches a guarded Git operation"
                           if shell_state == ALIAS_GUARDED
@@ -3219,11 +3840,15 @@ def resolve_git_alias(
             derived_configs)
 
 
-def git_grep_argv(tokens, resolution=None, deadline=None):
-    """Return guarded pattern argv, Git config, and unresolved invocation state.
+def resolve_effective_git_invocation(
+        tokens, resolution=None, deadline=None, inherited_aliases=None,
+        alias_seen=(), alias_depth=0):
+    """Resolve one visible Git command through global config and bounded aliases.
 
-    None means the resolved Git subcommand is outside grep/log/shortlog/rev-list
-    pattern handling. This is a bounded argv model, not a general Git dispatcher.
+    ``None`` means the command is proven not to invoke Git. Identity uncertainty is kept
+    separate from pattern-configuration uncertainty so an unread config file cannot hide
+    a native command, while the grep-engine consumer still fails closed on that file.
+    No alias body or caller-selected Git executable is executed by this resolver.
     """
     resolution = resolution or unwrap_command_prefix(tokens)
     items = resolution.items
@@ -3234,7 +3859,8 @@ def git_grep_argv(tokens, resolution=None, deadline=None):
     j = 0
     if resolution.errors:
         if resolution.hazard_hint:
-            return [], [], list(resolution.errors)
+            return EffectiveGitInvocation(
+                None, (), (), tuple(resolution.errors), ())
         return None
     if os.path.basename(words[j]) != "git":
         return None
@@ -3260,7 +3886,11 @@ def git_grep_argv(tokens, resolution=None, deadline=None):
         except ValueError:
             unresolved_configs.append("GIT_CONFIG_COUNT is not a non-negative integer")
             count = 0
+        if count > MAX_TOKENS:
+            raise CommandParseError(
+                f"GIT_CONFIG_COUNT exceeds the closed limit of {MAX_TOKENS}")
         for index in range(count):
+            _check_decision_budget(deadline)
             key = command_env.get(f"GIT_CONFIG_KEY_{index}")
             value = command_env.get(f"GIT_CONFIG_VALUE_{index}")
             if key is None or value is None:
@@ -3304,20 +3934,27 @@ def git_grep_argv(tokens, resolution=None, deadline=None):
         "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix",
         "--config-env", "--attr-source",
     }
+    terminal_options = {
+        "-v", "--version", "-h", "--help", "--exec-path",
+        "--html-path", "--man-path", "--info-path",
+    }
     while j < len(words) and words[j].startswith("-"):
         option = words[j]
         if option == "--":
             j += 1
             break
-        if option == "--exec-path":
-            return None
+        if option in terminal_options or option.startswith("--list-cmds="):
+            return EffectiveGitInvocation(
+                None, (), tuple(configs), (), tuple(unresolved_configs))
         if option.startswith("--exec-path="):
             effective_exec_path = option.split("=", 1)[1]
             j += 1
             continue
         if option in options_with_args:
             if j + 1 >= len(words):
-                return None
+                return EffectiveGitInvocation(
+                    None, (), tuple(configs),
+                    (f"{option} is missing its required value",), ())
             if option == "-c":
                 configs.append(words[j + 1])
             elif option == "--config-env":
@@ -3333,22 +3970,52 @@ def git_grep_argv(tokens, resolution=None, deadline=None):
         # the following git subcommand in the next argv slot.
         j += 1
     if j >= len(words):
-        return None
+        return EffectiveGitInvocation(
+            None, (), tuple(configs), (), tuple(unresolved_configs))
+    aliases = dict(inherited_aliases or {})
+    aliases.update(_alias_table(configs))
     subcommand, rest, alias_error, alias_configs = resolve_git_alias(
-        words[j], items[j + 1:], _alias_table(configs), authority,
+        words[j], items[j + 1:], aliases, authority,
         effective_exec_path, deadline, command_env,
         resolution.descendant_lookup_authority_uncertain,
-        resolution.lookup_authority_uncertain or path_changed)
+        resolution.lookup_authority_uncertain or path_changed,
+        alias_seen, alias_depth)
     configs.extend(alias_configs)
     if alias_error:
-        unresolved_configs.append(alias_error)
-        return [], configs, unresolved_configs
+        return EffectiveGitInvocation(
+            None, (), tuple(configs), (alias_error,), tuple(unresolved_configs))
+    if subcommand is None:
+        return EffectiveGitInvocation(
+            None, (), tuple(configs), (), tuple(unresolved_configs))
+    identity_unresolved = []
+    if subcommand in unresolved_aliases:
+        identity_unresolved.append(
+            f"effective subcommand {subcommand!r} has unresolved alias configuration")
+    return EffectiveGitInvocation(
+        subcommand, tuple(rest), tuple(configs), tuple(identity_unresolved),
+        tuple(unresolved_configs))
+
+
+def git_grep_argv(tokens, resolution=None, deadline=None):
+    """Return guarded pattern argv, Git config, and unresolved invocation state.
+
+    None means the resolved Git subcommand is outside grep/log/shortlog/rev-list
+    pattern handling. This is a bounded argv model, not a general Git dispatcher.
+    """
+    invocation = resolve_effective_git_invocation(tokens, resolution, deadline)
+    if invocation is None:
+        return None
+    configs = list(invocation.configs)
+    if invocation.identity_unresolved:
+        return [], configs, list(invocation.identity_unresolved)
+    subcommand = invocation.subcommand
     if subcommand is None:
         return None
-    if subcommand in unresolved_aliases:
-        return [], configs, unresolved_configs
+    rest = list(invocation.argv)
     if subcommand == "grep":
-        return rest, configs, unresolved_configs
+        if invocation.pattern_config_unresolved:
+            return [], configs, list(invocation.pattern_config_unresolved)
+        return rest, configs, []
     # `git log --grep=<pattern>` runs the pattern through the same engine selection as
     # `git grep`: measured on git 2.46.1, `-E --grep='foo\b'` returns the commit whose
     # subject contains `foob` while `-P` returns the intended one. The pattern rides an
@@ -3393,7 +4060,9 @@ def git_grep_argv(tokens, resolution=None, deadline=None):
                 lifted.append((GIT_LOG_ENGINE_TOKENS[text], ""))
             k += 1
         if found_pattern_option:
-            return lifted, configs, unresolved_configs
+            if invocation.pattern_config_unresolved:
+                return [], configs, list(invocation.pattern_config_unresolved)
+            return lifted, configs, []
     return None
 
 
@@ -4131,6 +4800,13 @@ def decide(command, _shell_depth=0, _deadline=None, _shell="zsh",
 def _classify(command, decisions, _shell_depth, _deadline, _shell, _equals_state,
               _command_env, _lookup_authority_uncertain):
     """Append every non-allow finding for one command source to `decisions`."""
+    if _shell == "zsh":
+        for body in zsh_trap_function_sources(command, _deadline):
+            trap_decision, trap_reason = decide(
+                body, _shell_depth + 1, _deadline, _shell, _equals_state,
+                _command_env, _lookup_authority_uncertain)
+            if trap_decision != "allow":
+                decisions.append((trap_decision, trap_reason))
     equals_heredoc = heredoc_equals_decision(
         command, _deadline,
         classifier=lambda body, shell, state, deadline, env, lookup: decide(
@@ -4148,6 +4824,20 @@ def _classify(command, decisions, _shell_depth, _deadline, _shell, _equals_state
             "ask", f"the Bash command cannot be parsed safely ({exc}); "
             "rewrite it as a direct command before proceeding."))
         return
+    equals_states = zsh_equals_states(
+        scan_command, commands,
+        _equals_state if _shell == "zsh" else ZSH_EQUALS_OFF, _deadline)
+    for finding in dynamic_source_findings(
+            scan_command, commands, _deadline, _shell, equals_states):
+        if finding.context == "guarded-git":
+            decisions.append((
+                "ask", f"{finding.reason} at {finding.operand!r}; the alias body is not "
+                "executed by this guard, so invoke Git directly with literal argv"))
+        else:
+            decisions.append((
+                "ask", f"{finding.reason} {finding.operand!r} is consumed by source/dot; "
+                "the emitted shell code is not executed by this guard, so use a literal "
+                "script path or inspect and run the command directly"))
     try:
         stdin_provenance = interpreter_stdin_provenance(
             command, commands, _shell_depth, _deadline, _shell, _equals_state,
@@ -4159,9 +4849,6 @@ def _classify(command, decisions, _shell_depth, _deadline, _shell, _equals_state
         return
     if stdin_provenance is not None:
         decisions.append((stdin_provenance.decision, stdin_provenance.reason))
-    equals_states = zsh_equals_states(
-        scan_command, commands,
-        _equals_state if _shell == "zsh" else ZSH_EQUALS_OFF, _deadline)
     environment_states = command_environment_states(
         scan_command, commands, _command_env, _lookup_authority_uncertain,
         _deadline)
@@ -4498,6 +5185,8 @@ FIXTURES = [
     ("RED  REVIEW: GIT_CONFIG_COUNT selects ERE",
      "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=grep.patternType "
      "GIT_CONFIG_VALUE_0=extended git grep -n 'harness\\b' -- README.md", "deny"),
+    ("ASK  REVIEW: GIT_CONFIG_COUNT above the closed loop bound fails closed",
+     "GIT_CONFIG_COUNT=65537 git status", "ask"),
     ("RED  REVIEW: --config-env resolves an explicit prefix assignment",
      "PT=extended git --config-env=grep.patternType=PT "
      "grep -n 'harness\\b' -- README.md", "deny"),
@@ -4817,7 +5506,7 @@ FIXTURES = [
 
 
 def measure_git_short_options():
-    """Classify every ASCII letter against the INSTALLED git. -> (accepted, takes_value).
+    """Classify every ASCII letter against Git. -> (measurement-or-None, executed).
 
     Probed outside any repository, because git parses its options before it looks for
     `.git`, so the three outcomes separate cleanly and no fixture repo is needed:
@@ -4829,15 +5518,17 @@ def measure_git_short_options():
     """
     probe_root = tempfile.mkdtemp(prefix="z-harness-git-optprobe-")
     accepted, takes_value = set(), set()
+    executed = 0
     try:
         for char in string.ascii_letters:
+            executed += 1
             try:
                 result = subprocess.run(
                     ["git", "grep", f"-{char}", "x"], cwd=probe_root,
                     capture_output=True, text=True, timeout=10,
                 )
             except (OSError, subprocess.SubprocessError):
-                return None
+                return None, executed
             stderr = result.stderr or ""
             if "unknown switch" in stderr:
                 continue
@@ -4846,65 +5537,71 @@ def measure_git_short_options():
                 takes_value.add(char)
     finally:
         shutil.rmtree(probe_root, ignore_errors=True)
-    return (accepted, takes_value) if accepted else None
+    return ((accepted, takes_value) if accepted else None), executed
 
 
 def check_option_table_against_git():
-    """-> list of failure strings. Empty means the table matches the installed git."""
-    measured = measure_git_short_options()
+    """-> (failure strings, executed semantic checks)."""
+    measured, checks = measure_git_short_options()
     if measured is None:
-        return ["cannot enforce: the installed git could not be probed, so the "
-                "short-option table is unverified"]
+        return (["cannot enforce: the installed git could not be probed, so the "
+                 "short-option table is unverified"], max(checks, 1))
     accepted, takes_value = measured
     modelled = (set(GREP_SHORT_ENGINE) | set(GREP_SHORT_PATTERN_ARG)
                 | GREP_SHORT_VALUE | GREP_SHORT_NOARG | GREP_SHORT_OPTIONAL_VALUE)
     failures = []
     gap = sorted(accepted - modelled)
+    checks += 1
     if gap:
         failures.append(
             f"this git accepts short flag(s) {gap} that short_option_cluster does not "
             f"model, so a cluster containing one falls through and its pattern is never "
             f"parsed; add each to the correct set in the same commit")
     stale = sorted(modelled - accepted)
+    checks += 1
     if stale:
         failures.append(
             f"the table models short flag(s) {stale} that this git rejects; remove them "
             f"so the table describes the tool actually installed")
     # -e and -f are the pattern-carrying flags and are modelled separately by design.
     measured_value = sorted(takes_value - set(GREP_SHORT_PATTERN_ARG))
+    checks += 1
     if set(measured_value) != GREP_SHORT_VALUE:
         failures.append(
             f"this git takes a value for {measured_value} but the table says "
             f"{sorted(GREP_SHORT_VALUE)}; a mis-typed arity either swallows the pattern "
             f"or leaves it unparsed")
-    return failures
+    return failures, checks
 
 
 def check_option_grammar_against_git(argv_mutator=None):
     """Exercise the valid spellings whose argv grammar is load-bearing here."""
     failures = []
+    checks = 0
     try:
         with tempfile.TemporaryDirectory(prefix="z-harness-git-grammar-") as repo:
+            checks += 1
             initialized = subprocess.run(
                 ["git", "init", "--quiet"], cwd=repo,
                 capture_output=True, text=True, timeout=10,
             )
             if initialized.returncode:
-                return ["cannot initialize the temporary Git grammar fixture: "
-                        + (initialized.stderr or "no diagnostic").strip()]
+                return (["cannot initialize the temporary Git grammar fixture: "
+                         + (initialized.stderr or "no diagnostic").strip()], checks)
             fixture = os.path.join(repo, "fixture.txt")
             with open(fixture, "w", encoding="utf-8") as stream:
                 stream.write("harness\nharnessb\nharnessx\n")
             engine_order_fixture = os.path.join(repo, "engine-order.txt")
             with open(engine_order_fixture, "w", encoding="utf-8") as stream:
                 stream.write("zz\n")
+            checks += 1
             indexed = subprocess.run(
                 ["git", "add", "fixture.txt", "engine-order.txt"], cwd=repo,
                 capture_output=True, text=True, timeout=10,
             )
             if indexed.returncode:
-                return ["cannot index the temporary Git grammar fixture: "
-                        + (indexed.stderr or "no diagnostic").strip()]
+                return (["cannot index the temporary Git grammar fixture: "
+                         + (indexed.stderr or "no diagnostic").strip()], checks)
             # `\b` is not a portable engine oracle: Git's regex backend treats it as a
             # word boundary under ERE on some Linux builds and as a literal `b` on this
             # macOS build. These patterns instead select syntax specific to the expected
@@ -4995,6 +5692,7 @@ def check_option_grammar_against_git(argv_mutator=None):
                  "fixture.txt:harnessb\n"),
             )
             for label, args, expected_fragment in cases:
+                checks += 1
                 observed = subprocess.run(
                     ["git", "grep", *args], cwd=repo,
                     capture_output=True, text=True, timeout=10,
@@ -5032,6 +5730,7 @@ def check_option_grammar_against_git(argv_mutator=None):
                  "engine-order.txt:zz\n"),
             )
             for label, args, expected_stdout in exact_engine_cases:
+                checks += 1
                 command = ["git", "grep", *args]
                 if argv_mutator is not None:
                     command = argv_mutator(label, command)
@@ -5044,6 +5743,7 @@ def check_option_grammar_against_git(argv_mutator=None):
                         f"{label} (rc={observed.returncode}, "
                         f"stdout={observed.stdout!r}, expected={expected_stdout!r}, "
                         f"stderr={observed.stderr!r})")
+            checks += 1
             ambiguous = subprocess.run(
                 ["git", "grep", "--ext", r"harness\b", "--", "fixture.txt"], cwd=repo,
                 capture_output=True, text=True, timeout=10,
@@ -5055,6 +5755,7 @@ def check_option_grammar_against_git(argv_mutator=None):
                     "installed Git did not reject --ext as the measured ambiguity "
                     f"(rc={ambiguous.returncode}, stdout={ambiguous.stdout!r}, "
                     f"stderr={ambiguous.stderr!r})")
+            checks += 1
             ambiguous_value = subprocess.run(
                 ["git", "grep", "--max", "1", "-E", ere_pattern, "--", "fixture.txt"],
                 cwd=repo, capture_output=True, text=True, timeout=10,
@@ -5069,7 +5770,8 @@ def check_option_grammar_against_git(argv_mutator=None):
                     f"stderr={ambiguous_value.stderr!r})")
     except (OSError, subprocess.SubprocessError) as exc:
         failures.append(f"installed Git grammar probe failed closed: {exc!r}")
-    return failures
+        checks += 1
+    return failures, checks
 
 
 def installed_git_binaries():
@@ -5104,12 +5806,15 @@ def check_alias_shadowing_against_installed_gits():
     only exists since git 2.18, so it cannot answer for anything older at all.
     """
     failures = []
+    checks = 1
     binaries = installed_git_binaries()
     if not binaries:
-        return (["no `git` on PATH, so the alias-proof set is unverified"], "0 binaries")
+        return (["no `git` on PATH, so the alias-proof set is unverified"],
+                "0 binaries", checks)
     described = []
     marker = "ZHAR-ALIAS-RAN"
     for binary in binaries:
+        checks += 1
         try:
             version = subprocess.run([binary, "--version"], capture_output=True,
                                      text=True, timeout=10)
@@ -5126,6 +5831,7 @@ def check_alias_shadowing_against_installed_gits():
                            GIT_CONFIG_GLOBAL=os.devnull,
                            GIT_AUTHOR_NAME="probe", GIT_AUTHOR_EMAIL="a@b",
                            GIT_COMMITTER_NAME="probe", GIT_COMMITTER_EMAIL="a@b")
+                checks += 1
                 started = subprocess.run([binary, "init", "--quiet", "."], cwd=repo,
                                          env=env, capture_output=True, text=True,
                                          timeout=10, stdin=subprocess.DEVNULL)
@@ -5135,6 +5841,7 @@ def check_alias_shadowing_against_installed_gits():
                     continue
                 shadowed = []
                 for name in sorted(CROSS_VERSION_ALIAS_PROOF):
+                    checks += 1
                     # stdin closed: `git shortlog` with no operand reads it and would
                     # otherwise hang the probe rather than answer the question.
                     probe = subprocess.run(
@@ -5151,6 +5858,7 @@ def check_alias_shadowing_against_installed_gits():
                         % (binary, shadowed))
         except (OSError, subprocess.SubprocessError) as exc:
             failures.append("alias-proof probe failed closed for %s: %r" % (binary, exc))
+    checks += 1
     if not CROSS_VERSION_ALIAS_PROOF:
         failures.append("the alias-proof set is empty, which is not a clean verdict")
     # Not a failure: a guarded subcommand outside the set costs a question on an
@@ -5159,7 +5867,7 @@ def check_alias_shadowing_against_installed_gits():
     questioned = sorted(GIT_HAZARD_SUBCOMMANDS - CROSS_VERSION_ALIAS_PROOF)
     scan_set = "%d binary/binaries: %s; guarded-but-not-alias-proof: %s" % (
         len(binaries), "; ".join(described), questioned or "none")
-    return failures, scan_set
+    return failures, scan_set, checks
 
 
 def check_log_grammar_against_git():
@@ -5179,31 +5887,34 @@ def check_log_grammar_against_git():
     # `(?:aab)` is a non-capturing group under PCRE and an invalid repeat under ERE, which
     # git rejects outright on every platform.
     failures = []
+    checks = 0
     interval = "a{2}b"
     group = "(?:aab)"
     try:
         with tempfile.TemporaryDirectory(prefix="z-harness-log-grammar-") as repo:
             env = dict(os.environ, GIT_AUTHOR_EMAIL="a@b", GIT_COMMITTER_EMAIL="a@b",
                        GIT_CONFIG_NOSYSTEM="1")
+            checks += 1
             initialized = subprocess.run(
                 ["git", "init", "--quiet"], cwd=repo, env=env,
                 capture_output=True, text=True, timeout=10)
             if initialized.returncode:
-                return ["cannot initialize the temporary Git log-grammar fixture: "
-                        + (initialized.stderr or "no diagnostic").strip()]
+                return (["cannot initialize the temporary Git log-grammar fixture: "
+                         + (initialized.stderr or "no diagnostic").strip()], checks)
             # LITERAL carries the interval as five plain characters, INTERVAL carries
             # what an interval expands to. A BRE or fixed-strings engine selects the
             # first; ERE and PCRE select the second.
             literal_subject = "subject a{2}b here"
             interval_subject = "subject aab here"
             for subject in (literal_subject, interval_subject):
+                checks += 1
                 committed = subprocess.run(
                     ["git", "commit", "--quiet", "--allow-empty", "-m", subject],
                     cwd=repo, capture_output=True, text=True, timeout=10,
                     env=dict(env, GIT_AUTHOR_NAME="probe", GIT_COMMITTER_NAME="probe"))
                 if committed.returncode:
-                    return ["cannot commit the temporary Git log-grammar fixture: "
-                            + (committed.stderr or "no diagnostic").strip()]
+                    return (["cannot commit the temporary Git log-grammar fixture: "
+                             + (committed.stderr or "no diagnostic").strip()], checks)
 
             def observe(flags, pattern=interval, subcommand="log"):
                 """-> 'LITERAL' | 'INTERVAL' | 'UNFILTERED' | 'NONE' | 'ERROR'.
@@ -5244,6 +5955,7 @@ def check_log_grammar_against_git():
                                               "--grep=" + interval], "ERROR"),
                     ("--no-perl-regexp", ["log", "--oneline", "--no-perl-regexp",
                                           "--grep=" + interval], "ERROR")):
+                checks += 1
                 observed = subprocess.run(["git", *argv], cwd=repo, capture_output=True,
                                           text=True, timeout=10, env=env)
                 if (observed.returncode == 0) == (expected == "ERROR"):
@@ -5258,11 +5970,13 @@ def check_log_grammar_against_git():
                                     ("-P", "INTERVAL"), ("--perl-regexp", "INTERVAL"),
                                     ("--basic-regexp", "LITERAL"),
                                     ("-F", "LITERAL"), ("--fixed-strings", "LITERAL")):
+                checks += 1
                 seen = observe([token])
                 if seen != expected:
                     failures.append(
                         "installed Git read log engine token %r as %s, the table models %s"
                         % (token, seen, expected))
+            checks += 1
             if observe([]) != "LITERAL":
                 failures.append(
                     "installed Git no longer defaults `git log --grep` to a basic engine "
@@ -5275,12 +5989,14 @@ def check_log_grammar_against_git():
             for flags, expected in ((["-P"], "INTERVAL"), (["-E"], "ERROR"),
                                     (["-E", "-P"], "INTERVAL"), (["-P", "-E"], "ERROR"),
                                     (["-F", "-E"], "ERROR")):
+                checks += 1
                 seen = observe(flags, group)
                 if seen != expected:
                     failures.append(
                         "installed Git read log %r over a PCRE-only group as %s, expected "
                         "%s" % (flags, seen, expected))
             for subcommand in ("shortlog", "rev-list"):
+                checks += 1
                 argv = ["git", subcommand, "-E", "--grep=" + interval, "HEAD"]
                 observed = subprocess.run(argv, cwd=repo, capture_output=True,
                                           text=True, timeout=10, env=env)
@@ -5296,6 +6012,7 @@ def check_log_grammar_against_git():
                 token = "-" + char
                 if token in modelled:
                     continue
+                checks += 1
                 if observe([token]) == "INTERVAL":
                     failures.append(
                         "installed Git lets the unmodelled log flag %r select an interval "
@@ -5303,21 +6020,24 @@ def check_log_grammar_against_git():
                         "to GIT_LOG_ENGINE_TOKENS in the same commit" % token)
     except (OSError, subprocess.SubprocessError) as exc:
         failures.append("installed Git log-grammar probe failed closed: %r" % (exc,))
-    return failures
+        checks += 1
+    return failures, checks
 
 
 def check_pcre_constructs_against_git():
     """Ground each modeled PCRE construct and the escaped-group equality control."""
     failures = []
+    checks = 0
     try:
         with tempfile.TemporaryDirectory(prefix="z-harness-pcre-atoms-") as repo:
+            checks += 1
             initialized = subprocess.run(
                 ["git", "init", "--quiet"], cwd=repo,
                 capture_output=True, text=True, timeout=10,
             )
             if initialized.returncode:
-                return ["cannot initialize PCRE construct fixture: "
-                        + (initialized.stderr or "no diagnostic").strip()]
+                return (["cannot initialize PCRE construct fixture: "
+                         + (initialized.stderr or "no diagnostic").strip()], checks)
             contents = {
                 "quote.txt": "abc\nQabcE\n",
                 "cluster.txt": "a\nX\nN\n",
@@ -5328,13 +6048,14 @@ def check_pcre_constructs_against_git():
             for name, content in contents.items():
                 with open(os.path.join(repo, name), "w", encoding="utf-8") as stream:
                     stream.write(content)
+            checks += 1
             added = subprocess.run(
                 ["git", "add", *contents], cwd=repo,
                 capture_output=True, text=True, timeout=10,
             )
             if added.returncode:
-                return ["cannot index PCRE construct fixture: "
-                        + (added.stderr or "no diagnostic").strip()]
+                return (["cannot index PCRE construct fixture: "
+                         + (added.stderr or "no diagnostic").strip()], checks)
             cases = (
                 (r"^\Qabc\E$", "quote.txt", "quote.txt:QabcE\n", "quote.txt:abc\n"),
                 (r"^\X$", "cluster.txt", "cluster.txt:X\n",
@@ -5344,11 +6065,13 @@ def check_pcre_constructs_against_git():
                 (r"^a\Kb$", "reset.txt", "reset.txt:aKb\n", "reset.txt:b\n"),
             )
             for pattern, path, ere_stdout, pcre_stdout in cases:
+                checks += 1
                 scan = scan_pcre_constructs(pattern)
                 if not scan.atoms or scan.uncertain:
                     failures.append(
                         f"scanner did not classify grounded construct {pattern!r}: {scan!r}")
                 for engine, expected in (("-E", ere_stdout), ("-P", pcre_stdout)):
+                    checks += 1
                     observed = subprocess.run(
                         ["git", "grep", "--only-matching", engine, pattern, "--", path],
                         cwd=repo, capture_output=True, text=True, timeout=10,
@@ -5367,6 +6090,7 @@ def check_pcre_constructs_against_git():
                 (r"^[()?]$", "-P", 0, "group.txt:(\ngroup.txt:?\n"),
             )
             for pattern, engine, expected_rc, expected_stdout in group_cases:
+                checks += 1
                 observed = subprocess.run(
                     ["git", "grep", engine, pattern, "--", "group.txt"], cwd=repo,
                     capture_output=True, text=True, timeout=10,
@@ -5377,10 +6101,12 @@ def check_pcre_constructs_against_git():
                         f"{engine} (rc={observed.returncode}, stdout={observed.stdout!r}, "
                         f"expected_rc={expected_rc}, expected={expected_stdout!r}, "
                         f"stderr={observed.stderr!r})")
+            checks += 1
             escaped = scan_pcre_constructs(r"^\(\?:abc\)$")
             if escaped.atoms or escaped.uncertain:
                 failures.append(
                     f"escaped-group equality control was classified as live: {escaped!r}")
+            checks += 1
             bracketed = scan_pcre_constructs(r"^[()?]$")
             if bracketed.atoms or bracketed.uncertain:
                 failures.append(
@@ -5392,6 +6118,7 @@ def check_pcre_constructs_against_git():
             )
             observed_outputs = []
             for engine in ("-E", "-P"):
+                checks += 1
                 observed = subprocess.run(
                     ["git", "grep", engine, posix_bracket_pattern, "--", "bracket.txt"],
                     cwd=repo, capture_output=True, text=True, timeout=10,
@@ -5403,39 +6130,46 @@ def check_pcre_constructs_against_git():
                         f"installed Git did not preserve POSIX bracket nesting under "
                         f"{engine} (rc={observed.returncode}, stdout={observed.stdout!r}, "
                         f"expected={expected_posix_stdout!r}, stderr={observed.stderr!r})")
+            checks += 1
             if len(observed_outputs) == 2 and observed_outputs[0] != observed_outputs[1]:
                 failures.append(
                     "installed Git ERE/PCRE POSIX bracket controls are not byte-equal")
             for pattern in (
                     posix_bracket_pattern, r"^[[.a.](?)]$", r"^[[=a=](?)]$"):
+                checks += 1
                 scan = scan_pcre_constructs(pattern)
                 if scan.atoms or scan.uncertain:
                     failures.append(
                         f"POSIX bracket element closed its outer class early for "
                         f"{pattern!r}: {scan!r}")
+            checks += 1
             outside = scan_pcre_constructs(r"^[[:alpha:]](?:abc)$")
             if "(?" not in outside.atoms or outside.uncertain:
                 failures.append(
                     f"group opener after a POSIX bracket class was not live: {outside!r}")
     except (OSError, subprocess.SubprocessError) as exc:
         failures.append(f"installed Git PCRE construct probe failed closed: {exc!r}")
-    return failures
+        checks += 1
+    return failures, checks
 
 
 def check_aliases_against_git():
     """Ground quoted standard aliases, recursive expansion, and cycle failure."""
     failures = []
+    checks = 0
     try:
         with tempfile.TemporaryDirectory(prefix="z-harness-git-alias-") as repo:
+            checks += 1
             initialized = subprocess.run(
                 ["git", "init", "--quiet"], cwd=repo,
                 capture_output=True, text=True, timeout=10,
             )
             if initialized.returncode:
-                return ["cannot initialize Git alias fixture: "
-                        + (initialized.stderr or "no diagnostic").strip()]
+                return (["cannot initialize Git alias fixture: "
+                         + (initialized.stderr or "no diagnostic").strip()], checks)
             with open(os.path.join(repo, "fixture.txt"), "w", encoding="utf-8") as stream:
                 stream.write("harness\nharnessb\n")
+            checks += 1
             subprocess.run(
                 ["git", "add", "fixture.txt"], cwd=repo,
                 capture_output=True, text=True, timeout=10, check=True,
@@ -5454,6 +6188,7 @@ def check_aliases_against_git():
                  "fixture.txt:harnessb\n"),
             )
             for label, args, case_expected in cases:
+                checks += 1
                 observed = subprocess.run(
                     ["git", *args], cwd=repo,
                     capture_output=True, text=True, timeout=10,
@@ -5463,21 +6198,25 @@ def check_aliases_against_git():
                         f"installed Git did not preserve {label} alias behavior "
                         f"(rc={observed.returncode}, stdout={observed.stdout!r}, "
                         f"expected={case_expected!r}, stderr={observed.stderr!r})")
+            checks += 1
             local_config = subprocess.run(
                 ["git", "config", "alias.ambient", "status --short"], cwd=repo,
                 capture_output=True, text=True, timeout=10,
             )
+            checks += 1
             local_alias = subprocess.run(
                 ["git", "ambient"], cwd=repo,
                 capture_output=True, text=True, timeout=10,
             )
             global_path = os.path.join(repo, "global-config")
+            checks += 1
             global_config = subprocess.run(
                 ["git", "config", "--file", global_path, "alias.external", "status --short"],
                 cwd=repo, capture_output=True, text=True, timeout=10,
             )
             global_env = dict(os.environ, GIT_CONFIG_GLOBAL=global_path,
                               GIT_CONFIG_NOSYSTEM="1")
+            checks += 1
             global_alias = subprocess.run(
                 ["git", "external"], cwd=repo, env=global_env,
                 capture_output=True, text=True, timeout=10,
@@ -5485,27 +6224,40 @@ def check_aliases_against_git():
             if (local_config.returncode or local_alias.returncode
                     or global_config.returncode or global_alias.returncode):
                 failures.append("installed Git did not expose local/global ambient aliases")
-            if decide("git ambient")[0] != "ask" or decide("git external")[0] != "ask":
+            ambient_decisions = (
+                decide("git ambient")[0] == "ask",
+                decide("git external")[0] == "ask",
+            )
+            checks += len(ambient_decisions)
+            if not all(ambient_decisions):
                 failures.append("unknown ambient aliases were not classified as uncertain")
             authority = trusted_git_authority()
+            checks += 1
             if ("submodule" in authority.builtins
                     or "submodule" not in authority.main):
                 failures.append("trusted Git inventory misclassified standard submodule")
-            if (decide("git submodule status")[0] != "allow"
-                    or decide(shlex.quote(authority.executable)
-                              + " status --short")[0] != "allow"):
+            native_controls = (
+                decide("git submodule status")[0] == "allow",
+                decide(shlex.quote(authority.executable)
+                       + " status --short")[0] == "allow",
+            )
+            checks += len(native_controls)
+            if not all(native_controls):
                 failures.append("trusted Git native/absolute controls were not allowed")
             alternate_exec = os.path.join(repo, "alternate-exec")
             os.mkdir(alternate_exec)
+            checks += 1
             env_override = subprocess.run(
                 ["git", "submodule", "status"], cwd=repo,
                 env=dict(os.environ, GIT_EXEC_PATH=alternate_exec),
                 capture_output=True, text=True, timeout=10,
             )
+            checks += 1
             option_override = subprocess.run(
                 ["git", f"--exec-path={alternate_exec}", "submodule", "status"],
                 cwd=repo, capture_output=True, text=True, timeout=10,
             )
+            checks += 1
             builtin_override = subprocess.run(
                 ["git", "status", "--short"], cwd=repo,
                 env=dict(os.environ, GIT_EXEC_PATH=alternate_exec),
@@ -5516,13 +6268,18 @@ def check_aliases_against_git():
                 failures.append(
                     "installed Git did not distinguish exec-path external commands "
                     "from builtins")
-            if (decide(f"GIT_EXEC_PATH={shlex.quote(alternate_exec)} "
-                       "git submodule status")[0] != "ask"
-                    or decide(f"git --exec-path={shlex.quote(alternate_exec)} "
-                              "submodule status")[0] != "ask"
-                    or decide(f"GIT_EXEC_PATH={shlex.quote(alternate_exec)} "
-                              "git status --short")[0] != "allow"):
+            guard_controls = (
+                decide(f"GIT_EXEC_PATH={shlex.quote(alternate_exec)} "
+                       "git submodule status")[0] == "ask",
+                decide(f"git --exec-path={shlex.quote(alternate_exec)} "
+                       "submodule status")[0] == "ask",
+                decide(f"GIT_EXEC_PATH={shlex.quote(alternate_exec)} "
+                       "git status --short")[0] == "allow",
+            )
+            checks += len(guard_controls)
+            if not all(guard_controls):
                 failures.append("exec-path authority controls disagreed with installed Git")
+            checks += 1
             cycle = subprocess.run(
                 ["git", "-c", "alias.a=b", "-c", "alias.b=a", "a"], cwd=repo,
                 capture_output=True, text=True, timeout=10,
@@ -5534,7 +6291,8 @@ def check_aliases_against_git():
                     f"stderr={cycle.stderr!r})")
     except (OSError, subprocess.SubprocessError) as exc:
         failures.append(f"installed Git alias probe failed closed: {exc!r}")
-    return failures
+        checks += 1
+    return failures, checks
 
 
 def check_shell_boundary_behavior():
@@ -5729,7 +6487,10 @@ def check_shell_boundary_behavior():
                     f"stdout={command_p_child.stdout!r}, "
                     f"stderr={command_p_child.stderr!r})")
     else:
-        skipped += 1
+        # The block above contains 35 separately asserted zsh observations. Keep their
+        # cardinality visible when the executable is absent; one collapsed "group" skip
+        # made the receipt claim 12/9 while 43 zsh cases had not run.
+        skipped += 35
     for text, quoting, live in (
         ("=git", "", True), ("=git", "'", False), ("=git", '"', False),
         ("=git", "mixed:UUUU", True), ("=git", "mixed:SUUU", False),
@@ -5769,6 +6530,223 @@ def check_shell_boundary_behavior():
             "EVAL grep -E pattern\n",
         ),
         (
+            "source alias operand forwarding",
+            'alias s="source"\n'
+            's <(print -r -- "print -r -- ALIAS-SOURCE")\n',
+            "ALIAS-SOURCE\n",
+        ),
+        (
+            "builtin source alias operand forwarding",
+            'alias s="builtin source"\n'
+            's <(print -r -- "print -r -- ALIAS-BUILTIN-SOURCE")\n',
+            "ALIAS-BUILTIN-SOURCE\n",
+        ),
+        (
+            "repeated builtin source alias operand forwarding",
+            'alias s="builtin builtin source"\n'
+            's <(print -r -- "print -r -- ALIAS-REPEATED-BUILTIN")\n',
+            "ALIAS-REPEATED-BUILTIN\n",
+        ),
+        (
+            "exec source alias operand forwarding",
+            'alias s="exec source"\n'
+            's <(print -r -- "print -r -- ALIAS-EXEC-SOURCE")\n',
+            "ALIAS-EXEC-SOURCE\n",
+        ),
+        (
+            "builtin exec source alias operand forwarding",
+            'alias s="builtin exec source"\n'
+            's <(print -r -- "print -r -- ALIAS-BUILTIN-EXEC")\n',
+            "ALIAS-BUILTIN-EXEC\n",
+        ),
+        (
+            "exec builtin source alias operand forwarding",
+            'alias s="exec builtin source"\n'
+            's <(print -r -- "print -r -- ALIAS-EXEC-BUILTIN")\n',
+            "ALIAS-EXEC-BUILTIN\n",
+        ),
+        (
+            "exec single-dash source alias operand forwarding",
+            'alias s="exec - source"\n'
+            's <(print -r -- "print -r -- ALIAS-EXEC-DASH")\n',
+            "ALIAS-EXEC-DASH\n",
+        ),
+        (
+            "exec terminator source alias operand forwarding",
+            'alias s="exec -- source"\n'
+            's <(print -r -- "print -r -- ALIAS-EXEC-TERMINATOR")\n',
+            "ALIAS-EXEC-TERMINATOR\n",
+        ),
+        (
+            "exec argv-zero source alias operand forwarding",
+            'alias s="exec -a pretend source"\n'
+            's <(print -r -- "print -r -- ALIAS-EXEC-ARGV0")\n',
+            "ALIAS-EXEC-ARGV0\n",
+        ),
+        (
+            "attached exec argv-zero source alias operand forwarding",
+            'alias s="exec -apretend source"\n'
+            's <(print -r -- "print -r -- ALIAS-EXEC-ATTACHED")\n',
+            "ALIAS-EXEC-ATTACHED\n",
+        ),
+        (
+            "noglob source alias operand forwarding",
+            'alias s="noglob source"\n'
+            's <(print -r -- "print -r -- ALIAS-NOGLOB")\n',
+            "ALIAS-NOGLOB\n",
+        ),
+        (
+            "repeat source alias operand forwarding",
+            'alias s="repeat 1 source"\n'
+            's <(print -r -- "print -r -- ALIAS-REPEAT")\n',
+            "ALIAS-REPEAT\n",
+        ),
+        (
+            "chained source alias operand forwarding",
+            'alias a="b"\n'
+            'alias b="source"\n'
+            'a <(print -r -- "print -r -- ALIAS-CHAIN")\n',
+            "ALIAS-CHAIN\n",
+        ),
+        (
+            "embedded computed source operand in alias body",
+            'alias s=\'source <(print -r -- "print -r -- ALIAS-EMBEDDED")\'\n'
+            "s\n",
+            "ALIAS-EMBEDDED\n",
+        ),
+        (
+            "earlier alias-body source command",
+            'alias s=\'source <(print -r -- "print -r -- ALIAS-EARLY"); '
+            "/bin/echo ALIAS-AFTER'\n"
+            "s\n",
+            "ALIAS-EARLY\nALIAS-AFTER\n",
+        ),
+        (
+            "embedded computed operand through alias chain",
+            'alias b="source"\n'
+            'alias a=\'b <(print -r -- "print -r -- ALIAS-CHAIN-EMBEDDED")\'\n'
+            "a\n",
+            "ALIAS-CHAIN-EMBEDDED\n",
+        ),
+        (
+            "repeat-wrapped source alias definition",
+            "repeat 1 builtin alias s=source\n"
+            's <(print -r -- "print -r -- ALIAS-REPEAT-DEFINITION")\n',
+            "ALIAS-REPEAT-DEFINITION\n",
+        ),
+        (
+            "repeat-zero alias definition control",
+            "repeat 0 builtin alias s=source\n"
+            "if (( $+aliases[s] )); then print -r -- WRONG; "
+            "else print -r -- REPEAT-ZERO; fi\n",
+            "REPEAT-ZERO\n",
+        ),
+        (
+            "called-function source alias state",
+            "f(){ builtin alias s=source; }\n"
+            "f\n"
+            'eval \'s <(print -r -- "print -r -- FUNCTION-ALIAS")\'\n',
+            "FUNCTION-ALIAS\n",
+        ),
+        (
+            "called-function exec-source alias state",
+            "f(){ builtin alias 's=exec source'; }\n"
+            "f\n"
+            'eval \'s <(print -r -- "print -r -- FUNCTION-EXEC-ALIAS")\'\n',
+            "FUNCTION-EXEC-ALIAS\n",
+        ),
+        (
+            "invoked alias body source state",
+            "eval 'alias a=\"builtin alias s=source\"'\n"
+            "eval a\n"
+            'eval \'s <(print -r -- "print -r -- INVOKED-ALIAS")\'\n',
+            "INVOKED-ALIAS\n",
+        ),
+        (
+            "multi-command invoked alias body source state",
+            "eval 'alias a=\"builtin alias s=source; :\"'\n"
+            "eval a\n"
+            'eval \'s <(print -r -- "print -r -- INVOKED-ALIAS-MULTI")\'\n',
+            "INVOKED-ALIAS-MULTI\n",
+        ),
+        (
+            "chained invoked alias body source state",
+            "eval 'alias b=\"builtin alias s=source\"'\n"
+            "eval 'alias a=b'\n"
+            "eval a\n"
+            'eval \'s <(print -r -- "print -r -- CHAINED-INVOKED-ALIAS")\'\n',
+            "CHAINED-INVOKED-ALIAS\n",
+        ),
+        (
+            "invoked alias mutation argv forwarding",
+            "eval 'alias a=\"builtin alias\"'\n"
+            "eval 'a s=source'\n"
+            'eval \'s <(print -r -- "print -r -- ALIAS-ARGV")\'\n',
+            "ALIAS-ARGV\n",
+        ),
+        (
+            "repeat-wrapped invoked alias source state",
+            "eval 'alias a=\"repeat 1 builtin alias s=source\"'\n"
+            "eval a\n"
+            'eval \'s <(print -r -- "print -r -- INVOKED-REPEAT")\'\n',
+            "INVOKED-REPEAT\n",
+        ),
+        (
+            "invoked alias source-state removal control",
+            "eval 'alias a=\"builtin alias s=source; unalias s\"'\n"
+            "eval a\n"
+            "if (( $+aliases[s] )); then print -r -- WRONG; "
+            "else print -r -- INVOKED-UNALIAS; fi\n",
+            "INVOKED-UNALIAS\n",
+        ),
+        (
+            "repeat-zero invoked alias control",
+            "eval 'alias a=\"repeat 0 builtin alias s=source\"'\n"
+            "eval a\n"
+            "if (( $+aliases[s] )); then print -r -- WRONG; "
+            "else print -r -- INVOKED-REPEAT-ZERO; fi\n",
+            "INVOKED-REPEAT-ZERO\n",
+        ),
+        (
+            "uncalled-function alias-state control",
+            "f(){ builtin alias s=source; }\n"
+            "if (( $+aliases[s] )); then print -r -- WRONG; "
+            "else print -r -- FUNCTION-UNCALLED; fi\n",
+            "FUNCTION-UNCALLED\n",
+        ),
+        (
+            "DEBUG-trap source alias state",
+            "trap 'builtin alias s=source; trap - DEBUG' DEBUG\n"
+            'eval \'s <(print -r -- "print -r -- DEBUG-ALIAS")\'\n',
+            "DEBUG-ALIAS\n",
+        ),
+        (
+            "TRAPDEBUG-function source alias state",
+            "TRAPDEBUG(){ builtin alias s=source; unfunction TRAPDEBUG; }\n"
+            'eval \'s <(print -r -- "print -r -- TRAPDEBUG-ALIAS")\'\n',
+            "TRAPDEBUG-ALIAS\n",
+        ),
+        (
+            "global alias executes at an unquoted argument token",
+            "alias -g X='; print -r -- GLOBAL-ALIAS'\n"
+            "print -r -- BEFORE X\n",
+            "BEFORE\nGLOBAL-ALIAS\n",
+        ),
+        (
+            "suffix alias executes at the command word",
+            "alias -s x='print -r -- SUFFIX-ALIAS'\n"
+            "file.x ARG\n",
+            "SUFFIX-ALIAS file.x ARG\n",
+        ),
+        (
+            "called-function helper establishes alias state",
+            "setalias(){ alias g='print -r -- HELPER-ALIAS'; }\n"
+            "f(){ setalias; }\n"
+            "f\n"
+            "eval g\n",
+            "HELPER-ALIAS\n",
+        ),
+        (
             "builtin echo bypass",
             'echo() { print -r -- "WRONG:$*"; }\n'
             "builtin echo git grep -E pattern\n",
@@ -5779,6 +6757,21 @@ def check_shell_boundary_behavior():
             'echo() { print -r -- "WRONG:$*"; }\n'
             "command echo git grep -E pattern\n",
             "git grep -E pattern\n",
+        ),
+        (
+            "builtin trap deferred source",
+            'builtin trap "print -r -- BUILTIN-TRAP" EXIT\n',
+            "BUILTIN-TRAP\n",
+        ),
+        (
+            "repeated builtin trap deferred source",
+            'builtin builtin trap "print -r -- REPEATED-TRAP" EXIT\n',
+            "REPEATED-TRAP\n",
+        ),
+        (
+            "exec single-dash source",
+            'exec - source <(print -r -- "print -r -- EXEC-DASH")\n',
+            "EXEC-DASH\n",
         ),
     )
     for label, source, expected in zsh_probes:
@@ -6686,6 +7679,347 @@ FIXTURES += [
       "literal\nB\n"), "deny"),
 ]
 
+# Dynamic source is executable shell input, not a data producer. These cases pin the
+# configured public classifier's sole top-level adoption plus its literal-data controls.
+FIXTURES += [
+    ("ASK SOURCE: process-substitution output is executed by source",
+     r'''source <(/usr/bin/printf '%s\n' "git grep -E 'harness\\b' -- README.md")''',
+     "ask"),
+    ("ASK SOURCE: sourced producer output can contain a rev:path command",
+     r'''SHA=HEAD; source <(/usr/bin/printf '%s\n' "git show \$SHA:src/f.py 2>/dev/null; /bin/echo AFTER")''',
+     "ask"),
+    ("RED SOURCE: a guarded producer retains deny precedence over source uncertainty",
+     r'''source <(git grep -E 'harness\b' -- README.md)''', "deny"),
+    ("ASK SOURCE: double-quoted variable selects executable source", 'source "$FILE"',
+     "ask"),
+    ("ASK SOURCE: positional parameter selects executable source", 'source "$1"',
+     "ask"),
+    ("ASK SOURCE: argument vector selects executable source", 'source "$@"', "ask"),
+    ("ASK SOURCE: variable-selected executable may resolve to source",
+     'CMD=source; $CMD "$FILE"', "ask"),
+    ("ASK SOURCE: variable-selected executable may resolve to dot",
+     'CMD=.; $CMD "$FILE"', "ask"),
+    ("ASK SOURCE: function forwarding may select the source builtin",
+     'f(){ "$@"; }; f source "$FILE"', "ask"),
+    ("ASK SOURCE: eval-installed alias may select the source builtin",
+     "eval 'alias s=source'; eval 's \"$FILE\"'", "ask"),
+    ("ASK SOURCE: builtin source alias forwards its operand",
+     "eval 'alias s=\"builtin source\"'; eval 's \"$FILE\"'", "ask"),
+    ("ASK SOURCE: repeated builtin source alias forwards its operand",
+     "eval 'alias s=\"builtin builtin source\"'; eval 's \"$FILE\"'", "ask"),
+    ("ASK SOURCE: exec source alias forwards its operand",
+     "eval 'alias s=\"exec source\"'; eval 's \"$FILE\"'", "ask"),
+    ("ASK SOURCE: builtin-exec source alias forwards its operand",
+     "eval 'alias s=\"builtin exec source\"'; eval 's \"$FILE\"'", "ask"),
+    ("ASK SOURCE: exec-builtin source alias forwards its operand",
+     "eval 'alias s=\"exec builtin source\"'; eval 's \"$FILE\"'", "ask"),
+    ("ASK SOURCE: exec single-dash source alias forwards its operand",
+     "eval 'alias s=\"exec - source\"'; eval 's \"$FILE\"'", "ask"),
+    ("ASK SOURCE: exec option terminator source alias forwards its operand",
+     "eval 'alias s=\"exec -- source\"'; eval 's \"$FILE\"'", "ask"),
+    ("ASK SOURCE: exec argv-zero source alias forwards its operand",
+     "eval 'alias s=\"exec -a pretend source\"'; eval 's \"$FILE\"'", "ask"),
+    ("ASK SOURCE: attached exec argv-zero source alias forwards its operand",
+     "eval 'alias s=\"exec -apretend source\"'; eval 's \"$FILE\"'", "ask"),
+    ("ASK SOURCE: noglob source alias forwards its operand",
+     "eval 'alias s=\"noglob source\"'; eval 's \"$FILE\"'", "ask"),
+    ("ASK SOURCE: repeat source alias forwards its operand",
+     "eval 'alias s=\"repeat 1 source\"'; eval 's \"$FILE\"'", "ask"),
+    ("ASK SOURCE: bounded alias chain reaches source",
+     "eval 'alias a=b'; eval 'alias b=source'; eval 'a \"$FILE\"'", "ask"),
+    ("ASK SOURCE: literal alias cycle cannot prove source absent",
+     "eval 'alias a=b'; eval 'alias b=a'; eval 'a \"$FILE\"'", "ask"),
+    ("ASK SOURCE: dynamic alias executable cannot prove source absent",
+     "eval 'alias s=\"$CMD\"'; eval s", "ask"),
+    ("ASK SOURCE: alias body embeds a computed source operand",
+     "eval 'alias s=\"source $FILE\"'; eval s", "ask"),
+    ("ASK SOURCE: chained alias body embeds a computed source operand",
+     "eval 'alias b=source'; eval 'alias a=\"b $FILE\"'; eval a", "ask"),
+    ("ASK SOURCE: an earlier alias-body command consumes computed source",
+     "eval 'alias s=\"source $FILE; /bin/echo done\"'; eval s", "ask"),
+    ("ASK SOURCE: an invoked alias body installs a source alias",
+     ("eval 'alias a=\"builtin alias s=source\"'; eval a; "
+      "eval 's \"$FILE\"'"), "ask"),
+    ("ASK SOURCE: every invoked alias body command applies state transitions",
+     ("eval 'alias a=\"builtin alias s=source; :\"'; eval a; "
+      "eval 's \"$FILE\"'"), "ask"),
+    ("ASK SOURCE: a chained invoked alias installs a source alias",
+     ("eval 'alias b=\"builtin alias s=source\"'; eval 'alias a=b'; "
+      "eval a; eval 's \"$FILE\"'"), "ask"),
+    ("ASK SOURCE: invoked alias argv completes an alias mutation",
+     ("eval 'alias a=\"builtin alias\"'; eval 'a s=source'; "
+      "eval 's \"$FILE\"'"), "ask"),
+    ("ASK SOURCE: repeat inside an invoked alias installs source identity",
+     ("eval 'alias a=\"repeat 1 builtin alias s=source\"'; eval a; "
+      "eval 's \"$FILE\"'"), "ask"),
+    ("ASK SOURCE: repeat-wrapped alias definition establishes source identity",
+     "repeat 1 builtin alias s=source; eval 's \"$FILE\"'", "ask"),
+    ("ASK SOURCE: a called function establishes source alias state",
+     "f(){ builtin alias s=source; }; f; eval 's \"$FILE\"'", "ask"),
+    ("ASK SOURCE: a called function establishes exec-source alias state",
+     "f(){ builtin alias 's=exec source'; }; f; eval 's \"$FILE\"'", "ask"),
+    ("ASK SOURCE: a DEBUG trap establishes source alias state",
+     "trap 'builtin alias s=source; trap - DEBUG' DEBUG; eval 's \"$FILE\"'",
+     "ask"),
+    ("ASK SOURCE: a TRAPDEBUG function establishes source alias state",
+     ("TRAPDEBUG(){ builtin alias s=source; unfunction TRAPDEBUG; }; "
+      "eval 's \"$FILE\"'"), "ask"),
+    ("GREEN SOURCE: zsh command-source alias keeps external lookup semantics",
+     "eval 'alias s=\"command source\"'; eval 's \"$FILE\"'", "allow"),
+    ("GREEN SOURCE: exec alias to an external command remains data",
+     "eval 'alias s=\"exec /bin/echo\"'; eval 's \"$FILE\"'", "allow"),
+    ("GREEN SOURCE: source alias definition alone executes nothing",
+     "eval 'alias s=\"exec source\"'; /bin/echo safe", "allow"),
+    ("GREEN SOURCE: quoted alias text is inert data",
+     "/bin/echo 'alias s=source; s \"$FILE\"'", "allow"),
+    ("GREEN SOURCE: alias with a literal source operand does not forward its path",
+     "eval 'alias s=\"source ./script.sh\"'; eval 's \"$ARG\"'", "allow"),
+    ("GREEN SOURCE: a literal source operand inside a compound alias stays literal",
+     "eval 'alias s=\"source ./script.sh; /bin/echo done\"'; eval s", "allow"),
+    ("GREEN SOURCE: a literal operand passed through an alias chain stays literal",
+     "eval 'alias b=source'; eval 'alias a=\"b ./script.sh\"'; eval a", "allow"),
+    ("GREEN SOURCE: repeat zero does not execute its alias definition",
+     "repeat 0 builtin alias s=source; eval 's \"$FILE\"'", "allow"),
+    ("GREEN SOURCE: an uncalled function cannot establish alias state",
+     "f(){ builtin alias s=source; }; eval 's \"$FILE\"'", "allow"),
+    ("GREEN SOURCE: an EXIT trap cannot alter an earlier alias invocation",
+     "trap 'builtin alias s=source' EXIT; eval 's \"$FILE\"'", "allow"),
+    ("GREEN SOURCE: an invoked alias can remove the source alias it installed",
+     ("eval 'alias a=\"builtin alias s=source; unalias s\"'; eval a; "
+      "eval 's \"$FILE\"'"), "allow"),
+    ("GREEN SOURCE: repeat zero inside an alias installs no source identity",
+     ("eval 'alias a=\"repeat 0 builtin alias s=source\"'; eval a; "
+      "eval 's \"$FILE\"'"), "allow"),
+    ("ASK SOURCE: fully dynamic executable identity cannot prove both hazards absent",
+     '$CMD --version', "ask"),
+    ("ASK SOURCE: zsh split parameter selects executable source", 'source $=FILE',
+     "ask"),
+    ("ASK SOURCE: zsh array parameter selects executable source", 'source $^FILES',
+     "ask"),
+    ("ASK SOURCE: command substitution selects executable source",
+     'source $(printf ./script.sh)', "ask"),
+    ("ASK SOURCE: backtick substitution selects executable source",
+     'source `printf ./script.sh`', "ask"),
+    ("ASK SOURCE: unquoted glob selects executable source", 'source *.sh', "ask"),
+    ("ASK SOURCE: brace expansion selects executable source", 'source {a,b}.sh', "ask"),
+    ("ASK SOURCE: descriptor path supplies executable source", 'source /dev/fd/11',
+     "ask"),
+    ("ASK SOURCE: repeated builtin wrappers still execute source",
+     'builtin builtin source "$FILE"', "ask"),
+    ("ASK SOURCE: exec wrapper still executes source", 'exec source "$FILE"', "ask"),
+    ("ASK SOURCE: exec-dot wrapper still executes source", 'exec . "$FILE"', "ask"),
+    ("ASK SOURCE: exec-builtin composition still executes source",
+     'exec builtin source "$FILE"', "ask"),
+    ("ASK SOURCE: builtin-exec composition still executes source",
+     'builtin exec source "$FILE"', "ask"),
+    ("ASK SOURCE: exec argv-zero option still executes source",
+     'exec -a pretend source "$FILE"', "ask"),
+    ("ASK SOURCE: attached exec argv-zero still executes source",
+     'exec -apretend source "$FILE"', "ask"),
+    ("ASK SOURCE: clustered attached exec argv-zero still executes dot",
+     'exec -clapretend . "$FILE"', "ask"),
+    ("ASK SOURCE: exec clean-environment option still executes source",
+     'exec -c source "$FILE"', "ask"),
+    ("ASK SOURCE: exec login option still executes source", 'exec -l source "$FILE"',
+     "ask"),
+    ("ASK SOURCE: exec option terminator still executes source",
+     'exec -- source "$FILE"', "ask"),
+    ("ASK SOURCE: exec single-dash terminator still executes source",
+     'exec - source "$FILE"', "ask"),
+    ("ASK SOURCE: exec single-dash dot can read a descriptor",
+     'exec - . /dev/fd/11', "ask"),
+    ("ASK SOURCE: exec single-dash retains process-substitution source",
+     'exec - source <(printf safe)', "ask"),
+    ("RED SOURCE: exec single-dash retains a guarded producer",
+     r'''exec - source <(git grep -E 'harness\b' -- README.md)''', "deny"),
+    ("GREEN SOURCE: exec single-dash preserves a literal script path",
+     'exec - source ./script.sh', "allow"),
+    ("ASK SOURCE: coprocess wrapper still executes source",
+     'coproc source "$FILE"', "ask"),
+    ("ASK SOURCE: repeat wrapper still executes source",
+     'repeat 1 source "$FILE"', "ask"),
+    ("ASK SOURCE: bash command wrapper executes source",
+     "bash -c 'command source \"$FILE\"'", "ask"),
+    ("ASK SOURCE: bash command option terminator executes dot",
+     "bash -c 'command -- . \"$FILE\"'", "ask"),
+    ("ASK SOURCE: bash command -p executes source",
+     "bash -c 'command -p source \"$FILE\"'", "ask"),
+    ("ASK SOURCE: bash builtin-command composition executes source",
+     "bash -c 'builtin command source \"$FILE\"'", "ask"),
+    ("ASK SOURCE: sh identity conservatively permits command source",
+     "sh -c 'command source \"$FILE\"'", "ask"),
+    ("ASK SOURCE: sh command wrapper executes dot",
+     "sh -c 'command . \"$FILE\"'", "ask"),
+    ("ASK SOURCE: dash command wrapper executes dot",
+     "dash -c 'command . \"$FILE\"'", "ask"),
+    ("ASK SOURCE: ksh command wrapper may execute source",
+     "ksh -c 'command source \"$FILE\"'", "ask"),
+    ("ASK SOURCE: trap action is deferred executable shell source",
+     "trap 'source \"$FILE\"' EXIT", "ask"),
+    ("ASK SOURCE: builtin trap retains deferred executable shell source",
+     "builtin trap 'source \"$FILE\"' EXIT", "ask"),
+    ("ASK SOURCE: repeated builtin wrappers retain a trap action",
+     "builtin builtin trap 'source \"$FILE\"' EXIT", "ask"),
+    ("ASK SOURCE: trap option terminator retains the deferred action",
+     "builtin trap -- 'source \"$FILE\"' EXIT", "ask"),
+    ("ASK SOURCE: zsh TRAPEXIT function is invoked by the shell",
+     'TRAPEXIT(){ source "$FILE"; }', "ask"),
+    ("RED SOURCE: trap action retains a guarded Git producer",
+     "trap \"git grep -E 'harness\\b' -- README.md\" EXIT", "deny"),
+    ("RED SOURCE: builtin trap retains a guarded Git producer",
+     "builtin trap \"git grep -E 'harness\\b' -- README.md\" EXIT", "deny"),
+    ("ASK SOURCE: active zsh EQUALS selects a PATH-derived script",
+     'source =script', "ask"),
+    ("GREEN SOURCE: literal script path remains literal", 'source ./script.sh', "allow"),
+    ("GREEN SOURCE: source arguments do not make the script path dynamic",
+     'source ./script.sh "$ARG"', "allow"),
+    ("GREEN SOURCE: single-quoted parameter is a literal filename", "source '$FILE'",
+     "allow"),
+    ("GREEN SOURCE: quoted glob is a literal filename", 'source "*.sh"', "allow"),
+    ("GREEN SOURCE: noglob makes an unquoted glob literal", 'noglob source *.sh',
+     "allow"),
+    ("GREEN SOURCE: quoted brace text is a literal filename", 'source "{a,b}.sh"',
+     "allow"),
+    ("GREEN SOURCE: noninitial tilde is literal", 'source ./foo~bar.sh', "allow"),
+    ("GREEN SOURCE: NOEQUALS makes bare equals text literal",
+     'setopt noequals; source =literal', "allow"),
+    ("GREEN SOURCE: quoted equals text is literal", "source '=script'", "allow"),
+    ("GREEN SOURCE: explicit external source basename is not the builtin",
+     '/tmp/source "$FILE"', "allow"),
+    ("GREEN SOURCE: command source spelling does external lookup in zsh",
+     'command source <(printf safe)', "allow"),
+    ("GREEN SOURCE: command -p source still does external lookup in zsh",
+     'command -p source "$FILE"', "allow"),
+    ("GREEN SOURCE: bash command -v only queries source identity",
+     "bash -c 'command -v source'", "allow"),
+    ("GREEN SOURCE: sh command -V only queries dot identity",
+     "sh -c 'command -V .'", "allow"),
+    ("GREEN SOURCE: trap -p only queries installed actions",
+     "trap -p EXIT", "allow"),
+    ("GREEN SOURCE: process-substitution data consumer remains data",
+     '/bin/cat <(printf safe)', "allow"),
+]
+
+# The effective invocation resolver is shared by pattern and rev:path consumers. These
+# controls keep native identity, shell-alias forwarding, cycles, config uncertainty, and
+# terminal global options separated rather than collapsing every unknown into one answer.
+FIXTURES += [
+    ("ASK ALIAS: ordinary shell alias reaches a rev-path Git consumer",
+     "alias g='SHA=x; git show $SHA:src/f.py'; eval g", "ask"),
+    ("ASK ALIAS: ordinary shell alias forwards argv to Git",
+     "alias g=git; eval 'SHA=x; g show $SHA:src/f.py'", "ask"),
+    ("ASK ALIAS: ordinary shell alias reaches an ERE Git hazard",
+     r'''alias q='git grep -E '"'"'harness\b'"'"' -- README.md'; eval q''',
+     "ask"),
+    ("ASK ALIAS: used zsh global alias has unresolved execution semantics",
+     ("alias -g X='; git show $SHA:src/f.py'; "
+      "eval 'SHA=x; print -r -- BEFORE X'"), "ask"),
+    ("ASK ALIAS: used zsh suffix alias has unresolved execution semantics",
+     ("alias -s x='git show'; "
+      "eval 'SHA=x; file.x $SHA:src/f.py'"), "ask"),
+    ("GREEN ALIAS: ordinary shell alias reaches harmless Git status",
+     "alias g='git status --short'; eval g", "allow"),
+    ("GREEN ALIAS: unused zsh global alias does not execute",
+     "alias -g X='; git show $SHA:src/f.py'; print -r -- BEFORE", "allow"),
+    ("GREEN ALIAS: quoted zsh global alias token stays data",
+     ("alias -g X='; git show $SHA:src/f.py'; "
+      "eval \"print -r -- 'X'\""), "allow"),
+    ("GREEN ALIAS: ordinary redefinition replaces a zsh global alias",
+     ("alias -g X='; git show $SHA:src/f.py'; alias X='print safe'; "
+      "eval 'print -r -- BEFORE X'"), "allow"),
+    ("GREEN ALIAS: explicit builtin lookup bypasses a source alias",
+     ("eval 'alias t=source'; eval 'alias s=\"builtin t\"'; "
+      "eval 's \"$FILE\"'"), "allow"),
+    ("GREEN ALIAS: explicit builtin lookup bypasses an alias cycle",
+     ("eval 'alias t=s'; eval 'alias s=\"builtin t\"'; "
+      "eval 's \"$FILE\"'"), "allow"),
+    ("GREEN ALIAS: function-installed builtin lookup bypasses a source alias",
+     ("f(){ builtin alias t=source; builtin alias 's=builtin t'; }; f; "
+      "eval 's \"$FILE\"'"), "allow"),
+    ("ASK ALIAS: called function establishes a guarded Git alias",
+     "f(){ alias g='git show $SHA:src/f.py'; }; f; eval g", "ask"),
+    ("ASK ALIAS: called function helper establishes a guarded Git alias",
+     ("setalias(){ alias g='git show $SHA:src/f.py'; }; "
+      "f(){ setalias; }; f; eval g"), "ask"),
+    ("ASK ALIAS: DEBUG trap establishes a guarded Git alias",
+     ("trap \"alias g='git show $SHA:src/f.py'; trap - DEBUG\" DEBUG; "
+      "eval g"), "ask"),
+    ("ASK ALIAS: TRAPDEBUG function establishes a guarded Git alias",
+     ("TRAPDEBUG(){ alias g='git show $SHA:src/f.py'; "
+      "unfunction TRAPDEBUG; }; eval g"), "ask"),
+    ("ASK ALIAS: TRAPDEBUG helper establishes a guarded Git alias",
+     ("setalias(){ alias g='git show $SHA:src/f.py'; }; "
+      "TRAPDEBUG(){ setalias; unfunction TRAPDEBUG; }; eval g"), "ask"),
+    ("GREEN ALIAS: uncalled function cannot establish a guarded Git alias",
+     "f(){ alias g='git show $SHA:src/f.py'; }; eval g", "allow"),
+    ("GREEN ALIAS: EXIT trap cannot alter an earlier guarded alias invocation",
+     "trap \"alias g='git show $SHA:src/f.py'\" EXIT; eval g", "allow"),
+    ("GREEN ALIAS: helper defined after its caller runs cannot mutate alias state",
+     ("f(){ setalias; }; f; "
+      "setalias(){ alias g='git show $SHA:src/f.py'; }; eval g"), "allow"),
+    ("GREEN ALIAS: caller removes the alias installed by its helper",
+     ("setalias(){ alias g='git show $SHA:src/f.py'; }; "
+      "f(){ setalias; unalias g; }; f; eval g"), "allow"),
+    ("RED ALIAS: config cannot hide native grep",
+     r'''git -c alias.grep=status grep -E 'harness\b' -- README.md''', "deny"),
+    ("RED WRAPPER: attached exec argv-zero does not hide native grep",
+     r'''exec -apretend git grep -E 'harness\b' -- README.md''', "deny"),
+    ("RED WRAPPER: exec single-dash does not hide native grep",
+     r'''exec - git grep -E 'harness\b' -- README.md''', "deny"),
+    ("ASK ALIAS: bare Git shell alias forwards outer grep argv",
+     r'''git -c 'alias.x=!git' x grep -E 'harness\b' -- README.md''', "ask"),
+    ("ASK ALIAS: bare Git shell alias with -C forwards outer grep argv",
+     r'''git -c 'alias.x=!git -C .' x grep -E 'harness\b' -- README.md''', "ask"),
+    ("ASK ALIAS: shell alias reaches push refspec consumer",
+     r'''git -c 'alias.x=!git push "$@"' x origin $B:refs/heads/main''', "ask"),
+    ("ASK ALIAS: shell alias reaches fetch refspec consumer",
+     r'''git -c 'alias.x=!git fetch "$@"' x origin $B:refs/remotes/x''', "ask"),
+    ("ASK ALIAS: shell alias reaches difftool rev-path consumer",
+     r'''git -c 'alias.x=!git difftool "$@"' x $SHA:src/f.py''', "ask"),
+    ("ASK ALIAS: hazard-union adoption retains pull",
+     r'''git -c 'alias.x=!git pull "$@"' x $SHA:src/f.py''', "ask"),
+    ("ASK ALIAS: hazard-union adoption retains shortlog",
+     r'''git -c 'alias.x=!git shortlog "$@"' x $SHA:src/f.py''', "ask"),
+    ("ASK ALIAS: hazard-union adoption retains ls-tree",
+     r'''git -c 'alias.x=!git ls-tree "$@"' x $SHA:src/f.py''', "ask"),
+    ("ASK ALIAS: hazard-union adoption retains archive",
+     r'''git -c 'alias.x=!git archive "$@"' x $SHA:src/f.py''', "ask"),
+    ("ASK ALIAS: hazard-union adoption retains blame",
+     r'''git -c 'alias.x=!git blame "$@"' x $SHA:src/f.py''', "ask"),
+    ("ASK ALIAS: hazard-union adoption retains cat-file",
+     r'''git -c 'alias.x=!git cat-file "$@"' x $SHA:src/f.py''', "ask"),
+    ("ASK ALIAS: hazard-union adoption retains diff",
+     r'''git -c 'alias.x=!git diff "$@"' x $SHA:src/f.py''', "ask"),
+    ("ASK ALIAS: hazard-union adoption retains rev-parse",
+     r'''git -c 'alias.x=!git rev-parse "$@"' x $SHA:src/f.py''', "ask"),
+    ("ASK ALIAS: hazard-union adoption retains restore",
+     r'''git -c 'alias.x=!git restore "$@"' x $SHA:src/f.py''', "ask"),
+    ("ASK ALIAS: hazard-union adoption retains rev-list",
+     r'''git -c 'alias.x=!git rev-list "$@"' x $SHA:src/f.py''', "ask"),
+    ("ASK ALIAS: hazard-union adoption retains checkout",
+     r'''git -c 'alias.x=!git checkout "$@"' x $SHA:src/f.py''', "ask"),
+    ("ASK ALIAS: direct shell-alias cycle is bounded",
+     r'''git -c 'alias.x=!git x' x''', "ask"),
+    ("ASK ALIAS: mutual shell-alias cycle is bounded",
+     r'''git -c 'alias.x=!git y' -c 'alias.y=!git x' x''', "ask"),
+    ("GREEN ALIAS: non-Git shell alias may receive outer argv",
+     r'''git -c 'alias.x=!printf ok' x a b''', "allow"),
+    ("GREEN ALIAS: explicit status subcommand stays harmless with outer argv",
+     r'''git -c 'alias.x=!git status' x --short''', "allow"),
+    ("GREEN CONFIG: unread pattern config does not affect native status identity",
+     'GIT_CONFIG_GLOBAL=/tmp/no-such git status --short', "allow"),
+    ("GREEN CONFIG: unread pattern config does not affect native show identity",
+     'GIT_CONFIG_GLOBAL=/tmp/no-such git show --no-patch HEAD', "allow"),
+    ("ASK CONFIG: unread pattern config still makes grep engine unresolved",
+     'GIT_CONFIG_GLOBAL=/tmp/no-such git grep -P harness -- README.md', "ask"),
+    ("GREEN GIT QUERY: bare exec-path is terminal",
+     'git --exec-path $SHA:src/f.py', "allow"),
+    ("GREEN GIT QUERY: version is terminal",
+     'git --version $SHA:src/f.py', "allow"),
+    ("GREEN GIT QUERY: html-path is terminal",
+     'git --html-path $SHA:src/f.py', "allow"),
+]
+
 # One fixture per PCRE_ESCAPE_LETTERS member that no check held. A per-element sweep found
 # twelve of the twenty-one letters at a margin of zero, while `\b` carried 194 checks because
 # it is the atom everyone reaches for. Dropping an unheld letter moves its atom from proven to
@@ -6746,40 +8080,31 @@ def fixture_pair_duplicates(fixtures):
     return duplicates
 
 
-_VERDICT_LINE = re.compile(r"^\s*(PASS|FAIL|SKIP)\b")
+class _SelftestTally:
+    """Count the assertions that actually execute instead of reporting a formula."""
+    def __init__(self):
+        self.checks = 0
+        self.failures = 0
 
+    def __iadd__(self, failures):
+        self.checks += 1
+        self.failures += int(failures)
+        return self
 
-class _VerdictCount:
-    """Count the verdict lines this suite emits, so the receipt reports what RAN.
+    def add_group(self, failures, executed, skipped=0):
+        if executed < 0 or skipped < 0 or len(failures) > executed:
+            raise AssertionError(
+                f"invalid selftest group accounting: checks={executed} "
+                f"skips={skipped} failures={len(failures)}")
+        # Optional-runtime probes keep a fixed planned corpus. Their identities move
+        # between executed and skipped; they do not disappear from the receipt.
+        self.checks += executed + skipped
+        self.failures += len(failures)
 
-    `checks` was `len(FIXTURES)` plus a hand-maintained literal that nothing derived and
-    nothing validated, and it was already wrong: 96 non-fixture verdicts against a recorded
-    76. The worse property is that deleting a whole check -- its scoring line and its report
-    -- left the number unchanged at 583, so the shrink-only floor could not see a gutted
-    suite, which is the one thing that floor exists to catch. Two digest bindings still
-    reddened, but both say the SOURCE changed; neither can say coverage dropped, and
-    following the remediation each one prints restores a green gate with a check gone.
-
-    Counting emitted verdicts ties the number to the run. A deleted check lowers it and the
-    floor reddens; an added check raises it and the floor is raised deliberately.
-    """
-
-    def __init__(self, stream):
-        self._stream = stream
-        self.verdicts = 0
-
-    def write(self, text):
-        for line in text.splitlines():
-            if _VERDICT_LINE.match(line):
-                self.verdicts += 1
-        return self._stream.write(text)
-
-    def flush(self):
-        return self._stream.flush()
-
-    def restore(self):
-        sys.stdout = self._stream
-        return self.verdicts
+    def reserve_vector(self, extra):
+        if extra < 0:
+            raise AssertionError("negative selftest vector cardinality")
+        self.checks += extra
 
 
 def selftest():
@@ -6787,13 +8112,23 @@ def selftest():
         print("SCAN SET EMPTY - zero fixtures is an error, not a clean verdict",
               file=sys.stderr)
         return 2
-    sys.stdout = _counted = _VerdictCount(sys.stdout)
     print("scan set: %d fixtures (%d must-deny, %d must-ask, %d must-allow)" % (
         len(FIXTURES),
         sum(1 for f in FIXTURES if f[2] == "deny"),
         sum(1 for f in FIXTURES if f[2] == "ask"),
         sum(1 for f in FIXTURES if f[2] == "allow")))
-    bad = 0
+    bad = _SelftestTally()
+
+    builtin_all = builtins.all
+    def all(iterable):
+        """Evaluate every vector member and account for every executed member."""
+        values = list(iterable)
+        if not values:
+            return False
+        # The enclosing ``bad +=`` records one assertion. Reserve the rest here.
+        bad.reserve_vector(len(values) - 1)
+        return builtin_all(values)
+
     for label, cmd, want in FIXTURES:
         got, reason = decide(cmd)
         ok = got == want
@@ -6811,16 +8146,18 @@ def selftest():
     # The fixtures above test the table against itself. This one tests it against the
     # tool, which is the only thing that can catch the table going stale under a git
     # upgrade or on a host whose git differs from the authoring one.
-    table_failures = check_option_table_against_git()
-    bad += len(table_failures)
+    table_failures, table_checks = check_option_table_against_git()
+    bad.add_group(table_failures, table_checks)
     if table_failures:
-        print("  FAIL short-option table vs installed git: %s" % "; ".join(table_failures))
+        for failure in table_failures:
+            print("  FAIL short-option table vs installed git: %s" % failure)
     else:
         print("  PASS short-option table matches the installed git")
-    grammar_failures = check_option_grammar_against_git()
-    bad += len(grammar_failures)
+    grammar_failures, grammar_checks = check_option_grammar_against_git()
+    bad.add_group(grammar_failures, grammar_checks)
     if grammar_failures:
-        print("  FAIL option grammar vs installed git: %s" % "; ".join(grammar_failures))
+        for failure in grammar_failures:
+            print("  FAIL option grammar vs installed git: %s" % failure)
     else:
         print("  PASS numeric, optional-value, negated-engine, and -- grammar matches installed git")
     limit_drift = {
@@ -6831,37 +8168,43 @@ def selftest():
     print("  %s the limit fixtures' literal sizes still match the closed limits (%s)" % (
         "PASS" if not limit_drift else "FAIL", limit_drift or "no drift"))
 
-    floor_failures, floor_scan_set = check_alias_shadowing_against_installed_gits()
-    bad += len(floor_failures)
+    floor_failures, floor_scan_set, floor_checks = (
+        check_alias_shadowing_against_installed_gits())
+    bad.add_group(floor_failures, floor_checks)
     if floor_failures:
-        print("  FAIL alias-proof set vs installed git: %s" % "; ".join(floor_failures))
+        for failure in floor_failures:
+            print("  FAIL alias-proof set vs installed git: %s" % failure)
     else:
         print("  PASS no ambient alias can redirect an alias-proof name on any Git this "
               "PATH selects [%s]" % floor_scan_set)
-    log_grammar_failures = check_log_grammar_against_git()
-    bad += len(log_grammar_failures)
+    log_grammar_failures, log_grammar_checks = check_log_grammar_against_git()
+    bad.add_group(log_grammar_failures, log_grammar_checks)
     if log_grammar_failures:
-        print("  FAIL log-family grammar vs installed git: %s" % "; ".join(log_grammar_failures))
+        for failure in log_grammar_failures:
+            print("  FAIL log-family grammar vs installed git: %s" % failure)
     else:
         print("  PASS log family takes no positional pattern, no cluster, no abbreviation "
               "and no negation, and its engine tokens match the installed git")
-    construct_failures = check_pcre_constructs_against_git()
-    bad += len(construct_failures)
+    construct_failures, construct_checks = check_pcre_constructs_against_git()
+    bad.add_group(construct_failures, construct_checks)
     if construct_failures:
-        print("  FAIL PCRE construct vs installed git: %s" % "; ".join(construct_failures))
+        for failure in construct_failures:
+            print("  FAIL PCRE construct vs installed git: %s" % failure)
     else:
         print("  PASS PCRE constructs and escaped-group control match installed git")
-    alias_failures = check_aliases_against_git()
-    bad += len(alias_failures)
+    alias_failures, alias_checks = check_aliases_against_git()
+    bad.add_group(alias_failures, alias_checks)
     if alias_failures:
-        print("  FAIL alias behavior vs installed git: %s" % "; ".join(alias_failures))
+        for failure in alias_failures:
+            print("  FAIL alias behavior vs installed git: %s" % failure)
     else:
         print("  PASS quoted, recursive, and cyclic aliases match installed git")
     def retain_pcre_engine(label, command):
         if label != "-NUM between P and E":
             return command
         return [word.replace("-P1Ee", "-P1Pe") for word in command]
-    retained_pcre_failures = check_option_grammar_against_git(retain_pcre_engine)
+    retained_pcre_failures, _retained_pcre_checks = (
+        check_option_grammar_against_git(retain_pcre_engine))
     retained_pcre_red = any(
         "exact final-engine order for -NUM between P and E" in failure
         for failure in retained_pcre_failures
@@ -6870,9 +8213,10 @@ def selftest():
     print("  %s final-engine oracle rejects an incorrectly retained PCRE engine" % (
         "PASS" if retained_pcre_red else "FAIL"))
     boundary_failures, boundary_checks, boundary_skips = check_shell_boundary_behavior()
-    bad += len(boundary_failures)
+    bad.add_group(boundary_failures, boundary_checks, boundary_skips)
     if boundary_failures:
-        print("  FAIL shell-boundary behavior probe: %s" % "; ".join(boundary_failures))
+        for failure in boundary_failures:
+            print("  FAIL shell-boundary behavior probe: %s" % failure)
     else:
         print("  PASS downstream expansion and explicit harmless identities match installed shells")
     print("SHELL-BOUNDARY-SUMMARY checks=%d skips=%d failures=%d" % (
@@ -6886,9 +8230,9 @@ def selftest():
         absent_failures, absent_checks, absent_skips = check_shell_boundary_behavior()
     finally:
         shutil.which = original_which
-    absence_ok = not absent_failures and absent_checks == 12 and absent_skips == 9
+    absence_ok = not absent_failures and absent_checks == 12 and absent_skips == 79
     bad += 0 if absence_ok else 1
-    print("  %s absent zsh skips only 9 zsh probe groups; 12 portable probes still execute" % (
+    print("  %s absent zsh skips 79 atomic zsh probes; 12 portable probes still execute" % (
         "PASS" if absence_ok else "FAIL"))
 
     # Mutate each production call site, not its helper in isolation. Every representative
@@ -6940,7 +8284,7 @@ def selftest():
     globals()["resolve_git_alias"] = (
         lambda subcommand, tail, _aliases, _authority, _exec_path, _deadline=None,
         _command_env=None, _lookup_authority_uncertain=False,
-        _executable_lookup_uncertain=False:
+        _executable_lookup_uncertain=False, _alias_seen=(), _alias_depth=0:
         (subcommand.lower(), list(tail), None, [])
     )
     try:
@@ -6989,13 +8333,13 @@ def selftest():
     globals()["_git_config_parameter_items"] = lambda _parameters: ([], None)
     try:
         alias_parameter_red = decide(
-            r'''git -c "alias.s=!GIT_CONFIG_PARAMETERS=\"'alias.y=grep -E'\" '''
-            r'''git y 'harness\b' -- README.md" s'''
-        )[0] != "ask"
+            r'''git -c "alias.s=!GIT_CONFIG_PARAMETERS=\"'alias.y=status'\" '''
+            r'''git y" s'''
+        )[0] != "allow"
     finally:
         globals()["_git_config_parameter_items"] = original_parameter_items
     bad += 0 if alias_parameter_red else 1
-    print("  %s shell-alias config-parameter mutation loses uncertain outcome" % (
+    print("  %s shell-alias config-parameter mutation loses harmless alias" % (
         "PASS" if alias_parameter_red else "FAIL"))
 
     original_dollar = _command_substitution
@@ -7502,6 +8846,25 @@ def selftest():
     bad += 0 if parser_budget_live else 1
     print("  %s an expired budget raises from the live parser checkpoint" % (
         "PASS" if parser_budget_live else "FAIL"))
+
+    # Pin the attacker-controlled GIT_CONFIG_COUNT loop itself, not only the shared
+    # checkpoint helper. Removing this call site used to leave every suite green because
+    # later checkpoints still returned the same final `ask` decision.
+    config_tokens = split_commands("GIT_CONFIG_COUNT=3 git status")[0]
+    config_resolution = unwrap_command_prefix(config_tokens)
+    config_budget_calls = []
+    original_budget_check = _check_decision_budget
+    globals()["_check_decision_budget"] = (
+        lambda deadline: config_budget_calls.append(deadline))
+    try:
+        resolve_effective_git_invocation(
+            config_tokens, config_resolution, deadline=None)
+    finally:
+        globals()["_check_decision_budget"] = original_budget_check
+    config_loop_budget_ok = config_budget_calls == [None, None, None]
+    bad += 0 if config_loop_budget_ok else 1
+    print("  %s GIT_CONFIG_COUNT checks the shared budget once per entry" % (
+        "PASS" if config_loop_budget_ok else "FAIL"))
 
     class _ExpiringClock:
         """A monotonic stand-in that jumps past the deadline after N readings."""
@@ -8334,11 +9697,12 @@ def selftest():
     print("  %s identifier-only heredoc mutation loses dashed-delimiter deny" % (
         "PASS" if dashed_heredoc_red else "FAIL"))
 
-    checks = _counted.restore()
-    print("failures: %d" % bad)
+    checks = bad.checks
+    failures = bad.failures
+    print("failures: %d" % failures)
     print("SELFTEST-SUMMARY suite=git_grep_engine_guard checks=%d failures=%d" % (
-        checks, bad))
-    return 0 if bad == 0 else 1
+        checks, failures))
+    return 0 if failures == 0 else 1
 
 
 def main():

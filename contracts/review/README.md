@@ -2,17 +2,16 @@
 
 Review text that will be posted to a pull request is drafted here and posted from here.
 
-The reason is narrow. Everything else this repository asserts is inside a gate: source
-digests pin bytes, `guard-decisions.json` pins verdicts, `SUITE_FLOORS` ratchets check
-counts, `mutation-receipt.json` pins what the suites catch. A GitHub comment is inside none
-of them. Three mutation counts published on this branch's review were the subset under
-attention rather than the suite total the surrounding sentence claimed, and no check in the
-repository could have seen them, because the artifact lived where no check can reach.
+The gate for this directory has a narrow claim: required generated include blocks must be
+present in the registered documents and byte-identical to their sources. Free prose and
+manually typed measurements outside those blocks are not mechanically verified. Source
+digests, guard decisions, suite execution counts, and mutation outcomes have separate
+validators under `contracts/goldens/`; none makes an unregistered GitHub edit verifiable.
 
 ## The rule
 
-A measured number belongs in a generated file, and outbound text INCLUDES that file rather
-than restating it:
+A current measurement used as evidence for the outbound head belongs in a generated file,
+and outbound text INCLUDES that file rather than restating it:
 
 ```
 <!-- include: contracts/goldens/mutation-summary.md -->
@@ -20,10 +19,12 @@ than restating it:
 <!-- end include -->
 ```
 
-`tools/ci-gate.py` checks every include block under this directory against its source and
-fails on a stale copy, so a table cannot drift in the copy a reviewer actually reads.
-Regenerate with `tools/write-mutation-receipt.py`, which writes the receipt and the summary
-from the same run.
+`tools/ci-gate.py` checks every live include block under this directory against its source,
+requires the registered PR description and roll-up includes, and rejects unregistered live
+blocks. `tools/write-mutation-receipt.py` writes the receipt and summary from one accepted
+aggregate of exact-plan shard fragments; its normal aggregate mode refuses changed output.
+Historical measurements may remain as context only when the document says they are not
+final-head evidence; the include gate does not validate those free-prose claims.
 
 ## Layout
 

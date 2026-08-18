@@ -1,0 +1,11 @@
+{
+ "schema_version": 1,
+ "note": "reviewed decision commands retained after their originating fixtures left the current source; append-only unless a deliberate retirement changes the independent gate contract",
+ "commands": [
+  "=/usr/bin/git grep -E 'harness\\b' -- README.md",
+  "==/usr/bin/git grep -E 'harness\\b' -- README.md",
+  "printf '%s\\n' 'printf() { git \"$@\"; }' git grep -E 'harness\\b' -- README.md",
+  "printf '%s\\n' 'printf() { git \"$@\"; }' git grep -nE 'harness\\b' -- README.md",
+  "printf '%s\\n' 'printf() { git \"$@\"; }' git show HEAD:README.md"
+ ]
+}

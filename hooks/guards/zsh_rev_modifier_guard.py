@@ -34,9 +34,9 @@ so `$SHA:guards/g.py` -> DC185FEB4ards/g.py (`:gu`), and `frontend/` `functions/
 `flake.nix` `gradle/` `generated/` `graphql/` `web/` `wait/` all mangle the same way,
 while `:go` `:gz` `:gitignore` `:foo` `:world` reach git untouched.
 
-Uppercase `:W` takes a delimiter and is NOT modelled: `:Watch.py` and `:World/x` mangle,
-`:Wa` and `:Warehouse/a.py` do not. A rev:path whose next segment starts with a capital W
-is outside this guard.
+Uppercase `:W` takes a delimiter (`W:separator:`) before a following modifier and is NOT
+modelled. A rev:path whose next segment starts with a capital W is therefore classified as
+unresolved instead of being guessed literal or consumed.
 
 Everything else after the colon is inert. The sets are re-derived from the installed zsh
 by `--selftest`; they were hand-listed once and four letters were missing.
@@ -53,6 +53,7 @@ single-quoted text (which the outer shell never expands) is ignored.
 Exit codes:  0 = decision emitted on stdout (or out of scope)
              2 = usage error / unknown flag / zero inputs in --selftest
 """
+import builtins
 import json
 import os
 import re
@@ -66,8 +67,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import git_grep_engine_guard as git_guard  # noqa: E402
 from git_grep_engine_guard import (  # noqa: E402
     BUDGET_EXHAUSTED_REASON,
-    _VerdictCount,
-    CommandParseError, GUARD_BUDGET_SECONDS, MAX_PREFIX_DEPTH, PrefixResolution,
+    CommandParseError, GitAuthorityError, GUARD_BUDGET_SECONDS, MAX_PREFIX_DEPTH,
+    PrefixResolution,
     nested_shell_invocation,
     nested_shell_equals_state, heredoc_equals_decision,
     live_here_string_sources, direct_here_string_invocation,
@@ -75,6 +76,9 @@ from git_grep_engine_guard import (  # noqa: E402
     fixture_pair_duplicates,
     only_changed_zsh_equals_lookup_authority_error,
     source_has_dynamic_command_word, source_has_git_hazard_hint,
+    zsh_trap_function_sources,
+    resolve_effective_git_invocation,
+    REV_PATH_SUBCOMMANDS,
     split_commands, command_without_heredoc_payloads,
     unwrap_command_prefix, zsh_equals_states,
     command_environment_states, _strongest_decision,
@@ -90,10 +94,9 @@ MODS = "aAcehlPqQrstu"
 # MODS letters because alone they are harmless: `:go` `:gz` `:gitignore` `:foo` `:world`
 # all reach git untouched, so folding them into MODS would deny correct commands.
 MOD_PREFIXES = "gfwF"
-# Uppercase `:W` is deliberately absent from both sets. It takes a delimiter, so what it
-# consumes depends on the rest of the token: `:Watch.py` and `:World/x` mangle while
-# `:Wa` and `:Warehouse/a.py` reach git intact. Neither "always" nor "only before a base
-# modifier" describes it, and guessing would either miss a mangle or deny a correct path.
+# Uppercase `:W` is deliberately absent from both sets. Its ``W:separator:`` grammar
+# changes how the following modifier is applied, so neither "always" nor "only before a
+# base modifier" describes it. Guessing would either miss a mangle or deny a correct path.
 MOD_UNMODELLED = "W"
 # unbraced parameter expansions, INCLUDING positionals and specials. $( is excluded.
 EXPANSION = re.compile(
@@ -119,6 +122,13 @@ EXPANSION_BRACED = re.compile(
 EXPANSION_BRACED_INVALID = re.compile(
     r"\$\{(?:[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]+\])?|[0-9]+|[#?*@!$-])"
     r":[" + MOD_PREFIXES + r"]*([" + MODS + r"])[A-Za-z]")
+# ``W`` has delimiter-dependent grammar (``W:sep:``). Keep this third state separate
+# from the deny regexes and ask on a resolved rev:path consumer.
+EXPANSION_UNMODELLED = re.compile(
+    r"\$(?:\{(?:\([^}]*\))?"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]+\])?|[0-9]+|[#?*@!$-])"
+    r"|(?:[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?|[0-9]+|[#?*@!$-]))"
+    r":[" + MOD_PREFIXES + r"]*W")
 
 # git subcommands that take a `rev:path` / `rev:./path` argument
 # How many `<shell> -c` layers this guard will unwrap. Reaching it returns `ask`, never
@@ -141,13 +151,6 @@ NEST_DEPTH_LIMIT = 4
 # the result is silent. Candidates not yet graded against this criterion, each needing its
 # own grounding against git's documented grammar rather than a guess: `reset`, `clone`,
 # `bundle`, `update-ref`, `ls-remote`, `send-pack`.
-REV_PATH_SUBCOMMANDS = {"show", "diff", "cat-file", "log", "ls-tree", "archive",
-                        "checkout", "restore", "grep", "rev-parse", "blame",
-                        # refspec `src:dst`
-                        "push", "fetch", "pull",
-                        # rev:path, same grammar as `diff`
-                        "difftool"}
-
 MOD_MEANING = {
     "a": ":a absolute-path", "A": ":A resolved-absolute", "c": ":c command-path",
     "e": ":e extension-only", "h": ":h dirname", "l": ":l lowercase",
@@ -157,35 +160,29 @@ MOD_MEANING = {
 }
 
 
-def is_rev_path_git(tokens, resolution=None):
-    """True when this subcommand's argv is `git [-C x] <rev:path subcommand> ...`.
+REV_PATH_GIT = "rev-path"
+NON_REV_PATH_GIT = "non-rev-path"
+UNRESOLVED_GIT = "unresolved"
 
-    The hook sees shell source, not execve(2) argv, so `git`, `/usr/bin/git`, `env git`
-    and `nice git` are the same invocation. Comparing argv[0] to the literal "git" made
-    every wrapper spelling vanish from this guard while the bare form was denied, so the
-    prefix is peeled by the same helper the sibling grep guard uses rather than by a
-    second hand-rolled walk that can drift from it.
-    """
+
+def rev_path_git_state(tokens, resolution=None, deadline=None):
+    """Return resolved rev:path, resolved non-rev:path, or unresolved Git state."""
     resolution = resolution or unwrap_command_prefix(tokens)
     if resolution.errors:
-        return False
-    words = [t for t, _ in resolution.items]
-    j = 0
-    if j >= len(words) or os.path.basename(words[j]) != "git":
-        return False
-    j += 1
-    options_with_args = {
-        "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix",
-        "--exec-path", "--config-env", "--attr-source",
-    }
-    while j < len(words) and words[j].startswith("-"):
-        if words[j] in options_with_args:
-            j += 2
-        else:
-            # Global switches such as --no-pager and --no-optional-locks do not
-            # change the rev:path semantics of the later subcommand.
-            j += 1
-    return j < len(words) and words[j] in REV_PATH_SUBCOMMANDS
+        return UNRESOLVED_GIT, "; ".join(resolution.errors)
+    try:
+        invocation = resolve_effective_git_invocation(
+            tokens, resolution, deadline)
+    except GitAuthorityError as exc:
+        return UNRESOLVED_GIT, str(exc)
+    if (invocation is None
+            or invocation.subcommand is None and not invocation.identity_unresolved):
+        return NON_REV_PATH_GIT, ""
+    if invocation.identity_unresolved:
+        return UNRESOLVED_GIT, "; ".join(invocation.identity_unresolved)
+    if invocation.subcommand in REV_PATH_SUBCOMMANDS:
+        return REV_PATH_GIT, ""
+    return NON_REV_PATH_GIT, ""
 
 
 def _zsh_expansion_hits(tokens):
@@ -204,6 +201,24 @@ def _zsh_expansion_hits(tokens):
                 if (matched_modes and len(set(matched_modes)) == 1
                         and matched_modes[0] != "S"):
                     hits.append((match.group(0), text, match.group(1)))
+    return hits
+
+
+def _zsh_unmodelled_hits(tokens):
+    hits = []
+    for text, quoting in tokens:
+        if quoting == "'":
+            continue
+        if quoting.startswith("mixed:"):
+            modes = quoting.split(":", 1)[1]
+        else:
+            code = {"": "U", "'": "S", '"': "D"}.get(quoting, "U")
+            modes = code * len(text)
+        for match in EXPANSION_UNMODELLED.finditer(text):
+            matched_modes = modes[match.start():match.end()]
+            if (matched_modes and len(set(matched_modes)) == 1
+                    and matched_modes[0] != "S"):
+                hits.append((match.group(0), text))
     return hits
 
 
@@ -246,6 +261,13 @@ def decide(command, _depth=0, _shell="zsh", _equals_state=ZSH_EQUALS_ON,
 def _classify(command, decisions, _depth, _shell, _equals_state, _deadline,
               _command_env, _lookup_authority_uncertain):
     """Append every non-allow rev:path finding for one command source."""
+    if _shell == "zsh":
+        for body in zsh_trap_function_sources(command, _deadline):
+            trap_decision, trap_reason = decide(
+                body, _depth + 1, _shell, _equals_state, _deadline,
+                _command_env, _lookup_authority_uncertain)
+            if trap_decision != "allow":
+                decisions.append((trap_decision, trap_reason))
     equals_heredoc = heredoc_equals_decision(
         command, _deadline, REV_PATH_SUBCOMMANDS,
         lambda body, shell, state, deadline, env, lookup: decide(
@@ -310,15 +332,30 @@ def _classify(command, decisions, _depth, _shell, _equals_state, _deadline,
                 rev_items, resolution.command_env, (), resolution.hazard_hint,
                 resolution.lookup_authority_uncertain,
                 resolution.descendant_lookup_authority_uncertain)
-        direct_git = is_rev_path_git(tokens, rev_path_resolution)
+        direct_git_state, direct_git_reason = rev_path_git_state(
+            tokens, rev_path_resolution, _deadline)
         invocation = nested_shell_invocation(resolution, _shell, _deadline)
         descendant_git = (invocation is not None
                           and source_has_git_hazard_hint(
                               invocation.command, _deadline))
-        if _shell == "zsh" and (direct_git or descendant_git):
+        if (_shell == "zsh"
+                and (direct_git_state != NON_REV_PATH_GIT or descendant_git)):
             hits = _zsh_expansion_hits(tokens)
+            unmodelled_hits = _zsh_unmodelled_hits(tokens)
             if hits:
-                decisions.append(_deny_hits(hits))
+                if direct_git_state == REV_PATH_GIT or descendant_git:
+                    decisions.append(_deny_hits(hits))
+                else:
+                    decisions.append((
+                        "ask", "the effective Git subcommand is unresolved ("
+                        + direct_git_reason
+                        + "), so the guard cannot prove whether zsh's modifier "
+                          "expansion reaches a rev:path operand"))
+            if unmodelled_hits:
+                decisions.append((
+                    "ask", "zsh `:W` parameter-modifier grammar is delimiter-dependent, "
+                    "so this guard cannot prove whether the rev:path reaches Git "
+                    "unchanged; brace the parameter name before the colon"))
         if resolution.errors and resolution.hazard_hint:
             decisions.append((
                 "ask",
@@ -468,10 +505,14 @@ FIXTURES = [
      "SHA=x; builtin command -- git show $SHA:src/f.py", "deny"),
     ("RED WRAPPER: exec -a consumes argv0 before executing git",
      "SHA=x; exec -a harmless git show $SHA:src/f.py", "deny"),
+    ("RED WRAPPER: attached exec argv0 consumes the same option word",
+     "SHA=x; exec -aharmless git show $SHA:src/f.py", "deny"),
     ("RED WRAPPER: exec -c still executes git",
      "SHA=x; exec -c git show $SHA:src/f.py", "deny"),
     ("RED WRAPPER: exec -- still executes git",
      "SHA=x; exec -- git show $SHA:src/f.py", "deny"),
+    ("RED WRAPPER: exec single-dash still executes git",
+     "SHA=x; exec - git show $SHA:src/f.py", "deny"),
     ("GREEN WRAPPER: command -v only prints a path, it does not run git",
      "SHA=x; command -v git show $SHA:src/f.py", "allow"),
     # A launcher whose argv rewriting is not modelled must not read as clean.
@@ -587,6 +628,12 @@ FIXTURES = [
 "sh -c 'bash -c \"git show $SHA:src/f.py\"'", "allow"),
     ("GREEN NESTED: nested shell with no rev:path git inside",
      'sh -c "git status"', "allow"),
+    ("RED TRAP: literal trap action is deferred zsh source",
+     "trap 'SHA=x; git show $SHA:src/f.py' EXIT", "deny"),
+    ("RED TRAP: builtin trap retains deferred zsh source",
+     "builtin trap 'SHA=x; git show $SHA:src/f.py' EXIT", "deny"),
+    ("RED TRAP: zsh TRAPEXIT function is invoked automatically",
+     "TRAPEXIT(){ SHA=x; git show $SHA:src/f.py; }", "deny"),
 ]
 
 
@@ -604,6 +651,20 @@ FIXTURES += [
     ("RED PREFIX: :ge via generated/", "SHA=x; git show $SHA:generated/x.ts", "deny"),
     ("RED PREFIX: :we via web/", "SHA=x; git show $SHA:web/x.ts", "deny"),
     ("RED PREFIX: :wa via wait/", "SHA=x; git show $SHA:wait/x", "deny"),
+    ("ASK UNMODELLED: delimiter-dependent :W path cannot be proved literal",
+     "SHA=x; git show $SHA:Watch.py", "ask"),
+    ("ASK UNMODELLED: well-formed :W grammar can consume path bytes",
+     "SHA=x; git show $SHA:W@/@h", "ask"),
+    ("ASK UNMODELLED: :gW grammar can consume path bytes",
+     "SHA=x; git show $SHA:gW@/@h", "ask"),
+    ("ASK UNMODELLED: :fW grammar can consume path bytes",
+     "SHA=x; git show $SHA:fW@/@h", "ask"),
+    ("ASK UNMODELLED: :wW grammar can consume path bytes",
+     "SHA=x; git show $SHA:wW@/@h", "ask"),
+    ("ASK UNMODELLED: :FW grammar can consume path bytes",
+     "SHA=x; git show $SHA:FW@/@h", "ask"),
+    ("ASK UNMODELLED: a short :W form still lacks literal authority",
+     "SHA=x; git show $SHA:Wa", "ask"),
     ("RED PREFIX: braced form carries the prefix too",
      "SHA=x; git show ${SHA:fr}ontend/a.js", "deny"),
     # The flag letters are harmless alone. Folding them into MODS would deny these.
@@ -872,12 +933,16 @@ def check_modifier_sets_against_zsh():
     absent -- the claim is about zsh, so on a host without it the claim is inapplicable
     rather than unproven.
     """
-    # One probe GROUP either way. A conditionally-sized contribution made `checks` vary
-    # by host, so the shrink-only floor read a zsh-less runner as a gutted suite; the
-    # skip is reported in the printed line instead, where it is visible without moving
-    # the number the floor compares against.
+    # Every ASCII letter is probed alone. Stable base/prefix letters are also probed
+    # before a known modifier. `:W` has delimiter-dependent grammar, so it gets one
+    # observed-consuming and one observed-literal spelling instead of being forced into
+    # the stable-prefix boolean model.
+    planned = (len(string.ascii_letters)
+               + len(string.ascii_letters) - len(MOD_UNMODELLED)
+               + 2 * len(MOD_UNMODELLED)
+               + len(MOD_PREFIXES) * len(MOD_UNMODELLED))
     if shutil.which("zsh") is None:
-        return [], 0, 1
+        return [], 0, planned
 
     def consumed(suffix):
         probe = subprocess.run(
@@ -902,16 +967,37 @@ def check_modifier_sets_against_zsh():
             failures.append(
                 f"MODS claims `:{char}` is a modifier but this zsh leaves it literal, so "
                 f"a correct rev:path starting with {char!r} is denied")
-    for prefix in MOD_PREFIXES:
-        if consumed(prefix + "o-x"):
+    for prefix in string.ascii_letters:
+        if prefix in MOD_UNMODELLED:
+            if prefix in MODS or prefix in MOD_PREFIXES:
+                failures.append(
+                    f"unmodelled modifier {prefix!r} is also declared as a stable "
+                    "modifier or prefix")
+            continue
+        paired = consumed(prefix + MODS[0] + "-x")
+        expected = prefix in (set(MODS) | set(MOD_PREFIXES))
+        if paired != expected:
             failures.append(
-                f"MOD_PREFIXES treats `:{prefix}` as harmless alone, but this zsh consumed "
-                f"`:{prefix}o-x`; it belongs in MODS instead")
-        if not consumed(prefix + MODS[0] + "-x"):
+                f"zsh prefix behavior for `:{prefix}{MODS[0]}-x` is {paired}, but the "
+                f"declared modifier/prefix tables predict {expected}")
+    for prefix in MOD_UNMODELLED:
+        consuming = prefix + "@/@h"
+        literal = prefix + "@/@"
+        if not consumed(consuming):
             failures.append(
-                f"MOD_PREFIXES expects `:{prefix}` to consume ahead of a base modifier, "
-                f"but this zsh left `:{prefix}{MODS[0]}-x` literal")
-    return failures, 1, 0
+                f"unmodelled modifier `:{prefix}` no longer consumes the grounded "
+                f"delimiter spelling `:{consuming}`")
+        if consumed(literal):
+            failures.append(
+                f"unmodelled modifier `:{prefix}` unexpectedly consumes the grounded "
+                f"literal spelling `:{literal}`")
+        for stable_prefix in MOD_PREFIXES:
+            prefixed = stable_prefix + consuming
+            if not consumed(prefixed):
+                failures.append(
+                    f"modifier prefix {stable_prefix!r} no longer carries the "
+                    f"unmodelled delimiter spelling `:{prefixed}`")
+    return failures, planned, 0
 
 
 FIXTURES += [
@@ -951,14 +1037,40 @@ FIXTURES += [
       "sh <<'EOF'\n=git show $SHA:src/f.py\nEOF\n"), "deny"),
 ]
 
+FIXTURES += [
+    ("RED ALIAS: standard alias resolves to native show",
+     'git -c alias.x=show x $SHA:src/f.py', "deny"),
+    ("GREEN ALIAS: standard alias resolves to status",
+     'git -c alias.x=status x $SHA:src/f.py', "allow"),
+    ("RED ALIAS: config cannot hide native show",
+     'git -c alias.show=status show $SHA:src/f.py', "deny"),
+    ("ASK ALIAS: unknown ambient subcommand may resolve to rev-path Git",
+     'git x $SHA:src/f.py', "ask"),
+    ("RED ALIAS: recursive standard alias resolves to native show",
+     'git -c alias.a=b -c alias.b=show a $SHA:src/f.py', "deny"),
+    ("ASK ALIAS: standard alias cycle is unresolved",
+     'git -c alias.a=b -c alias.b=a a $SHA:src/f.py', "ask"),
+    ("ASK ALIAS: bare Git shell alias forwards outer show argv",
+     r'''git -c 'alias.x=!git' x show $SHA:src/f.py''', "ask"),
+    ("GREEN ALIAS: explicit status shell alias remains non-rev-path",
+     r'''git -c 'alias.x=!git status' x $SHA:src/f.py''', "allow"),
+    ("ASK ALIAS: shell alias reaches push refspec consumer",
+     r'''git -c 'alias.x=!git push "$@"' x origin $B:refs/heads/main''', "ask"),
+    ("RED CONFIG: unread pattern config cannot obscure native show identity",
+     'GIT_CONFIG_GLOBAL=/tmp/no-such git show $SHA:src/f.py', "deny"),
+    ("GREEN CONFIG: unread pattern config does not turn status into rev-path Git",
+     'GIT_CONFIG_GLOBAL=/tmp/no-such git status $SHA:src/f.py', "allow"),
+    ("GREEN GIT QUERY: bare exec-path does not dispatch its trailing word",
+     'git --exec-path $SHA:src/f.py', "allow"),
+    ("GREEN GIT QUERY: version does not dispatch its trailing word",
+     'git --version $SHA:src/f.py', "allow"),
+]
+
 
 def selftest():
     if not FIXTURES:
         print("SCAN SET EMPTY - zero fixtures is an error", file=sys.stderr)
         return 2
-    # Shared with the Git guard rather than copied: both reported `len(FIXTURES)` plus a
-    # literal nothing derived, and a fix that lands on one leaves the other asserting.
-    sys.stdout = _counted = _VerdictCount(sys.stdout)
     census = {}
     for fixture in FIXTURES:
         census[fixture[2]] = census.get(fixture[2], 0) + 1
@@ -974,7 +1086,15 @@ def selftest():
           % (len(FIXTURES),
              ", ".join(f"{count} must-{outcome}"
                        for outcome, count in sorted(census.items()))))
-    bad = 0
+    bad = git_guard._SelftestTally()
+    builtin_all = builtins.all
+    def all(iterable):
+        """Evaluate and account for every member of a selftest vector."""
+        values = list(iterable)
+        if not values:
+            return False
+        bad.reserve_vector(len(values) - 1)
+        return builtin_all(values)
     for label, cmd, want in FIXTURES:
         got, _ = decide(cmd)
         ok = got == want
@@ -990,17 +1110,13 @@ def selftest():
     if duplicates:
         print("        duplicate pairs: %r" % duplicates)
     modifier_failures, modifier_checks, modifier_skips = check_modifier_sets_against_zsh()
-    bad += len(modifier_failures)
-    # Exactly one verdict line, whatever the outcome. The suite reports the verdicts it
-    # emits, so a probe that printed one line per problem made the count move under any
-    # mutation that produced a second problem -- a working suite reading as a broken one.
-    if modifier_failures:
-        print("  FAIL modifier set vs installed zsh: %s"
-              % "; ".join(modifier_failures))
-    elif modifier_skips:
+    bad.add_group(modifier_failures, modifier_checks, modifier_skips)
+    for failure in modifier_failures:
+        print("  FAIL modifier set vs installed zsh: %s" % failure)
+    if modifier_skips:
         print("  SKIP modifier set vs installed zsh: no zsh on this host; "
               "the letters are unverified here")
-    else:
+    elif not modifier_failures:
         print("  PASS MODS and MOD_PREFIXES match the installed zsh "
               "(%d letters, %d prefixes probed)" % (len(string.ascii_letters),
                                                     len(MOD_PREFIXES)))
@@ -1013,9 +1129,10 @@ def selftest():
             check_modifier_sets_against_zsh())
     finally:
         shutil.which = original_which
-    absent_ok = (not absent_failures and absent_executed == 0 and absent_skipped == 1)
+    absent_ok = (not absent_failures and absent_executed == 0
+                 and absent_skipped == modifier_checks)
     bad += 0 if absent_ok else 1
-    print("  %-4s a zsh-less host skips the probe and reports the same check count"
+    print("  %-4s a zsh-less host reports every modifier probe as skipped"
           % ("PASS" if absent_ok else "FAIL"))
 
     # Some modifier spellings make zsh emit arbitrary bytes. Drive that through the
@@ -1030,9 +1147,11 @@ def selftest():
         byte_probe_calls.append((args, kwargs))
         suffix = args[2].split('$v:', 1)[1].rsplit('"', 1)[0]
         consumed = (
-            suffix[0] in MODS + MOD_UNMODELLED
+            suffix == "W@/@h"
+            or suffix[0] in MODS
             or (suffix[0] in MOD_PREFIXES
-                and len(suffix) > 1 and suffix[1] in MODS)
+                and len(suffix) > 1
+                and suffix[1] in (MODS + MOD_UNMODELLED))
         )
         if suffix == "xrest":
             stdout = b"/a/b/c.py:\xf8rest\n"
@@ -1049,11 +1168,11 @@ def selftest():
         subprocess.run = original_run
         shutil.which = original_which
     byte_probe_ok = (
-        byte_executed == 1
+        byte_executed == modifier_checks
         and byte_skipped == 0
         and len(byte_failures) == 1
         and "starts with 'x'" in byte_failures[0]
-        and len(byte_probe_calls) == len(string.ascii_letters) + 2 * len(MOD_PREFIXES)
+        and len(byte_probe_calls) == byte_executed
         and all(
             kwargs == {"capture_output": True, "timeout": 10}
             for _args, kwargs in byte_probe_calls
@@ -1230,11 +1349,12 @@ def selftest():
               "PASS" if budget_ask_ok else "FAIL", full_clock.readings,
               ", ".join(decision for decision, _fired in budget_results)))
 
-    checks = _counted.restore()
-    print("failures: %d" % bad)
+    checks = bad.checks
+    failures = bad.failures
+    print("failures: %d" % failures)
     print("SELFTEST-SUMMARY suite=zsh_rev_modifier_guard checks=%d failures=%d" % (
-        checks, bad))
-    return 0 if bad == 0 else 1
+        checks, failures))
+    return 0 if failures == 0 else 1
 
 
 def main():

@@ -43,6 +43,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -87,7 +88,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 77
+SELFTEST_FLOOR = 78
 
 AUTHORING_SKILLS = {"craft-prompt", "craft-skill", "craft-context-file", "review-prompt"}
 BODY_CHAR_CAP = 5000          # chars after frontmatter — the builders' instrument
@@ -99,7 +100,7 @@ DESC_CAP = 400                # house cap (spec ceiling is 1024)
 # checks=111, so a suite can be gutted with nothing failing. Raise a floor in the same
 # commit that adds the checks; lowering one is a deliberate, reviewable edit.
 SELFTEST_SUITES = [
-    ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"], 1100),
+    ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"], 1337),
     ("askq_timeout_guard", ["hooks/askq_timeout_guard.py", "--selftest"], 13),
     ("harness_report", ["hooks/harness_report.py", "--selftest"], 12),
     ("cc-cost", ["tools/cc-cost.py", "--selftest"], 8),
@@ -108,25 +109,49 @@ SELFTEST_SUITES = [
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 8),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
-    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 57),
+    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 124),
     ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 65),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
     ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 16),
-    ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 603),
-    ("zsh_rev_modifier_guard", ["hooks/guards/zsh_rev_modifier_guard.py", "--selftest"], 240),
+    ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 1144),
+    ("zsh_rev_modifier_guard", ["hooks/guards/zsh_rev_modifier_guard.py", "--selftest"], 487),
 ]
+
+
+def expected_selftest_checks(name):
+    """Exact execution-derived counts for suites whose former formulas hid probes."""
+    if name == "bash_command_guard":
+        return 1337
+    if name == "zsh_rev_modifier_guard":
+        return 487
+    if name != "git_grep_engine_guard":
+        return None
+    binaries, seen = [], set()
+    for directory in (os.environ.get("PATH") or "").split(os.pathsep):
+        if not directory:
+            continue
+        resolved = shutil.which("git", path=directory)
+        if not resolved:
+            continue
+        real = os.path.realpath(resolved)
+        if real not in seen:
+            seen.add(real)
+            binaries.append(real)
+    # The portable corpus is 1144 checks for one Git. Every additional executable adds
+    # one version probe, one fixture setup, and 22 alias-proof-name probes.
+    return 1144 + 24 * (max(1, len(binaries)) - 1)
 # The public Bash-guard selftest intentionally runs five independent process-level timing
 # observations for each runtime. Give that aggregate suite enough wall-clock without
 # weakening the five-second deadline each individual hook process must meet.
 # Registered where the 15 s default leaves no headroom for a slower runner. Measured
 # on the authoring host: bash_command_guard 27 s, git_grep_engine_guard 7.3 s (its
 # byte-cap, token and subcommand fixtures parse real megabyte-scale sources, and it
-# probes the installed git and zsh), ci-gate 6 s. C1 requires each to finish inside
+# probes the installed git and zsh), ci-gate 20.8 s. C1 requires each to finish inside
 # SELFTEST_TIMEOUT_MARGIN of its budget, so these are ceilings with room, not targets.
 SELFTEST_TIMEOUTS = {
     "bash_command_guard": 90,
     "git_grep_engine_guard": 60,
-    "ci-gate": 30,
+    "ci-gate": 60,
 }
 DEFAULT_SELFTEST_TIMEOUT = 15
 # A suite may use this much of its registered timeout before C1 says so. Without it the
@@ -500,8 +525,10 @@ class Run:
         `SELFTEST-SUMMARY suite=<name> checks=<floor> failures=0` satisfied the floor and
         took the whole gate green, including for the tool that proves PR delivery state.
         The floor only ever defended against a suite that reported honestly, so the source
-        of each suite is pinned: a suite cannot be replaced by something that merely
-        claims to have run.
+        of each suite is pinned. Under the reviewed workflow and authentic runners, an
+        isolated suite replacement cannot merely claim to have run. A coordinated edit to
+        the workflow, runners, and authored digest registry remains a reviewer or external
+        required-workflow trust boundary rather than an in-repo self-attestation.
         """
         if suites is None:
             suites = SELFTEST_SUITES
@@ -563,10 +590,16 @@ class Run:
                 re.M,
             )
             final_line = p.stdout.rstrip().splitlines()[-1] if p.stdout.rstrip() else b""
+            exact_checks = expected_selftest_checks(name)
+            count_ok = (
+                int(receipts[0][1]) == exact_checks
+                if len(receipts) == 1 and exact_checks is not None
+                else len(receipts) == 1 and int(receipts[0][1]) >= floor
+            )
             receipt_ok = (
                 len(receipts) == 1
                 and receipts[0][0].decode("ascii") == name
-                and int(receipts[0][1]) >= floor
+                and count_ok
                 and int(receipts[0][2]) == 0
                 and final_line == (
                     b"SELFTEST-SUMMARY suite=" + receipts[0][0]
@@ -578,10 +611,13 @@ class Run:
             if len(receipts) == 1:
                 detail += (f" suite={receipts[0][0].decode('ascii')} "
                            f"checks={int(receipts[0][1])} floor={floor} "
+                           f"exact={exact_checks if exact_checks is not None else 'n/a'} "
                            f"failures={int(receipts[0][2])} "
                            f"final={final_line.startswith(b'SELFTEST-SUMMARY ')}")
                 if int(receipts[0][1]) < floor:
                     detail += " below-floor"
+                elif exact_checks is not None and int(receipts[0][1]) != exact_checks:
+                    detail += " wrong-exact-count"
             passed = p.returncode == 0 and receipt_ok
             if not passed:
                 detail += child_faults(p.stdout)
@@ -1336,7 +1372,7 @@ def selftest():
             observed_timeouts.append(kwargs.get("timeout"))
             return subprocess.CompletedProcess(
                 args[0], 0,
-                b"SELFTEST-SUMMARY suite=bash_command_guard checks=1 failures=0\n",
+                b"SELFTEST-SUMMARY suite=bash_command_guard checks=1337 failures=0\n",
                 b"")
         subprocess.run = record_c1_timeout
         try:
@@ -1357,6 +1393,10 @@ def selftest():
             "the registered Bash timeout is still the one this check asserts",
             lambda: SELFTEST_TIMEOUTS["bash_command_guard"] == 90,
         )
+        expect_red(
+            "the registered CI-gate timeout retains measured headroom",
+            lambda: SELFTEST_TIMEOUTS["ci-gate"] == 60,
+        )
 
         slow_timeouts = []
         def slow_run(*args, **kwargs):
@@ -1364,7 +1404,7 @@ def selftest():
             time.sleep(0.05)
             return subprocess.CompletedProcess(
                 args[0], 0,
-                b"SELFTEST-SUMMARY suite=bash_command_guard checks=1 failures=0\n",
+                b"SELFTEST-SUMMARY suite=bash_command_guard checks=1337 failures=0\n",
                 b"")
         subprocess.run = slow_run
         try:

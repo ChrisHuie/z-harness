@@ -1,20 +1,21 @@
 {
-  "note": "sha256 of each aggregated selftest suite's source. The check count in a receipt is self-reported, so an eight-line stub printing a passing receipt satisfied the floor and the whole gate went green. Binding the source means a suite cannot be replaced by something that merely claims to have run. Update an entry in the same commit that changes its tool, and review the diff: this file is authored, never generated from whatever is on disk.",
+  "note": "sha256 of each aggregated selftest suite's source. The check count in a receipt is self-reported, so an eight-line stub printing a passing receipt satisfied the floor and the whole gate went green. Under a workflow that invokes the authentic harness/ci-gate pair, this binding detects an isolated suite or runner replacement that merely claims to have run. It is not independent attestation against an in-repository workflow edit that bypasses those runners; reviewer diff inspection or an externally administered required workflow remains that trust root. Update an entry in the same commit that changes its tool, and review the diff: this file is authored, never generated from whatever is on disk.",
   "suites": {
     "askq_timeout_guard": "85c136dc24f3b4f41a60987b8abecb97779e209e49c4e29e74a5d46174d695ef",
-    "bash_command_guard": "cd461bb6443d542b54efa8a4aca8f066a14bb65fea37097e9764a3153cf0e5f5",
+    "bash_command_guard": "6a9fcd551c84573d4dee4e768326d2519aebf61f50b14e0c2bc764c151d6ee7a",
     "cc-cost": "972b0122b5f84de10f41915a133132f555b943c46061d91b07e3f7b534a4d003",
-    "ci-gate": "648348e08ef63cd207224698bc4ea8e22cdebae95fcec48a12ad367143f36a7c",
+    "ci-gate": "4c5e6e039cfdb8ec6202060d9b69902cbad4a0c960fc883444476f6dc919080a",
     "claim-provenance": "7b88bdb3792fb65e146b3a9ab2357a81585cd9824043cc9fa8bc835dc4b6e1ff",
     "codex-cost": "fc46c95da8babd276e705c9578c5857a6563588b588da540ea4222c2c6ca793c",
     "codex_session_start": "b9dbedba94d623304ef97ca1b13a14b2f7b000cc98f35e016448ed4c85030567",
-    "git_grep_engine_guard": "2f3a9f37ee49a8dae6ea97c01c0cee1ab11110ddabf2dc462b1fcadae1cd8a3f",
+    "git_grep_engine_guard": "0e543ced67496e05ba5360ea05ce52c89402064ca9964434a34c6b8630a0bdd5",
     "harness_report": "eec022de9c2f7dec81c612e751dac472f2f8b695029d627784e7e5d840312cbc",
+    "harness_check": "8025b0d51d3698e0632b631f6839387a0552b036eae14ac3e485b06f186fa33a",
     "portable-conformance": "8eb48510971d0e4f7371cd7a4d16c41850e8e1324a739b70b71d3b85c5823606",
     "pr-delivery-state": "da5293b7134b159c1b6bb91b67c40193550076c908db8e185ddcb9d82011fe6b",
     "render-packages": "6b05aa44c351651202e8a5e720bd1a13ed8d2301705367cea0dc198d7f5a178e",
     "run-skill-evals": "3fc8bc86c67ccec70b09255e332b2828eb1e8db1e5467c9ada6ee7142ba68961",
     "spawn_preflight_guard": "b2a0fc907102ab997cd10a7bad6c6cf4f3a5cd4cfd18cf4fc2e7807f81db1a54",
-    "zsh_rev_modifier_guard": "ebb5f310637b8c03e0862193bde5dedf36a84ccc33789661f022ef983eabbc65"
+    "zsh_rev_modifier_guard": "a056e1f8375467c6c7a6b878aff858c257b44c10faaeb0fa3bb685d073c0fb9c"
   }
 }

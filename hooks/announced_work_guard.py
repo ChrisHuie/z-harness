@@ -67,7 +67,9 @@ reason on stderr · 1 selftest failure.
 import json
 import os
 import re
+import subprocess
 import sys
+import traceback
 
 VERSION = "1.0.0"
 
@@ -158,6 +160,10 @@ QUALIFIED = re.compile(r"\b(?:except|other than|besides|apart from|aside from|"
 # whole discriminator, so it has to be measured in sentences.
 TAIL_UNITS = 2
 
+# Ceiling on the text handed to the matchers. 32 KB costs 36 ms end to end and
+# 10 MB costs 1.9 s; the registered timeout is the wall that matters, not the cost.
+MAX_JUDGED = 65536
+
 # A "unit" ends at a sentence terminator OR at a structural break, because prose
 # punctuation is not the only thing that ends a thought. Splitting on `[.!?]`
 # alone was the second bug this file's own controls caught: a message ending in
@@ -181,7 +187,12 @@ def boundary(text):
     a heading or a colon lost its anchor and was allowed. Rejoining with `\n` keeps
     it, because `\n` is already in that anchor class.
     """
-    parts = [p for p in SPLIT.split(text.strip()) if p and p.strip()]
+    # Bounded so a pathological message degrades to a fast decision rather than
+    # a SIGTERM. The runtime does not truncate last_assistant_message, and a
+    # hook killed at its timeout ends the turn with NO signal to the model and
+    # none to the operator - measured: the only fully unobservable path there is.
+    # Only the last TAIL_UNITS are read, so trimming the head is verdict-neutral.
+    parts = [p for p in SPLIT.split(text.strip()[-MAX_JUDGED:]) if p and p.strip()]
     return parts[-TAIL_UNITS:]
 
 BLOCK_MSG = """\
@@ -246,8 +257,9 @@ stop_hook_active, so the turn will end normally and this will not loop."""
 class EnvelopeDrift(ValueError):
     """The Stop envelope no longer carries a message this guard can read.
 
-    Returning "allow" here is the failure this whole file exists to prevent: a
-    renamed or dropped field would make the gate silently pass every turn,
+    Raised for an unmodelled TYPE only. A field the runtime declares optional and
+    legitimately omits is NOT drift - see message_text. What this catches is a
+    renamed field or an alien shape, either of which would make the gate pass every turn,
     forever, while reading as a healthy hook. The house pattern in
     askq_timeout_guard separates UNRECOGNISED (schema changed) from
     OUT_OF_SCOPE (legitimately not ours), and only the first is loud.
@@ -262,9 +274,24 @@ def message_text(payload):
     """The last assistant message as plain text, however it is shaped."""
     if not isinstance(payload, dict):
         raise EnvelopeDrift(f"stdin parsed to {type(payload).__name__}, expected a JSON object")
+    # ABSENT IS NOT DRIFT, BUT RENAMED STILL IS, and absence alone cannot tell
+    # them apart. The 2.1.234 Stop schema declares
+    # `last_assistant_message: F().optional()` and the runtime omits it whenever
+    # the final assistant message carries no text block - so raising on a missing
+    # key fired the loudest message in this file at a conformant envelope. Simply
+    # allowing instead reopens the silent pass the file was written to stop, since
+    # a rename also presents as absence. The discriminator is a LOOKALIKE key: the
+    # field going missing is normal, the field going missing while something
+    # message-shaped sits beside it is a schema change.
     if "last_assistant_message" not in payload:
-        raise EnvelopeDrift("envelope has no 'last_assistant_message' key — "
-                            "the Stop payload schema changed")
+        lookalike = [k for k in payload
+                     if isinstance(k, str) and k != "last_assistant_message"
+                     and re.search(r"assistant.*message|message.*assistant", k, re.I)]
+        if lookalike:
+            raise EnvelopeDrift(
+                f"no 'last_assistant_message', but {lookalike[0]!r} is present — "
+                "the Stop payload schema was renamed, not merely omitted")
+        return ""            # declared-optional and legitimately absent
     m = payload.get("last_assistant_message")
     if isinstance(m, str):
         return m
@@ -492,16 +519,17 @@ def selftest():
          {"last_assistant_message": "If it does not answer shortly I will re-run those "
                                     "three questions myself rather than wait on it."}, False),
     ]
-    failures = 0
     cases += [
         # Envelope drift. Silently allowing here would make the gate pass every
         # turn forever while reading as a healthy hook - the exact
         # unvalidated-instrument failure the rest of this harness exists to
         # stop. Each of these must be LOUD, and each blocks only once.
-        ("drift: the field is renamed",
+        ("a renamed field is still drift — a lookalike key sits beside the gap",
          {"hook_event_name": "Stop", "assistant_message": "Starting the audit."}, "drift"),
-        ("drift: the field is gone entirely",
-         {"hook_event_name": "Stop", "session_id": "x"}, "drift"),
+        ("...and the rename is caught whatever the lookalike is called",
+         {"hook_event_name": "Stop", "assistantMessageLast": "Starting the audit."}, "drift"),
+        ("absent field is a declared-optional state, not drift",
+         {"hook_event_name": "Stop", "session_id": "x"}, False),
         ("drift: the message is an alien shape",
          {"last_assistant_message": 42}, "drift"),
         ("drift: stdin is not an object",
@@ -600,6 +628,61 @@ def selftest():
           "background_tasks": "not-a-list"}, False),
     ]
 
+    # ENTRY-PATH CONTROLS. Every case above enters at judge() or contradicted();
+    # main() was reachable from no test at all, and main() is where the wiring-
+    # visible behaviour lives - the exit codes settings.json depends on, the
+    # event-scope filter, the stdin read, and the kill switch. askq_timeout_guard
+    # drives its own process for exactly this reason. Env is scrubbed of the kill
+    # switch so an ambient value cannot make the suite pass, which is the same
+    # precaution askq takes.
+    failures = 0
+    me = os.path.abspath(__file__)
+    base_env = dict(os.environ)
+    base_env.pop("ANNOUNCED_WORK_GUARD", None)
+    BG = [{"id": "b6zq8li65", "type": "shell", "status": "running"}]
+    proc_cases = [
+        ("process: benign ending exits 0",
+         {"hook_event_name": "Stop", "last_assistant_message": "Committed 19c57aa."}, None, 0),
+        ("process: announcement exits 2",
+         {"hook_event_name": "Stop", "last_assistant_message": "Right. Starting the audit."},
+         None, 2),
+        ("process: all-clear over live work exits 2",
+         {"hook_event_name": "Stop", "last_assistant_message": "Nothing is running.",
+          "background_tasks": BG}, None, 2),
+        ("process: absent last_assistant_message is not a defect",
+         {"hook_event_name": "Stop", "stop_hook_active": False, "session_id": "x"}, None, 0),
+        ("process: a foreign hook event is out of scope",
+         {"hook_event_name": "PreToolUse", "last_assistant_message": "Starting the audit."},
+         None, 0),
+        ("process: a crash BLOCKS rather than ending the turn",
+         {"hook_event_name": "Stop",
+          "last_assistant_message": {"content": [{"type": "text", "text": 123}]}}, None, 2),
+        ("process: the kill switch is honoured",
+         {"hook_event_name": "Stop", "last_assistant_message": "Right. Starting the audit."},
+         {"ANNOUNCED_WORK_GUARD": "off"}, 0),
+        ("process: the kill switch is exact-string, not truthy",
+         {"hook_event_name": "Stop", "last_assistant_message": "Right. Starting the audit."},
+         {"ANNOUNCED_WORK_GUARD": "1"}, 2),
+    ]
+    for name, payload, extra_env, want_code in proc_cases:
+        env = dict(base_env)
+        if extra_env:
+            env.update(extra_env)
+        p = subprocess.run([sys.executable, me], input=json.dumps(payload).encode(),
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        ok = p.returncode == want_code
+        if not ok:
+            failures += 1
+        print(f"  {'PASS' if ok else 'FAIL'} {name} -> exit {p.returncode}")
+    # stdin that is not JSON at all, fed as raw bytes
+    p = subprocess.run([sys.executable, me], input=b"not json",
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=base_env)
+    ok = p.returncode == 2
+    if not ok:
+        failures += 1
+    print(f"  {'PASS' if ok else 'FAIL'} process: non-JSON stdin blocks -> exit {p.returncode}")
+    proc_n = len(proc_cases) + 1
+
     for name, payload, want in cases:
         if isinstance(payload, dict) and "__contract__" in payload:
             got = "contract" if payload["__contract__"] else "BROKEN"
@@ -616,8 +699,8 @@ def selftest():
         label = got if isinstance(got, str) else ("block" if got else "allow")
         print(f"  {'PASS' if got == want else 'FAIL'} {name} -> {label}")
     print(f"\n  selftest: {failures} failure(s)")
-    print(f"SELFTEST-SUMMARY suite=announced_work_guard checks={len(cases)} "
-          f"failures={failures}")
+    print(f"SELFTEST-SUMMARY suite=announced_work_guard "
+          f"checks={len(cases) + proc_n} failures={failures}")
     return failures == 0
 
 
@@ -700,8 +783,8 @@ def main(argv):
         rest = argv[argv.index("--sweep") + 1:]
         return sweep(rest or ["~/.claude/projects/*/*.jsonl"])
     off = os.environ.get("ANNOUNCED_WORK_GUARD") == "off"
-    raw = sys.stdin.read()
     try:
+        raw = sys.stdin.read()
         payload = json.loads(raw)
     except Exception as exc:
         if off:
@@ -709,7 +792,12 @@ def main(argv):
         print(DRIFT_MSG.format(v=VERSION, why=f"stdin is not JSON ({exc})"), file=sys.stderr)
         return 2
     if isinstance(payload, dict) and \
-            payload.get("hook_event_name") not in (None, "Stop", "SubagentStop"):
+            payload.get("hook_event_name") not in (None, "Stop"):
+        # SubagentStop is deliberately NOT in scope. It is registered nowhere, has
+        # no fixture and no control, and one agent-teardown call site sends no
+        # message at all while hard-coding stop_hook_active false - so the
+        # once-only promise would not hold there. Accepting an event on those
+        # terms is a claim with no evidence behind it.
         return 0                        # out of scope, which is not drift
     try:
         stale = contradicted(payload)
@@ -736,4 +824,18 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    # A crash must BLOCK, not pass. Exit 1 is filed by the runtime as a
+    # non-blocking error: the turn ends, the model is told nothing, and the only
+    # operator signal is a toast byte-identical to the one a SUCCESSFUL block
+    # produces - so it carries no information. Measured end to end against a
+    # must-block control. askq_timeout_guard already converts a crash to exit 2;
+    # this file did not, and no control asserted that it should.
+    try:
+        sys.exit(main(sys.argv))
+    except SystemExit:
+        raise
+    except BaseException:
+        sys.stderr.write(f"announced_work_guard {VERSION} CRASHED — blocking rather "
+                         f"than letting the turn end on an unread envelope.\n"
+                         f"{traceback.format_exc()}")
+        sys.exit(2)

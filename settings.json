@@ -64,7 +64,7 @@
           {
             "type": "command",
             "command": "python3 ~/.claude/hooks/announced_work_guard.py",
-            "timeout": 5
+            "timeout": 15
           }
         ]
       }

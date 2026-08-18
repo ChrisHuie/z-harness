@@ -22,11 +22,23 @@ construction nothing can run after the final text. The check therefore needs no
 transcript walk and no turn segmentation: if the last thing said announces
 imminent action, that action is not going to happen.
 
-WHAT THIS CANNOT DO. It reads the tail of one message. It cannot tell a
-sincere announcement from a rhetorical one, it cannot catch work promised in
-the middle of a message and quietly dropped, and it says nothing about whether
-the work that DID run was any good. Blocking here costs one turn; missing costs
-the user's trust in every status line, which is why it is tuned to fire.
+THE SAME DEFECT POINTS BOTH WAYS. Announcing work with nothing behind it is one
+half. The other is ending a turn with an all-clear while background work is
+still armed - the reader's own screen then contradicts the claim, which costs
+more trust than the first case. The Stop envelope already carries
+`background_tasks` and `session_crons` for exactly this: the runtime's words are
+that they let a hook "distinguish 'session is done' from 'session is paused
+waiting for background work to wake it'". So the guard reads them, and blocks a
+denial the envelope refutes. It reports each `id`, because no query surface the
+model has will list these - TaskList is the to-do board, ListAgents lists
+addressable agents, and an in-process websocket watch never appears in `ps`.
+
+WHAT THIS CANNOT DO. It reads the tail of one message plus two envelope fields.
+It cannot tell a sincere announcement from a rhetorical one, it cannot catch work
+promised in the middle of a message and quietly dropped, it cannot see state the
+runtime does not report in the envelope, and it says nothing about whether the
+work that DID run was any good. Blocking here costs one turn; missing costs the
+user's trust in every status line, which is why it is tuned to fire.
 
 CONTRACT, VERIFIED THREE WAYS rather than read once. (1) In-binary against
 Claude Code 2.1.227. (2) Against a REAL captured Stop envelope, shipped as
@@ -111,6 +123,33 @@ HANDBACK = re.compile(
     r'happy to .{0,30}if you|unless you|if you\'d rather|'
     r'continuing to (wait|collect|hold|monitor|poll|watch))', re.I)
 
+# A DENIAL that anything is in flight. This is the mirror of ANNOUNCE: that arm
+# catches a claim to be working with nothing behind it, and this one catches a
+# claim that nothing is working while the envelope says otherwise. Both are the
+# same defect - a work signal the reader cannot check from the outside.
+#
+# Deliberately NOT "all done" / "everything complete": those are claims about the
+# TASK, not about session state, and they end turns constantly. Measured over 2281
+# turn-endings, this arm matches 16.
+QUIESCENT = re.compile(
+    r"nothing\s+(?:is\s+|'s\s+|else\s+)?(?:currently\s+|still\s+|left\s+)?"
+    r"(?:running|pending|in[\s-]flight|queued|armed|outstanding|active|to\s+wait\s+(?:for|on))"
+    r"|no(?:thing)?\s+(?:background\s+|pending\s+|other\s+)?"
+    r"(?:work|tasks?|agents?|jobs?|monitors?|watches|subscriptions?)\s+"
+    r"(?:are\s+|is\s+)?(?:running|pending|in[\s-]flight|left|outstanding|armed|active)"
+    r"|nothing\s+(?:is\s+)?(?:left|remaining|in\s+progress)"
+    r"|no\s+(?:tools?\s+(?:were|are)\s+run|work\s+was\s+performed)"
+    r"|nothing\s+running", re.I)
+
+# A denial that names its own exception is an accurate report, not a false
+# all-clear. "Nothing running except the two agents" is the honest form and must
+# pass. This arm was NOT taste: it is the one suppression among the 16 measured
+# matches, and it is a real turn ending from the corpus. `still` is deliberately
+# absent - "Nothing outstanding. Still holding on your call" waits on the USER,
+# not on background work, so it is a genuine all-clear and must stay blockable.
+QUALIFIED = re.compile(r"\b(?:except|other than|besides|apart from|aside from|"
+                       r"save for|but the|but for)\b", re.I)
+
 # The boundary is the LAST SENTENCE OR TWO, not a character window. A window
 # was the first design and its own control caught it: on a short message the
 # window is the whole message, so "Let me check the register. …I checked it:
@@ -162,6 +201,31 @@ Do exactly one of these, now:
      "next step is X, say go" or "stopping here".
 
 Do not restate the intention in different words. That is the same claim."""
+
+STALE_MSG = """\
+STOP BLOCKED — announced-work guard ({v}).
+
+Your ending says {claim!r}, and the Stop envelope disagrees. Still in flight:
+
+{rows}
+
+This is the same defect as announcing work you have not started, pointed the
+other way: a work signal the reader cannot check from the outside. It is worse
+in one respect — the reader's own screen contradicts you, so the next thing they
+lose is trust in every status line you write.
+
+The ids above are the handle. `TaskStop` takes one directly, and no query
+surface you have will list these for you: TaskList is the to-do board,
+ListAgents lists addressable agents, and an in-process websocket watch never
+appears in the process table. An empty result from any of those is not evidence
+of absence.
+
+Do exactly one of these, now:
+  1. Stop the work, if it should not be running: TaskStop each id above.
+  2. Rewrite the ending to say what is still armed and how it is cancelled.
+
+Do not restate the all-clear in softer words. That is the same claim."""
+
 
 DRIFT_MSG = """\
 STOP BLOCKED — announced-work guard ({v}) HAS GONE BLIND.
@@ -242,6 +306,62 @@ def judge(payload):
         return None
     m = ANNOUNCE.search(tail)
     return m.group(0).strip() if m else None
+
+
+def armed(payload):
+    """Live background work the runtime reports in the Stop envelope.
+
+    `background_tasks` and `session_crons` are documented Stop fields - the
+    binary's own words are that they let a hook "distinguish 'session is done'
+    from 'session is paused waiting for background work to wake it'". This guard
+    is exactly that distinction. Each entry carries an `id`, which is the handle
+    TaskStop needs; without it the model can see a task in no query surface it
+    has, and will report an empty result as proof of absence.
+
+    Absent or malformed is treated as empty, NOT as drift: unlike
+    last_assistant_message these are optional by declaration, and a session with
+    nothing in flight legitimately sends `[]`.
+    """
+    out = []
+    if not isinstance(payload, dict):
+        return out
+    for key in ("background_tasks", "session_crons"):
+        rows = payload.get(key)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("status", "")).lower() in ("completed", "failed", "cancelled",
+                                                     "stopped", "killed"):
+                continue                # terminal; TaskStop would reject it anyway
+            out.append((key, row))
+    return out
+
+
+def contradicted(payload):
+    """-> (claim, live_rows) when the ending denies in-flight work that exists.
+
+    Kept OUT of judge() on purpose. judge() is text-only, which is what a
+    transcript can support, so --sweep measures the same function it reports on.
+    This check needs the envelope and therefore cannot be swept - saying so is
+    cheaper than a measurement nobody can reproduce.
+    """
+    if isinstance(payload, dict) and payload.get("stop_hook_active"):
+        return None
+    live = armed(payload)
+    if not live:
+        return None                     # no claim can contradict an empty set
+    text = message_text(payload).strip()
+    if not text:
+        return None
+    tail = "\n".join(boundary(text))
+    m = QUIESCENT.search(tail)
+    if not m:
+        return None
+    if QUALIFIED.search(tail[m.start():m.start() + 90]):
+        return None                     # a named exception is an honest report
+    return m.group(0).strip(), live
 
 
 def selftest():
@@ -401,6 +521,13 @@ def selftest():
         real = json.load(open(fx, encoding="utf-8"))
     except Exception:
         real = None
+    fx2 = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       "fixtures_stop", "S2_stop_background_tasks.json")
+    try:
+        live = json.load(open(fx2, encoding="utf-8"))
+    except Exception:
+        live = None
+    live_row = ((live or {}).get("background_tasks") or [{}])[0]
     cases += [
         ("real envelope: fixture present and parses",
          {"__contract__": real is not None}, "contract"),
@@ -417,6 +544,60 @@ def selftest():
         ("real envelope, announcement substituted -> block",
          dict(real, last_assistant_message="Right. Starting the IR-38 audit.")
          if real else {"__contract__": False}, True if real else "contract"),
+
+        # S1 carries both arrays EMPTY, which proves the keys exist and nothing
+        # more. S2 is the other half: a live backgrounded task, captured from a
+        # real 2.1.234 Stop event. Absence is a failure, not a skip.
+        ("live envelope: fixture present and parses",
+         {"__contract__": live is not None}, "contract"),
+        ("live envelope: background_tasks is a NON-EMPTY list",
+         {"__contract__": isinstance((live or {}).get("background_tasks"), list)
+          and len((live or {}).get("background_tasks") or []) > 0}, "contract"),
+        ("live envelope: the entry carries a string id for TaskStop",
+         {"__contract__": isinstance(live_row.get("id"), str) and bool(live_row.get("id"))},
+         "contract"),
+        ("live envelope: the entry reports a non-terminal status",
+         {"__contract__": live_row.get("status") == "running"}, "contract"),
+        ("live envelope: session_crons is a list",
+         {"__contract__": isinstance((live or {}).get("session_crons"), list)}, "contract"),
+        ("live envelope, benign ending -> allow",
+         live if live else {"__contract__": False}, False if live else "contract"),
+        ("live envelope, all-clear substituted -> block",
+         dict(live, last_assistant_message="It is spinning on its own. Nothing is "
+                                           "running. Nothing to wait for.")
+         if live else {"__contract__": False}, True if live else "contract"),
+
+        # The contradiction arm, hand-built so each discriminator has its own row.
+        ("all-clear while a shell task runs",
+         {"last_assistant_message": "Nothing is running. Nothing to wait for.",
+          "background_tasks": [{"id": "b6zq8li65", "type": "shell", "status": "running",
+           "description": "Sleep 45 seconds in background"}]}, True),
+        ("all-clear while a cron is scheduled",
+         {"last_assistant_message": "Nothing pending on my side.",
+          "session_crons": [{"id": "c1", "type": "cron", "status": "scheduled",
+                             "description": "loop"}]}, True),
+        ("the same all-clear with nothing armed is honest",
+         {"last_assistant_message": "Nothing is running. Nothing to wait for.",
+          "background_tasks": [], "session_crons": []}, False),
+        ("a denial that names its exception is a report, not an all-clear",
+         {"last_assistant_message": "Nothing running except the two agents.",
+          "background_tasks": [{"id": "b6zq8li65", "type": "shell", "status": "running",
+           "description": "Sleep 45 seconds in background"}]}, False),
+        ("live work with no all-clear is the ordinary case",
+         {"last_assistant_message": "Committed c0a9739. Three agents still working.",
+          "background_tasks": [{"id": "b6zq8li65", "type": "shell", "status": "running",
+           "description": "Sleep 45 seconds in background"}]}, False),
+        ("a terminal task cannot be contradicted - TaskStop would reject it",
+         {"last_assistant_message": "Nothing is running.",
+          "background_tasks": [{"id": "x", "type": "shell", "status": "completed"}]}, False),
+        ("loop guard clears the contradiction too, not just the announcement",
+         {"stop_hook_active": True,
+          "last_assistant_message": "Nothing is running.",
+          "background_tasks": [{"id": "b6zq8li65", "type": "shell", "status": "running",
+           "description": "Sleep 45 seconds in background"}]}, False),
+        ("a malformed background_tasks is empty, not drift",
+         {"last_assistant_message": "Nothing is running.",
+          "background_tasks": "not-a-list"}, False),
     ]
 
     for name, payload, want in cases:
@@ -427,7 +608,7 @@ def selftest():
             print(f"  {'PASS' if got == want else 'FAIL'} {name} -> {got}")
             continue
         try:
-            got = judge(payload) is not None
+            got = (judge(payload) is not None) or (contradicted(payload) is not None)
         except EnvelopeDrift:
             got = "drift"
         if got != want:
@@ -531,13 +712,24 @@ def main(argv):
             payload.get("hook_event_name") not in (None, "Stop", "SubagentStop"):
         return 0                        # out of scope, which is not drift
     try:
+        stale = contradicted(payload)
         trigger = judge(payload)
     except EnvelopeDrift as exc:
         if off:
             return 0
         print(DRIFT_MSG.format(v=VERSION, why=str(exc)), file=sys.stderr)
         return 2
-    if not trigger or off:
+    if off:
+        return 0
+    if stale:
+        claim, live = stale
+        rows = "\n".join(
+            f"  {key}: id={row.get('id')!r} type={row.get('type')!r} "
+            f"status={row.get('status')!r} {row.get('description') or ''}".rstrip()
+            for key, row in live)
+        print(STALE_MSG.format(v=VERSION, claim=claim, rows=rows), file=sys.stderr)
+        return 2
+    if not trigger:
         return 0
     print(BLOCK_MSG.format(v=VERSION, trigger=trigger), file=sys.stderr)
     return 2

@@ -1,0 +1,24 @@
+{
+  "session_id": "00000000-0000-0000-0000-000000000000",
+  "transcript_path": "/PATH/TO/TRANSCRIPT.jsonl",
+  "cwd": "/PATH/TO/CWD",
+  "prompt_id": "00000000-0000-0000-0000-000000000000",
+  "permission_mode": "auto",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "Stop",
+  "stop_hook_active": false,
+  "last_assistant_message": "armed",
+  "background_tasks": [
+    {
+      "id": "b6zq8li65",
+      "type": "shell",
+      "status": "running",
+      "description": "Sleep 45 seconds in background",
+      "command": "sleep 45"
+    }
+  ],
+  "session_crons": [],
+  "_note": "Captured from a real Claude Code 2.1.234 Stop event on 2026-08-18 via `claude -p ... --settings <hook that tees stdin>`, in a run told to start a backgrounded Bash task before answering. Host-bound values are scrubbed; every key and every type is verbatim. S1 carries both arrays EMPTY, which proves the keys exist but not that a live task populates them. This is the other half of that contract, and the `id` is what makes TaskStop reachable."
+}

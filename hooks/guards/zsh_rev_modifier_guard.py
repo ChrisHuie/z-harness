@@ -66,6 +66,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import git_grep_engine_guard as git_guard  # noqa: E402
 from git_grep_engine_guard import (  # noqa: E402
     BUDGET_EXHAUSTED_REASON,
+    _VerdictCount,
     CommandParseError, GUARD_BUDGET_SECONDS, MAX_PREFIX_DEPTH, PrefixResolution,
     nested_shell_invocation,
     nested_shell_equals_state, heredoc_equals_decision,
@@ -955,6 +956,9 @@ def selftest():
     if not FIXTURES:
         print("SCAN SET EMPTY - zero fixtures is an error", file=sys.stderr)
         return 2
+    # Shared with the Git guard rather than copied: both reported `len(FIXTURES)` plus a
+    # literal nothing derived, and a fix that lands on one leaves the other asserting.
+    sys.stdout = _counted = _VerdictCount(sys.stdout)
     census = {}
     for fixture in FIXTURES:
         census[fixture[2]] = census.get(fixture[2], 0) + 1
@@ -987,12 +991,16 @@ def selftest():
         print("        duplicate pairs: %r" % duplicates)
     modifier_failures, modifier_checks, modifier_skips = check_modifier_sets_against_zsh()
     bad += len(modifier_failures)
-    for failure in modifier_failures:
-        print("  FAIL modifier set vs installed zsh: %s" % failure)
-    if modifier_skips:
+    # Exactly one verdict line, whatever the outcome. The suite reports the verdicts it
+    # emits, so a probe that printed one line per problem made the count move under any
+    # mutation that produced a second problem -- a working suite reading as a broken one.
+    if modifier_failures:
+        print("  FAIL modifier set vs installed zsh: %s"
+              % "; ".join(modifier_failures))
+    elif modifier_skips:
         print("  SKIP modifier set vs installed zsh: no zsh on this host; "
               "the letters are unverified here")
-    elif not modifier_failures:
+    else:
         print("  PASS MODS and MOD_PREFIXES match the installed zsh "
               "(%d letters, %d prefixes probed)" % (len(string.ascii_letters),
                                                     len(MOD_PREFIXES)))
@@ -1222,7 +1230,7 @@ def selftest():
               "PASS" if budget_ask_ok else "FAIL", full_clock.readings,
               ", ".join(decision for decision, _fired in budget_results)))
 
-    checks = len(FIXTURES) + 10
+    checks = _counted.restore()
     print("failures: %d" % bad)
     print("SELFTEST-SUMMARY suite=zsh_rev_modifier_guard checks=%d failures=%d" % (
         checks, bad))

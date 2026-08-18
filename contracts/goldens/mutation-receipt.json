@@ -1,17 +1,17 @@
 {
  "note": "what the guards' suites CATCH, measured by breaking them",
  "measured_against": {
-  "hooks/guards/git_grep_engine_guard.py": "46a42754561b734a97355f4781c4a2a07363ddd1bb43f8c19fe7178b2bbbafde",
-  "hooks/guards/zsh_rev_modifier_guard.py": "c82bde1d7897a248ee0b44412317c2ecf1061b2cccf606cab72e44a05751f68d",
+  "hooks/guards/git_grep_engine_guard.py": "2f3a9f37ee49a8dae6ea97c01c0cee1ab11110ddabf2dc462b1fcadae1cd8a3f",
+  "hooks/guards/zsh_rev_modifier_guard.py": "ebb5f310637b8c03e0862193bde5dedf36a84ccc33789661f022ef983eabbc65",
   "hooks/bash_command_guard.py": "cd461bb6443d542b54efa8a4aca8f066a14bb65fea37097e9764a3153cf0e5f5"
  },
  "baseline": {
   "hooks/guards/git_grep_engine_guard.py": {
-   "checks": 583,
+   "checks": 603,
    "failures": 0
   },
   "hooks/guards/zsh_rev_modifier_guard.py": {
-   "checks": 239,
+   "checks": 240,
    "failures": 0
   }
  },

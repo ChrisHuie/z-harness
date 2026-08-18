@@ -6745,11 +6745,49 @@ def fixture_pair_duplicates(fixtures):
         seen.add(pair)
     return duplicates
 
+
+_VERDICT_LINE = re.compile(r"^\s*(PASS|FAIL|SKIP)\b")
+
+
+class _VerdictCount:
+    """Count the verdict lines this suite emits, so the receipt reports what RAN.
+
+    `checks` was `len(FIXTURES)` plus a hand-maintained literal that nothing derived and
+    nothing validated, and it was already wrong: 96 non-fixture verdicts against a recorded
+    76. The worse property is that deleting a whole check -- its scoring line and its report
+    -- left the number unchanged at 583, so the shrink-only floor could not see a gutted
+    suite, which is the one thing that floor exists to catch. Two digest bindings still
+    reddened, but both say the SOURCE changed; neither can say coverage dropped, and
+    following the remediation each one prints restores a green gate with a check gone.
+
+    Counting emitted verdicts ties the number to the run. A deleted check lowers it and the
+    floor reddens; an added check raises it and the floor is raised deliberately.
+    """
+
+    def __init__(self, stream):
+        self._stream = stream
+        self.verdicts = 0
+
+    def write(self, text):
+        for line in text.splitlines():
+            if _VERDICT_LINE.match(line):
+                self.verdicts += 1
+        return self._stream.write(text)
+
+    def flush(self):
+        return self._stream.flush()
+
+    def restore(self):
+        sys.stdout = self._stream
+        return self.verdicts
+
+
 def selftest():
     if not FIXTURES:
         print("SCAN SET EMPTY - zero fixtures is an error, not a clean verdict",
               file=sys.stderr)
         return 2
+    sys.stdout = _counted = _VerdictCount(sys.stdout)
     print("scan set: %d fixtures (%d must-deny, %d must-ask, %d must-allow)" % (
         len(FIXTURES),
         sum(1 for f in FIXTURES if f[2] == "deny"),
@@ -6776,15 +6814,13 @@ def selftest():
     table_failures = check_option_table_against_git()
     bad += len(table_failures)
     if table_failures:
-        for failure in table_failures:
-            print("  FAIL short-option table vs installed git: %s" % failure)
+        print("  FAIL short-option table vs installed git: %s" % "; ".join(table_failures))
     else:
         print("  PASS short-option table matches the installed git")
     grammar_failures = check_option_grammar_against_git()
     bad += len(grammar_failures)
     if grammar_failures:
-        for failure in grammar_failures:
-            print("  FAIL option grammar vs installed git: %s" % failure)
+        print("  FAIL option grammar vs installed git: %s" % "; ".join(grammar_failures))
     else:
         print("  PASS numeric, optional-value, negated-engine, and -- grammar matches installed git")
     limit_drift = {
@@ -6798,31 +6834,27 @@ def selftest():
     floor_failures, floor_scan_set = check_alias_shadowing_against_installed_gits()
     bad += len(floor_failures)
     if floor_failures:
-        for failure in floor_failures:
-            print("  FAIL alias-proof set vs installed git: %s" % failure)
+        print("  FAIL alias-proof set vs installed git: %s" % "; ".join(floor_failures))
     else:
         print("  PASS no ambient alias can redirect an alias-proof name on any Git this "
               "PATH selects [%s]" % floor_scan_set)
     log_grammar_failures = check_log_grammar_against_git()
     bad += len(log_grammar_failures)
     if log_grammar_failures:
-        for failure in log_grammar_failures:
-            print("  FAIL log-family grammar vs installed git: %s" % failure)
+        print("  FAIL log-family grammar vs installed git: %s" % "; ".join(log_grammar_failures))
     else:
         print("  PASS log family takes no positional pattern, no cluster, no abbreviation "
               "and no negation, and its engine tokens match the installed git")
     construct_failures = check_pcre_constructs_against_git()
     bad += len(construct_failures)
     if construct_failures:
-        for failure in construct_failures:
-            print("  FAIL PCRE construct vs installed git: %s" % failure)
+        print("  FAIL PCRE construct vs installed git: %s" % "; ".join(construct_failures))
     else:
         print("  PASS PCRE constructs and escaped-group control match installed git")
     alias_failures = check_aliases_against_git()
     bad += len(alias_failures)
     if alias_failures:
-        for failure in alias_failures:
-            print("  FAIL alias behavior vs installed git: %s" % failure)
+        print("  FAIL alias behavior vs installed git: %s" % "; ".join(alias_failures))
     else:
         print("  PASS quoted, recursive, and cyclic aliases match installed git")
     def retain_pcre_engine(label, command):
@@ -6840,8 +6872,7 @@ def selftest():
     boundary_failures, boundary_checks, boundary_skips = check_shell_boundary_behavior()
     bad += len(boundary_failures)
     if boundary_failures:
-        for failure in boundary_failures:
-            print("  FAIL shell-boundary behavior probe: %s" % failure)
+        print("  FAIL shell-boundary behavior probe: %s" % "; ".join(boundary_failures))
     else:
         print("  PASS downstream expansion and explicit harmless identities match installed shells")
     print("SHELL-BOUNDARY-SUMMARY checks=%d skips=%d failures=%d" % (
@@ -8303,7 +8334,7 @@ def selftest():
     print("  %s identifier-only heredoc mutation loses dashed-delimiter deny" % (
         "PASS" if dashed_heredoc_red else "FAIL"))
 
-    checks = len(FIXTURES) + 76
+    checks = _counted.restore()
     print("failures: %d" % bad)
     print("SELFTEST-SUMMARY suite=git_grep_engine_guard checks=%d failures=%d" % (
         checks, bad))

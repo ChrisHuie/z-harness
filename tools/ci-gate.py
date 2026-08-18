@@ -39,8 +39,8 @@ SUITE_FLOORS = {
     "harness_check": 77,
     "render-packages": 192,
     "bash_command_guard": 1100,
-    "git_grep_engine_guard": 583,
-    "zsh_rev_modifier_guard": 239,
+    "git_grep_engine_guard": 603,
+    "zsh_rev_modifier_guard": 240,
 }
 EXPECTED_WORKFLOW = """name: harness-check
 on:
@@ -299,9 +299,17 @@ def hook_budget_error(*, settings_data=None, codex_data=None, budget=None) -> st
 
 
 DECISION_GOLDEN = ROOT / "contracts/goldens/guard-decisions.json"
+# The golden was floored only at zero: 752 commands and 1 command both read as a clean
+# verdict, and `752` appeared nowhere in this repository. `write-decision-golden.py` unions
+# fixture commands across every revision in `rev-list BASE..HEAD`, so the corpus does not
+# shrink on the normal regeneration path -- but that protection lives in the generator,
+# where this gate cannot see it, and the gate validates whatever golden it is handed. The
+# eval corpus earned EVAL_SCENARIO_FLOOR for exactly this shape. Lower this only in the
+# commit that retires the commands.
+DECISION_CORPUS_FLOOR = 752
 
 
-def decision_golden_error(golden_data=None, decide=None) -> str:
+def decision_golden_error(golden_data=None, decide=None, corpus_floor=None) -> str:
     """Return drift between the recorded guard verdicts and what the guards now return.
 
     Source digests pin bytes and floors ratchet counts; neither notices a DECISION
@@ -310,11 +318,20 @@ def decision_golden_error(golden_data=None, decide=None) -> str:
     now has to appear here too, one reviewable line per command.
     """
     try:
+        # A caller supplying its own golden is probing this function's logic, not the tree;
+        # only the real invocation can meaningfully compare the corpus against its floor.
+        synthetic = golden_data is not None
+        floor = (corpus_floor if corpus_floor is not None
+                 else (None if synthetic else DECISION_CORPUS_FLOOR))
         if golden_data is None:
             golden_data = json.loads(DECISION_GOLDEN.read_text(encoding="utf-8"))
         recorded = golden_data.get("decisions") or {}
         if not recorded:
             return "the decision golden records no commands, which is not a clean verdict"
+        if floor is not None and len(recorded) < floor:
+            return (f"the decision corpus shrank to {len(recorded)} commands, below the "
+                    f"recorded floor of {floor}; a smaller corpus reads as the same clean "
+                    f"verdict while pinning fewer verdicts")
         if decide is None:
             for path in (ROOT / "hooks", ROOT / "hooks" / "guards"):
                 if str(path) not in sys.path:
@@ -783,6 +800,18 @@ def selftest() -> int:
     expect(
         "an empty decision golden is a failure, not a clean verdict",
         decision_golden_error(golden_data={"decisions": {}}) != "",
+    )
+    expect(
+        "a shrunken decision corpus is a failure, not the same clean verdict",
+        "corpus shrank" in decision_golden_error(
+            golden_data={"decisions": {"git status --short": "allow"}},
+            decide=lambda _command: ("allow", ""), corpus_floor=5),
+    )
+    expect(
+        "a corpus at its recorded floor clears",
+        decision_golden_error(
+            golden_data={"decisions": {"git status --short": "allow"}},
+            decide=lambda _command: ("allow", ""), corpus_floor=1) == "",
     )
     expect(
         "a reversed verdict in the golden is reported with both sides",

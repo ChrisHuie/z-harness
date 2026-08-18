@@ -39,6 +39,7 @@
 
 | module | site mutation | outcome |
 |---|---|---|
+| `bash_command_guard.py` | merged guard function cache scope dropped | caught |
 | `git_grep_engine_guard.py` | DEBUG trap alias state dropped | caught |
 | `git_grep_engine_guard.py` | TRAPDEBUG function alias state dropped | caught |
 | `git_grep_engine_guard.py` | attached exec argv-zero grammar dropped | caught |
@@ -52,6 +53,8 @@
 | `git_grep_engine_guard.py` | dynamic source command identity dropped | caught |
 | `git_grep_engine_guard.py` | exec single-dash terminator dropped | caught |
 | `git_grep_engine_guard.py` | executed alias Git traversal dropped | caught |
+| `git_grep_engine_guard.py` | function record cache cap raised | caught |
+| `git_grep_engine_guard.py` | function record decision cache dropped | caught |
 | `git_grep_engine_guard.py` | git config count cap dropped | caught |
 | `git_grep_engine_guard.py` | git config loop budget dropped | caught |
 | `git_grep_engine_guard.py` | git hazard union adoption dropped | caught |
@@ -83,6 +86,6 @@
 | `zsh_rev_modifier_guard.py` | zsh unmodelled modifier prefix grammar dropped | caught |
 | `zsh_rev_modifier_guard.py` | zsh unmodelled modifier uncertainty dropped | caught |
 
-218 of 307 planned mutations are caught; 89 exact mutation IDs remain recorded coverage debt.
+221 of 310 planned mutations are caught; 89 exact mutation IDs remain recorded coverage debt.
 
 Not swept: `hooks/guards/git_grep_engine_guard.py::ALIAS_GUARDED` (repeated characters identify an enum word, not a membership charset); `hooks/guards/git_grep_engine_guard.py::ALIAS_HARMLESS` (repeated characters identify an enum word, not a membership charset); `hooks/guards/git_grep_engine_guard.py::ALIAS_UNCERTAIN` (repeated characters identify an enum word, not a membership charset); `hooks/guards/git_grep_engine_guard.py::FIXTURES` (fixture corpus; removing a fixture measures the grader); `hooks/guards/git_grep_engine_guard.py::GREP_LONG_PATTERN_ARG` (empty grammar collection has no element mutation; absence is fixture-pinned); `hooks/guards/git_grep_engine_guard.py::ZSH_EQUALS_OFF` (repeated characters identify an enum word, not a membership charset); `hooks/guards/git_grep_engine_guard.py::ZSH_EQUALS_UNKNOWN` (repeated characters identify an enum word, not a membership charset); `hooks/guards/git_grep_engine_guard.py::_EQUALS_LOOKUP_CACHE` (runtime memoization map, not a guarded membership collection); `hooks/guards/git_grep_engine_guard.py::_GIT_AUTHORITY_CACHE` (runtime memoization map, not a guarded membership collection); `hooks/guards/zsh_rev_modifier_guard.py::FIXTURES` (fixture corpus; removing a fixture measures the grader); `hooks/guards/zsh_rev_modifier_guard.py::UNRESOLVED_GIT` (repeated characters identify an enum word, not a membership charset).

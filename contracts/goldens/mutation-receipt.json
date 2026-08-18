@@ -2,13 +2,13 @@
  "schema_version": 2,
  "generated_by": "tools/write-mutation-receipt.py --aggregate ... --accept-receipt-changes",
  "note": "which guard mutations the shipped suites catch",
- "generator_sha256": "4a037d3d52a18b0662ab81cf3d06b486868437ab16f2b6993ba592071deb7c31",
+ "generator_sha256": "b3dbcba6cce06395d7cdb7d47aa723a38517522762a367aa1b4a8ed8d7dc4d5d",
  "source_digests": {
-  "hooks/guards/git_grep_engine_guard.py": "0e543ced67496e05ba5360ea05ce52c89402064ca9964434a34c6b8630a0bdd5",
+  "hooks/guards/git_grep_engine_guard.py": "33095f9c2651857fde6296918000176191a70c8995a0205fe27024260e3b47f6",
   "hooks/guards/zsh_rev_modifier_guard.py": "a056e1f8375467c6c7a6b878aff858c257b44c10faaeb0fa3bb685d073c0fb9c",
-  "hooks/bash_command_guard.py": "6a9fcd551c84573d4dee4e768326d2519aebf61f50b14e0c2bc764c151d6ee7a"
+  "hooks/bash_command_guard.py": "67544a397c5fd7caf5e7bb7ce24c279cff31de2a92b43606c04730fdbf3b80fd"
  },
- "plan_sha256": "c4518df40c5228734811557cacefe127a31ad9372a8223dbdd005b65cb1df5f1",
+ "plan_sha256": "f7e5d576cc04e44fc774dea61a75f40c062e531e50c64c0feaad7de9072eb072",
  "baseline": {
   "hooks/guards/git_grep_engine_guard.py": "passed",
   "hooks/guards/zsh_rev_modifier_guard.py": "passed",
@@ -2828,6 +2828,16 @@
    "id": "e46f8d26724fe857f777bc603302abe6c30b729cf4c7058a2b35b9ab01ad83bd",
    "outcome": "caught"
   },
+  "e47606a137327b6834e24d17d88f9cba6b86cf04e96c04747359e0a96a060cf4": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "label": "function record cache cap raised",
+   "anchor_sha256": "e0b42f5e826cb9e835b44ebedb7c463b0d5736ed4f8aa7739b210872a71c4dbb",
+   "replacement_sha256": "03f32f2d7e12e0853b19fe0b42b859c0342c02924575e9345bd153d6058cac32",
+   "id": "e47606a137327b6834e24d17d88f9cba6b86cf04e96c04747359e0a96a060cf4",
+   "outcome": "caught"
+  },
   "e48bf70a301d03c385c47d0ea6a3e08a32352da71ce87d64664aca50b877777b": {
    "version": 1,
    "kind": "set-element",
@@ -2938,6 +2948,16 @@
    "id": "f08d4c1506173aabb8fdc25ae11cd13077a69735fa0753d998ccf616f70f93af",
    "outcome": "caught"
   },
+  "f266b0e65324e80d0718b9eb80a1513318e982456a0da7e5fa51787bb4dbf888": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "label": "function record decision cache dropped",
+   "anchor_sha256": "fd814e738411b1f0be9033c7268af9284a44553dc2c50b0749f581ebc3be6ea5",
+   "replacement_sha256": "a8a00aedd57093e0a251e9f1d5149f2c964abc0eace0ee3a84f2e44b80894cba",
+   "id": "f266b0e65324e80d0718b9eb80a1513318e982456a0da7e5fa51787bb4dbf888",
+   "outcome": "caught"
+  },
   "f2704b8cf0f4e04641be5f3c9e6d7d4ff4c1be3169cc6aeb1e827fc236765a0f": {
    "version": 1,
    "kind": "set-element",
@@ -3006,6 +3026,16 @@
    "collection_kind": "charset",
    "element": "m",
    "id": "f42b7da0375232a9d38ee0bbaa103d6c3d1876ddd233ebdb41becc34e5507a83",
+   "outcome": "caught"
+  },
+  "f4a3495d17b814478a84e571dc0eeba86ba7152a79e7076b58521c0e39e333e6": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/bash_command_guard.py",
+   "label": "merged guard function cache scope dropped",
+   "anchor_sha256": "f018995073e0ba69944f5374e22178896c8834b78efa0ad08f8866fbcddcf1e2",
+   "replacement_sha256": "5996ec652a91e7e90adc68f06c8a96ac0904d6d05f41505fc693994d4bd70315",
+   "id": "f4a3495d17b814478a84e571dc0eeba86ba7152a79e7076b58521c0e39e333e6",
    "outcome": "caught"
   },
   "f57536f65222bf0d25c1c69d272051721c95ebf99e24b0c5e55126f8f34587e2": {
@@ -3190,6 +3220,6 @@
   "fb507ef3e0a8dab3f7c840be9ad945a47a09a26232494744c4c97c5354b49110",
   "fc12c498aec08a7c6926394094d801c49290c66b8c18f43f54aaf668e6230a61"
  ],
- "caught": 218,
- "total": 307
+ "caught": 221,
+ "total": 310
 }

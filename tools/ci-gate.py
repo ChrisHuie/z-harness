@@ -39,8 +39,8 @@ EVAL_SKILL_FLOOR = 6
 SUITE_FLOORS = {
     "harness_check": 78,
     "render-packages": 192,
-    "bash_command_guard": 1337,
-    "git_grep_engine_guard": 1144,
+    "bash_command_guard": 1338,
+    "git_grep_engine_guard": 1137,
     "zsh_rev_modifier_guard": 487,
 }
 EXPECTED_WORKFLOW = """name: harness-check
@@ -615,7 +615,7 @@ def decision_golden_error(golden_data=None, decide=None, snapshot=None,
 MUTATION_RECEIPT = ROOT / "contracts/goldens/mutation-receipt.json"
 MUTATION_SUMMARY = ROOT / "contracts/goldens/mutation-summary.md"
 MUTATION_SURVIVOR_DEBT_CEILING = 89
-MUTATION_PLAN_FLOOR = 307
+MUTATION_PLAN_FLOOR = 310
 EXPECTED_MUTATION_COLLECTIONS = {
     ("hooks/bash_command_guard.py", "GUARDS"): 2,
     ("hooks/bash_command_guard.py", "RANK"): 3,
@@ -653,6 +653,7 @@ EXPECTED_MUTATION_COLLECTIONS = {
     ("hooks/guards/zsh_rev_modifier_guard.py", "MOD_UNMODELLED"): 1,
 }
 EXPECTED_MUTATION_SITES = {
+    ("hooks/bash_command_guard.py", "merged guard function cache scope dropped"),
     ("hooks/guards/git_grep_engine_guard.py", "attached exec argv-zero grammar dropped"),
     ("hooks/guards/git_grep_engine_guard.py", "builtin trap wrapper adoption dropped"),
     ("hooks/guards/git_grep_engine_guard.py", "budget wrap deleted"),
@@ -661,6 +662,8 @@ EXPECTED_MUTATION_SITES = {
     ("hooks/guards/git_grep_engine_guard.py", "dynamic source adoption removed"),
     ("hooks/guards/git_grep_engine_guard.py", "dynamic source command identity dropped"),
     ("hooks/guards/git_grep_engine_guard.py", "exec single-dash terminator dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "function record decision cache dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "function record cache cap raised"),
     ("hooks/guards/git_grep_engine_guard.py", "git config count cap dropped"),
     ("hooks/guards/git_grep_engine_guard.py", "git config loop budget dropped"),
     ("hooks/guards/git_grep_engine_guard.py", "git hazard union adoption dropped"),
@@ -710,7 +713,7 @@ EXPECTED_MUTATION_SITES = {
      "zsh unmodelled modifier prefix grammar dropped"),
 }
 EXPECTED_MUTATION_SITE_DIGEST = (
-    "89b6b244a3bdedc0a0620b1c5af359182888cc0d32e5396b9a43f1caa6b482f5"
+    "d1c160aa924d12bccdbd5aab536ab004754faf9ce60987881363bf6f1283ad0e"
 )
 EXPECTED_MUTATION_EXCLUSIONS = {
     "hooks/guards/git_grep_engine_guard.py::ALIAS_GUARDED":

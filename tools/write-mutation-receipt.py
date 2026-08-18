@@ -71,6 +71,19 @@ CHARSET_COLLECTIONS = {
 # ``timeout`` is an allowed kill only for the edit that restores an unbounded traversal.
 SITE_MUTATIONS = (
     {
+        "label": "merged guard function cache scope dropped", "module": BASH,
+        "anchor": (
+            "def decide(command, _deadline=None):\n"
+            "    \"\"\"-> (decision, reason). Worst decision wins; reasons accumulate.\"\"\"\n"
+            "    with grep_guard.function_record_cache_scope():\n"
+            "        return _decide(command, _deadline)"),
+        "replacement": (
+            "def decide(command, _deadline=None):\n"
+            "    \"\"\"-> (decision, reason). Worst decision wins; reasons accumulate.\"\"\"\n"
+            "    return _decide(command, _deadline)"),
+        "allowed_statuses": (),
+    },
+    {
         "label": "budget wrap deleted", "module": GREP,
         "anchor": (
             "    except CommandParseError as exc:\n"
@@ -86,6 +99,26 @@ SITE_MUTATIONS = (
             "        raise CommandParseError(\n"
             "            \"the guard's internal decision budget was exhausted while parsing\")"),
         "replacement": "def _check_decision_budget(deadline):\n    return None",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "function record decision cache dropped", "module": GREP,
+        "anchor": (
+            "def function_declaration_records(cmd, deadline=None):\n"
+            "    \"\"\"Return live function declarations with temporal reachability and scope.\"\"\"\n"
+            "    _check_decision_budget(deadline)\n"
+            "    cache = _FUNCTION_RECORD_CACHE.get()"),
+        "replacement": (
+            "def function_declaration_records(cmd, deadline=None):\n"
+            "    \"\"\"Return live function declarations with temporal reachability and scope.\"\"\"\n"
+            "    _check_decision_budget(deadline)\n"
+            "    cache = None"),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "function record cache cap raised", "module": GREP,
+        "anchor": "MAX_FUNCTION_RECORD_CACHE_ENTRIES = 32",
+        "replacement": "MAX_FUNCTION_RECORD_CACHE_ENTRIES = 4096",
         "allowed_statuses": (),
     },
     {

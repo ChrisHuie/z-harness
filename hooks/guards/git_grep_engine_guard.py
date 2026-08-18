@@ -45,6 +45,8 @@ Exit codes:  0 = decision emitted on stdout (allow/deny/ask)
              2 = usage error / unknown flag / zero inputs in --selftest
 """
 import builtins
+import contextlib
+import contextvars
 import json
 import os
 import re
@@ -72,12 +74,30 @@ MAX_ENV_SPLITS = 4
 MAX_ALIAS_DEPTH = 8
 MAX_SOURCE_DEPTH = 16
 MAX_FUNCTION_DECLARATIONS = 512
+MAX_FUNCTION_RECORD_CACHE_ENTRIES = 32
 REGISTERED_HOOK_TIMEOUT_SECONDS = 5
 GUARD_BUDGET_SECONDS = 4.0
 GIT_PROBE_TIMEOUT_SECONDS = 0.75
 ZSH_EQUALS_ON = "on"
 ZSH_EQUALS_OFF = "off"
 ZSH_EQUALS_UNKNOWN = "unknown"
+
+_FUNCTION_RECORD_CACHE = contextvars.ContextVar(
+    "git_grep_function_record_cache", default=None)
+_FUNCTION_RECORD_CACHE_MISS = object()
+
+
+@contextlib.contextmanager
+def function_record_cache_scope():
+    """Share immutable function analysis inside one public guard decision."""
+    cache_token = None
+    if _FUNCTION_RECORD_CACHE.get() is None:
+        cache_token = _FUNCTION_RECORD_CACHE.set({})
+    try:
+        yield
+    finally:
+        if cache_token is not None:
+            _FUNCTION_RECORD_CACHE.reset(cache_token)
 
 
 def hook_timeout_contract(settings_data=None, codex_data=None, *, root=None, budget=None):
@@ -1350,7 +1370,14 @@ def annotate_function_declarations(cmd, records, deadline=None):
 def function_declaration_records(cmd, deadline=None):
     """Return live function declarations with temporal reachability and scope."""
     _check_decision_budget(deadline)
+    cache = _FUNCTION_RECORD_CACHE.get()
+    if cache is not None:
+        cached = cache.get(cmd, _FUNCTION_RECORD_CACHE_MISS)
+        if cached is not _FUNCTION_RECORD_CACHE_MISS:
+            return cached
     if "()" not in cmd and "function " not in cmd:
+        if cache is not None and len(cache) < MAX_FUNCTION_RECORD_CACHE_ENTRIES:
+            cache[cmd] = ()
         return ()
     pattern = re.compile(
         r"(?ms)(?:(?:function[ \t]+)([A-Za-z_][A-Za-z0-9_]*)(?:\s*\(\s*\))?"
@@ -1424,7 +1451,10 @@ def function_declaration_records(cmd, deadline=None):
             cmd[match.end():index - 1], -1, len(cmd), False, False, -1, -1,
         ))
         cursor = index
-    return annotate_function_declarations(cmd, tuple(records), deadline)
+    annotated = annotate_function_declarations(cmd, tuple(records), deadline)
+    if cache is not None and len(cache) < MAX_FUNCTION_RECORD_CACHE_ENTRIES:
+        cache[cmd] = annotated
+    return annotated
 
 
 def _invoked_function_contexts(source, declarations, uncertain=(), deadline=None):
@@ -4780,6 +4810,15 @@ def decide(command, _shell_depth=0, _deadline=None, _shell="zsh",
            _equals_state=ZSH_EQUALS_ON, _command_env=None,
            _lookup_authority_uncertain=False):
     """-> (decision, reason). decision in {allow, deny, ask}."""
+    with function_record_cache_scope():
+        return _decide(
+            command, _shell_depth, _deadline, _shell, _equals_state,
+            _command_env, _lookup_authority_uncertain)
+
+
+def _decide(command, _shell_depth, _deadline, _shell, _equals_state,
+            _command_env, _lookup_authority_uncertain):
+    """Classify inside the function-record cache established by ``decide``."""
     _deadline = (time.monotonic() + GUARD_BUDGET_SECONDS
                  if _deadline is None else _deadline)
     if time.monotonic() >= _deadline:
@@ -8833,6 +8872,35 @@ def selftest():
     bad += 0 if equals_cache_ok else 1
     print("  %s a repeated live `=name` costs one PATH walk, not one per word (%d)" % (
         "PASS" if equals_cache_ok else "FAIL", len(which_names)))
+
+    cache_probe_source = "f(){ /bin/echo safe; }; f;" + "( : );" * 64
+    annotation_calls = []
+    original_annotate = annotate_function_declarations
+
+    def counting_annotate(source, records, deadline=None):
+        if source == cache_probe_source:
+            annotation_calls.append(source)
+        return original_annotate(source, records, deadline)
+
+    globals()["annotate_function_declarations"] = counting_annotate
+    try:
+        cache_probe_decision = decide(cache_probe_source)[0]
+    finally:
+        globals()["annotate_function_declarations"] = original_annotate
+    with function_record_cache_scope():
+        for cache_index in range(MAX_FUNCTION_RECORD_CACHE_ENTRIES + 8):
+            function_declaration_records(f"/bin/echo cache-bound-{cache_index}")
+        cache_entry_count = len(_FUNCTION_RECORD_CACHE.get() or {})
+    function_cache_ok = (cache_probe_decision == "allow"
+                         and len(annotation_calls) == 1
+                         and MAX_FUNCTION_RECORD_CACHE_ENTRIES == 32
+                         and cache_entry_count == 32
+                         and _FUNCTION_RECORD_CACHE.get() is None)
+    bad += 0 if function_cache_ok else 1
+    print("  %s one decision annotates repeated function source once and caps its cache "
+          "at 32 entries (%d annotation, %d entries)" % (
+              "PASS" if function_cache_ok else "FAIL",
+              len(annotation_calls), cache_entry_count))
 
     # The arm above proves the checkpoint is REMOVABLE; nothing proved it fires. Replacing
     # `_check_decision_budget`'s body with `return None` left this suite, the sibling

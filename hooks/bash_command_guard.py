@@ -69,6 +69,12 @@ class EnvelopeError(ValueError):
 
 def decide(command, _deadline=None):
     """-> (decision, reason). Worst decision wins; reasons accumulate."""
+    with grep_guard.function_record_cache_scope():
+        return _decide(command, _deadline)
+
+
+def _decide(command, _deadline=None):
+    """Run both predicates inside the shared parser-analysis scope."""
     _deadline = (time.monotonic() + grep_guard.GUARD_BUDGET_SECONDS
                  if _deadline is None else _deadline)
     worst, reasons = "allow", []
@@ -1189,6 +1195,26 @@ def selftest():
               f"5 explicit allow decisions; max="
               f"{max(item[3] for item in observations):.3f}s (cap 4.5s)"
               f"{_budget_note(faults, len(observations))}")
+
+    cache_probe_source = "f(){ /bin/echo safe; }; f;" + "( : );" * 64
+    annotation_calls = []
+    original_annotate = grep_guard.annotate_function_declarations
+
+    def counting_annotate(source, records, deadline=None):
+        if source == cache_probe_source:
+            annotation_calls.append(source)
+        return original_annotate(source, records, deadline)
+
+    grep_guard.annotate_function_declarations = counting_annotate
+    try:
+        public_cache_ok = (decide(cache_probe_source)[0] == "allow"
+                           and len(annotation_calls) == 1)
+    finally:
+        grep_guard.annotate_function_declarations = original_annotate
+    total += 1
+    failures += (not public_cache_ok)
+    print(f"  {'PASS' if public_cache_ok else 'FAIL'} public-function-cache "
+          f"both predicates share one annotation pass ({len(annotation_calls)})")
 
     seen_deadlines = []
     class DeadlineGuard:

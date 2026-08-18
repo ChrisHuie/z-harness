@@ -66,9 +66,11 @@ reason on stderr · 1 selftest failure.
 """
 import json
 import os
+import hashlib
 import re
 import subprocess
 import sys
+import time
 import traceback
 
 VERSION = "1.0.0"
@@ -86,7 +88,7 @@ ANNOUNCE = re.compile(
     # "Continuing with the merge class". `Continuing to wait/collect/hold` is a
     # description of an ongoing state, usually while background agents run, and
     # ending the turn there is correct: that distinction was the largest single
-    # class of false positive measured on real transcripts. It is now carried by
+    # class of false positive measured on the corpus of the day. It is now carried by
     # HANDBACK's `continuing to <verb>` arm rather than by this object slot, which
     # admits `to` — the two must move together or that class reopens.
     r'(?:Starting|Running|Proceeding|Continuing|Beginning|Kicking off|Firing off)'
@@ -106,8 +108,9 @@ ANNOUNCE = re.compile(
     r'(?:start|run|check|look|do|go|build|fix|verify|audit|dig|pull|open|read|grep|sweep|write|take)'
     # `I'll <verb>` REQUIRES an imminence marker. Bare "I'll verify X" is far
     # more often a standing policy or a sequencing note than a claim to be
-    # acting now — measured on real transcripts, that arm produced 3 of 4 false
-    # positives ("I'll verify each agent's sharpest claim myself, as before").
+    # acting now. Re-measured with --sweep: dropping the imminence requirement
+    # adds 7 blocks, of which 5 are standing-policy or conditional statements
+    # ("I'll verify each agent's sharpest claim myself, as before").
     # The present participles carry the failure on their own.
     r'|I\'?ll\s+(?:now|go\s+ahead\s+and)\s+'
     r'(?:start|run|check|look|do|build|fix|verify|audit|dig|pull|open|read|write|kick|take)'
@@ -203,7 +206,7 @@ Your final sentence announces work you have not started: {trigger!r}
 At Stop the turn is over, so nothing can run after it. As written this is a
 status claim with no execution behind it, and the reader cannot tell the
 difference from the outside. Measured base rate for this failure in one
-session: 7 turns of 314, self-reported as 2.
+session: 7 turns of 314, self-reported as 2. Regenerate with --sweep.
 
 Do exactly one of these, now:
   1. Make the tool calls. If you meant it, the calls belong in THIS turn.
@@ -681,7 +684,18 @@ def selftest():
     if not ok:
         failures += 1
     print(f"  {'PASS' if ok else 'FAIL'} process: non-JSON stdin blocks -> exit {p.returncode}")
-    proc_n = len(proc_cases) + 1
+    # --sweep over nothing is an error, not a clean 0.00%. The house rule is
+    # already implemented twice: askq_timeout_guard exits 2 on zero fixtures, and
+    # C6 fails when its scan set shrinks. This tool published a rate a reviewer is
+    # invited to re-run, so a wrong glob printing a healthy 0% is the failure.
+    p = subprocess.run([sys.executable, me, "--sweep", "/nonexistent-scan-set/*.jsonl"],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=base_env)
+    ok = p.returncode == 2 and b"scan set is empty" in p.stderr
+    if not ok:
+        failures += 1
+    print(f"  {'PASS' if ok else 'FAIL'} process: --sweep over an empty scan set is an error "
+          f"-> exit {p.returncode}")
+    proc_n = len(proc_cases) + 2
 
     for name, payload, want in cases:
         if isinstance(payload, dict) and "__contract__" in payload:
@@ -704,24 +718,67 @@ def selftest():
     return failures == 0
 
 
+def corpus_identity(files):
+    """A fingerprint of the scan set, so a re-run can tell drift from disagreement.
+
+    The rate this tool prints is offered IN PLACE of a checkable literal, and that
+    only works if a reviewer can tell "the matcher changed" from "the corpus
+    changed". It could not: `~/.claude/projects` is a rolling window - the oldest
+    surviving transcript here is 29 days old - so a stated rate stops reproducing
+    within days while the command that produced it still runs clean. Print the
+    corpus with the number and the two are distinguishable.
+    """
+    h = hashlib.sha256()
+    oldest = newest = None
+    for f in files:
+        try:
+            st = os.stat(f)
+        except OSError:
+            continue
+        h.update(f"{os.path.basename(f)}:{st.st_size}".encode())
+        oldest = st.st_mtime if oldest is None else min(oldest, st.st_mtime)
+        newest = st.st_mtime if newest is None else max(newest, st.st_mtime)
+    span = ""
+    if oldest is not None:
+        day = 86400.0
+        span = (f" oldest={time.strftime('%Y-%m-%d', time.localtime(oldest))}"
+                f" newest={time.strftime('%Y-%m-%d', time.localtime(newest))}"
+                f" span_days={int((newest - oldest) / day)}")
+    return f"files={len(files)} digest={h.hexdigest()[:16]}{span}"
+
+
 def sweep(globs):
     """Re-run the false-positive measurement over real transcripts.
 
-    The headline number in this file's history — 6 blocks in 2676 turns that
-    end on text, 0.22% — is worthless as a literal: nobody can check it and it
-    drifts the moment the matcher changes. This is the query that regenerates
-    it, so a reviewer can disagree with the number instead of taking it.
+    A rate is worthless as a literal: nobody can check it and it drifts the moment
+    either the matcher or the corpus changes. This is the query that regenerates
+    it, printed with a corpus identity so a reviewer can tell which of the two
+    moved. Earlier revisions of this file quoted bare figures - 6 blocks in 2676
+    turns, 10 false positives across 696 transcripts - that no command reproduces,
+    because the matcher they described is gone. Do not add another.
 
-    A turn is scored only when it ENDS on text. A turn whose last text is
-    followed by a tool call is the healthy case by construction and is not a
-    candidate, which is why the denominator here is smaller than the turn count.
+    A turn is scored only when it ENDS on text. Two exclusion classes get there,
+    not one, and both are printed: a turn whose last text is followed by a tool
+    call is the healthy case by construction, and a turn with no text block at all
+    cannot exhibit the defect either. Reporting only the first understated the
+    second by roughly a quarter of the excluded set.
+
+    Only the text-only check is swept. The envelope check in contradicted() needs
+    `background_tasks`, which no transcript carries, so it is not measured here -
+    saying that is cheaper than a number nobody can reproduce.
     """
     import glob as _glob
     files = sorted({f for g in globs for f in _glob.glob(os.path.expanduser(g))})
-    turns_n = ends = blocks = 0
+    if not files:
+        print(f"# COVERAGE {corpus_identity(files)}")
+        print("# FATAL: the scan set is empty. Zero inputs is an error, never a clean "
+              "verdict — a 0.00% rate over nothing reads identical to 0.00% over a "
+              "corpus. Check the glob.", file=sys.stderr)
+        return 2
+    turns_n = ends = blocks = no_text = trailing_tool = 0
     hits = []
     for path in files:
-        turns, cur = [], []
+        turns, cur, closed_by = [], [], []
         try:
             lines = open(path, encoding="utf-8", errors="replace").readlines()
         except OSError:
@@ -742,18 +799,25 @@ def sweep(globs):
                     continue
                 if cur:
                     turns.append(cur)
+                    closed_by.append("meta" if d.get("isMeta") else "human")
                     cur = []
                 continue
             if d.get("type") == "assistant" and isinstance(c, list):
                 for b in c:
                     if isinstance(b, dict) and b.get("type") in ("text", "tool_use"):
-                        cur.append((b["type"], b.get("text", "") or b.get("name", "")))
+                        cur.append((b["type"], b.get("text", "") or b.get("name", ""),
+                                    d.get("timestamp") or ""))
         if cur:
             turns.append(cur)
+            closed_by.append("eof")
         turns_n += len(turns)
-        for t in turns:
-            li = max((i for i, (k, _) in enumerate(t) if k == "text"), default=None)
-            if li is None or any(k == "tool_use" for k, _ in t[li + 1:]):
+        for t, closer in zip(turns, closed_by):
+            li = max((i for i, (k, _, _) in enumerate(t) if k == "text"), default=None)
+            if li is None:
+                no_text += 1
+                continue
+            if any(k == "tool_use" for k, _, _ in t[li + 1:]):
+                trailing_tool += 1
                 continue
             ends += 1
             try:
@@ -762,17 +826,26 @@ def sweep(globs):
                 continue
             if trig:
                 blocks += 1
-                hits.append((os.path.basename(os.path.dirname(path))[-30:], trig,
-                             " ".join(t[li][1][-120:].split())))
-    print(f"# COVERAGE transcripts={len(files)} turns={turns_n} ending_on_text={ends}")
-    print("#   NOT COVERED: a turn ending in a tool call cannot exhibit this defect and is "
-          "excluded from the denominator, so this is a rate over CANDIDATES, not over turns.")
+                hits.append((os.path.basename(os.path.dirname(path))[-30:],
+                             os.path.basename(path)[:8], (t[li][2] or "")[:19], closer,
+                             trig, " ".join(t[li][1][-260:].split())))
+    print(f"# COVERAGE {corpus_identity(files)}")
+    print(f"#   turns={turns_n} ending_on_text={ends} "
+          f"excluded_no_text={no_text} excluded_trailing_tool={trailing_tool}")
+    print("#   NOT COVERED: a turn ending in a tool call cannot exhibit this defect, and a "
+          "turn with no text block cannot either. Both are excluded, so this is a rate over "
+          "CANDIDATES, not over turns.")
+    print("#   NOT COVERED: the envelope check in contradicted(). No transcript carries "
+          "background_tasks, so its rate is unmeasured rather than zero.")
     print("#   NOT COVERED: whether each block is a TRUE positive. That is a human read; "
-          "the tails are printed so it can be disagreed with.")
+          "each hit prints its session, timestamp and what closed the turn so it can be "
+          "disagreed with — a turn closed by `meta` was ended by a harness injection such "
+          "as a background-agent report, which is a class the matcher is tuned around.")
     print(f"\n# {blocks} block(s) / {ends} candidates = "
           f"{100 * blocks / max(ends, 1):.2f}%\n")
-    for proj, trig, tail in hits:
-        print(f"  [{proj}] {trig!r}\n     …{tail}")
+    for proj, sess, ts, closer, trig, tail in hits:
+        print(f"  [{proj}] {sess} {ts} closed_by={closer} {trig!r}")
+        print(f"     …{tail}")
     return 0
 
 

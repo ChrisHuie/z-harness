@@ -71,10 +71,23 @@ ANNOUNCE = re.compile(
     # The participle must lead into an OBJECT — "Starting the audit",
     # "Continuing with the merge class". `Continuing to wait/collect/hold` is a
     # description of an ongoing state, usually while background agents run, and
-    # ending the turn there is correct. That distinction is 4 of the 10 false
-    # positives measured across 696 transcripts.
+    # ending the turn there is correct: that distinction was the largest single
+    # class of false positive measured on real transcripts. It is now carried by
+    # HANDBACK's `continuing to <verb>` arm rather than by this object slot, which
+    # admits `to` — the two must move together or that class reopens.
     r'(?:Starting|Running|Proceeding|Continuing|Beginning|Kicking off|Firing off)'
-    r'\s+(?:with|on|the|a|an)\b'
+    # The object slot. `with|on|the|a|an` alone allowed three measured turn-ends
+    # through: `Kicking off that research now.`, `Starting Phase 1 -`, `Proceeding to
+    # the doc pass now.` Two of the three carry `now`, the strongest signal there is.
+    # NOTE the scoped (?-i:) - this pattern is compiled re.I, so a bare [A-Z] matches
+    # lowercase and turns this gate into `any token`, which is the same matcher as no
+    # gate at all (4.3x the block rate on the measured corpus).
+    r'\s+(?:'
+    r'(?:with|on|to|the|a|an|that|this|these|those|my|our|its|their)\b'
+    r"|(?-i:[A-Z])[\w.'-]*"          # a named target: Phase 1, IR-38, F90
+    r'|[`"\u201c]'                    # a quoted or backticked target
+    r'|\d'                            # a numbered target
+    r')'
     r'|(?:Let me|Let\'s)\s+(?:now\s+|go\s+ahead\s+and\s+)?'
     r'(?:start|run|check|look|do|go|build|fix|verify|audit|dig|pull|open|read|grep|sweep|write|take)'
     # `I'll <verb>` REQUIRES an imminence marker. Bare "I'll verify X" is far
@@ -95,7 +108,8 @@ HANDBACK = re.compile(
     r'(stopping here|stopped here|say go|your call|let me know|over to you|'
     r'waiting on|want me to|shall I|should I|do you want|which (would|do) you|'
     r'before I (start|proceed|continue|touch|change)|say the word|'
-    r'happy to .{0,30}if you|unless you|if you\'d rather|continuing to (wait|collect|hold|monitor|poll|watch))', re.I)
+    r'happy to .{0,30}if you|unless you|if you\'d rather|'
+    r'continuing to (wait|collect|hold|monitor|poll|watch))', re.I)
 
 # The boundary is the LAST SENTENCE OR TWO, not a character window. A window
 # was the first design and its own control caught it: on a short message the
@@ -120,8 +134,16 @@ SPLIT = re.compile(
 
 
 def boundary(text):
+    """The last TAIL_UNITS units, as units - the caller needs them apart.
+
+    Joining them into one string with a space was the first shape and it threw away
+    the very boundary SPLIT had just found: ANNOUNCE anchors on `^`, `[.!?\n]` or an
+    em-dash, so an announcement whose preceding unit ends in a table pipe, a bullet,
+    a heading or a colon lost its anchor and was allowed. Rejoining with `\n` keeps
+    it, because `\n` is already in that anchor class.
+    """
     parts = [p for p in SPLIT.split(text.strip()) if p and p.strip()]
-    return " ".join(parts[-TAIL_UNITS:]) if parts else ""
+    return parts[-TAIL_UNITS:]
 
 BLOCK_MSG = """\
 STOP BLOCKED — announced-work guard ({v}).
@@ -205,7 +227,8 @@ def judge(payload):
     text = message_text(payload).strip()
     if not text:
         return None                     # nothing read is not evidence of a defect
-    tail = boundary(text)
+    units = boundary(text)
+    tail = "\n".join(units)
     # A turn that ends on a QUESTION is asking, not claiming — whatever was
     # said before it. Found on a real transcript: a message opening "Starting
     # with a mechanical producer-existence check" and closing "Does the
@@ -213,7 +236,9 @@ def judge(payload):
     # which would have punished the exact behaviour the rule wants.
     if text.rstrip().endswith("?"):
         return None
-    if HANDBACK.search(tail):
+    # Only the LAST unit decides. A handback in the penultimate unit that an
+    # announcement then supersedes is not how the turn ends.
+    if units and HANDBACK.search(units[-1]):
         return None
     m = ANNOUNCE.search(tail)
     return m.group(0).strip() if m else None
@@ -292,6 +317,60 @@ def selftest():
                                     "the only entity that fits no merge class."}, True),
         ("`I'll` still fires when imminence is explicit",
          {"last_assistant_message": "That settles it. I'll now run the audit."}, True),
+        # Measured misses. Real turn endings from the transcript corpus that the
+        # `with|on|the|a|an` object slot allowed through; two carry `now`, the
+        # strongest imminence marker there is. The third needs the rejoin as well.
+        ("measured miss: demonstrative object",
+         {"last_assistant_message": "That settles the ordering. Kicking off that "
+                                    "research now."}, True),
+        ("measured miss: named object",
+         {"last_assistant_message": "No blockers. Starting Phase 1 - implementation "
+                                    "in an isolated clone."}, True),
+        ("measured miss: `to` object after a bolded unit",
+         {"last_assistant_message": "...and bring the buy side with you.**\n\n"
+                                    "Proceeding to the doc pass now."}, True),
+
+        # The rejoin. SPLIT finds these boundaries and a space-join threw them away, so
+        # an announcement after a list, table or heading lost the anchor ANNOUNCE needs.
+        ("structure first, announcement last: bullets",
+         {"last_assistant_message": "- F20 live\n- F90 live\n\n"
+                                    "Starting the IR-38 audit."}, True),
+        ("structure first, announcement last: table",
+         {"last_assistant_message": "| gate | state |\n|---|---|\n| residue | green |"
+                                    "\n\nStarting the IR-38 audit."}, True),
+        ("structure first, announcement last: heading",
+         {"last_assistant_message": "## What I found\n\nStarting the IR-38 audit."}, True),
+
+        # HANDBACK decides on the LAST unit only. A handback an announcement then
+        # supersedes is not how the turn ended.
+        ("handback superseded by an announcement blocks",
+         {"last_assistant_message": "Waiting on the two background agents. "
+                                    "Starting the IR-38 audit."}, True),
+
+        # ...and the arm keeping the background-work case allowed. Admitting `to` into
+        # the object slot is what makes `Continuing to wait` reachable at all, so this
+        # control only has teeth once that widening exists. Both must hold together.
+        ("background wait still allows, one unit",
+         {"last_assistant_message": "Continuing to wait on the two background "
+                                    "agents."}, False),
+        ("background wait still allows, after a report",
+         {"last_assistant_message": "The batch is out. Continuing to monitor the "
+                                    "three agents."}, False),
+
+        # FALSE-POSITIVE CEILING. Verbatim corpus endings that a matcher without the
+        # positional anchor blocks. The comment above calls position the whole
+        # discriminator and nothing asserted it: deleting the anchor moved the measured
+        # block count from 14 to 55 with every other control still green. These are
+        # reports of work in flight, not claims to be starting it.
+        ("FP ceiling: status report naming a running agent",
+         {"last_assistant_message": "Six green, `design-candidate` still running "
+                                    "the sweep."}, False),
+        ("FP ceiling: report of what another agent is running",
+         {"last_assistant_message": "The wp7-drafter is still running on the B5+B6 "
+                                    "draft; I will report when it delivers."}, False),
+        ("FP ceiling: `on it` inside a sentence about waiting",
+         {"last_assistant_message": "If it does not answer shortly I will re-run those "
+                                    "three questions myself rather than wait on it."}, False),
     ]
     failures = 0
     cases += [

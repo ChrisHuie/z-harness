@@ -257,6 +257,28 @@ set ANNOUNCED_WORK_GUARD=off to disable it deliberately. The retry carries
 stop_hook_active, so the turn will end normally and this will not loop."""
 
 
+def report_drift(why):
+    """Block on stderr for the model AND on stdout for the operator.
+
+    DRIFT_MSG is addressed to a person: it names a file to fix and an env var to
+    set. Delivered on stderr alone it reaches only the model, which can do neither
+    — and the operator's sole signal is a toast byte-identical to the one a
+    successful block produces. askq_timeout_guard sets `systemMessage` on exactly
+    this path for exactly this reason.
+
+    Verified end to end: exit 2 with a stdout payload still blocks, and the
+    systemMessage surfaces as an operator-facing record. Writing to stdout also
+    closes a downgrade — the runtime demotes a Stop-hook exit 2 to non-blocking
+    when stdout is empty and stderr looks like a missing-file error, and a
+    non-empty stdout makes that branch unreachable.
+    """
+    print(json.dumps({"systemMessage":
+                      f"announced_work_guard {VERSION}: Stop envelope drift — {why}. "
+                      "The gate is not checking anything until this is fixed."}))
+    print(DRIFT_MSG.format(v=VERSION, why=why), file=sys.stderr)
+    return 2
+
+
 class EnvelopeDrift(ValueError):
     """The Stop envelope no longer carries a message this guard can read.
 
@@ -862,8 +884,7 @@ def main(argv):
     except Exception as exc:
         if off:
             return 0
-        print(DRIFT_MSG.format(v=VERSION, why=f"stdin is not JSON ({exc})"), file=sys.stderr)
-        return 2
+        return report_drift(f"stdin is not JSON ({exc})")
     if isinstance(payload, dict) and \
             payload.get("hook_event_name") not in (None, "Stop"):
         # SubagentStop is deliberately NOT in scope. It is registered nowhere, has
@@ -878,8 +899,7 @@ def main(argv):
     except EnvelopeDrift as exc:
         if off:
             return 0
-        print(DRIFT_MSG.format(v=VERSION, why=str(exc)), file=sys.stderr)
-        return 2
+        return report_drift(str(exc))
     if off:
         return 0
     if stale:

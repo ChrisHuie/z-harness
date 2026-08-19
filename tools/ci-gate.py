@@ -1422,6 +1422,17 @@ def eval_corpus_distribution_error(counts=None, floors=None) -> str:
     return ("eval corpus distribution: " + "; ".join(problems[:6])) if problems else ""
 
 
+def _raises(call, kind) -> bool:
+    """True when `call` raises `kind`; a check that swallows it would prove nothing."""
+    try:
+        call()
+    except kind:
+        return True
+    except Exception:
+        return False
+    return False
+
+
 def review_handoff_policy_error(source_texts=None, review_root=None,
                                 extra_texts=None) -> str:
     """Require append-only head-specific handoffs and reject the retired mutable artifact."""
@@ -2356,6 +2367,56 @@ def selftest() -> int:
             f"the cross-host comparison still sees {_label}",
             writer.platform_stable(stable_probe) != writer.platform_stable(_changed),
         )
+    # The sweep-scope decision gates an hour of CI and the assertion that replaces it, so
+    # both arms need a red case. A runner stands in for git so the cases are exact rather
+    # than dependent on this checkout's history.
+    def _diff_runner(names):
+        def run(argv, **kwargs):
+            class Done:
+                returncode = 0
+                stdout = "".join(f"{n}\n" for n in names)
+                stderr = ""
+            return Done()
+        return run
+
+    def _broken_diff(argv, **kwargs):
+        class Done:
+            returncode = 128
+            stdout = ""
+            stderr = "fatal: bad revision"
+        return Done()
+
+    expect(
+        "a head touching nothing the sweep observes needs no resweep",
+        writer.resweep_needed("base", runner=_diff_runner([])) is False,
+    )
+    for _observed in ("hooks/guards/git_grep_engine_guard.py",
+                      "tools/write-mutation-receipt.py",
+                      "contracts/goldens/mutation-receipt.json",
+                      "hooks/bash_command_guard.py",
+                      ".github/workflows/mutation-proof.yml"):
+        expect(
+            f"a head touching {_observed} needs a resweep",
+            writer.resweep_needed("base", runner=_diff_runner([_observed])) is True,
+        )
+    expect(
+        "an unreadable base is an error, never a silent no-resweep",
+        _raises(lambda: writer.resweep_needed("base", runner=_broken_diff), ValueError),
+    )
+    expect(
+        "inheritance is refused when an observed input changed",
+        writer.inherited_proof_error(
+            "base", runner=_diff_runner(["hooks/guards/zsh_rev_modifier_guard.py"])) != "",
+    )
+    expect(
+        "inheritance is granted only when nothing observed changed",
+        writer.inherited_proof_error("base", runner=_diff_runner([])) == "",
+    )
+    expect(
+        "inheritance is refused when the base cannot be read",
+        _raises(lambda: writer.inherited_proof_error("base", runner=_broken_diff),
+                ValueError),
+    )
     expect("recorded mutation evidence matches the guards", mutation_receipt_error() == "")
     expect(
         "an exact synthetic mutation receipt clears",

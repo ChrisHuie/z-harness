@@ -70,8 +70,13 @@ jobs:
       - name: install zsh and assert the exact pull-request head
         timeout-minutes: 10
         run: |
+          # The runner image ships populated package lists, so a mirror that stalls during
+          # `update` need not block the install -- treating update as advisory turns a
+          # transient outage into a slow success instead of a coverage failure. `zsh
+          # --version` is the assertion: if the interpreter is absent this step still fails.
           for attempt in 1 2 3; do
-            sudo apt-get update && sudo apt-get install -y zsh && break
+            sudo apt-get update -o Acquire::Retries=3 || true
+            sudo apt-get install -y zsh && break
             echo "apt attempt $attempt failed; retrying"
             sleep 15
           done
@@ -108,8 +113,13 @@ jobs:
       - name: install zsh and assert the exact pull-request head
         timeout-minutes: 10
         run: |
+          # The runner image ships populated package lists, so a mirror that stalls during
+          # `update` need not block the install -- treating update as advisory turns a
+          # transient outage into a slow success instead of a coverage failure. `zsh
+          # --version` is the assertion: if the interpreter is absent this step still fails.
           for attempt in 1 2 3; do
-            sudo apt-get update && sudo apt-get install -y zsh && break
+            sudo apt-get update -o Acquire::Retries=3 || true
+            sudo apt-get install -y zsh && break
             echo "apt attempt $attempt failed; retrying"
             sleep 15
           done

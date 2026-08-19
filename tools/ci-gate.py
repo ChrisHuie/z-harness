@@ -60,6 +60,7 @@ SUITE_FLOORS = {
 EXPECTED_WORKFLOW = """name: harness-check
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
@@ -82,7 +83,14 @@ jobs:
           python-version: 3.13.14
       - name: install zsh where the runner image omits it
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y zsh && zsh --version
+        timeout-minutes: 10
+        run: |
+          for attempt in 1 2 3; do
+            sudo apt-get update && sudo apt-get install -y zsh && break
+            echo "apt attempt $attempt failed; retrying"
+            sleep 15
+          done
+          zsh --version
       - name: source-bound bootstrap and complete offline gate
         run: |
           python3 hooks/harness_check.py --ci
@@ -101,14 +109,60 @@ jobs:
         run: python3 tools/portable-conformance.py
 """
 EXPECTED_MUTATION_WORKFLOW = """name: mutation-proof
+# The sweep re-measures every mutation to prove the committed receipt is truthful rather than
+# merely self-consistent, which is the one thing the offline gate cannot do: it recomputes
+# from the receipt's own contents and can never re-measure. It is the only check that tells a
+# real measurement from a fabricated one, so it must reach every head.
+#
+# It runs on every pull request. What varies is the work, not the coverage: a head that
+# changes nothing a sweep would observe inherits the proof its base already carries, and the
+# aggregate says so positively rather than being absent. A path filter would instead leave no
+# entry at all for such a head, and a job class with no entry is indistinguishable from a
+# workflow that failed to run -- absence is not evidence. `tools/write-mutation-receipt.py`
+# owns both decisions, so the rule is tested rather than expressed in unreachable YAML.
 on:
   pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  scope:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      resweep: ${{ steps.decide.outputs.resweep }}
+      base: ${{ steps.decide.outputs.base }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: 3.13.14
+      - name: decide whether this head can differ from its base in what a sweep observes
+        id: decide
+        run: |
+          BASE='${{ github.event.pull_request.base.sha }}'
+          if [ -z "$BASE" ]; then
+            echo "resweep=true" >> "$GITHUB_OUTPUT"
+            echo "base=" >> "$GITHUB_OUTPUT"
+            echo "no pull-request base: sweeping"
+          else
+            RESWEEP="$(python3 tools/write-mutation-receipt.py --resweep-needed "$BASE")"
+            echo "resweep=$RESWEEP" >> "$GITHUB_OUTPUT"
+            echo "base=$BASE" >> "$GITHUB_OUTPUT"
+            echo "base $BASE resweep=$RESWEEP"
+          fi
+
   mutations:
+    needs: scope
+    if: needs.scope.outputs.resweep == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -119,23 +173,27 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: 3.13.14
       - name: install zsh and assert the exact pull-request head
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y zsh
+          for attempt in 1 2 3; do
+            sudo apt-get update && sudo apt-get install -y zsh && break
+            echo "apt attempt $attempt failed; retrying"
+            sleep 15
+          done
           zsh --version
-          git rev-parse HEAD | grep -Fx '${{ github.event.pull_request.head.sha }}'
+          git rev-parse HEAD | grep -Fx '${{ github.event.pull_request.head.sha || github.sha }}'
       - name: run mutation shard
         run: >-
           python3 tools/write-mutation-receipt.py
           --shard-index ${{ matrix.shard }}
           --shard-count 6
           --fragment mutation-fragment-${{ matrix.shard }}.json
-          --expected-head '${{ github.event.pull_request.head.sha }}'
+          --expected-head '${{ github.event.pull_request.head.sha || github.sha }}'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: mutation-fragment-${{ matrix.shard }}
@@ -145,31 +203,49 @@ jobs:
 
   aggregate:
     if: always()
-    needs: mutations
+    needs: [scope, mutations]
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: 3.13.14
       - name: install zsh and assert the exact pull-request head
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y zsh
+          for attempt in 1 2 3; do
+            sudo apt-get update && sudo apt-get install -y zsh && break
+            echo "apt attempt $attempt failed; retrying"
+            sleep 15
+          done
           zsh --version
-          git rev-parse HEAD | grep -Fx '${{ github.event.pull_request.head.sha }}'
+          git rev-parse HEAD | grep -Fx '${{ github.event.pull_request.head.sha || github.sha }}'
+      - name: refuse a swept head whose shards did not all succeed
+        if: needs.scope.outputs.resweep == 'true' && needs.mutations.result != 'success'
+        run: |
+          echo "mutations result: ${{ needs.mutations.result }}"
+          exit 1
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        if: needs.scope.outputs.resweep == 'true'
         with:
           pattern: mutation-fragment-*
           path: mutation-fragments
           merge-multiple: true
       - name: reject incomplete evidence and compare the tracked receipt
+        if: needs.scope.outputs.resweep == 'true'
         run: >-
           python3 tools/write-mutation-receipt.py
           --aggregate mutation-fragments/*.json
+      - name: assert this head inherits its base's proof
+        if: needs.scope.outputs.resweep != 'true'
+        run: >-
+          python3 tools/write-mutation-receipt.py
+          --verify-inherited '${{ needs.scope.outputs.base }}'
 """
 
 
@@ -1627,15 +1703,49 @@ def selftest() -> int:
         workflow_error(
             EXPECTED_WORKFLOW,
             EXPECTED_MUTATION_WORKFLOW.replace(
-                "          ref: ${{ github.event.pull_request.head.sha }}\n", "", 1),
+                "          ref: ${{ github.event.pull_request.head.sha "
+                "|| github.sha }}\n", "", 1),
         ) is not None,
     )
+    # The sweep is the only check that can tell a truthful receipt from a self-consistent
+    # forgery, so it must reach every head. A `paths:` filter would leave no entry at all for
+    # a head it skips, and a job class with no entry cannot be told from a workflow that
+    # failed to run. Coverage is therefore unconditional and only the WORK is conditional:
+    # these pin that the verdict is always produced, by one arm or the other.
     expect(
-        "mutation workflow remains pull-request-only",
+        "mutation workflow carries no paths filter that would silence a head",
+        "paths:" not in EXPECTED_MUTATION_WORKFLOW,
+    )
+    expect(
+        "mutation aggregate depends on the scope decision and the shards",
         workflow_error(
             EXPECTED_WORKFLOW,
             EXPECTED_MUTATION_WORKFLOW.replace(
-                "on:\n  pull_request:\n", "on:\n  push:\n  pull_request:\n", 1),
+                "    needs: [scope, mutations]\n", "    needs: mutations\n", 1),
+        ) is not None,
+    )
+    expect(
+        "a swept head whose shards did not all succeed is refused",
+        workflow_error(
+            EXPECTED_WORKFLOW,
+            EXPECTED_MUTATION_WORKFLOW.replace(
+                "        if: needs.scope.outputs.resweep == 'true' "
+                "&& needs.mutations.result != 'success'\n", "", 1),
+        ) is not None,
+    )
+    expect(
+        "a head that skips the sweep must still assert it inherits its base's proof",
+        workflow_error(
+            EXPECTED_WORKFLOW,
+            EXPECTED_MUTATION_WORKFLOW.replace(
+                "      - name: assert this head inherits its base's proof\n", "", 1),
+        ) is not None,
+    )
+    expect(
+        "mutation workflow binds its head on every event it accepts",
+        workflow_error(
+            EXPECTED_WORKFLOW,
+            EXPECTED_MUTATION_WORKFLOW.replace("|| github.sha ", "", 1),
         ) is not None,
     )
     expect(

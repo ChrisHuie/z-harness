@@ -548,6 +548,58 @@ ADDITION_MUTATIONS = (
 )
 
 
+# The paths whose change can alter what a sweep would observe: the three guard sources, the
+# generator, the plan derived from them, the receipt and summary themselves, and this
+# workflow. A pull request touching none of them inherits the proof its base already carries,
+# because a receipt reaches main only through a run that swept it. The list lives here rather
+# than in the workflow so it is testable and cannot drift from the digests it mirrors.
+RESWEEP_PATHS = (
+    ".github/workflows/mutation-proof.yml",
+    "contracts/goldens/mutation-receipt.json",
+    "contracts/goldens/mutation-summary.md",
+    GENERATOR,
+    *GUARDS,
+)
+
+
+def _changed_against(base_ref: str, paths, runner=None) -> list[str]:
+    runner = subprocess.run if runner is None else runner
+    done = runner(
+        ["git", "-C", str(ROOT), "diff", "--name-only", base_ref, "HEAD", "--", *paths],
+        capture_output=True, text=True, timeout=60)
+    if done.returncode != 0:
+        raise ValueError(
+            f"cannot diff against {base_ref}: {(done.stderr or 'no diagnostic').strip()[:200]}")
+    return [name for name in done.stdout.split("\n") if name]
+
+
+def resweep_needed(base_ref: str, runner=None) -> bool:
+    """True when this head can differ from its base in what a sweep would measure."""
+    return bool(_changed_against(base_ref, RESWEEP_PATHS, runner=runner))
+
+
+def inherited_proof_error(base_ref: str, runner=None) -> str:
+    """Why this head may NOT inherit its base's sweep, or "" when it may.
+
+    Skipping a sweep must be a positive assertion, never an absent check: a job class with
+    no entry for a head is indistinguishable from a workflow that failed to run. This states
+    both halves of the claim -- nothing a sweep would observe has changed, and the receipt
+    still binds the sources present here.
+    """
+    changed = _changed_against(base_ref, RESWEEP_PATHS, runner=runner)
+    if changed:
+        return f"inputs a sweep would observe changed since {base_ref}: {sorted(changed)}"
+    receipt = load_json(RECEIPT)
+    if receipt.get("source_digests") != source_digests():
+        return "receipt source digests do not match the guard sources present here"
+    if receipt.get("generator_sha256") != file_sha256(ROOT / GENERATOR):
+        return "receipt generator digest does not match the generator present here"
+    plan, _exclusions = mutation_plan()
+    if receipt.get("plan_sha256") != digest(plan):
+        return "receipt plan digest does not match the plan derived here"
+    return ""
+
+
 def canonical(value) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"),
                       ensure_ascii=True).encode()
@@ -1364,12 +1416,23 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--expected-head")
     parser.add_argument("--aggregate", nargs="+", type=Path)
     parser.add_argument("--accept-receipt-changes", action="store_true")
+    parser.add_argument("--resweep-needed", metavar="BASE")
+    parser.add_argument("--verify-inherited", metavar="BASE")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     try:
+        if args.resweep_needed:
+            print("true" if resweep_needed(args.resweep_needed) else "false")
+            return 0
+        if args.verify_inherited:
+            problem = inherited_proof_error(args.verify_inherited)
+            print(f"MUTATION-PROOF-SUMMARY mode=inherited base={args.verify_inherited} "
+                  f"swept=0 verified={0 if problem else 1} "
+                  f"problem={problem or 'none'}")
+            return 1 if problem else 0
         if args.list_plan:
             plan, exclusions = mutation_plan()
             kinds = {kind: sum(item["kind"] == kind for item in plan)

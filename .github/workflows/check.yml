@@ -1,6 +1,7 @@
 name: harness-check
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
@@ -23,7 +24,14 @@ jobs:
           python-version: 3.13.14
       - name: install zsh where the runner image omits it
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y zsh && zsh --version
+        timeout-minutes: 10
+        run: |
+          for attempt in 1 2 3; do
+            sudo apt-get update && sudo apt-get install -y zsh && break
+            echo "apt attempt $attempt failed; retrying"
+            sleep 15
+          done
+          zsh --version
       - name: source-bound bootstrap and complete offline gate
         run: |
           python3 hooks/harness_check.py --ci

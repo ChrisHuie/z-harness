@@ -642,7 +642,7 @@ def decision_golden_error(golden_data=None, decide=None, snapshot=None,
 MUTATION_RECEIPT = ROOT / "contracts/goldens/mutation-receipt.json"
 MUTATION_SUMMARY = ROOT / "contracts/goldens/mutation-summary.md"
 MUTATION_SURVIVOR_DEBT_CEILING = 80
-MUTATION_PLAN_FLOOR = 317
+MUTATION_PLAN_FLOOR = 322
 # Kills scored only because the recorded check count moved, with no assertion failing. A
 # guard that increments its counter once per element of the collection under mutation moves
 # that count on any removal, so such a kill is decided by loop structure before any probe
@@ -653,19 +653,31 @@ MUTATION_PLAN_FLOOR = 317
 # The ceiling is one rather than zero because whether an assertion fires can depend on the
 # environment: deleting "W" from MOD_UNMODELLED reddens a probe on a zsh that consumes that
 # letter as a modifier and only moves the check count on a zsh that does not, so the CI
-# runner observes one such kill where this host observes none. Recording zero here would
-# assert a property that does not hold where the evidence is actually attested.
-MUTATION_UNASSERTED_KILL_CEILING = 1
+# runner observes one such kill where this host observes none. The writer owns the ceiling
+# because it evaluates fresh fragments before projecting host-observed fields away; this gate
+# reads that same value while validating the tracked authoring receipt.
 # Declared additions, pinned here independently of the generator. The element sweep only
 # REMOVES members, and removal makes a collection that grants an exemption stricter, so the
 # generated sweep cannot express the direction these fail in. Each entry must be caught; a
 # survivor is a live fail-open rather than coverage debt. Pinned so an entry cannot be
 # dropped without this gate saying so.
 EXPECTED_MUTATION_ADDITIONS = {
-    ("hooks/guards/git_grep_engine_guard.py", "_GIT_TERMINAL_OPTIONS", "--icase-pathspecs"),
-    ("hooks/guards/git_grep_engine_guard.py", "_GIT_GLOBAL_OPTIONS_WITH_VALUES", "--no-advice"),
-    ("hooks/guards/git_grep_engine_guard.py", "GREP_SHORT_PATTERN_ARG", "w"),
-    ("hooks/guards/git_grep_engine_guard.py", "GREP_SHORT_OPTIONAL_VALUE", "w"),
+    (
+        "hooks/guards/git_grep_engine_guard.py", "_GIT_TERMINAL_OPTIONS", "set",
+        "--icase-pathspecs", "a non-terminating git global is treated as terminal", (),
+    ),
+    (
+        "hooks/guards/git_grep_engine_guard.py", "_GIT_GLOBAL_OPTIONS_WITH_VALUES", "set",
+        "--no-advice", "a valueless git global is treated as value-taking", (),
+    ),
+    (
+        "hooks/guards/git_grep_engine_guard.py", "GREP_SHORT_PATTERN_ARG", "set", "w",
+        "a boolean grep short option is treated as taking the pattern", (),
+    ),
+    (
+        "hooks/guards/git_grep_engine_guard.py", "GREP_SHORT_OPTIONAL_VALUE", "set", "w",
+        "a boolean grep short option is treated as optionally valued", (),
+    ),
 }
 EXPECTED_MUTATION_COLLECTIONS = {
     ("hooks/bash_command_guard.py", "GUARDS"): 2,
@@ -706,6 +718,7 @@ EXPECTED_MUTATION_COLLECTIONS = {
 }
 EXPECTED_MUTATION_SITES = {
     ("hooks/bash_command_guard.py", "merged guard function cache scope dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "alias shadowing failure channel dropped"),
     ("hooks/guards/git_grep_engine_guard.py", "attached exec argv-zero grammar dropped"),
     ("hooks/guards/git_grep_engine_guard.py", "builtin trap wrapper adoption dropped"),
     ("hooks/guards/git_grep_engine_guard.py", "budget wrap deleted"),
@@ -765,7 +778,7 @@ EXPECTED_MUTATION_SITES = {
      "zsh unmodelled modifier prefix grammar dropped"),
 }
 EXPECTED_MUTATION_SITE_DIGEST = (
-    "d1c160aa924d12bccdbd5aab536ab004754faf9ce60987881363bf6f1283ad0e"
+    "4999ddfc67d497d16a8757a5cfc9ff5a49c7486a20e27a1810a88d53d0945626"
 )
 EXPECTED_MUTATION_EXCLUSIONS = {
     "hooks/guards/git_grep_engine_guard.py::ALIAS_GUARDED":
@@ -793,6 +806,17 @@ EXPECTED_MUTATION_EXCLUSIONS = {
 }
 
 
+def mutation_unasserted_kill_ceiling() -> int:
+    """Read the fresh-observation ceiling from the mutation evidence owner."""
+    spec = importlib.util.spec_from_file_location(
+        "_ci_gate_mutation_ceiling", ROOT / "tools/write-mutation-receipt.py")
+    if spec is None or spec.loader is None:
+        raise ValueError("cannot load write-mutation-receipt.py for its kill ceiling")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.UNASSERTED_KILL_CEILING
+
+
 def mutation_site_policy_digest(descriptors) -> str:
     """Hash every semantic site field under a stable, reviewable framing."""
     records = []
@@ -813,7 +837,7 @@ def mutation_site_policy_digest(descriptors) -> str:
 def mutation_policy_error(plan, exclusions, policy) -> str:
     """Validate the plan against a closed inventory independent of its generator."""
     collection_counts = {}
-    addition_identities = []
+    addition_descriptors = []
     site_identities = []
     site_descriptors = []
     semantic_targets = []
@@ -853,20 +877,27 @@ def mutation_policy_error(plan, exclusions, policy) -> str:
         elif descriptor.get("kind") == "set-addition":
             module = descriptor.get("module")
             name = descriptor.get("name")
+            collection_kind = descriptor.get("collection_kind")
             element = descriptor.get("element")
+            label = descriptor.get("label")
+            allowed = descriptor.get("allowed_statuses")
             if (not isinstance(module, str) or not isinstance(name, str)
-                    or not isinstance(element, str)):
+                    or not isinstance(collection_kind, str)
+                    or not isinstance(element, str) or not isinstance(label, str)
+                    or not isinstance(allowed, (list, tuple))
+                    or any(not isinstance(status, str) for status in allowed)):
                 problems.append(
                     f"addition descriptor fields are invalid for {(module, name)}")
                 continue
-            addition_identities.append((module, name, element))
+            addition_descriptors.append(
+                (module, name, collection_kind, element, label, tuple(allowed)))
         else:
             return f"mutation plan contains unknown kind {descriptor.get('kind')!r}"
-    if len(addition_identities) != len(set(addition_identities)):
-        problems.append("addition inventory contains duplicate module/name/element triples")
-    if set(addition_identities) != policy["additions"]:
+    if len(addition_descriptors) != len(set(addition_descriptors)):
+        problems.append("addition inventory contains duplicate full descriptors")
+    if set(addition_descriptors) != policy["additions"]:
         problems.append(
-            f"addition inventory differs: observed={set(addition_identities)} "
+            f"addition inventory differs: observed={set(addition_descriptors)} "
             f"required={policy['additions']}")
     if collection_counts != policy["collections"]:
         problems.append(
@@ -926,6 +957,7 @@ def mutation_receipt_error(receipt_data=None, plan=None, exclusions=None,
                 "plan_sha256": module.digest(plan),
                 "kill_reasons": frozenset(module.KILL_REASONS),
                 "unasserted_reason": module.UNASSERTED_KILL_REASON,
+                "unasserted_ceiling": module.UNASSERTED_KILL_CEILING,
             }
             current_sources = module.source_digests()
         if policy is None and production_contract:
@@ -940,7 +972,7 @@ def mutation_receipt_error(receipt_data=None, plan=None, exclusions=None,
         if ceiling is None:
             ceiling = MUTATION_SURVIVOR_DEBT_CEILING
         if unasserted_ceiling is None:
-            unasserted_ceiling = MUTATION_UNASSERTED_KILL_CEILING
+            unasserted_ceiling = contract["unasserted_ceiling"]
     except Exception as exc:
         return f"cannot verify the mutation receipt: {exc!r}"
     if not isinstance(receipt_data, dict):
@@ -978,6 +1010,7 @@ def mutation_receipt_error(receipt_data=None, plan=None, exclusions=None,
     if missing or foreign:
         problems.append(f"result inventory missing={missing[:4]} foreign={foreign[:4]}")
     observed_survivors = []
+    addition_survivors = []
     site_survivors = []
     observed_unasserted = []
     unasserted_reason = contract["unasserted_reason"]
@@ -1016,6 +1049,8 @@ def mutation_receipt_error(receipt_data=None, plan=None, exclusions=None,
             observed_survivors.append(mutation_id)
             if expected["kind"] == "site":
                 site_survivors.append(mutation_id)
+            elif expected["kind"] == "set-addition":
+                addition_survivors.append(mutation_id)
         elif reason == unasserted_reason:
             observed_unasserted.append(mutation_id)
     if receipt_data.get("survivors") != observed_survivors:
@@ -1033,6 +1068,8 @@ def mutation_receipt_error(receipt_data=None, plan=None, exclusions=None,
         problems.append("caught is not derived from total minus survivors")
     if site_survivors:
         problems.append(f"site mutations survived: {site_survivors[:4]}")
+    if addition_survivors:
+        problems.append(f"declared additions survived: {addition_survivors[:4]}")
     if len(observed_survivors) > ceiling:
         problems.append(
             f"survivor debt {len(observed_survivors)} exceeds ceiling {ceiling}")
@@ -1271,7 +1308,7 @@ def gate(
         _unasserted = len(_receipt.get("unasserted_kills") or [])
         _caught = _receipt.get("caught")
         print(f"  INFO mutation-kills caught={_caught} scored-on-count-alone={_unasserted} "
-              f"ceiling={MUTATION_UNASSERTED_KILL_CEILING}")
+              f"ceiling={mutation_unasserted_kill_ceiling()}")
     except Exception:
         pass
     generator_source_problem = mutation_generator_source_error()
@@ -1699,6 +1736,7 @@ def selftest() -> int:
             "timeout",
         }),
         "unasserted_reason": "exact-check-count",
+        "unasserted_ceiling": 1,
     }
     mutation_sources = {name: str(index) * 64 for index, name in enumerate(
         mutation_contract["guards"], 1)}
@@ -1736,7 +1774,9 @@ def selftest() -> int:
             "sites": {("guard-b.py", "site probe")},
             "site_digest": mutation_site_policy_digest([site_mutation]),
             "exclusions": mutation_probe["sweep_exclusions"],
-            "additions": {("guard-a.py", "TOKENS", "z")},
+            "additions": {
+                ("guard-a.py", "TOKENS", "set", "z", "probe addition", ()),
+            },
             "floor": 3,
         },
     }
@@ -1942,6 +1982,41 @@ def selftest() -> int:
         "every declared host-observed field is invisible to both cross-host comparisons",
         observed_invisible,
     )
+    _under_ceiling = _copy.deepcopy(stable_probe)
+    _under_ceiling["results"]["a"]["reason"] = writer.UNASSERTED_KILL_REASON
+    _under_ceiling["unasserted_kills"] = ["a"]
+    _over_ceiling = _copy.deepcopy(_under_ceiling)
+    _over_ceiling["results"]["b"]["outcome"] = "caught"
+    _over_ceiling["results"]["b"]["reason"] = writer.UNASSERTED_KILL_REASON
+    _over_ceiling["survivors"] = []
+    _over_ceiling["unasserted_kills"] = ["a", "b"]
+    _over_ceiling["caught"] = 2
+    expect(
+        "fresh host-observed kills are derived and bounded before projection",
+        writer.fresh_observation_error(_under_ceiling) == ""
+        and writer.fresh_observation_error(_over_ceiling) != "",
+    )
+    _saved_receipt = writer.RECEIPT
+    _saved_summary = writer.SUMMARY
+    _saved_normalized_receipt = writer.normalized_receipt
+    with tempfile.TemporaryDirectory(prefix="z-harness-fresh-observation-") as raw:
+        writer.RECEIPT = Path(raw) / "receipt.json"
+        writer.SUMMARY = Path(raw) / "summary.md"
+        writer.RECEIPT.write_text(
+            json.dumps(_over_ceiling, indent=1) + "\n", encoding="utf-8")
+        writer.SUMMARY.write_text(
+            writer.summary_text(_over_ceiling), encoding="utf-8")
+        writer.normalized_receipt = lambda _fragments: _over_ceiling
+        try:
+            _fresh_aggregate_rc = writer.aggregate([], False)
+        finally:
+            writer.RECEIPT = _saved_receipt
+            writer.SUMMARY = _saved_summary
+            writer.normalized_receipt = _saved_normalized_receipt
+    expect(
+        "fresh aggregation enforces the kill ceiling before a stable projection can pass",
+        _fresh_aggregate_rc == 2,
+    )
     # The dual: the projection must not quietly stop comparing something real. Any field it
     # drops beyond the declared set would be a regression nobody could see.
     _projected = writer.platform_stable(stable_probe)
@@ -2089,6 +2164,14 @@ def selftest() -> int:
             mutation_probe["sweep_exclusions"], mutation_args["policy"],
         ) != "",
     )
+    expect(
+        "changing a declared addition's allowed kill modes fails closed",
+        mutation_policy_error(
+            [set_mutation, site_mutation,
+             dict(addition_mutation, allowed_statuses=["timeout"])],
+            mutation_probe["sweep_exclusions"], mutation_args["policy"],
+        ) != "",
+    )
     duplicate_target = dict(
         site_mutation, label="site twin", id="duplicate-target")
     duplicate_target_policy = dict(
@@ -2144,14 +2227,31 @@ def selftest() -> int:
         mutation_receipt_error(
             dict(mutation_probe, caught=999, total=999), **mutation_args) != "",
     )
-    site_survived = dict(site_result, outcome="survived")
+    site_survived = dict(site_result, outcome="survived", reason="survived")
+    caught_set = dict(set_result, outcome="caught", reason="suite-failure")
     expect(
         "a surviving site mutation is always a failure",
         mutation_receipt_error(
             dict(mutation_probe,
-                 results={"set-id": set_result, "site-id": site_survived},
-                 survivors=["set-id", "site-id"], caught=0),
+                 results={"set-id": caught_set, "site-id": site_survived,
+                          "add-id": addition_result},
+                 survivors=["site-id"], caught=2),
             **mutation_args) != "",
+    )
+    compensated_addition = dict(
+        addition_result, outcome="survived", reason="survived")
+    compensated_set = dict(set_result, outcome="caught", reason="suite-failure")
+    expect(
+        "a declared addition survivor fails even when ordinary debt falls by one",
+        mutation_receipt_error(
+            dict(
+                mutation_probe,
+                results={"set-id": compensated_set, "site-id": site_result,
+                         "add-id": compensated_addition},
+                survivors=["add-id"], caught=2,
+            ),
+            **mutation_args,
+        ) != "",
     )
     expect(
         "survivor debt above the closed ceiling is a failure",

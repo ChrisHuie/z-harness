@@ -71,7 +71,6 @@
    "RED  LIMIT: substitution nesting at the cap still reaches the ERE hazard",
    "RED  REVIEW: line continuation before subcommand",
    "RED PROCESS: public envelope retains the direct grep decision",
-   "alias-proof set",
    "backtick-substitution",
    "installed-git aliases",
    "log-family grammar",

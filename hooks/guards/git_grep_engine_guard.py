@@ -5850,7 +5850,7 @@ def installed_git_binaries():
     return tuple(binaries)
 
 
-def check_alias_shadowing_against_installed_gits():
+def check_alias_shadowing_against_installed_gits(runner=None):
     """-> (failures, scan-set). Ask each installed Git whether an alias can redirect a name.
 
     `authorize_git_subcommand` classifies a name on an executable it never runs, using
@@ -5864,6 +5864,7 @@ def check_alias_shadowing_against_installed_gits():
     DO run the alias on 2.20.4, because the command did not exist yet. And `--list-cmds`
     only exists since git 2.18, so it cannot answer for anything older at all.
     """
+    runner = subprocess.run if runner is None else runner
     failures = []
     checks = 1
     binaries = installed_git_binaries()
@@ -5875,8 +5876,8 @@ def check_alias_shadowing_against_installed_gits():
     for binary in binaries:
         checks += 1
         try:
-            version = subprocess.run([binary, "--version"], capture_output=True,
-                                     text=True, timeout=10)
+            version = runner([binary, "--version"], capture_output=True,
+                             text=True, timeout=10)
         except (OSError, subprocess.SubprocessError) as exc:
             failures.append("cannot run %s: %r" % (binary, exc))
             continue
@@ -5891,9 +5892,9 @@ def check_alias_shadowing_against_installed_gits():
                            GIT_AUTHOR_NAME="probe", GIT_AUTHOR_EMAIL="a@b",
                            GIT_COMMITTER_NAME="probe", GIT_COMMITTER_EMAIL="a@b")
                 checks += 1
-                started = subprocess.run([binary, "init", "--quiet", "."], cwd=repo,
-                                         env=env, capture_output=True, text=True,
-                                         timeout=10, stdin=subprocess.DEVNULL)
+                started = runner([binary, "init", "--quiet", "."], cwd=repo,
+                                 env=env, capture_output=True, text=True,
+                                 timeout=10, stdin=subprocess.DEVNULL)
                 if started.returncode:
                     failures.append("cannot initialize an alias-proof fixture for %s: %s"
                                     % (binary, started.stderr.strip()[:100]))
@@ -5903,7 +5904,7 @@ def check_alias_shadowing_against_installed_gits():
                     checks += 1
                     # stdin closed: `git shortlog` with no operand reads it and would
                     # otherwise hang the probe rather than answer the question.
-                    probe = subprocess.run(
+                    probe = runner(
                         [binary, "-c", "alias.%s=!printf %s" % (name, marker), name],
                         cwd=repo, env=env, capture_output=True, text=True, timeout=20,
                         stdin=subprocess.DEVNULL)
@@ -8306,8 +8307,6 @@ def selftest():
     for _label, _detector, _swaps in (
         ("short-option table", check_option_table_against_git,
          {"GREP_SHORT_ENGINE": {k: v for k, v in GREP_SHORT_ENGINE.items() if k != "E"}}),
-        ("alias-proof set", check_alias_shadowing_against_installed_gits,
-         {"CROSS_VERSION_ALIAS_PROOF": frozenset()}),
         ("log-family grammar", check_log_grammar_against_git,
          {"GIT_LOG_ENGINE_TOKENS": {k: v for k, v in GIT_LOG_ENGINE_TOKENS.items()
                                     if k != "-E"}}),
@@ -8322,6 +8321,22 @@ def selftest():
         bad += 0 if _live else 1
         print("  %s the %s detector still reports when its input is broken" % (
             "PASS" if _live else "FAIL", _label))
+
+    def _shadow_archive_runner(argv, **kwargs):
+        if (len(argv) >= 4 and argv[1] == "-c"
+                and argv[2].startswith("alias.archive=")):
+            return subprocess.CompletedProcess(
+                argv, 0, stdout="ZHAR-ALIAS-RAN", stderr="")
+        return subprocess.run(argv, **kwargs)
+
+    _alias_failures = check_alias_shadowing_against_installed_gits(
+        _shadow_archive_runner)[0]
+    _alias_channel_live = any(
+        "archive" in failure and "ambient alias redirect" in failure
+        for failure in _alias_failures)
+    bad += 0 if _alias_channel_live else 1
+    print("  %s the alias-proof detector reports a shadowed real proof member" % (
+        "PASS" if _alias_channel_live else "FAIL"))
 
     # Prove the absence branch is narrow: removing the availability check or broadening
     # it to skip sh/bash/exact-path probes changes these counts and turns this selftest red.

@@ -25,10 +25,11 @@ The element sweep removes members. For a collection that grants an exemption rem
 the guard stricter, so a removal-only sweep returns a clean result on exactly the sets whose
 failure direction it cannot express. Four sets carried a permissive mutation the decision
 corpus did not catch: adding one option to the terminal-option set moves a denied engine
-hazard to `allow`, and adding `w` to either short-option grammar set does the same through
-both the separated and attached spellings. `git grep -n -Ew 'harness\b'` returns no match on
-git 2.46.1 while `-Pw` matches, so those denials guard a live silent-wrong-result rather than
-a theoretical one.
+hazard to `allow`; adding the valueless `--no-advice` global to the value-taking set skips
+the following subcommand during resolution; and adding `w` to either short-option grammar
+set does the same through both the separated and attached spellings. On git 2.46.1,
+`git grep -n -Ew 'harness\b'` returns no match while `-Pw` matches, so those denials guard
+a live silent-wrong-result rather than a theoretical one.
 
 Two of the four were function-local and lower-case, which the plan's enumeration skips on
 both filters, and one duplicated a module-level set that disagreed with it about
@@ -52,7 +53,9 @@ reason, a crash status is only legitimate where the plan declared it tolerable, 
 separate tally of count-only kills is derived from the results rather than reported. An
 arithmetic kill no longer preempts the merged suite where those verdicts are visible, and
 composite fixtures assert them there, because each sub-guard grades only its own fixtures and
-none could see a verdict that depends on another guard's authority.
+none could see a verdict that depends on another guard's authority. Fresh aggregation derives
+and enforces the count-only ceiling before projecting host-observed reasons out of the
+cross-platform comparison.
 
 `add_group` adds executed plus skipped to the check count and the failure count separately,
 so severing a detector's failure return left the count byte-identical while its probes
@@ -188,8 +191,8 @@ is pushed; a prior exact-head run is not evidence for a later fix.
 | `git_grep_engine_guard.py` | `GREP_LONG_REQUIRED_VALUE` | 6 | 6 | 0 |
 | `git_grep_engine_guard.py` | `GREP_SHORT_ENGINE` | 4 | 4 | 0 |
 | `git_grep_engine_guard.py` | `GREP_SHORT_NOARG` | 17 | 17 | 0 |
-| `git_grep_engine_guard.py` | `GREP_SHORT_OPTIONAL_VALUE` | 2 | 2 | 0 |
-| `git_grep_engine_guard.py` | `GREP_SHORT_PATTERN_ARG` | 3 | 3 | 0 |
+| `git_grep_engine_guard.py` | `GREP_SHORT_OPTIONAL_VALUE` | 1 | 1 | 0 |
+| `git_grep_engine_guard.py` | `GREP_SHORT_PATTERN_ARG` | 2 | 2 | 0 |
 | `git_grep_engine_guard.py` | `GREP_SHORT_VALUE` | 4 | 4 | 0 |
 | `git_grep_engine_guard.py` | `PCRE_ESCAPE_LETTERS` | 21 | 21 | 0 |
 | `git_grep_engine_guard.py` | `REV_PATH_SUBCOMMANDS` | 15 | 14 | 1 |
@@ -198,18 +201,26 @@ is pushed; a prior exact-head run is not evidence for a later fix.
 | `git_grep_engine_guard.py` | `TRUSTED_EXTERNAL_NON_FORWARDING_COMMANDS` | 3 | 3 | 0 |
 | `git_grep_engine_guard.py` | `WRAPPER_TERMINAL_OPTIONS` | 2 | 1 | 1 |
 | `git_grep_engine_guard.py` | `_CLOSED_LIMITS` | 5 | 0 | 5 |
-| `git_grep_engine_guard.py` | `_GIT_GLOBAL_OPTIONS_WITH_VALUES` | 9 | 6 | 3 |
-| `git_grep_engine_guard.py` | `_GIT_TERMINAL_OPTIONS` | 9 | 4 | 5 |
+| `git_grep_engine_guard.py` | `_GIT_GLOBAL_OPTIONS_WITH_VALUES` | 8 | 5 | 3 |
+| `git_grep_engine_guard.py` | `_GIT_TERMINAL_OPTIONS` | 8 | 3 | 5 |
 | `zsh_rev_modifier_guard.py` | `MODS` | 13 | 13 | 0 |
 | `zsh_rev_modifier_guard.py` | `MOD_MEANING` | 13 | 0 | 13 |
 | `zsh_rev_modifier_guard.py` | `MOD_PREFIXES` | 4 | 4 | 0 |
 | `zsh_rev_modifier_guard.py` | `MOD_UNMODELLED` | 1 | 1 | 0 |
+
+| module | guarded set | added element | declared mutation | outcome |
+|---|---|---|---|---|
+| `git_grep_engine_guard.py` | `GREP_SHORT_OPTIONAL_VALUE` | `w` | a boolean grep short option is treated as optionally valued | caught |
+| `git_grep_engine_guard.py` | `GREP_SHORT_PATTERN_ARG` | `w` | a boolean grep short option is treated as taking the pattern | caught |
+| `git_grep_engine_guard.py` | `_GIT_GLOBAL_OPTIONS_WITH_VALUES` | `--no-advice` | a valueless git global is treated as value-taking | caught |
+| `git_grep_engine_guard.py` | `_GIT_TERMINAL_OPTIONS` | `--icase-pathspecs` | a non-terminating git global is treated as terminal | caught |
 
 | module | site mutation | outcome |
 |---|---|---|
 | `bash_command_guard.py` | merged guard function cache scope dropped | caught |
 | `git_grep_engine_guard.py` | DEBUG trap alias state dropped | caught |
 | `git_grep_engine_guard.py` | TRAPDEBUG function alias state dropped | caught |
+| `git_grep_engine_guard.py` | alias shadowing failure channel dropped | caught |
 | `git_grep_engine_guard.py` | attached exec argv-zero grammar dropped | caught |
 | `git_grep_engine_guard.py` | budget wrap deleted | caught |
 | `git_grep_engine_guard.py` | builtin trap wrapper adoption dropped | caught |
@@ -254,7 +265,7 @@ is pushed; a prior exact-head run is not evidence for a later fix.
 | `zsh_rev_modifier_guard.py` | zsh unmodelled modifier prefix grammar dropped | caught |
 | `zsh_rev_modifier_guard.py` | zsh unmodelled modifier uncertainty dropped | caught |
 
-241 of 321 planned mutations are caught; 80 exact mutation IDs remain recorded coverage debt.
+242 of 322 planned mutations are caught; 80 exact mutation IDs remain recorded coverage debt.
 
 A kill scored only because the recorded check count moved is not evidence that the suites observe the change. That count is recorded per result and reported by the gate rather than shown here, because whether an assertion fires can differ between hosts and this file is compared across them.
 

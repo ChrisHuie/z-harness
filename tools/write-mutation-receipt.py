@@ -40,6 +40,7 @@ OUTCOMES = {"caught", "survived"}
 # zero assertions failing, while the deletion moved real verdicts from deny to ask. Dropping
 # the reason made a predetermined kill and a detection read identically in the artifact.
 UNASSERTED_KILL_REASON = "exact-check-count"
+UNASSERTED_KILL_CEILING = 1
 KILL_REASONS = frozenset({
     "suite-failure", UNASSERTED_KILL_REASON, "survived", "invalid-receipt", "timeout",
 })
@@ -103,6 +104,14 @@ SITE_MUTATIONS = (
             "def decide(command, _deadline=None):\n"
             "    \"\"\"-> (decision, reason). Worst decision wins; reasons accumulate.\"\"\"\n"
             "    return _decide(command, _deadline)"),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "alias shadowing failure channel dropped", "module": GREP,
+        "anchor": "                if shadowed:\n                    failures.append(",
+        "replacement": (
+            "                if False and shadowed:\n"
+            "                    failures.append("),
         "allowed_statuses": (),
     },
     {
@@ -1204,10 +1213,13 @@ def summary_text(payload: dict) -> str:
         "| module | guarded set | elements | caught | survived |",
         "|---|---|---:|---:|---:|",
     ]
-    grouped, sites = {}, []
+    grouped, additions, sites = {}, [], []
     for entry in payload["results"].values():
         if entry["kind"] == "site":
             sites.append(entry)
+            continue
+        if entry["kind"] == "set-addition":
+            additions.append(entry)
             continue
         key = (entry["module"], entry["name"])
         counts = grouped.setdefault(key, {"caught": 0, "survived": 0})
@@ -1217,6 +1229,16 @@ def summary_text(payload: dict) -> str:
         lines.append(
             f"| `{Path(module).name}` | `{name}` | {total} | "
             f"{counts['caught']} | {counts['survived']} |")
+    lines += [
+        "", "| module | guarded set | added element | declared mutation | outcome |",
+        "|---|---|---|---|---|",
+    ]
+    for entry in sorted(
+            additions,
+            key=lambda item: (item["module"], item["name"], item["element"])):
+        lines.append(
+            f"| `{Path(entry['module']).name}` | `{entry['name']}` | "
+            f"`{entry['element']}` | {entry['label']} | {entry['outcome']} |")
     lines += ["", "| module | site mutation | outcome |", "|---|---|---|"]
     for entry in sorted(sites, key=lambda item: (item["module"], item["label"])):
         lines.append(
@@ -1271,8 +1293,34 @@ def platform_stable(payload):
     return reduced
 
 
+def fresh_observation_error(payload: dict) -> str:
+    """Validate host-observed kill evidence before projecting it away."""
+    if not isinstance(payload, dict):
+        return "fresh mutation receipt root is not an object"
+    results = payload.get("results")
+    if not isinstance(results, dict):
+        return "fresh mutation results are not an object"
+    observed = sorted(
+        mutation_id for mutation_id, result in results.items()
+        if isinstance(result, dict)
+        and result.get("outcome") == "caught"
+        and result.get("reason") == UNASSERTED_KILL_REASON
+    )
+    if payload.get("unasserted_kills") != observed:
+        return "fresh unasserted-kill IDs are not exactly derived from results"
+    if len(observed) > UNASSERTED_KILL_CEILING:
+        return (
+            f"fresh unasserted kills {len(observed)} exceed ceiling "
+            f"{UNASSERTED_KILL_CEILING}")
+    return ""
+
+
 def aggregate(paths: list[Path], accept: bool) -> int:
     payload = normalized_receipt([load_json(path) for path in paths])
+    observation_problem = fresh_observation_error(payload)
+    if observation_problem:
+        print(f"refusing mutation receipt: {observation_problem}", file=sys.stderr)
+        return 2
     summary = summary_text(payload)
     existing = load_json(RECEIPT) if RECEIPT.is_file() else None
     existing_summary = SUMMARY.read_text(encoding="utf-8") if SUMMARY.is_file() else None
@@ -1325,7 +1373,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.list_plan:
             plan, exclusions = mutation_plan()
             kinds = {kind: sum(item["kind"] == kind for item in plan)
-                     for kind in ("set-element", "site")}
+                     for kind in ("set-element", "set-addition", "site")}
             print(json.dumps({
                 "total": len(plan), "kinds": kinds,
                 "plan_sha256": digest(plan), "exclusions": exclusions,

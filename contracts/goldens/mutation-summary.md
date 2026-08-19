@@ -21,8 +21,8 @@
 | `git_grep_engine_guard.py` | `GREP_LONG_REQUIRED_VALUE` | 6 | 6 | 0 |
 | `git_grep_engine_guard.py` | `GREP_SHORT_ENGINE` | 4 | 4 | 0 |
 | `git_grep_engine_guard.py` | `GREP_SHORT_NOARG` | 17 | 17 | 0 |
-| `git_grep_engine_guard.py` | `GREP_SHORT_OPTIONAL_VALUE` | 2 | 2 | 0 |
-| `git_grep_engine_guard.py` | `GREP_SHORT_PATTERN_ARG` | 3 | 3 | 0 |
+| `git_grep_engine_guard.py` | `GREP_SHORT_OPTIONAL_VALUE` | 1 | 1 | 0 |
+| `git_grep_engine_guard.py` | `GREP_SHORT_PATTERN_ARG` | 2 | 2 | 0 |
 | `git_grep_engine_guard.py` | `GREP_SHORT_VALUE` | 4 | 4 | 0 |
 | `git_grep_engine_guard.py` | `PCRE_ESCAPE_LETTERS` | 21 | 21 | 0 |
 | `git_grep_engine_guard.py` | `REV_PATH_SUBCOMMANDS` | 15 | 14 | 1 |
@@ -31,18 +31,26 @@
 | `git_grep_engine_guard.py` | `TRUSTED_EXTERNAL_NON_FORWARDING_COMMANDS` | 3 | 3 | 0 |
 | `git_grep_engine_guard.py` | `WRAPPER_TERMINAL_OPTIONS` | 2 | 1 | 1 |
 | `git_grep_engine_guard.py` | `_CLOSED_LIMITS` | 5 | 0 | 5 |
-| `git_grep_engine_guard.py` | `_GIT_GLOBAL_OPTIONS_WITH_VALUES` | 9 | 6 | 3 |
-| `git_grep_engine_guard.py` | `_GIT_TERMINAL_OPTIONS` | 9 | 4 | 5 |
+| `git_grep_engine_guard.py` | `_GIT_GLOBAL_OPTIONS_WITH_VALUES` | 8 | 5 | 3 |
+| `git_grep_engine_guard.py` | `_GIT_TERMINAL_OPTIONS` | 8 | 3 | 5 |
 | `zsh_rev_modifier_guard.py` | `MODS` | 13 | 13 | 0 |
 | `zsh_rev_modifier_guard.py` | `MOD_MEANING` | 13 | 0 | 13 |
 | `zsh_rev_modifier_guard.py` | `MOD_PREFIXES` | 4 | 4 | 0 |
 | `zsh_rev_modifier_guard.py` | `MOD_UNMODELLED` | 1 | 1 | 0 |
+
+| module | guarded set | added element | declared mutation | outcome |
+|---|---|---|---|---|
+| `git_grep_engine_guard.py` | `GREP_SHORT_OPTIONAL_VALUE` | `w` | a boolean grep short option is treated as optionally valued | caught |
+| `git_grep_engine_guard.py` | `GREP_SHORT_PATTERN_ARG` | `w` | a boolean grep short option is treated as taking the pattern | caught |
+| `git_grep_engine_guard.py` | `_GIT_GLOBAL_OPTIONS_WITH_VALUES` | `--no-advice` | a valueless git global is treated as value-taking | caught |
+| `git_grep_engine_guard.py` | `_GIT_TERMINAL_OPTIONS` | `--icase-pathspecs` | a non-terminating git global is treated as terminal | caught |
 
 | module | site mutation | outcome |
 |---|---|---|
 | `bash_command_guard.py` | merged guard function cache scope dropped | caught |
 | `git_grep_engine_guard.py` | DEBUG trap alias state dropped | caught |
 | `git_grep_engine_guard.py` | TRAPDEBUG function alias state dropped | caught |
+| `git_grep_engine_guard.py` | alias shadowing failure channel dropped | caught |
 | `git_grep_engine_guard.py` | attached exec argv-zero grammar dropped | caught |
 | `git_grep_engine_guard.py` | budget wrap deleted | caught |
 | `git_grep_engine_guard.py` | builtin trap wrapper adoption dropped | caught |
@@ -87,7 +95,7 @@
 | `zsh_rev_modifier_guard.py` | zsh unmodelled modifier prefix grammar dropped | caught |
 | `zsh_rev_modifier_guard.py` | zsh unmodelled modifier uncertainty dropped | caught |
 
-241 of 321 planned mutations are caught; 80 exact mutation IDs remain recorded coverage debt.
+242 of 322 planned mutations are caught; 80 exact mutation IDs remain recorded coverage debt.
 
 A kill scored only because the recorded check count moved is not evidence that the suites observe the change. That count is recorded per result and reported by the gate rather than shown here, because whether an assertion fires can differ between hosts and this file is compared across them.
 

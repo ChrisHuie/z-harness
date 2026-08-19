@@ -85,15 +85,21 @@ jobs:
         if: runner.os == 'Linux'
         timeout-minutes: 10
         run: |
-          # The runner image ships populated package lists, so a mirror that stalls during
-          # `update` need not block the install -- treating update as advisory turns a
-          # transient outage into a slow success instead of a coverage failure. `zsh
-          # --version` is the assertion: if the interpreter is absent this step still fails.
+          # A stalled mirror does not fail, it hangs: `update` sat on one InRelease fetch
+          # until the step budget killed it, so `|| true` never fired -- that guards against
+          # a non-zero exit, not against never exiting. Each refresh is bounded instead, and
+          # is advisory because the runner image ships package lists an install can already
+          # satisfy. `zsh --version` remains the assertion: an absent interpreter still fails
+          # this step, so resilience is not bought with coverage.
+          # No backslash continuations here: this file is pinned byte-for-byte inside a
+          # Python string literal, where a trailing backslash is a line continuation and
+          # would collapse, so the pin could never match the file.
+          APT_OPTS="-o Acquire::Retries=2 -o Acquire::http::Timeout=15"
           for attempt in 1 2 3; do
-            sudo apt-get update -o Acquire::Retries=3 || true
+            sudo timeout 120 apt-get update $APT_OPTS || true
             sudo apt-get install -y zsh && break
-            echo "apt attempt $attempt failed; retrying"
-            sleep 15
+            echo "apt attempt $attempt did not yield zsh; retrying"
+            sleep 10
           done
           zsh --version
       - name: source-bound bootstrap and complete offline gate
@@ -185,15 +191,21 @@ jobs:
       - name: install zsh and assert the exact pull-request head
         timeout-minutes: 10
         run: |
-          # The runner image ships populated package lists, so a mirror that stalls during
-          # `update` need not block the install -- treating update as advisory turns a
-          # transient outage into a slow success instead of a coverage failure. `zsh
-          # --version` is the assertion: if the interpreter is absent this step still fails.
+          # A stalled mirror does not fail, it hangs: `update` sat on one InRelease fetch
+          # until the step budget killed it, so `|| true` never fired -- that guards against
+          # a non-zero exit, not against never exiting. Each refresh is bounded instead, and
+          # is advisory because the runner image ships package lists an install can already
+          # satisfy. `zsh --version` remains the assertion: an absent interpreter still fails
+          # this step, so resilience is not bought with coverage.
+          # No backslash continuations here: this file is pinned byte-for-byte inside a
+          # Python string literal, where a trailing backslash is a line continuation and
+          # would collapse, so the pin could never match the file.
+          APT_OPTS="-o Acquire::Retries=2 -o Acquire::http::Timeout=15"
           for attempt in 1 2 3; do
-            sudo apt-get update -o Acquire::Retries=3 || true
+            sudo timeout 120 apt-get update $APT_OPTS || true
             sudo apt-get install -y zsh && break
-            echo "apt attempt $attempt failed; retrying"
-            sleep 15
+            echo "apt attempt $attempt did not yield zsh; retrying"
+            sleep 10
           done
           zsh --version
           git rev-parse HEAD | grep -Fx '${{ github.event.pull_request.head.sha || github.sha }}'
@@ -228,15 +240,21 @@ jobs:
       - name: install zsh and assert the exact pull-request head
         timeout-minutes: 10
         run: |
-          # The runner image ships populated package lists, so a mirror that stalls during
-          # `update` need not block the install -- treating update as advisory turns a
-          # transient outage into a slow success instead of a coverage failure. `zsh
-          # --version` is the assertion: if the interpreter is absent this step still fails.
+          # A stalled mirror does not fail, it hangs: `update` sat on one InRelease fetch
+          # until the step budget killed it, so `|| true` never fired -- that guards against
+          # a non-zero exit, not against never exiting. Each refresh is bounded instead, and
+          # is advisory because the runner image ships package lists an install can already
+          # satisfy. `zsh --version` remains the assertion: an absent interpreter still fails
+          # this step, so resilience is not bought with coverage.
+          # No backslash continuations here: this file is pinned byte-for-byte inside a
+          # Python string literal, where a trailing backslash is a line continuation and
+          # would collapse, so the pin could never match the file.
+          APT_OPTS="-o Acquire::Retries=2 -o Acquire::http::Timeout=15"
           for attempt in 1 2 3; do
-            sudo apt-get update -o Acquire::Retries=3 || true
+            sudo timeout 120 apt-get update $APT_OPTS || true
             sudo apt-get install -y zsh && break
-            echo "apt attempt $attempt failed; retrying"
-            sleep 15
+            echo "apt attempt $attempt did not yield zsh; retrying"
+            sleep 10
           done
           zsh --version
           git rev-parse HEAD | grep -Fx '${{ github.event.pull_request.head.sha || github.sha }}'

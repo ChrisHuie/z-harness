@@ -91,6 +91,31 @@ is not hypothetical -- the handoff rule was rewritten here while agents went on 
 retired one. A local-only check now compares each installed skill against its reviewed source
 and names the ones that drift; CI skips it, having no installation to compare.
 
+## What the mutation proof costs, and when
+
+The sweep re-measures every mutation to prove the committed receipt is truthful rather than
+merely self-consistent. That is the one thing the offline gate cannot do: it recomputes from
+the receipt's own contents and can never re-measure, so it accepts a self-consistent forgery.
+The sweep is therefore the only check that tells a real measurement from a fabricated one,
+and it reaches every head.
+
+What varies is the work, not the coverage. A head that changes nothing a sweep would
+observe inherits the proof its base carries, because a receipt reaches the base branch only
+through a run that swept it; the aggregate asserts that inheritance positively -- nothing
+observable changed, and the receipt still binds the sources present here. A path filter
+would express the same intent by leaving no entry at all for such a head, and a job class
+with no entry cannot be distinguished from a workflow that failed to run. `RESWEEP_PATHS`,
+`resweep_needed` and `inherited_proof_error` own both decisions so the rule is tested rather
+than expressed as unreachable workflow conditions.
+
+Two failure modes in that workflow were infrastructure wearing the costume of a coverage
+failure. A stalled package mirror does not fail, it hangs, so a guard against a non-zero
+exit never fired and four shards were killed at the ninety-minute job bound having executed
+no mutations at all; the refresh now runs under its own wall-clock bound and is advisory,
+while the interpreter version call remains the assertion. And the aggregate depended only on
+the shards, so a cancelled matrix still reached it and had to infer the problem from missing
+artifacts rather than refusing outright.
+
 ## The timeout is a fail-open boundary
 
 Measured on Claude Code 2.1.233 in an isolated scratch project: a PreToolUse

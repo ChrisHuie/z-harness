@@ -20,25 +20,32 @@ and outbound text INCLUDES that file rather than restating it:
 ```
 
 `tools/ci-gate.py` checks every live include block under this directory against its source,
-requires the registered PR description and roll-up includes, and rejects unregistered live
-blocks. `tools/write-mutation-receipt.py` writes the receipt and summary from one accepted
+requires the registered PR description include, and rejects unregistered live blocks.
+`tools/write-mutation-receipt.py` writes the receipt and summary from one accepted
 aggregate of exact-plan shard fragments; its normal aggregate mode refuses changed output.
 Historical measurements may remain as context only when the document says they are not
 final-head evidence; the include gate does not validate those free-prose claims.
 
 ## Layout
 
-    contracts/review/pr-<number>/rollup.md         the one roll-up comment, edited in place
     contracts/review/pr-<number>/description.md    the pull request body
     contracts/review/pr-<number>/title.txt         the pull request title
 
-One roll-up per pull request, edited rather than reposted. Individual findings are inline
-`path:line` threads and are not drafted here: a finding in a roll-up has no lifecycle and
-drops out unaddressed.
+Head-specific handoffs are append-only external comments, one verified head per comment.
+Never edit, replace, or delete a published handoff. A later head or correction gets a new
+comment that links the earlier record and states what changed. Individual findings remain
+inline `path:line` threads because a PR-level handoff has no finding lifecycle.
 
-The description and title live here for the same reason the roll-up does: both carry measured
-figures, and a figure edited on GitHub is outside every check in this repository. Build each
-by editing the file and posting from it, never by retyping a number into the web form.
+The description and title are mutable current-state documents and live here because both carry
+measured figures. Build each by editing the file and posting from it, never by retyping a number
+into the web form.
+
+Do not keep a mutable tracked file as the current handoff. Its exact head does not exist until
+the implementation commit is final, and committing that head back into the same branch creates
+a self-reference that can never settle. Build the handoff after exact-head verification, POST it
+as a new comment, then read the created comment back and require its body to match the submitted
+bytes. The repository gate validates the sources used to build that handoff; the public read-back
+validates the external comment.
 
 A document that revises published text is built by splicing the published body, not by
 retyping the parts that are unchanged. Retyping is how a wrong figure enters, so it is not

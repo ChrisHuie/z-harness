@@ -27,10 +27,10 @@ WORKFLOW_DIR = ROOT / ".github/workflows"
 # configuration is the set of files, not the one file we happen to name.
 EXPECTED_WORKFLOW_FILES = ("check.yml", "mutation-proof.yml")
 # Every selftest suite carries a numeric floor; the eval corpus was floored only at zero,
-# so cutting 22 scenarios across 6 skills down to a single semantically empty one left the
+# so cutting 25 scenarios across 7 skills down to a single semantically empty one leaves the
 # whole gate green. Lower these in the commit that removes the scenarios.
-EVAL_SCENARIO_FLOOR = 22
-EVAL_SKILL_FLOOR = 6
+EVAL_SCENARIO_FLOOR = 25
+EVAL_SKILL_FLOOR = 7
 
 # One floor per suite, read by both the production spec table and the selftest's fake
 # runner. Two hand-maintained copies had already drifted -- render-packages was floored at
@@ -1105,8 +1105,31 @@ INCLUDE_CLOSE = "<!-- end include -->"
 FENCE_MARKERS = ("```", "~~~")
 REQUIRED_REVIEW_INCLUDES = {
     "pr-8/description.md": ("contracts/goldens/mutation-summary.md",),
-    "pr-8/rollup.md": ("contracts/goldens/mutation-summary.md",),
 }
+HANDOFF_DOCTRINE = {
+    "skills/outbound-drafts/SKILL.md": (
+        "Review handoffs are append-only, one exact head per comment.",
+        "Never edit, replace, or delete a posted handoff",
+    ),
+    "skills/pr-review-method/SKILL.md": (
+        "A head-specific handoff",
+        "it never owns a finding",
+    ),
+    "skills/pr-review-method/references/deferred.md": (
+        "append-only handoff comments, one exact head per comment",
+    ),
+    "contracts/review/README.md": (
+        "Head-specific handoffs are append-only external comments",
+        "Do not keep a mutable tracked file as the current handoff",
+    ),
+}
+FORBIDDEN_HANDOFF_DOCTRINE = (
+    "one roll-up comment per pr",
+    "one roll-up per pull request",
+    "one tracking comment edited in place",
+    "edited in place across rounds",
+    "edited rather than reposted",
+)
 
 
 def include_blocks(lines):
@@ -1231,6 +1254,38 @@ def review_include_error(review_root=None, required_inventory=None) -> str:
     return ""
 
 
+def review_handoff_policy_error(source_texts=None, review_root=None) -> str:
+    """Require append-only head-specific handoffs and reject the retired mutable artifact."""
+    problems = []
+    if source_texts is None:
+        source_texts = {}
+        for relative in HANDOFF_DOCTRINE:
+            path = ROOT / relative
+            if not path.is_file():
+                problems.append(f"missing handoff doctrine source {relative}")
+                continue
+            source_texts[relative] = path.read_text(encoding="utf-8")
+    for relative, required in HANDOFF_DOCTRINE.items():
+        text = source_texts.get(relative)
+        if text is None:
+            problems.append(f"missing handoff doctrine source {relative}")
+            continue
+        normalized_text = re.sub(r"\s+", " ", text)
+        for phrase in required:
+            if phrase not in normalized_text:
+                problems.append(f"{relative} is missing required handoff rule {phrase!r}")
+    joined = re.sub(r"\s+", " ", "\n".join(source_texts.values())).casefold()
+    for phrase in FORBIDDEN_HANDOFF_DOCTRINE:
+        if phrase in joined:
+            problems.append(f"retired mutable-handoff rule is present: {phrase!r}")
+    root = REVIEW_ROOT if review_root is None else Path(review_root)
+    mutable_handoffs = sorted(root.rglob("rollup.md")) if root.is_dir() else []
+    if mutable_handoffs:
+        labels = [str(review_path_label(path)) for path in mutable_handoffs]
+        problems.append(f"retired mutable handoff artifact is present: {labels}")
+    return ("review handoff policy mismatch: " + "; ".join(problems[:8])) if problems else ""
+
+
 def gated_environment(which=None, runner=None) -> str:
     """Name the interpreters this run's verdicts were measured against.
 
@@ -1335,6 +1390,10 @@ def gate(
     print(f"  {'FAIL' if review_problem else 'PASS'} review-includes")
     if review_problem:
         failures.append(review_problem)
+    handoff_problem = review_handoff_policy_error()
+    print(f"  {'FAIL' if handoff_problem else 'PASS'} review-handoff-policy")
+    if handoff_problem:
+        failures.append(handoff_problem)
     completed = 1
     with tempfile.TemporaryDirectory(prefix="z-harness-ci-gate-") as raw:
         render_root = Path(raw) / "rendered"
@@ -2300,6 +2359,46 @@ def selftest() -> int:
         mutation_summary_error(
             receipt_data=recorded_receipt, summary_bytes=forged_summary) != "",
     )
+    handoff_sources = {
+        relative: (ROOT / relative).read_text(encoding="utf-8")
+        for relative in HANDOFF_DOCTRINE
+    }
+    expect(
+        "review handoff doctrine requires append-only exact-head comments",
+        review_handoff_policy_error(source_texts=handoff_sources) == "",
+    )
+    missing_append_only = dict(handoff_sources)
+    missing_append_only["skills/outbound-drafts/SKILL.md"] = (
+        missing_append_only["skills/outbound-drafts/SKILL.md"].replace(
+            "Review handoffs are append-only, one exact head per comment.",
+            "Review handoffs summarize the current state.",
+            1,
+        )
+    )
+    expect(
+        "removing the append-only rule turns the doctrine check red",
+        review_handoff_policy_error(source_texts=missing_append_only) != "",
+    )
+    mutable_comment_rule = dict(handoff_sources)
+    mutable_comment_rule["skills/outbound-drafts/SKILL.md"] += (
+        "\nOne roll-up comment per PR, edited in place across rounds.\n"
+    )
+    expect(
+        "reintroducing the edit-in-place rule turns the doctrine check red",
+        review_handoff_policy_error(source_texts=mutable_comment_rule) != "",
+    )
+    with tempfile.TemporaryDirectory(prefix="z-harness-handoff-policy-") as raw:
+        retired_review_root = Path(raw)
+        (retired_review_root / "pr-8").mkdir()
+        (retired_review_root / "pr-8/rollup.md").write_text(
+            "# mutable handoff\n", encoding="utf-8")
+        expect(
+            "a tracked mutable handoff artifact turns the doctrine check red",
+            review_handoff_policy_error(
+                source_texts=handoff_sources,
+                review_root=retired_review_root,
+            ) != "",
+        )
     expect("outbound review text matches the sources it includes", review_include_error() == "")
     with tempfile.TemporaryDirectory(prefix="z-harness-review-") as raw:
         review = Path(raw)
@@ -2468,6 +2567,15 @@ def selftest() -> int:
         )
     finally:
         SUITE_FLOORS["harness_check"] = recorded_harness_floor
+    original_handoff_policy = review_handoff_policy_error
+    globals()["review_handoff_policy_error"] = lambda: "planted handoff-policy failure"
+    try:
+        expect(
+            "production gate adopts the review handoff policy result",
+            gate(fake_runner, emit_child_output=False) != 0,
+        )
+    finally:
+        globals()["review_handoff_policy_error"] = original_handoff_policy
     def invalid_child_runner(argv: Sequence[str]) -> Result:
         result = fake_runner(argv)
         if "harness_check.py --ci" in " ".join(argv):

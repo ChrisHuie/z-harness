@@ -68,10 +68,10 @@ executable form, plus the rules that only fire once there is a draft.
 - **Every outbound artifact carries the verified head id and a footer split `Ran:` /
   `Not-run:`** — the head you asserted against, not the one you fetched first, and the scope of
   what actually executed.
-- **One roll-up comment per PR, edited in place across rounds** — never a new one each round —
-  carrying that head id so a reader can tell when it went stale. **This governs the summary
-  only.** An individual review finding is an inline `path:line` thread with its own lifecycle
-  (`pr-review-method`); putting findings in the roll-up is what drops them unaddressed.
+- **Review handoffs are append-only, one exact head per comment.** Never edit, replace, or
+  delete a posted handoff; a later head or correction gets a new comment that links the earlier
+  record. Re-read the created comment and require an exact body match. Individual findings stay
+  in inline `path:line` threads with their own lifecycle (`pr-review-method`).
 
 ## Publishing tooling
 

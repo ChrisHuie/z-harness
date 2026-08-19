@@ -29,6 +29,20 @@ EXPECTED_WORKFLOW_FILES = ("check.yml", "mutation-proof.yml")
 # Every selftest suite carries a numeric floor; the eval corpus was floored only at zero,
 # so cutting 25 scenarios across 7 skills down to a single semantically empty one leaves the
 # whole gate green. Lower these in the commit that removes the scenarios.
+# Per skill, not a total. The aggregate floors below compare only sums, so deleting an
+# entire skill's eval corpus and adding the same number of throwaway files under any other
+# skill restored both totals and passed the whole gate. A deletion must not be maskable by
+# an addition somewhere else, so each skill's corpus is floored where it lives. Counted from
+# disk here rather than read from the child receipt, which reports only totals.
+EVAL_SCENARIO_FLOORS = {
+    "craft-context-file": 3,
+    "craft-prompt": 3,
+    "craft-skill": 3,
+    "git-workflow": 3,
+    "ground-claims": 6,
+    "outbound-drafts": 3,
+    "review-prompt": 4,
+}
 EVAL_SCENARIO_FLOOR = 25
 EVAL_SKILL_FLOOR = 7
 
@@ -310,7 +324,7 @@ def command_specs(render_root: Path) -> List[Tuple[List[str], ReceiptSpec]]:
                 re.compile(
                     r"^EVAL-VALIDATE-SUMMARY scenarios=(?P<scenarios>\d+) "
                     r"skills=(?P<skills>\d+) failures=(?P<failures>\d+) "
-                    r"exit=(?P<exit>\d+)$"
+                    r"scope=shape-only exit=(?P<exit>\d+)$"
                 ),
                 lambda match, code: (
                     f"eval corpus shrank: scenarios={match.group('scenarios')} "
@@ -661,6 +675,20 @@ MUTATION_PLAN_FLOOR = 322
 # generated sweep cannot express the direction these fail in. Each entry must be caught; a
 # survivor is a live fail-open rather than coverage debt. Pinned so an entry cannot be
 # dropped without this gate saying so.
+# The committed receipt's kill reasons are dropped from the cross-host comparison, because
+# whether an assertion fires can differ by environment. Dropped from comparison also means
+# unfalsifiable: relabelling every recorded kill as a real assertion and emptying the tally
+# passed both this gate and the CI aggregate, which is exactly the overstatement the reason
+# field exists to prevent. Pinning the committed set by identity puts it back under review --
+# laundering it now requires editing this constant, which a reader sees. This constrains the
+# committed artifact only; it does not claim any host observes the same set.
+# Empty because the committed receipt was measured on a host whose zsh consumes "W" as a
+# modifier, so that mutation reddens a real probe there. A host whose zsh does not will
+# observe one arithmetic kill instead, which the ceiling admits; the cross-host comparison
+# never sees the difference. This pin constrains the COMMITTED set only, and it ratchets in
+# both directions: a regeneration that produces a different set fails until this constant is
+# updated, so the set can neither grow unnoticed nor be quietly emptied.
+EXPECTED_UNASSERTED_KILLS: set[tuple] = set()
 EXPECTED_MUTATION_ADDITIONS = {
     (
         "hooks/guards/git_grep_engine_guard.py", "_GIT_TERMINAL_OPTIONS", "set",
@@ -927,7 +955,8 @@ def mutation_policy_error(plan, exclusions, policy) -> str:
 
 def mutation_receipt_error(receipt_data=None, plan=None, exclusions=None,
                            contract=None, current_sources=None, ceiling=None,
-                           policy=None, unasserted_ceiling=None) -> str:
+                           policy=None, unasserted_ceiling=None,
+                           unasserted_identities=None) -> str:
     """Validate exact mutation schema, plan coverage, and every derived field."""
     try:
         production_contract = plan is None or exclusions is None or contract is None
@@ -973,6 +1002,8 @@ def mutation_receipt_error(receipt_data=None, plan=None, exclusions=None,
             ceiling = MUTATION_SURVIVOR_DEBT_CEILING
         if unasserted_ceiling is None:
             unasserted_ceiling = contract["unasserted_ceiling"]
+        if unasserted_identities is None:
+            unasserted_identities = EXPECTED_UNASSERTED_KILLS
     except Exception as exc:
         return f"cannot verify the mutation receipt: {exc!r}"
     if not isinstance(receipt_data, dict):
@@ -1057,6 +1088,14 @@ def mutation_receipt_error(receipt_data=None, plan=None, exclusions=None,
         problems.append("survivor IDs are not exactly derived from results")
     if receipt_data.get("unasserted_kills") != observed_unasserted:
         problems.append("unasserted-kill IDs are not exactly derived from results")
+    recorded_unasserted = {
+        (results[i].get("module"), results[i].get("name"), results[i].get("element"))
+        for i in observed_unasserted if isinstance(results.get(i), dict)
+    }
+    if recorded_unasserted != set(unasserted_identities):
+        problems.append(
+            f"recorded unasserted kills {sorted(recorded_unasserted)} differ from the "
+            f"reviewed set {sorted(unasserted_identities)}")
     if len(observed_unasserted) > unasserted_ceiling:
         problems.append(
             f"unasserted kills {len(observed_unasserted)} exceed ceiling "
@@ -1106,6 +1145,7 @@ FENCE_MARKERS = ("```", "~~~")
 REQUIRED_REVIEW_INCLUDES = {
     "pr-8/description.md": ("contracts/goldens/mutation-summary.md",),
 }
+REGISTERED_REVIEW_DOCUMENTS = frozenset({"description.md", "title.txt", "README.md"})
 HANDOFF_DOCTRINE = {
     "skills/outbound-drafts/SKILL.md": (
         "Review handoffs are append-only, one exact head per comment.",
@@ -1254,7 +1294,27 @@ def review_include_error(review_root=None, required_inventory=None) -> str:
     return ""
 
 
-def review_handoff_policy_error(source_texts=None, review_root=None) -> str:
+def eval_corpus_distribution_error(counts=None, floors=None) -> str:
+    """Require every skill's own eval corpus to hold, not merely the totals."""
+    floors = EVAL_SCENARIO_FLOORS if floors is None else floors
+    if counts is None:
+        counts = {}
+        skills_root = ROOT / "skills"
+        if skills_root.is_dir():
+            for skill in sorted(skills_root.iterdir()):
+                found = sorted((skill / "evals").glob("*.json")) if skill.is_dir() else []
+                if found:
+                    counts[skill.name] = len(found)
+    problems = []
+    for skill, floor in sorted(floors.items()):
+        observed = counts.get(skill, 0)
+        if observed < floor:
+            problems.append(f"{skill} holds {observed} scenario(s), floor {floor}")
+    return ("eval corpus distribution: " + "; ".join(problems[:6])) if problems else ""
+
+
+def review_handoff_policy_error(source_texts=None, review_root=None,
+                                extra_texts=None) -> str:
     """Require append-only head-specific handoffs and reject the retired mutable artifact."""
     problems = []
     if source_texts is None:
@@ -1274,16 +1334,64 @@ def review_handoff_policy_error(source_texts=None, review_root=None) -> str:
         for phrase in required:
             if phrase not in normalized_text:
                 problems.append(f"{relative} is missing required handoff rule {phrase!r}")
-    joined = re.sub(r"\s+", " ", "\n".join(source_texts.values())).casefold()
-    for phrase in FORBIDDEN_HANDOFF_DOCTRINE:
-        if phrase in joined:
-            problems.append(f"retired mutable-handoff rule is present: {phrase!r}")
+    # Scan every markdown document, not only the four that carry the rule. The retired
+    # spelling is not legitimate anywhere here, and the file that outranks every skill --
+    # AGENTS.md -- is not among the four, so a scan limited to them left the one document
+    # that could reinstate the rule with the most authority entirely unread.
+    scanned = dict(source_texts)
+    if extra_texts is None:
+        # Tracked files only. A directory walk also reads nested worktrees and any other
+        # untracked checkout living inside the tree, which are other branches' bytes and
+        # not this commit's claim -- the same mistake that makes C8 red locally and green
+        # in CI. `git ls-files` is the scan set the commit is actually accountable for.
+        listed = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files", "-z", "--", "*.md"],
+            capture_output=True, text=True)
+        if listed.returncode != 0:
+            problems.append("cannot enumerate tracked markdown for the forbidden-rule scan")
+            names = []
+        else:
+            names = [name for name in listed.stdout.split("\0") if name]
+        for name in names:
+            if name in scanned:
+                continue
+            try:
+                scanned[name] = (ROOT / name).read_text(encoding="utf-8")
+            except OSError:
+                continue
+    else:
+        scanned.update(extra_texts)
+    for relative, text in sorted(scanned.items()):
+        joined = re.sub(r"\s+", " ", text).casefold()
+        for phrase in FORBIDDEN_HANDOFF_DOCTRINE:
+            if phrase in joined:
+                problems.append(
+                    f"retired mutable-handoff rule is present in {relative}: {phrase!r}")
+    # An allowlist, not a denylist of one basename. The doctrine forbids keeping a mutable
+    # tracked file as the current handoff -- not keeping a file called rollup.md -- and a
+    # denylist is escaped by renaming, which is how a tracked handoff.md carrying a
+    # hand-typed figure passed every review check.
     root = REVIEW_ROOT if review_root is None else Path(review_root)
-    mutable_handoffs = sorted(root.rglob("rollup.md")) if root.is_dir() else []
-    if mutable_handoffs:
-        labels = [str(review_path_label(path)) for path in mutable_handoffs]
-        problems.append(f"retired mutable handoff artifact is present: {labels}")
-    return ("review handoff policy mismatch: " + "; ".join(problems[:8])) if problems else ""
+    if root.is_dir():
+        unregistered = sorted(
+            str(review_path_label(path))
+            for path in root.rglob("*")
+            if path.is_file() and path.name not in REGISTERED_REVIEW_DOCUMENTS
+        )
+        if unregistered:
+            problems.append(
+                f"unregistered document in the review tree, which may be a mutable "
+                f"handoff: {unregistered[:6]}")
+    if not problems:
+        return ""
+    # Per testing-ci: a guard that models only the spellings it knows must say so where the
+    # verdict is read. Required-phrase presence is monotone -- a document can carry the rule
+    # and contradict it in the next paragraph -- and the forbidden list is a denylist that
+    # a paraphrase walks past. Both arms are tripwires, not proofs.
+    return (
+        "review handoff policy mismatch: " + "; ".join(problems[:8])
+        + " (scope: literal retired spellings across tracked markdown and registered "
+        + "document names; a paraphrase or an added contradicting rule is out of scope)")
 
 
 def gated_environment(which=None, runner=None) -> str:
@@ -1363,9 +1471,10 @@ def gate(
         _unasserted = len(_receipt.get("unasserted_kills") or [])
         _caught = _receipt.get("caught")
         print(f"  INFO mutation-kills caught={_caught} scored-on-count-alone={_unasserted} "
-              f"ceiling={mutation_unasserted_kill_ceiling()}")
-    except Exception:
-        pass
+              f"ceiling={mutation_unasserted_kill_ceiling()} "
+              f"(recorded in the committed receipt, not measured on this host)")
+    except Exception as exc:
+        print(f"  INFO mutation-kills unavailable: {exc!r}")
     generator_source_problem = mutation_generator_source_error()
     print(f"  {'FAIL' if generator_source_problem else 'PASS'} mutation-generator-source")
     if generator_source_problem:
@@ -1390,6 +1499,10 @@ def gate(
     print(f"  {'FAIL' if review_problem else 'PASS'} review-includes")
     if review_problem:
         failures.append(review_problem)
+    distribution_problem = eval_corpus_distribution_error()
+    print(f"  {'FAIL' if distribution_problem else 'PASS'} eval-corpus-distribution")
+    if distribution_problem:
+        failures.append(distribution_problem)
     handoff_problem = review_handoff_policy_error()
     print(f"  {'FAIL' if handoff_problem else 'PASS'} review-handoff-policy")
     if handoff_problem:
@@ -1828,6 +1941,7 @@ def selftest() -> int:
         "current_sources": mutation_sources,
         "ceiling": 1,
         "unasserted_ceiling": 1,
+        "unasserted_identities": set(),
         "policy": {
             "collections": {("guard-a.py", "TOKENS"): 1},
             "sites": {("guard-b.py", "site probe")},
@@ -2116,7 +2230,14 @@ def selftest() -> int:
     )
     expect(
         "a kill scored only by a moved check count is recorded as unasserted",
-        mutation_receipt_error(unasserted_probe, **mutation_args) == "",
+        mutation_receipt_error(
+            unasserted_probe,
+            **dict(mutation_args,
+                   unasserted_identities={("guard-b.py", None, None)})) == "",
+    )
+    expect(
+        "an unasserted kill outside the reviewed set fails",
+        mutation_receipt_error(unasserted_probe, **mutation_args) != "",
     )
     expect(
         "an unasserted kill omitted from the tally fails",
@@ -2364,6 +2485,16 @@ def selftest() -> int:
         for relative in HANDOFF_DOCTRINE
     }
     expect(
+        "every skill's own eval corpus meets its floor",
+        eval_corpus_distribution_error() == "",
+    )
+    expect(
+        "a skill whose eval corpus is emptied fails even when the total is restored",
+        eval_corpus_distribution_error(
+            counts=dict({k: v for k, v in EVAL_SCENARIO_FLOORS.items()},
+                        **{"outbound-drafts": 0, "craft-prompt": 6})) != "",
+    )
+    expect(
         "review handoff doctrine requires append-only exact-head comments",
         review_handoff_policy_error(source_texts=handoff_sources) == "",
     )
@@ -2548,7 +2679,7 @@ def selftest() -> int:
             return Result(0, f"SELFTEST-SUMMARY suite=zsh_rev_modifier_guard checks={expected_selftest_checks('zsh_rev_modifier_guard')} failures=0\n")
         if "run-skill-evals.py" in joined:
             return Result(0, f"EVAL-VALIDATE-SUMMARY scenarios={EVAL_SCENARIO_FLOOR} "
-                          f"skills={EVAL_SKILL_FLOOR} failures=0 exit=0\n")
+                          f"skills={EVAL_SKILL_FLOOR} failures=0 scope=shape-only exit=0\n")
         if "--output" in argv:
             return Result(0, "RENDER-SUMMARY action=render targets=5 failures=0 exit=0\n")
         return Result(0, "RENDER-SUMMARY action=verify targets=5 failures=0 exit=0\n")
@@ -2558,6 +2689,29 @@ def selftest() -> int:
         gate(fake_runner, emit_child_output=False) == 0,
     )
     expect("production registry is non-empty", len(fake_calls) == 9)
+    # The fake runner above emits the very constants the production check compares against,
+    # so a floor change can never redden it -- the comparison is FLOOR < FLOOR. These arms
+    # emit a corpus one below each floor instead, so the error path executes at least once.
+    def shrunken_scenario_runner(argv):
+        if "run-skill-evals.py" in " ".join(argv):
+            return Result(0, f"EVAL-VALIDATE-SUMMARY scenarios={EVAL_SCENARIO_FLOOR - 1} "
+                          f"skills={EVAL_SKILL_FLOOR} failures=0 scope=shape-only exit=0\n")
+        return fake_runner(argv)
+
+    def shrunken_skill_runner(argv):
+        if "run-skill-evals.py" in " ".join(argv):
+            return Result(0, f"EVAL-VALIDATE-SUMMARY scenarios={EVAL_SCENARIO_FLOOR} "
+                          f"skills={EVAL_SKILL_FLOOR - 1} failures=0 scope=shape-only exit=0\n")
+        return fake_runner(argv)
+
+    expect(
+        "production gate turns red when the eval corpus falls below its scenario floor",
+        gate(shrunken_scenario_runner, emit_child_output=False) != 0,
+    )
+    expect(
+        "production gate turns red when the eval corpus falls below its skill floor",
+        gate(shrunken_skill_runner, emit_child_output=False) != 0,
+    )
     recorded_harness_floor = SUITE_FLOORS["harness_check"]
     SUITE_FLOORS["harness_check"] = recorded_harness_floor - 1
     try:

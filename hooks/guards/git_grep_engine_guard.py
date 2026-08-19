@@ -5850,7 +5850,7 @@ def installed_git_binaries():
     return tuple(binaries)
 
 
-def check_alias_shadowing_against_installed_gits(runner=None):
+def check_alias_shadowing_against_installed_gits(*, runner=None):
     """-> (failures, scan-set). Ask each installed Git whether an alias can redirect a name.
 
     `authorize_git_subcommand` classifies a name on an executable it never runs, using
@@ -8322,21 +8322,29 @@ def selftest():
         print("  %s the %s detector still reports when its input is broken" % (
             "PASS" if _live else "FAIL", _label))
 
-    def _shadow_archive_runner(argv, **kwargs):
+    def _shadow_every_proof_member(argv, **kwargs):
+        # Shadow whichever name the probe is currently testing, so this control witnesses
+        # every member rather than one. A single-witness control stays green when a change
+        # breaks detection for only some names -- the hyphenated ones, say, if the alias
+        # spelling at the probe site ever mis-quotes them.
         if (len(argv) >= 4 and argv[1] == "-c"
-                and argv[2].startswith("alias.archive=")):
+                and argv[2].startswith("alias.%s=" % argv[3])):
             return subprocess.CompletedProcess(
                 argv, 0, stdout="ZHAR-ALIAS-RAN", stderr="")
         return subprocess.run(argv, **kwargs)
 
     _alias_failures = check_alias_shadowing_against_installed_gits(
-        _shadow_archive_runner)[0]
-    _alias_channel_live = any(
-        "archive" in failure and "ambient alias redirect" in failure
-        for failure in _alias_failures)
+        runner=_shadow_every_proof_member)[0]
+    _alias_reported = {
+        name for name in CROSS_VERSION_ALIAS_PROOF
+        for failure in _alias_failures
+        if "ambient alias redirect" in failure and repr(name) in failure
+    }
+    _alias_channel_live = _alias_reported == set(CROSS_VERSION_ALIAS_PROOF)
     bad += 0 if _alias_channel_live else 1
-    print("  %s the alias-proof detector reports a shadowed real proof member" % (
-        "PASS" if _alias_channel_live else "FAIL"))
+    print("  %s the alias-proof detector reports every shadowed proof member (%d/%d)" % (
+        "PASS" if _alias_channel_live else "FAIL",
+        len(_alias_reported), len(CROSS_VERSION_ALIAS_PROOF)))
 
     # Prove the absence branch is narrow: removing the availability check or broadening
     # it to skip sh/bash/exact-path probes changes these counts and turns this selftest red.

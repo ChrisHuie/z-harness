@@ -107,9 +107,11 @@ SELFTEST_SUITES = [
     ("codex-cost", ["tools/codex-cost.py", "--selftest"], 28),
     ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 42),
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 8),
+    ("verify-handoff-comment",
+     ["tools/verify-handoff-comment.py", "--selftest"], 11),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
-    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 155),
+    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 160),
     ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 65),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
     ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 16),
@@ -865,6 +867,30 @@ class Run:
                                 "--verify-harness"], capture_output=True)
             self.result("C7", v.returncode == 0,
                         f"[local] askq --verify-harness: exit {v.returncode}")
+            # A rule reviewed in this repository governs nothing until the installed copy
+            # carries it. `~/.claude` is the live installation and this tree is only a
+            # synchronization source, so an agent loads the installed bytes: a doctrine
+            # changed here and not there is enforced against a copy nobody executes. That
+            # is not hypothetical -- the handoff rule was rewritten here while every agent
+            # went on following the retired one, which no gate could see because CI has no
+            # `~/.claude` to compare against. Local-only for that same reason.
+            installed_root = os.path.expanduser("~/.claude/skills")
+            if os.path.isdir(installed_root):
+                drifted = []
+                for name in sorted(os.listdir(os.path.join(self.root, "skills"))):
+                    source = os.path.join(self.root, "skills", name, "SKILL.md")
+                    installed = os.path.join(installed_root, name, "SKILL.md")
+                    if not os.path.isfile(source) or not os.path.isfile(installed):
+                        continue
+                    with open(source, "rb") as fh:
+                        source_bytes = fh.read()
+                    with open(installed, "rb") as fh:
+                        installed_bytes = fh.read()
+                    if source_bytes != installed_bytes:
+                        drifted.append(name)
+                self.result("C7", not drifted,
+                            f"[local] installed skills match their reviewed source "
+                            f"(drifted: {drifted or 'none'})")
 
     # ---- C8 ----------------------------------------------------------------
     def c8_reserved_basenames(self):
@@ -875,15 +901,31 @@ class Run:
         identical bytes under docs/ failed — so the one directory a reviewer is least
         likely to read was the one place the guard could not see.
         """
+        # Tracked files only. A directory walk also descends into nested worktrees and any
+        # other untracked checkout living inside the tree, whose reserved basenames are
+        # another branch's bytes rather than this commit's claim -- so the check went red
+        # locally and stayed green in CI, where no such directory exists. A verdict that
+        # depends on which untracked directories happen to be present is not a verdict.
         hits, scanned = [], 0
-        for dirpath, dirs, files in os.walk(self.root):
-            dirs[:] = [d for d in dirs if d != ".git"]
-            for f in files:
-                scanned += 1
-                if f.lower() in RESERVED_BASENAMES:
-                    p = os.path.join(dirpath, f)
-                    if os.path.dirname(os.path.abspath(p)) != os.path.abspath(self.root):
-                        hits.append(os.path.relpath(p, self.root))
+        listed = subprocess.run(["git", "-C", self.root, "ls-files", "-z"],
+                                capture_output=True, text=True)
+        if listed.returncode == 0:
+            tracked = [n for n in listed.stdout.split("\0") if n]
+        else:
+            # Planted-defect fixture trees are plain directories, not repositories. Fall
+            # back to the walk there so the fixtures still exercise this logic; the tracked
+            # set is what matters in a real checkout, which is where the nested worktrees
+            # that made this check unreliable actually live.
+            tracked = []
+            for dirpath, dirs, files in os.walk(self.root):
+                dirs[:] = [d for d in dirs if d != ".git"]
+                for f in files:
+                    tracked.append(os.path.relpath(os.path.join(dirpath, f), self.root))
+        for name in tracked:
+            scanned += 1
+            if os.path.basename(name).lower() in RESERVED_BASENAMES:
+                if os.path.dirname(name):
+                    hits.append(name)
         if not scanned:
             self.result("C8", False, "zero files in scan set")
             return

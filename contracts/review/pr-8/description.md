@@ -66,6 +66,31 @@ The generator that measures the guards had no external pin; its only digest live
 receipt it writes. It now carries an authored entry in the source registry like the guards
 themselves.
 
+## Review handoffs and the copy that executes
+
+A handoff comment is an attestation: its whole content is that at one exact head, these
+commands ran and measured this. Editing one in place either strands the head id while the
+figures move or destroys the record that the earlier head was ever attested, so handoffs are
+append-only, one exact head per comment, and a later head gets a new comment linking the
+earlier record. The description and title stay mutable, because they are current-state
+documents rather than attestations.
+
+Two limits are worth stating rather than leaving to be discovered. The doctrine check is a
+tripwire on literal retired spellings across tracked markdown plus an allowlist of registered
+document names; required-phrase presence is monotone, so a document can carry the rule and
+contradict it in the next paragraph, and a paraphrase walks past the denylist. It says so in
+its own output. And the repository gate can only ever validate the sources a handoff was
+built from -- never the comment that was published -- so the read-back is a command,
+`tools/verify-handoff-comment.py`, which byte-compares the posted body against the submitted
+file and exits non-zero on any difference or on a comment it cannot read.
+
+The rule governs nothing until the installed copy carries it. `~/.claude` is the live
+installation and this tree is only a synchronization source, so an agent loads the installed
+bytes: a doctrine changed here and not there is enforced against a copy nobody executes. That
+is not hypothetical -- the handoff rule was rewritten here while agents went on following the
+retired one. A local-only check now compares each installed skill against its reviewed source
+and names the ones that drift; CI skips it, having no installation to compare.
+
 ## The timeout is a fail-open boundary
 
 Measured on Claude Code 2.1.233 in an isolated scratch project: a PreToolUse

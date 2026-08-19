@@ -44,8 +44,17 @@ Do not keep a mutable tracked file as the current handoff. Its exact head does n
 the implementation commit is final, and committing that head back into the same branch creates
 a self-reference that can never settle. Build the handoff after exact-head verification, POST it
 as a new comment, then read the created comment back and require its body to match the submitted
-bytes. The repository gate validates the sources used to build that handoff; the public read-back
-validates the external comment.
+bytes. The repository gate validates the sources used to build that handoff; the read-back
+validates the external comment, and it is a command rather than an instruction:
+
+```
+tools/verify-handoff-comment.py --repo <owner/name> --comment-id <id> --body-file <draft>
+```
+
+It exits 0 only on a byte-exact match, 1 on a difference naming the first line that differs,
+and 2 when the comment cannot be read -- never silently clean. Nothing else in this repository
+can see a posted comment, so a handoff that is never read back carries no mechanical evidence
+at all, whatever the gate says about the sources it was built from.
 
 A document that revises published text is built by splicing the published body, not by
 retyping the parts that are unchanged. Retyping is how a wrong figure enters, so it is not

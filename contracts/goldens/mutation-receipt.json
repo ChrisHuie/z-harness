@@ -4,7 +4,7 @@
  "note": "which guard mutations the shipped suites catch; each result's reason is an observation from the host that generated it, not a cross-platform fact",
  "generator_sha256": "b7f3cf9ac51f1461fbd9aa29b032cc228ea7f83ae6c0762079589a12bc6515e1",
  "source_digests": {
-  "hooks/guards/git_grep_engine_guard.py": "742b3163da1f11508f9619dace007772b577746aa1328bcc889e5f31910d0160",
+  "hooks/guards/git_grep_engine_guard.py": "2fa728eb17d041bdf1c4f38fc6416f0bbf90df7d122ba3b1da15b1aa4c254bd0",
   "hooks/guards/zsh_rev_modifier_guard.py": "a056e1f8375467c6c7a6b878aff858c257b44c10faaeb0fa3bb685d073c0fb9c",
   "hooks/bash_command_guard.py": "fe8d2e68f1cffeb94f8fe6ccb79a1211f7f8b9fae601f3cbae0fde7e47011f00"
  },
@@ -1327,7 +1327,7 @@
    "element": "W",
    "id": "5f0b0cfb68a707f7ff5ed2971aab8240554cd95a5e8027aa20c343f395b0e907",
    "outcome": "caught",
-   "reason": "exact-check-count"
+   "reason": "suite-failure"
   },
   "5f75ee797b45a2990baf8d4041e07cae43eda650767ee878017c782be8f7f399": {
    "version": 1,
@@ -3657,9 +3657,7 @@
   "fc12c498aec08a7c6926394094d801c49290c66b8c18f43f54aaf668e6230a61",
   "fc9390dabe1c6cf6562336aba3ff8721f0b5d6223760043abe75114363b7a027"
  ],
- "unasserted_kills": [
-  "5f0b0cfb68a707f7ff5ed2971aab8240554cd95a5e8027aa20c343f395b0e907"
- ],
+ "unasserted_kills": [],
  "caught": 242,
  "total": 322
 }

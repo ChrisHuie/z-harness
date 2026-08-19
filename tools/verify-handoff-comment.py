@@ -8,10 +8,12 @@ with no artifact: a handoff could carry a hand-typed figure contradicting the ge
 summary and every gate stayed green, because nothing in the repository ever fetched a
 comment. This is the missing half.
 
-It reads the published comment through `gh` and byte-compares it against the submitted file,
-then prints a receipt line. A trailing-newline difference is reported rather than normalized
-away: GitHub returns exactly what was stored, and a body that differs at all is a body the
-reviewer did not approve.
+It reads the published comment through `gh` and compares it against the submitted file, then
+prints a receipt line. GitHub strips trailing newlines when it stores a body -- measured on
+this tool's first real use, where a file ending in one newline came back one line shorter --
+so trailing newlines are normalized on both sides before comparing. Nothing else is: a body
+differing anywhere else is a body the reviewer did not approve, and interior blank lines,
+indentation and line endings all still compare.
 
   tools/verify-handoff-comment.py --repo owner/name --comment-id 123 --body-file draft.md
 """
@@ -45,6 +47,11 @@ def fetch_comment_body(repo: str, comment_id: str, runner=None) -> str:
 
 def readback_error(published: str, submitted: str) -> str:
     """Return the first way the published bytes differ from the submitted ones."""
+    # GitHub does not store a trailing newline, so requiring one to survive would make every
+    # file that ends the way text files end permanently unverifiable. Normalize only that,
+    # and only at the very end of the body.
+    published = published.rstrip("\n")
+    submitted = submitted.rstrip("\n")
     if published == submitted:
         return ""
     if published.replace("\r\n", "\n") == submitted.replace("\r\n", "\n"):
@@ -90,8 +97,14 @@ def selftest() -> int:
            "line(s) where the submitted" in readback_error("a\nb", "a"))
     expect("a line-ending-only difference is named, not normalized away",
            readback_error("a\r\nb", "a\nb") == "published body differs only in line endings")
-    expect("trailing blank lines are part of the body",
-           readback_error("a\n\n", "a") != "")
+    expect("a trailing newline is normalized, because GitHub does not store one",
+           readback_error("a\nb", "a\nb\n") == "")
+    expect("several trailing newlines are normalized the same way",
+           readback_error("a\nb", "a\nb\n\n\n") == "")
+    expect("an interior blank line is still part of the body",
+           readback_error("a\n\nb", "a\nb") != "")
+    expect("trailing spaces are not whitespace to be normalized away",
+           readback_error("a\nb ", "a\nb") != "")
 
     class Done:
         def __init__(self, returncode, stdout, stderr=""):

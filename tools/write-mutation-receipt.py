@@ -30,7 +30,7 @@ BASH = "hooks/bash_command_guard.py"
 GUARDS = (GREP, ZSH, BASH)
 SCHEMA_VERSION = 3
 GENERATOR = "tools/write-mutation-receipt.py"
-NOTE = "which guard mutations the shipped suites catch"
+NOTE = ("which guard mutations the shipped suites catch; each result's reason is an observation from the host that generated it, not a cross-platform fact")
 OUTCOMES = {"caught", "survived"}
 # The reason a kill was scored, recorded per result because the outcome alone cannot be
 # graded. ``result_kill`` scores a kill when the recorded check count moves, and a guard
@@ -1243,12 +1243,37 @@ def load_json(path: Path) -> dict:
         path.read_text(encoding="utf-8"), object_pairs_hook=unique_object)
 
 
+def platform_stable(payload):
+    """Drop the environment-observed fields so two hosts can be compared."""
+    if not isinstance(payload, dict):
+        return payload
+    reduced = dict(payload)
+    reduced.pop("unasserted_kills", None)
+    results = reduced.get("results")
+    if isinstance(results, dict):
+        reduced["results"] = {
+            key: {k: v for k, v in value.items() if k != "reason"}
+            if isinstance(value, dict) else value
+            for key, value in results.items()
+        }
+    return reduced
+
+
 def aggregate(paths: list[Path], accept: bool) -> int:
     payload = normalized_receipt([load_json(path) for path in paths])
     summary = summary_text(payload)
     existing = load_json(RECEIPT) if RECEIPT.is_file() else None
     existing_summary = SUMMARY.read_text(encoding="utf-8") if SUMMARY.is_file() else None
-    if not accept and (existing != payload or existing_summary != summary):
+    # `reason` answers whether an assertion fired, which legitimately differs by platform:
+    # deleting "W" from MOD_UNMODELLED reddens a probe on a zsh that consumes that letter as
+    # a modifier and only moves the check count on a zsh that does not. The outcome is the
+    # cross-platform fact this receipt claims, so the comparison is made on the projection
+    # that excludes reason and its derived tally; both remain recorded as an observation from
+    # the host that generated them, and ci-gate still validates their vocabulary and their
+    # consistency with the outcome.
+    if not accept and (
+            platform_stable(existing) != platform_stable(payload)
+            or existing_summary != summary):
         before = len(existing.get("results", {})) if isinstance(existing, dict) else 0
         print(
             f"refusing mutation receipt change ({before} -> {payload['total']} results; "

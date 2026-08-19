@@ -649,9 +649,13 @@ MUTATION_PLAN_FLOOR = 317
 # runs and inflates `caught` without evidence. This was 17 of the 22 CROSS_VERSION_ALIAS_PROOF
 # elements, thirteen of which moved a real merged verdict from deny to ask while every gate
 # stayed green. Fixtures now assert those verdicts, and an arithmetic kill no longer preempts
-# the merged suite that sees them, so the measured count is zero and the ceiling holds it
-# there: any new one means a mutation is recorded caught that nothing actually detected.
-MUTATION_UNASSERTED_KILL_CEILING = 0
+# the merged suite that sees them, so the count fell from 17 to zero on the authoring host.
+# The ceiling is one rather than zero because whether an assertion fires can depend on the
+# environment: deleting "W" from MOD_UNMODELLED reddens a probe on a zsh that consumes that
+# letter as a modifier and only moves the check count on a zsh that does not, so the CI
+# runner observes one such kill where this host observes none. Recording zero here would
+# assert a property that does not hold where the evidence is actually attested.
+MUTATION_UNASSERTED_KILL_CEILING = 1
 # Declared additions, pinned here independently of the generator. The element sweep only
 # REMOVES members, and removal makes a collection that grants an exemption stricter, so the
 # generated sweep cannot express the direction these fail in. Each entry must be caught; a
@@ -1886,6 +1890,44 @@ def selftest() -> int:
             "fragment JSON rejects duplicate object keys",
             duplicate_fragment_rejected,
         )
+    # The receipt is compared across hosts, and whether an assertion fires can differ by
+    # environment, so the comparison runs on a projection that drops the observed reason and
+    # its tally. That projection must stay blind to exactly those two fields and to nothing
+    # else, or a real regression rides through the same hole.
+    stable_probe = {
+        "results": {"a": {"outcome": "caught", "reason": "suite-failure", "kind": "x"},
+                    "b": {"outcome": "survived", "reason": "survived", "kind": "x"}},
+        "survivors": ["b"], "unasserted_kills": [], "caught": 1, "total": 2,
+    }
+    def restable(**changes):
+        import copy
+        probe = copy.deepcopy(stable_probe)
+        probe.update(changes)
+        return writer.platform_stable(stable_probe) == writer.platform_stable(probe)
+    import copy as _copy
+    reason_only = _copy.deepcopy(stable_probe)
+    reason_only["results"]["a"]["reason"] = "exact-check-count"
+    reason_only["unasserted_kills"] = ["a"]
+    expect(
+        "the cross-host projection ignores an observed reason and its tally",
+        writer.platform_stable(stable_probe) == writer.platform_stable(reason_only),
+    )
+    flipped = _copy.deepcopy(stable_probe)
+    flipped["results"]["a"]["outcome"] = "survived"
+    expect(
+        "the cross-host projection still sees a flipped outcome",
+        writer.platform_stable(stable_probe) != writer.platform_stable(flipped),
+    )
+    dropped = _copy.deepcopy(stable_probe)
+    dropped["results"].pop("a")
+    expect(
+        "the cross-host projection still sees a dropped result",
+        writer.platform_stable(stable_probe) != writer.platform_stable(dropped),
+    )
+    expect(
+        "the cross-host projection still sees a shortened survivor list",
+        not restable(survivors=[]),
+    )
     expect("recorded mutation evidence matches the guards", mutation_receipt_error() == "")
     expect(
         "an exact synthetic mutation receipt clears",

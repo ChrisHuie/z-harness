@@ -19,6 +19,50 @@ three guards, runs each mutation in a private on-disk tree, and emits determinis
 fragments. The aggregator rejects incomplete or overlapping evidence and reduces raw suite
 receipts to the caught/survived fact and per-result kill reason recorded below.
 
+## What the sweep can express
+
+The element sweep removes members. For a collection that grants an exemption removal makes
+the guard stricter, so a removal-only sweep returns a clean result on exactly the sets whose
+failure direction it cannot express. Four sets carried a permissive mutation the decision
+corpus did not catch: adding one option to the terminal-option set moves a denied engine
+hazard to `allow`, and adding `w` to either short-option grammar set does the same through
+both the separated and attached spellings. `git grep -n -Ew 'harness\b'` returns no match on
+git 2.46.1 while `-Pw` matches, so those denials guard a live silent-wrong-result rather than
+a theoretical one.
+
+Two of the four were function-local and lower-case, which the plan's enumeration skips on
+both filters, and one duplicated a module-level set that disagreed with it about
+`--exec-path`. Bare `--exec-path` ends argument processing rather than taking a value, so the
+copy carrying it fed a subcommand scanner no caller invoked and its nine planned mutations
+could never be caught. The live path now uses the corrected module-level sets, which moves no
+verdict across the recorded corpus, and declared additions cover the direction removal cannot
+reach. The addition table is declared rather than generated: it covers the sets it names and
+is pinned so an entry cannot be dropped silently.
+
+## What a recorded kill means
+
+A kill is scored when the recorded check count moves. A guard that counts once per element of
+the collection under mutation moves that count on any removal, so the kill was decided by
+loop structure before any probe ran, and the receipt kept only the outcome. Seventeen of the
+twenty-two cross-version alias-proof elements were killed that way, thirteen of them moving a
+merged verdict from `deny` to `ask` while every gate stayed green.
+
+The reason is now recorded per result and validated: a survived outcome has one truthful
+reason, a crash status is only legitimate where the plan declared it tolerable, and the
+separate tally of count-only kills is derived from the results rather than reported. An
+arithmetic kill no longer preempts the merged suite where those verdicts are visible, and
+composite fixtures assert them there, because each sub-guard grades only its own fixtures and
+none could see a verdict that depends on another guard's authority.
+
+`add_group` adds executed plus skipped to the check count and the failure count separately,
+so severing a detector's failure return left the count byte-identical while its probes
+stopped being able to report. Each group now proves its failure channel by perturbing its own
+input and requiring a failure to arrive.
+
+The generator that measures the guards had no external pin; its only digest lived inside the
+receipt it writes. It now carries an authored entry in the source registry like the guards
+themselves.
+
 ## The timeout is a fail-open boundary
 
 Measured on Claude Code 2.1.233 in an isolated scratch project: a PreToolUse

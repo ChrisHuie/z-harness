@@ -4,19 +4,19 @@
     "askq_timeout_guard": "85c136dc24f3b4f41a60987b8abecb97779e209e49c4e29e74a5d46174d695ef",
     "bash_command_guard": "fe8d2e68f1cffeb94f8fe6ccb79a1211f7f8b9fae601f3cbae0fde7e47011f00",
     "cc-cost": "972b0122b5f84de10f41915a133132f555b943c46061d91b07e3f7b534a4d003",
-    "ci-gate": "dba8dec44aa99877d7d18235f2705f8ce052d9b1e5f2e28fc0744529f99e045a",
+    "ci-gate": "cf3b65966ffe88149bbe13818930459b57e29f2bf1353bede5603d0226d7cb48",
     "claim-provenance": "7b88bdb3792fb65e146b3a9ab2357a81585cd9824043cc9fa8bc835dc4b6e1ff",
     "codex-cost": "fc46c95da8babd276e705c9578c5857a6563588b588da540ea4222c2c6ca793c",
     "codex_session_start": "b9dbedba94d623304ef97ca1b13a14b2f7b000cc98f35e016448ed4c85030567",
     "git_grep_engine_guard": "58e5ab1713f81baab68e6a7c401acc3d5ec1bf6663efa6208d1dd5532930d66b",
-    "harness_check": "44f10bd931d8e816543b774876d697c2a16ad718b7b5827e77b77caa5c5d7713",
+    "harness_check": "b7c464b39ce810e15b7e1386c44c08e1d119cbb1cc120a37a9654912adf4c77c",
     "harness_report": "eec022de9c2f7dec81c612e751dac472f2f8b695029d627784e7e5d840312cbc",
     "portable-conformance": "8eb48510971d0e4f7371cd7a4d16c41850e8e1324a739b70b71d3b85c5823606",
     "pr-delivery-state": "da5293b7134b159c1b6bb91b67c40193550076c908db8e185ddcb9d82011fe6b",
     "render-packages": "6b05aa44c351651202e8a5e720bd1a13ed8d2301705367cea0dc198d7f5a178e",
     "run-skill-evals": "3fc8bc86c67ccec70b09255e332b2828eb1e8db1e5467c9ada6ee7142ba68961",
     "spawn_preflight_guard": "b2a0fc907102ab997cd10a7bad6c6cf4f3a5cd4cfd18cf4fc2e7807f81db1a54",
-    "write-mutation-receipt": "15f4802a7a9e17d1f489607c70d82608cac06c6110f375f30cbc38bff6f9d7b3",
+    "write-mutation-receipt": "32d6a3603392b7fda4235883237667296cdadc6730a1a86598eaf10ad7abbf6a",
     "zsh_rev_modifier_guard": "a056e1f8375467c6c7a6b878aff858c257b44c10faaeb0fa3bb685d073c0fb9c"
   }
 }

@@ -1263,6 +1263,17 @@ def gate(
     print(f"  {'FAIL' if harness_source_problem else 'PASS'} harness-source")
     if harness_source_problem:
         failures.append(harness_source_problem)
+    # Reported here rather than in the tracked summary: whether an assertion fires can differ
+    # between hosts, so this count belongs in the run that observed it, not in a file two
+    # hosts compare byte for byte.
+    try:
+        _receipt = _json_without_duplicate_keys(MUTATION_RECEIPT)
+        _unasserted = len(_receipt.get("unasserted_kills") or [])
+        _caught = _receipt.get("caught")
+        print(f"  INFO mutation-kills caught={_caught} scored-on-count-alone={_unasserted} "
+              f"ceiling={MUTATION_UNASSERTED_KILL_CEILING}")
+    except Exception:
+        pass
     generator_source_problem = mutation_generator_source_error()
     print(f"  {'FAIL' if generator_source_problem else 'PASS'} mutation-generator-source")
     if generator_source_problem:
@@ -1894,40 +1905,66 @@ def selftest() -> int:
     # environment, so the comparison runs on a projection that drops the observed reason and
     # its tally. That projection must stay blind to exactly those two fields and to nothing
     # else, or a real regression rides through the same hole.
+    import copy as _copy
     stable_probe = {
-        "results": {"a": {"outcome": "caught", "reason": "suite-failure", "kind": "x"},
-                    "b": {"outcome": "survived", "reason": "survived", "kind": "x"}},
+        "schema_version": writer.SCHEMA_VERSION, "generated_by": "x", "note": "n",
+        "generator_sha256": "c" * 64, "source_digests": {}, "plan_sha256": "d" * 64,
+        "baseline": {}, "sweep_exclusions": {},
+        "results": {
+            "a": {"outcome": "caught", "reason": "suite-failure", "kind": "set-element",
+                  "module": "guard-a.py", "name": "T", "element": "x"},
+            "b": {"outcome": "survived", "reason": "survived", "kind": "set-element",
+                  "module": "guard-a.py", "name": "T", "element": "y"}},
         "survivors": ["b"], "unasserted_kills": [], "caught": 1, "total": 2,
     }
-    def restable(**changes):
-        import copy
-        probe = copy.deepcopy(stable_probe)
-        probe.update(changes)
-        return writer.platform_stable(stable_probe) == writer.platform_stable(probe)
-    import copy as _copy
-    reason_only = _copy.deepcopy(stable_probe)
-    reason_only["results"]["a"]["reason"] = "exact-check-count"
-    reason_only["unasserted_kills"] = ["a"]
+    # The receipt and its summary are compared byte for byte against a CI re-measurement, so
+    # neither may depend on a value only one host can observe. These pin the RULE rather than
+    # the two fields that broke it: every declared host-observed field must be invisible to
+    # both comparisons, and nothing else may be.
     expect(
-        "the cross-host projection ignores an observed reason and its tally",
-        writer.platform_stable(stable_probe) == writer.platform_stable(reason_only),
+        "the host-observed field sets are declared and non-empty",
+        bool(writer.HOST_OBSERVED_RESULT_FIELDS) and bool(writer.HOST_OBSERVED_RECEIPT_KEYS),
     )
-    flipped = _copy.deepcopy(stable_probe)
-    flipped["results"]["a"]["outcome"] = "survived"
+    observed_invisible = True
+    for _key in writer.HOST_OBSERVED_RECEIPT_KEYS:
+        _probe = _copy.deepcopy(stable_probe)
+        _probe[_key] = ["a"] if _probe.get(_key) == [] else []
+        observed_invisible &= (
+            writer.platform_stable(stable_probe) == writer.platform_stable(_probe)
+            and writer.summary_text(stable_probe) == writer.summary_text(_probe))
+    for _field in writer.HOST_OBSERVED_RESULT_FIELDS:
+        _probe = _copy.deepcopy(stable_probe)
+        _probe["results"]["a"][_field] = "exact-check-count"
+        observed_invisible &= (
+            writer.platform_stable(stable_probe) == writer.platform_stable(_probe)
+            and writer.summary_text(stable_probe) == writer.summary_text(_probe))
     expect(
-        "the cross-host projection still sees a flipped outcome",
-        writer.platform_stable(stable_probe) != writer.platform_stable(flipped),
+        "every declared host-observed field is invisible to both cross-host comparisons",
+        observed_invisible,
     )
-    dropped = _copy.deepcopy(stable_probe)
-    dropped["results"].pop("a")
+    # The dual: the projection must not quietly stop comparing something real. Any field it
+    # drops beyond the declared set would be a regression nobody could see.
+    _projected = writer.platform_stable(stable_probe)
     expect(
-        "the cross-host projection still sees a dropped result",
-        writer.platform_stable(stable_probe) != writer.platform_stable(dropped),
+        "the projection drops the declared host-observed keys and nothing else",
+        set(stable_probe) - set(_projected) == set(writer.HOST_OBSERVED_RECEIPT_KEYS)
+        and all(set(stable_probe["results"][k]) - set(_projected["results"][k])
+                == set(writer.HOST_OBSERVED_RESULT_FIELDS) for k in _projected["results"]),
     )
-    expect(
-        "the cross-host projection still sees a shortened survivor list",
-        not restable(survivors=[]),
-    )
+    _real_changes = []
+    _flip = _copy.deepcopy(stable_probe); _flip["results"]["a"]["outcome"] = "survived"
+    _real_changes.append(("a flipped outcome", _flip))
+    _drop = _copy.deepcopy(stable_probe); _drop["results"].pop("a")
+    _real_changes.append(("a dropped result", _drop))
+    _surv = _copy.deepcopy(stable_probe); _surv["survivors"] = []
+    _real_changes.append(("a shortened survivor list", _surv))
+    _elem = _copy.deepcopy(stable_probe); _elem["results"]["a"]["element"] = "z"
+    _real_changes.append(("a changed mutation element", _elem))
+    for _label, _changed in _real_changes:
+        expect(
+            f"the cross-host comparison still sees {_label}",
+            writer.platform_stable(stable_probe) != writer.platform_stable(_changed),
+        )
     expect("recorded mutation evidence matches the guards", mutation_receipt_error() == "")
     expect(
         "an exact synthetic mutation receipt clears",

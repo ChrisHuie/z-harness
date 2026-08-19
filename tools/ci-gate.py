@@ -2386,6 +2386,20 @@ def selftest() -> int:
             stderr = "fatal: bad revision"
         return Done()
 
+    # The helper below decides three checks, so a helper that always answered "it raised"
+    # would make all three pass without testing anything. Control it first.
+    expect(
+        "the raise helper reports a call that does not raise",
+        _raises(lambda: None, ValueError) is False,
+    )
+    expect(
+        "the raise helper does not accept the wrong exception type",
+        _raises(lambda: (_ for _ in ()).throw(KeyError("x")), ValueError) is False,
+    )
+    expect(
+        "the raise helper reports a call that raises the named type",
+        _raises(lambda: (_ for _ in ()).throw(ValueError("x")), ValueError) is True,
+    )
     expect(
         "a head touching nothing the sweep observes needs no resweep",
         writer.resweep_needed("base", runner=_diff_runner([])) is False,

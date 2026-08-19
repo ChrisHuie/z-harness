@@ -63,6 +63,61 @@ DECISION_FIXTURES = (
 )
 
 
+# Graded by the merged decide(), not by any single sub-guard, because these hazards are
+# denied through a coupling no sub-guard fixture can pin: the zsh path-modifier deny holds
+# only while the git guard can settle the subcommand's identity from its cross-version
+# alias-proof set. Deleting a name from that set moves the merged verdict for that name --
+# thirteen of them from deny to ask -- while the git guard's own verdict never changes, so
+# its FIXTURES cannot see it. The mutation receipt still scored those deletions "caught"
+# because the recorded check count moved, which is arithmetic rather than detection.
+COMPOSITE_FIXTURES = (
+    ("GREEN ALIAS-PROOF: add keeps its merged verdict",
+     "command -p git add -p $SHA:src/f.py", "allow"),
+    ("RED  ALIAS-PROOF: archive keeps its merged verdict",
+     "command -p git archive -p $SHA:src/f.py", "deny"),
+    ("RED  ALIAS-PROOF: blame keeps its merged verdict",
+     "command -p git blame -p $SHA:src/f.py", "deny"),
+    ("GREEN ALIAS-PROOF: branch keeps its merged verdict",
+     "command -p git branch -p $SHA:src/f.py", "allow"),
+    ("RED  ALIAS-PROOF: cat-file keeps its merged verdict",
+     "command -p git cat-file -p $SHA:src/f.py", "deny"),
+    ("RED  ALIAS-PROOF: checkout keeps its merged verdict",
+     "command -p git checkout -p $SHA:src/f.py", "deny"),
+    ("GREEN ALIAS-PROOF: commit keeps its merged verdict",
+     "command -p git commit -p $SHA:src/f.py", "allow"),
+    ("GREEN ALIAS-PROOF: config keeps its merged verdict",
+     "command -p git config -p $SHA:src/f.py", "allow"),
+    ("RED  ALIAS-PROOF: diff keeps its merged verdict",
+     "command -p git diff -p $SHA:src/f.py", "deny"),
+    ("RED  ALIAS-PROOF: fetch keeps its merged verdict",
+     "command -p git fetch -p $SHA:src/f.py", "deny"),
+    ("GREEN ALIAS-PROOF: gc keeps its merged verdict",
+     "command -p git gc -p $SHA:src/f.py", "allow"),
+    ("RED  ALIAS-PROOF: grep keeps its merged verdict",
+     "command -p git grep -p $SHA:src/f.py", "deny"),
+    ("RED  ALIAS-PROOF: log keeps its merged verdict",
+     "command -p git log -p $SHA:src/f.py", "deny"),
+    ("RED  ALIAS-PROOF: ls-tree keeps its merged verdict",
+     "command -p git ls-tree -p $SHA:src/f.py", "deny"),
+    ("RED  ALIAS-PROOF: pull keeps its merged verdict",
+     "command -p git pull -p $SHA:src/f.py", "deny"),
+    ("RED  ALIAS-PROOF: push keeps its merged verdict",
+     "command -p git push -p $SHA:src/f.py", "deny"),
+    ("GREEN ALIAS-PROOF: rev-list keeps its merged verdict",
+     "command -p git rev-list -p $SHA:src/f.py", "allow"),
+    ("RED  ALIAS-PROOF: rev-parse keeps its merged verdict",
+     "command -p git rev-parse -p $SHA:src/f.py", "deny"),
+    ("GREEN ALIAS-PROOF: shortlog keeps its merged verdict",
+     "command -p git shortlog -p $SHA:src/f.py", "allow"),
+    ("RED  ALIAS-PROOF: show keeps its merged verdict",
+     "command -p git show -p $SHA:src/f.py", "deny"),
+    ("GREEN ALIAS-PROOF: stash keeps its merged verdict",
+     "command -p git stash -p $SHA:src/f.py", "allow"),
+    ("GREEN ALIAS-PROOF: status keeps its merged verdict",
+     "command -p git status -p $SHA:src/f.py", "allow"),
+)
+
+
 class EnvelopeError(ValueError):
     """The matched PreToolUse envelope cannot be judged safely."""
 
@@ -184,6 +239,13 @@ def selftest():
             total += 1
             failures += (not ok)
             print(f"  {'PASS' if ok else 'FAIL'} {name:<18} want={want:<5} got={got:<5} {label}")
+    for label, cmd, want in COMPOSITE_FIXTURES:
+        got, _ = decide(cmd)
+        ok = got == want
+        total += 1
+        failures += (not ok)
+        print(f"  {'PASS' if ok else 'FAIL'} composite          want={want:<5} "
+              f"got={got:<5} {label}")
     # the merge itself must be exercised, not just the parts
     both = 'git show $sha:src/x.py && git grep -nE "def \\bfoo"'
     got, reason = decide(both)

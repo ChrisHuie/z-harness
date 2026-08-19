@@ -2474,24 +2474,28 @@ GIT_UNSETTLED_EXECUTABLE_ERROR = (
     "Git subcommand %r is not alias-proof across supported Git versions while the executing "
     "Git binary is not settled, so ambient alias or config may redirect it"
 )
+# Git global options that consume the FOLLOWING token as their value, so a subcommand after
+# one of them is that option's argument rather than the subcommand. `--exec-path` is not one
+# of them: on git 2.46.1 `git --exec-path rev-parse --is-bare-repository` prints the exec
+# path and never runs rev-parse, so the bare spelling terminates argument processing. Only
+# `--exec-path=VALUE` sets it and continues, and that spelling is handled where options are
+# parsed. Both sets below were previously duplicated as function-local, lower-case literals
+# inside resolve_effective_git_invocation, where the mutation plan could not reach them: it
+# enumerates module scope and requires an upper-case name, so a change to either was
+# unmeasured. The copy carrying `--exec-path` fed a subcommand scanner no caller ever
+# invoked, so its nine planned mutations could never be caught and were recorded as
+# coverage debt against dead code.
 _GIT_GLOBAL_OPTIONS_WITH_VALUES = {
     "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix",
-    "--exec-path", "--config-env", "--attr-source",
+    "--config-env", "--attr-source",
 }
-
-
-def _git_subcommand_word(words):
-    """Return the subcommand token of a `git ...` tail, or None when argv cannot say."""
-    index = 0
-    while index < len(words) and words[index].startswith("-"):
-        if words[index] == "--":
-            index += 1
-            break
-        if words[index] in _GIT_GLOBAL_OPTIONS_WITH_VALUES:
-            index += 2
-            continue
-        index += 1
-    return words[index] if index < len(words) else None
+# Options after which git prints and exits. No subcommand runs, so nothing that follows can
+# be a hazard -- which makes ADDING a non-terminal option here the fail-open direction, and
+# removing one only more restrictive.
+_GIT_TERMINAL_OPTIONS = {
+    "-v", "--version", "-h", "--help", "--exec-path",
+    "--html-path", "--man-path", "--info-path",
+}
 
 
 def authorize_git_subcommand(subcommand, authority, effective_exec_path,
@@ -3960,14 +3964,8 @@ def resolve_effective_git_invocation(
             if key.strip().lower().startswith("alias."):
                 unresolved_aliases.add(key.strip().lower()[6:])
 
-    options_with_args = {
-        "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix",
-        "--config-env", "--attr-source",
-    }
-    terminal_options = {
-        "-v", "--version", "-h", "--help", "--exec-path",
-        "--html-path", "--man-path", "--info-path",
-    }
+    options_with_args = _GIT_GLOBAL_OPTIONS_WITH_VALUES
+    terminal_options = _GIT_TERMINAL_OPTIONS
     while j < len(words) and words[j].startswith("-"):
         option = words[j]
         if option == "--":
@@ -5169,6 +5167,28 @@ FIXTURES = [
      """git grep --extended -e'harness\\b' -- README.md""", "deny"),
     ("RED  LONG ABBREV: --extended-r uniquely selects extended-regexp",
      """git grep --extended-r -e'harness\\b' -- README.md""", "deny"),
+    # The four below pin the ADDITION direction for the option-grammar sets. Removing a
+    # member of any of them only makes this guard stricter, so the element sweep -- which
+    # only removes -- reported them clean while each could be widened by one token into an
+    # allow. `-Ew 'harness\b'` returns no match on git 2.46.1 where `-Pw` matches, so the
+    # silent-wrong-result hazard these deny is live rather than theoretical.
+    # `-F` selects fixed-strings for the log family, where a `\b` in the pattern is a literal
+    # rather than a word boundary and the engine hazard does not arise. Nothing else asserted
+    # this token, so deleting it changed three verdicts while the receipt still scored the
+    # mutation caught -- on the recorded check count alone, with no assertion failing.
+    ("GREEN LOG ENGINE: -F selects fixed-strings, so \\b carries no engine hazard",
+     """git log -F --grep='harness\\b'""", "allow"),
+    ("GREEN LOG ENGINE: trailing -F selects fixed-strings just as the leading form does",
+     """git log --grep='harness\\b' -F""", "allow"),
+    ("RED  ADDITION: -w stays boolean, so -Ew keeps the ERE engine hazard",
+     """git grep -Ew 'harness\\b' -- README.md""", "deny"),
+    ("RED  ADDITION: -w stays boolean in the attached spelling",
+     """git grep -Ew'harness\\b' -- README.md""", "deny"),
+    ("RED  ADDITION: a non-terminating git global still reaches the subcommand",
+     """command -p git --icase-pathspecs grep -nE 'harness\\b' -- README.md""", "deny"),
+    ("RED  ADDITION: a valueless git global does not consume the next token",
+     """command -p git --no-advice -c grep.patternType=extended grep -n 'harness\\b'"""
+     """ -- README.md""", "deny"),
     ("GREEN LONG ABBREV: --no-extended resets the shared engine",
      """git grep -P --no-extended -e'harness\\b' -- README.md""", "allow"),
     ("RED  LONG ABBREV: a later --extended wins after an abbreviated reset",
@@ -8260,6 +8280,48 @@ def selftest():
         print("  PASS downstream expansion and explicit harmless identities match installed shells")
     print("SHELL-BOUNDARY-SUMMARY checks=%d skips=%d failures=%d" % (
         boundary_checks, boundary_skips, len(boundary_failures)))
+
+    # Every group above reports through add_group, which adds `executed + skipped` to the
+    # check count and `len(failures)` to the failure count. The two terms are independent,
+    # so replacing a detector's `return failures, ...` with `return [], ...` leaves the
+    # recorded count byte-identical: the shrink-only floor and the exact-count binding both
+    # stay green while the probes stop being able to report anything. The count measures how
+    # many probes RAN, never whether any of them could speak. These controls perturb each
+    # detector's own input and require a failure to arrive, so a severed failure channel is
+    # a red check rather than a silent one.
+    def _channel_is_live(detector, **swaps):
+        saved = {name: globals()[name] for name in swaps}
+        try:
+            globals().update(swaps)
+            return bool(detector()[0])
+        finally:
+            globals().update(saved)
+
+    _original_authority = trusted_git_authority
+
+    def _submodule_reported_builtin(executable="git", deadline=None, **kwargs):
+        authority = _original_authority(executable, deadline, **kwargs)
+        return authority._replace(builtins=authority.builtins | {"submodule"})
+
+    for _label, _detector, _swaps in (
+        ("short-option table", check_option_table_against_git,
+         {"GREP_SHORT_ENGINE": {k: v for k, v in GREP_SHORT_ENGINE.items() if k != "E"}}),
+        ("alias-proof set", check_alias_shadowing_against_installed_gits,
+         {"CROSS_VERSION_ALIAS_PROOF": frozenset()}),
+        ("log-family grammar", check_log_grammar_against_git,
+         {"GIT_LOG_ENGINE_TOKENS": {k: v for k, v in GIT_LOG_ENGINE_TOKENS.items()
+                                    if k != "-E"}}),
+        ("PCRE constructs", check_pcre_constructs_against_git,
+         {"scan_pcre_constructs": lambda _pattern: PatternScan((), ())}),
+        ("installed-git aliases", check_aliases_against_git,
+         {"trusted_git_authority": _submodule_reported_builtin}),
+        ("shell boundary", check_shell_boundary_behavior,
+         {"_equals_expansion_is_live": lambda _text, _quoting: True}),
+    ):
+        _live = _channel_is_live(_detector, **_swaps)
+        bad += 0 if _live else 1
+        print("  %s the %s detector still reports when its input is broken" % (
+            "PASS" if _live else "FAIL", _label))
 
     # Prove the absence branch is narrow: removing the availability check or broadening
     # it to skip sh/bash/exact-path probes changes these counts and turns this selftest red.

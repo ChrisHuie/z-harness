@@ -28,14 +28,25 @@ GREP = "hooks/guards/git_grep_engine_guard.py"
 ZSH = "hooks/guards/zsh_rev_modifier_guard.py"
 BASH = "hooks/bash_command_guard.py"
 GUARDS = (GREP, ZSH, BASH)
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 GENERATOR = "tools/write-mutation-receipt.py"
 NOTE = "which guard mutations the shipped suites catch"
 OUTCOMES = {"caught", "survived"}
+# The reason a kill was scored, recorded per result because the outcome alone cannot be
+# graded. ``result_kill`` scores a kill when the recorded check count moves, and a guard
+# that increments its counter once per element of the collection under mutation moves that
+# count on ANY removal -- so the kill is decided by loop structure before an assertion runs.
+# Measured over CROSS_VERSION_ALIAS_PROOF, 17 of its 22 elements were killed that way with
+# zero assertions failing, while the deletion moved real verdicts from deny to ask. Dropping
+# the reason made a predetermined kill and a detection read identically in the artifact.
+UNASSERTED_KILL_REASON = "exact-check-count"
+KILL_REASONS = frozenset({
+    "suite-failure", UNASSERTED_KILL_REASON, "survived", "invalid-receipt", "timeout",
+})
 RECEIPT_KEYS = (
     "schema_version", "generated_by", "note", "generator_sha256",
     "source_digests", "plan_sha256", "baseline", "sweep_exclusions",
-    "results", "survivors", "caught", "total",
+    "results", "survivors", "unasserted_kills", "caught", "total",
 )
 FRAGMENT_KEYS = (
     "schema_version", "kind", "head_sha", "generator_sha256", "source_digests",
@@ -472,6 +483,50 @@ SITE_MUTATIONS = (
     },
 )
 
+# Additions, declared rather than generated. The element sweep only REMOVES members, and for
+# a collection that grants an exemption removal makes the guard stricter -- so the generated
+# sweep returns a clean result on precisely the sets whose failure direction it cannot
+# express. Each entry names a value that must never be a member, together with the hazard
+# that becomes reachable if it is. Every entry is expected to be caught; a survivor here is a
+# live fail-open, not coverage debt.
+#
+# This table is declared, so it covers what it names and no more -- it is not a claim that
+# every exemption-shaped collection in the tree has an entry. `mutation_addition_policy` pins
+# it so entries cannot be dropped without the gate saying so.
+ADDITION_MUTATIONS = (
+    {
+        "label": "a non-terminating git global is treated as terminal",
+        "module": GREP, "name": "_GIT_TERMINAL_OPTIONS", "collection_kind": "set",
+        "element": "--icase-pathspecs",
+        # git 2.46.1 runs the subcommand after this option, so treating it as terminal makes
+        # the guard stop reading the argv that carries the engine hazard.
+        "allowed_statuses": (),
+    },
+    {
+        "label": "a valueless git global is treated as value-taking",
+        "module": GREP, "name": "_GIT_GLOBAL_OPTIONS_WITH_VALUES", "collection_kind": "set",
+        "element": "--no-advice",
+        # Consuming the next token as this option's value desynchronises subcommand
+        # identification, so the word actually naming the subcommand is skipped.
+        "allowed_statuses": (),
+    },
+    {
+        "label": "a boolean grep short option is treated as taking the pattern",
+        "module": GREP, "name": "GREP_SHORT_PATTERN_ARG", "collection_kind": "set",
+        "element": "w",
+        # `git grep -Ew 'harness\b'` returns no match on git 2.46.1 while -Pw matches, so
+        # reading `w` as the pattern-bearing option loses the ERE engine hazard.
+        "allowed_statuses": (),
+    },
+    {
+        "label": "a boolean grep short option is treated as optionally valued",
+        "module": GREP, "name": "GREP_SHORT_OPTIONAL_VALUE", "collection_kind": "set",
+        "element": "w",
+        # Same hazard reached through the attached spelling `-Ew'harness\b'`.
+        "allowed_statuses": (),
+    },
+)
+
 
 def canonical(value) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"),
@@ -637,6 +692,57 @@ def without_element(source: str, name: str, kind: str, element: str) -> str:
     return source[:start] + f"{name} = {literal}\n" + source[end:]
 
 
+def with_element(source: str, name: str, kind: str, element: str) -> str:
+    """Add ``element`` to a module-level collection.
+
+    Removing a member of a collection that grants an exemption makes the guard STRICTER, so
+    a deletion-only sweep reports a clean result on exactly the sets whose failure direction
+    is addition. Measured on the terminal-option set: none of its eight deletions moves a
+    verdict toward allow, while adding one option moves a denied engine hazard to allow.
+    """
+    tree = ast.parse(source)
+    target_node = None
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == name):
+            target_node = node
+            break
+    if target_node is None:
+        raise LookupError(name)
+    value, wrapper = target_node.value, None
+    if isinstance(value, ast.Call):
+        wrapper = value.func.id
+        value = value.args[0]
+    if kind == "charset":
+        if element in value.value:
+            raise ValueError(f"{name} already contains {element!r}")
+        literal = repr(value.value + element)
+    elif kind in {"set", "computed-set"}:
+        assignments = {
+            node.targets[0].id: node.value for node in tree.body
+            if isinstance(node, ast.Assign) and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        }
+        elements = _string_collection(value, assignments)
+        if elements is None:
+            raise ValueError(f"cannot resolve collection {name} for addition")
+        if element in elements:
+            raise ValueError(f"{name} already contains {element!r}")
+        literal = "{" + ", ".join(repr(item) for item in [*elements, element]) + "}"
+    else:
+        # Never fall through to an unchanged source: a mutation that edits nothing runs the
+        # suite against the pristine tree, scores "survived", and is recorded as coverage
+        # debt that no assertion could ever retire.
+        raise ValueError(f"addition is not modelled for collection kind {kind!r}")
+    if wrapper:
+        literal = f"{wrapper}({literal})"
+    lines = source.splitlines(keepends=True)
+    start = sum(len(line) for line in lines[:target_node.lineno - 1])
+    end = sum(len(line) for line in lines[:target_node.end_lineno])
+    return source[:start] + f"{name} = {literal}\n" + source[end:]
+
+
 def mutation_plan() -> tuple[list[dict], dict[str, str]]:
     mutations, rejected = [], {}
     discovered_names = set()
@@ -672,6 +778,21 @@ def mutation_plan() -> tuple[list[dict], dict[str, str]]:
             "replacement_sha256": hashlib.sha256(
                 site["replacement"].encode()).hexdigest(),
             "allowed_statuses": list(site["allowed_statuses"]),
+        }
+        descriptor["id"] = digest(descriptor)
+        mutations.append(descriptor)
+    for addition in ADDITION_MUTATIONS:
+        identity = qname(addition["module"], addition["name"])
+        if identity not in discovered_names:
+            raise ValueError(
+                f"addition {addition['label']!r} names {identity}, which the element sweep "
+                f"does not enumerate; a declared addition against an invisible collection "
+                f"would never run")
+        descriptor = {
+            "version": 1, "kind": "set-addition", "module": addition["module"],
+            "name": addition["name"], "collection_kind": addition["collection_kind"],
+            "element": addition["element"], "label": addition["label"],
+            "allowed_statuses": list(addition["allowed_statuses"]),
         }
         descriptor["id"] = digest(descriptor)
         mutations.append(descriptor)
@@ -744,11 +865,30 @@ def result_kill(result: dict, baseline: dict, allowed_statuses=()) -> tuple[bool
     return False, "survived"
 
 
+def needs_merged_run(killed: bool, reason: str, module: str) -> bool:
+    """Whether the merged suite must also run after the owner suite has reported.
+
+    A kill scored only by a moved check count is arithmetic: nothing asserted. Stopping
+    there let that artifact PREEMPT a real detection, because the merged suite is where some
+    hazards are visible at all. Deleting a name from the cross-version alias-proof set moves
+    thirteen merged verdicts from deny to ask while the owning guard's own verdict never
+    changes, so the owner could only ever report the count while the assertion that sees the
+    regression lives one suite away and was never run.
+    """
+    if module == BASH:
+        return False
+    return (not killed) or reason == UNASSERTED_KILL_REASON
+
+
 def apply_mutation(tree: Path, descriptor: dict) -> tuple[Path, str]:
     target = tree / descriptor["module"]
     source = target.read_text(encoding="utf-8")
     if descriptor["kind"] == "set-element":
         mutated = without_element(
+            source, descriptor["name"], descriptor["collection_kind"],
+            descriptor["element"])
+    elif descriptor["kind"] == "set-addition":
+        mutated = with_element(
             source, descriptor["name"], descriptor["collection_kind"],
             descriptor["element"])
     else:
@@ -758,6 +898,11 @@ def apply_mutation(tree: Path, descriptor: dict) -> tuple[Path, str]:
         if source.count(site["anchor"]) != 1:
             raise ValueError(f"site anchor moved for {descriptor['label']!r}")
         mutated = source.replace(site["anchor"], site["replacement"])
+    # A mutation that edits nothing runs the suite against a pristine tree, scores
+    # "survived", and is recorded as coverage debt no assertion could ever retire.
+    if mutated == source:
+        raise ValueError(
+            f"mutation {descriptor['id']} left {descriptor['module']} byte-identical")
     target.write_text(mutated, encoding="utf-8")
     return target, source
 
@@ -769,10 +914,14 @@ def execute_mutation(tree: Path, descriptor: dict, baseline: dict) -> dict:
         killed, reason = result_kill(
             owner, baseline[descriptor["module"]], descriptor.get("allowed_statuses", ()))
         merged = None
-        if not killed and descriptor["module"] != BASH:
+        if needs_merged_run(killed, reason, descriptor["module"]):
             merged = run_suite(tree, BASH)
-            killed, reason = result_kill(
+            merged_killed, merged_reason = result_kill(
                 merged, baseline[BASH], descriptor.get("allowed_statuses", ()))
+            # A detection outranks a count artifact. Otherwise the owner's verdict stands,
+            # so an arithmetic kill is still a kill -- just an honestly labelled one.
+            if not killed or (merged_killed and merged_reason != UNASSERTED_KILL_REASON):
+                killed, reason = merged_killed, merged_reason
         return {
             "owner": owner, "merged": merged,
             "outcome": "caught" if killed else "survived", "reason": reason,
@@ -800,8 +949,11 @@ def fragment_payload(index: int, count: int, expected_head: str | None) -> dict:
     guard_hashes = source_digests()
     with tempfile.TemporaryDirectory(prefix="z-harness-mutations-") as raw:
         tree = Path(raw) / "tree"
+        # ``.claude`` holds locally-created worktrees whose basename is ``worktrees``, so the
+        # ``.worktrees`` pattern never matched them and each shard copied every nested
+        # checkout into its private tree. Nothing under it is tracked and no suite reads it.
         shutil.copytree(ROOT, tree, ignore=shutil.ignore_patterns(
-            ".git", ".worktrees", "__pycache__", "node_modules"))
+            ".git", ".claude", ".worktrees", "__pycache__", "node_modules"))
         if (file_sha256(tree / GENERATOR) != generator_hash
                 or source_digests(tree) != guard_hashes):
             raise ValueError("private mutation tree differs from the captured sources")
@@ -906,7 +1058,7 @@ def recompute_raw_result(raw: object, descriptor: dict, baseline: dict) -> tuple
     killed, reason = result_kill(
         raw["owner"], baseline[descriptor["module"]],
         descriptor.get("allowed_statuses", ()))
-    if killed or descriptor["module"] == BASH:
+    if not needs_merged_run(killed, reason, descriptor["module"]):
         if raw["merged"] is not None:
             raise ValueError(
                 f"raw merged result is unexpected for {descriptor['id']}")
@@ -914,8 +1066,10 @@ def recompute_raw_result(raw: object, descriptor: dict, baseline: dict) -> tuple
         problem = suite_result_error(raw["merged"])
         if problem:
             raise ValueError(f"raw merged result {descriptor['id']}: {problem}")
-        killed, reason = result_kill(
+        merged_killed, merged_reason = result_kill(
             raw["merged"], baseline[BASH], descriptor.get("allowed_statuses", ()))
+        if not killed or (merged_killed and merged_reason != UNASSERTED_KILL_REASON):
+            killed, reason = merged_killed, merged_reason
     outcome = "caught" if killed else "survived"
     if raw["outcome"] != outcome or raw["reason"] != reason:
         raise ValueError(
@@ -997,20 +1151,23 @@ def normalized_receipt(fragments: list[dict]) -> dict:
     if foreign or missing:
         raise ValueError(
             f"mutation result inventory foreign={foreign[:4]} missing={missing[:4]}")
-    reduced, survivors = {}, []
+    reduced, survivors, unasserted = {}, [], []
     for mutation_id in sorted(expected_ids):
         raw, baseline = combined[mutation_id]
-        outcome, _reason = recompute_raw_result(
+        outcome, reason = recompute_raw_result(
             raw, plan_by_id[mutation_id], baseline)
         descriptor = dict(plan_by_id[mutation_id])
         descriptor.pop("allowed_statuses", None)
         descriptor["outcome"] = outcome
+        descriptor["reason"] = reason
         reduced[mutation_id] = descriptor
         if outcome == "survived":
             survivors.append(mutation_id)
+        elif reason == UNASSERTED_KILL_REASON:
+            unasserted.append(mutation_id)
     return {
         "schema_version": SCHEMA_VERSION,
-        "generated_by": f"{GENERATOR} --aggregate ... --accept-receipt-changes",
+        "generated_by": f"{GENERATOR} --aggregate",
         "note": NOTE,
         "generator_sha256": fragments[0]["generator_sha256"],
         "source_digests": fragments[0]["source_digests"],
@@ -1019,6 +1176,7 @@ def normalized_receipt(fragments: list[dict]) -> dict:
         "sweep_exclusions": exclusions,
         "results": reduced,
         "survivors": survivors,
+        "unasserted_kills": unasserted,
         "caught": len(reduced) - len(survivors),
         "total": len(reduced),
     }
@@ -1027,8 +1185,8 @@ def normalized_receipt(fragments: list[dict]) -> dict:
 def summary_text(payload: dict) -> str:
     lines = [
         "<!-- generated by tools/write-mutation-receipt.py -- do not edit -->", "",
-        "| module | guarded set | elements | caught | survived |",
-        "|---|---|---:|---:|---:|",
+        "| module | guarded set | elements | caught | of which unasserted | survived |",
+        "|---|---|---:|---:|---:|---:|",
     ]
     grouped, sites = {}, []
     for entry in payload["results"].values():
@@ -1036,13 +1194,17 @@ def summary_text(payload: dict) -> str:
             sites.append(entry)
             continue
         key = (entry["module"], entry["name"])
-        counts = grouped.setdefault(key, {"caught": 0, "survived": 0})
+        counts = grouped.setdefault(
+            key, {"caught": 0, "survived": 0, "unasserted": 0})
         counts[entry["outcome"]] += 1
+        if (entry["outcome"] == "caught"
+                and entry["reason"] == UNASSERTED_KILL_REASON):
+            counts["unasserted"] += 1
     for (module, name), counts in sorted(grouped.items()):
         total = counts["caught"] + counts["survived"]
         lines.append(
             f"| `{Path(module).name}` | `{name}` | {total} | "
-            f"{counts['caught']} | {counts['survived']} |")
+            f"{counts['caught']} | {counts['unasserted']} | {counts['survived']} |")
     lines += ["", "| module | site mutation | outcome |", "|---|---|---|"]
     for entry in sorted(sites, key=lambda item: (item["module"], item["label"])):
         lines.append(
@@ -1052,6 +1214,12 @@ def summary_text(payload: dict) -> str:
         "",
         f"{payload['caught']} of {payload['total']} planned mutations are caught; "
         f"{len(payload['survivors'])} exact mutation IDs remain recorded coverage debt.",
+        "",
+        f"Of the {payload['caught']} caught, {len(payload['unasserted_kills'])} were scored "
+        f"only because the recorded check count moved: no assertion failed. A guard whose "
+        f"counter increments once per element of the collection under mutation moves that "
+        f"count on any removal, so those kills are decided by loop structure rather than by "
+        f"detection, and they are not evidence that the suites observe the change.",
         "",
     ]
     if payload["sweep_exclusions"]:

@@ -1,14 +1,14 @@
 {
- "schema_version": 2,
- "generated_by": "tools/write-mutation-receipt.py --aggregate ... --accept-receipt-changes",
+ "schema_version": 3,
+ "generated_by": "tools/write-mutation-receipt.py --aggregate",
  "note": "which guard mutations the shipped suites catch",
- "generator_sha256": "b3dbcba6cce06395d7cdb7d47aa723a38517522762a367aa1b4a8ed8d7dc4d5d",
+ "generator_sha256": "6536c6ee0f57e8e7bfdcc2f92a8e5d23ca03adafc8c42b5c434e63e9ff9a2324",
  "source_digests": {
-  "hooks/guards/git_grep_engine_guard.py": "33095f9c2651857fde6296918000176191a70c8995a0205fe27024260e3b47f6",
+  "hooks/guards/git_grep_engine_guard.py": "58e5ab1713f81baab68e6a7c401acc3d5ec1bf6663efa6208d1dd5532930d66b",
   "hooks/guards/zsh_rev_modifier_guard.py": "a056e1f8375467c6c7a6b878aff858c257b44c10faaeb0fa3bb685d073c0fb9c",
-  "hooks/bash_command_guard.py": "67544a397c5fd7caf5e7bb7ce24c279cff31de2a92b43606c04730fdbf3b80fd"
+  "hooks/bash_command_guard.py": "fe8d2e68f1cffeb94f8fe6ccb79a1211f7f8b9fae601f3cbae0fde7e47011f00"
  },
- "plan_sha256": "f7e5d576cc04e44fc774dea61a75f40c062e531e50c64c0feaad7de9072eb072",
+ "plan_sha256": "861fd6ed6865f0d41603a3e54c5e4408d400c02cbc5a2ba3684e26aaeba7d5da",
  "baseline": {
   "hooks/guards/git_grep_engine_guard.py": "passed",
   "hooks/guards/zsh_rev_modifier_guard.py": "passed",
@@ -36,7 +36,8 @@
    "collection_kind": "set",
    "element": "--text",
    "id": "003e9a148fe636b06384150018d7e569c9731266e7301520608a86aa06905628",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "004339c45e94ae472dbc6fa78b8071d42f87149515db2aced9f5f2a59825a837": {
    "version": 1,
@@ -46,7 +47,31 @@
    "collection_kind": "set",
    "element": "shortlog",
    "id": "004339c45e94ae472dbc6fa78b8071d42f87149515db2aced9f5f2a59825a837",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
+  },
+  "017d147392f9a1742a810d203c34a04d1481769bac2fc4dfd5ca1755b3811698": {
+   "version": 1,
+   "kind": "set-element",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "name": "_GIT_TERMINAL_OPTIONS",
+   "collection_kind": "set",
+   "element": "-h",
+   "id": "017d147392f9a1742a810d203c34a04d1481769bac2fc4dfd5ca1755b3811698",
+   "outcome": "survived",
+   "reason": "survived"
+  },
+  "020ab9062556f2fbea3e1f436f0ab99091cf6649144a324e06d645f95fc24c7a": {
+   "version": 1,
+   "kind": "set-addition",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "name": "GREP_SHORT_OPTIONAL_VALUE",
+   "collection_kind": "set",
+   "element": "w",
+   "label": "a boolean grep short option is treated as optionally valued",
+   "id": "020ab9062556f2fbea3e1f436f0ab99091cf6649144a324e06d645f95fc24c7a",
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "02a2ed33f9c0ea1f12fc7594a2da5773486e68b765c976bfc3f19fbe27acfc60": {
    "version": 1,
@@ -56,7 +81,8 @@
    "collection_kind": "dict",
    "element": "s",
    "id": "02a2ed33f9c0ea1f12fc7594a2da5773486e68b765c976bfc3f19fbe27acfc60",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "0453256375d591d9d464f7829d55d9f576cb08c71874f84a59fc40f76367ca29": {
    "version": 1,
@@ -66,7 +92,8 @@
    "anchor_sha256": "30a62d2a8e10ecc7c2ef30f3268922b62c0b16f30e553d20555099badff0b739",
    "replacement_sha256": "76b9fd0da34600e89bbdb7f7a9d26ff2527ee09ed6a3c475feab5fcc443822db",
    "id": "0453256375d591d9d464f7829d55d9f576cb08c71874f84a59fc40f76367ca29",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "0644bd73a256d2b5a2dfaf5f26459b28af147de07103dfd047a5d5103d7d9894": {
    "version": 1,
@@ -76,7 +103,8 @@
    "collection_kind": "set",
    "element": "checkout",
    "id": "0644bd73a256d2b5a2dfaf5f26459b28af147de07103dfd047a5d5103d7d9894",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "06af11cd789bdf087cece70e8e185a161827e12259ba35a729933b2995db9bd0": {
    "version": 1,
@@ -86,7 +114,8 @@
    "collection_kind": "charset",
    "element": "s",
    "id": "06af11cd789bdf087cece70e8e185a161827e12259ba35a729933b2995db9bd0",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "093f10555ab89eb7a2ba19f6e3669f1c5e1aea799ff51d8e6a5ced8268d040b6": {
    "version": 1,
@@ -96,7 +125,8 @@
    "collection_kind": "charset",
    "element": "o",
    "id": "093f10555ab89eb7a2ba19f6e3669f1c5e1aea799ff51d8e6a5ced8268d040b6",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "09a56aa293e9c9c8343414de3d1568aac3dfe9b39b1fde694100eaba79935a09": {
    "version": 1,
@@ -106,7 +136,8 @@
    "collection_kind": "set",
    "element": "--no-extended-regexp",
    "id": "09a56aa293e9c9c8343414de3d1568aac3dfe9b39b1fde694100eaba79935a09",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "09c867a764cd6acb2dbb4d1af2a9da09c6ac5f9dc43b6c2157bae5d24c324ee9": {
    "version": 1,
@@ -116,7 +147,8 @@
    "collection_kind": "dict",
    "element": "allow",
    "id": "09c867a764cd6acb2dbb4d1af2a9da09c6ac5f9dc43b6c2157bae5d24c324ee9",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "invalid-receipt"
   },
   "0b4976ffa02b31fee1de20b3c6652604a004c328c072899731091a94f0f92aa3": {
    "version": 1,
@@ -126,7 +158,8 @@
    "anchor_sha256": "2722a3d8fe8af72153608c622d05d265300b40190d027ea7e53eb134d0e2b0a2",
    "replacement_sha256": "8887fd830fc0ab65f5a0bbd3c8579033f6fb13bd85c120bd84b79fb373d5d4ab",
    "id": "0b4976ffa02b31fee1de20b3c6652604a004c328c072899731091a94f0f92aa3",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "0ba7d40b1389a5d1042d6648dce2e0722283fad60908e936299e3061aa96df75": {
    "version": 1,
@@ -136,7 +169,8 @@
    "collection_kind": "set",
    "element": "ksh",
    "id": "0ba7d40b1389a5d1042d6648dce2e0722283fad60908e936299e3061aa96df75",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "0d689ac259f1c3b57b90868efe1f5bb95f5be19a98c424cdcb0f92df38a0b345": {
    "version": 1,
@@ -146,7 +180,8 @@
    "collection_kind": "set",
    "element": "push",
    "id": "0d689ac259f1c3b57b90868efe1f5bb95f5be19a98c424cdcb0f92df38a0b345",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "0e7288e5ef3d9c1f3838cb27630741f697c6110fe36c3d43af26e4a8def2feea": {
    "version": 1,
@@ -156,7 +191,8 @@
    "collection_kind": "set",
    "element": "config",
    "id": "0e7288e5ef3d9c1f3838cb27630741f697c6110fe36c3d43af26e4a8def2feea",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "10909fef1c50679d8b6b38343e19fe2d01fb787f9e5f3fef9abc1d4bc4c4ec61": {
    "version": 1,
@@ -166,7 +202,8 @@
    "collection_kind": "dict",
    "element": "h",
    "id": "10909fef1c50679d8b6b38343e19fe2d01fb787f9e5f3fef9abc1d4bc4c4ec61",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "1109e692a5957f3e6b568493c2bcb022645cfc6dff74d4b3ce6d8238a63e6d1c": {
    "version": 1,
@@ -176,7 +213,8 @@
    "collection_kind": "set",
    "element": "--grep",
    "id": "1109e692a5957f3e6b568493c2bcb022645cfc6dff74d4b3ce6d8238a63e6d1c",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "113984889b5f63ba65708bb7e6b69093a1f557d5b31549235f531057270b675e": {
    "version": 1,
@@ -186,7 +224,8 @@
    "collection_kind": "dict",
    "element": "basic",
    "id": "113984889b5f63ba65708bb7e6b69093a1f557d5b31549235f531057270b675e",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "114430df66094d434c33333e115f022771b9dad3c1707acafd6fe16e0063ad19": {
    "version": 1,
@@ -196,7 +235,8 @@
    "collection_kind": "set",
    "element": "--author",
    "id": "114430df66094d434c33333e115f022771b9dad3c1707acafd6fe16e0063ad19",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "12ceefbb3a2a4ed06a52826137c2f3cb22840c145f09933485427e996a6a01bc": {
    "version": 1,
@@ -206,7 +246,20 @@
    "collection_kind": "set",
    "element": "--no-index",
    "id": "12ceefbb3a2a4ed06a52826137c2f3cb22840c145f09933485427e996a6a01bc",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
+  },
+  "12f07f8caabf77ef419b7e64dbf48a0f60ee720867bede84eb10480309e43cdc": {
+   "version": 1,
+   "kind": "set-addition",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "name": "GREP_SHORT_PATTERN_ARG",
+   "collection_kind": "set",
+   "element": "w",
+   "label": "a boolean grep short option is treated as taking the pattern",
+   "id": "12f07f8caabf77ef419b7e64dbf48a0f60ee720867bede84eb10480309e43cdc",
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "132233d111a21ad9d5ec7bdb84aec82583a588d0ab6004e690d1d0da713a54fb": {
    "version": 1,
@@ -216,7 +269,8 @@
    "anchor_sha256": "29d06a8b773d7f2ae1d559e9ac36fb02e39fa106efb9b175beb1f715f09b1014",
    "replacement_sha256": "9bbfe59f351b0a50f48a002401e33fc1e107cdaaee9d04df8c1698ecb22426ee",
    "id": "132233d111a21ad9d5ec7bdb84aec82583a588d0ab6004e690d1d0da713a54fb",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "1395e5dbffab248b4f38cc17e5052e35279c475aefbdd2e8195560000dd5e9b6": {
    "version": 1,
@@ -226,7 +280,8 @@
    "collection_kind": "computed-set",
    "element": "pull",
    "id": "1395e5dbffab248b4f38cc17e5052e35279c475aefbdd2e8195560000dd5e9b6",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "14f83a434f4d617f7b9a5052c6925d7b6625c60ff3cd38a7735dc7183fc3ca17": {
    "version": 1,
@@ -236,7 +291,8 @@
    "collection_kind": "set",
    "element": "/usr/bin/printf",
    "id": "14f83a434f4d617f7b9a5052c6925d7b6625c60ff3cd38a7735dc7183fc3ca17",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "16095b559ee12a8c64081df9b1c92854fbeb22da177ec61136aeb8d87ef39793": {
    "version": 1,
@@ -246,7 +302,8 @@
    "collection_kind": "set",
    "element": "bash",
    "id": "16095b559ee12a8c64081df9b1c92854fbeb22da177ec61136aeb8d87ef39793",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "1660b2773f21ffaaf3c6f373373920949321bcb5ca4fe2271343572bf1529e70": {
    "version": 1,
@@ -256,7 +313,8 @@
    "collection_kind": "set",
    "element": "coproc",
    "id": "1660b2773f21ffaaf3c6f373373920949321bcb5ca4fe2271343572bf1529e70",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "1694e1c9bc48e288fb7279d671ddda27f8a3546f66ddbc89a01ff46bad8725d8": {
    "version": 1,
@@ -266,7 +324,8 @@
    "collection_kind": "dict",
    "element": "sudo",
    "id": "1694e1c9bc48e288fb7279d671ddda27f8a3546f66ddbc89a01ff46bad8725d8",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "16e8ce42527e700c8044b0b952d1105112748e504ee12bd473bf0c9bc479f54a": {
    "version": 1,
@@ -276,7 +335,8 @@
    "collection_kind": "dict",
    "element": "fixed",
    "id": "16e8ce42527e700c8044b0b952d1105112748e504ee12bd473bf0c9bc479f54a",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "16ef07c5623cf8bc0f13bfb6b12b5e5628b76ef62be8bb00e8d69dfc156f6f76": {
    "version": 1,
@@ -286,7 +346,8 @@
    "collection_kind": "set",
    "element": "show",
    "id": "16ef07c5623cf8bc0f13bfb6b12b5e5628b76ef62be8bb00e8d69dfc156f6f76",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "17286f0b59b6147e5e548e92b255eb389537009be5c68a40603cb7c5ae911a3e": {
    "version": 1,
@@ -296,7 +357,8 @@
    "collection_kind": "dispatch",
    "element": "git_grep_engine",
    "id": "17286f0b59b6147e5e548e92b255eb389537009be5c68a40603cb7c5ae911a3e",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "17512ac064312b7365d36544ff80bc81c859bb0361d2a5ae292f3ba4490c3acd": {
    "version": 1,
@@ -306,7 +368,8 @@
    "collection_kind": "set",
    "element": "printf",
    "id": "17512ac064312b7365d36544ff80bc81c859bb0361d2a5ae292f3ba4490c3acd",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "17ed615b9f6e3806916107d6b781f5695e109754d36cee3f8ecce6ff1e3fb9aa": {
    "version": 1,
@@ -316,7 +379,8 @@
    "collection_kind": "charset",
    "element": "c",
    "id": "17ed615b9f6e3806916107d6b781f5695e109754d36cee3f8ecce6ff1e3fb9aa",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "18722fa77f69d1084d51e83d5a5cc62de646f7a039204c5c41c5e77231ccf046": {
    "version": 1,
@@ -326,7 +390,8 @@
    "collection_kind": "set",
    "element": "--open-files-in-pager",
    "id": "18722fa77f69d1084d51e83d5a5cc62de646f7a039204c5c41c5e77231ccf046",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "1968c3eec86041188b0c46f77be10116bbd026bfaee9982ecbacc8c9a0e83dec": {
    "version": 1,
@@ -336,7 +401,8 @@
    "collection_kind": "dict",
    "element": "P",
    "id": "1968c3eec86041188b0c46f77be10116bbd026bfaee9982ecbacc8c9a0e83dec",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "198ca68184220ad94943621585db5e27e0b197c76294f29dbc5e9c6128ba618e": {
    "version": 1,
@@ -346,7 +412,8 @@
    "collection_kind": "set",
    "element": "log",
    "id": "198ca68184220ad94943621585db5e27e0b197c76294f29dbc5e9c6128ba618e",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "19abcb0a36c5c177cdc6ccde2773d5a8574ccf28281863410a41b686788a3e29": {
    "version": 1,
@@ -356,7 +423,8 @@
    "collection_kind": "charset",
    "element": "v",
    "id": "19abcb0a36c5c177cdc6ccde2773d5a8574ccf28281863410a41b686788a3e29",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "1a932bda4d4cf210f50a1a7c45469bde397666b94c3a6e001a33e539069e978a": {
    "version": 1,
@@ -366,7 +434,8 @@
    "collection_kind": "dict",
    "element": "caffeinate",
    "id": "1a932bda4d4cf210f50a1a7c45469bde397666b94c3a6e001a33e539069e978a",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "1aa0cd5ca6bdf5782cad8f7494867d0a5fcbd1b6ee17690bc1a35be99ffa33ad": {
    "version": 1,
@@ -376,7 +445,8 @@
    "collection_kind": "set",
    "element": "difftool",
    "id": "1aa0cd5ca6bdf5782cad8f7494867d0a5fcbd1b6ee17690bc1a35be99ffa33ad",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "1adf70e277371788aaa342e716ab98e838f9f8ae7654572849b31a6cc5d44383": {
    "version": 1,
@@ -386,7 +456,8 @@
    "collection_kind": "set",
    "element": "status",
    "id": "1adf70e277371788aaa342e716ab98e838f9f8ae7654572849b31a6cc5d44383",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "1cdb7e4a047b99eb1b82028fcdc0ffd6569b09df168d79582753b237ff587d03": {
    "version": 1,
@@ -396,7 +467,8 @@
    "collection_kind": "set",
    "element": "dash",
    "id": "1cdb7e4a047b99eb1b82028fcdc0ffd6569b09df168d79582753b237ff587d03",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "1ddbdb805ec11f58d7fc23646655e56910d2701ca3ae9edcb9d47b72de087da1": {
    "version": 1,
@@ -406,7 +478,20 @@
    "collection_kind": "computed-set",
    "element": "shortlog",
    "id": "1ddbdb805ec11f58d7fc23646655e56910d2701ca3ae9edcb9d47b72de087da1",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
+  },
+  "1ed831d44673fe27b47e47b5153896a274651d1b6f973ab36fecbf1698e2f48b": {
+   "version": 1,
+   "kind": "set-addition",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "name": "_GIT_GLOBAL_OPTIONS_WITH_VALUES",
+   "collection_kind": "set",
+   "element": "--no-advice",
+   "label": "a valueless git global is treated as value-taking",
+   "id": "1ed831d44673fe27b47e47b5153896a274651d1b6f973ab36fecbf1698e2f48b",
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "1f4772f612d43d2c4caaf9e8607db5eb8ac8afcad5178f25189b872b459a4b46": {
    "version": 1,
@@ -416,7 +501,8 @@
    "collection_kind": "set",
    "element": "--extended-regexp",
    "id": "1f4772f612d43d2c4caaf9e8607db5eb8ac8afcad5178f25189b872b459a4b46",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "1fd9bb0978c61ffd13541622221be78123e9b0b9ad254c08c0e8b252a947f21d": {
    "version": 1,
@@ -426,7 +512,8 @@
    "collection_kind": "set",
    "element": "rev-list",
    "id": "1fd9bb0978c61ffd13541622221be78123e9b0b9ad254c08c0e8b252a947f21d",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "21febe8d3fff1f38707110d33e590b154138d841a7cd6f4f4a481326a7453ba0": {
    "version": 1,
@@ -436,7 +523,8 @@
    "collection_kind": "set",
    "element": "--threads",
    "id": "21febe8d3fff1f38707110d33e590b154138d841a7cd6f4f4a481326a7453ba0",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "227b8393a8226d398477ddb4ea25187002795e06fd2f532acc8481b6b19ace71": {
    "version": 1,
@@ -446,7 +534,8 @@
    "collection_kind": "set",
    "element": "--fixed-strings",
    "id": "227b8393a8226d398477ddb4ea25187002795e06fd2f532acc8481b6b19ace71",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "23df802af9069f4869cbe571f9c7b2a39fbb1341066a625835b045cb87a29c50": {
    "version": 1,
@@ -456,7 +545,8 @@
    "anchor_sha256": "992d8204ca9bc0c791ee353221261833bee0976f2a780d93886d8208255f19aa",
    "replacement_sha256": "0ac28a88ade5e44749483d6206def7b7c6dcfc29f8aaab576b4316bd74bee27f",
    "id": "23df802af9069f4869cbe571f9c7b2a39fbb1341066a625835b045cb87a29c50",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "27239a068aed59cd0fc349b8c83c2dee44cf75c25c6c0db5d48240ac022a4cfa": {
    "version": 1,
@@ -466,7 +556,8 @@
    "collection_kind": "charset",
    "element": "a",
    "id": "27239a068aed59cd0fc349b8c83c2dee44cf75c25c6c0db5d48240ac022a4cfa",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "284c61dcc56701af20d6e49edd1ba38ee6e67094af1ce0ee03d5973d100ac3bc": {
    "version": 1,
@@ -476,7 +567,8 @@
    "collection_kind": "charset",
    "element": "f",
    "id": "284c61dcc56701af20d6e49edd1ba38ee6e67094af1ce0ee03d5973d100ac3bc",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "288e408ae751bd3767711ffb7ae185ee4f1fd9383f2a946fc654f8ed00ae0e39": {
    "version": 1,
@@ -486,7 +578,8 @@
    "collection_kind": "set",
    "element": "--column",
    "id": "288e408ae751bd3767711ffb7ae185ee4f1fd9383f2a946fc654f8ed00ae0e39",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "2ade018354ede8dba1588c3d21fc59f36d735b9ece2b33a83c9fa69a791e0ba5": {
    "version": 1,
@@ -496,7 +589,8 @@
    "collection_kind": "charset",
    "element": "F",
    "id": "2ade018354ede8dba1588c3d21fc59f36d735b9ece2b33a83c9fa69a791e0ba5",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "2befccbc751c05ee1603beb6c1023b6b0a41645f45d501ca253b77330d15ed3f": {
    "version": 1,
@@ -506,7 +600,8 @@
    "collection_kind": "dict",
    "element": "nohup",
    "id": "2befccbc751c05ee1603beb6c1023b6b0a41645f45d501ca253b77330d15ed3f",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "2c1e31b050751ab81236bb963f512e5b4f1b5a7a53f4cc89b9ef72c4c4e06c1d": {
    "version": 1,
@@ -516,7 +611,8 @@
    "collection_kind": "dict",
    "element": "P",
    "id": "2c1e31b050751ab81236bb963f512e5b4f1b5a7a53f4cc89b9ef72c4c4e06c1d",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "2c76eed682d1dea4236c6ad72be0903f3990652918fcb16832bb3caba153eb90": {
    "version": 1,
@@ -526,7 +622,8 @@
    "collection_kind": "set",
    "element": "--version",
    "id": "2c76eed682d1dea4236c6ad72be0903f3990652918fcb16832bb3caba153eb90",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "2ea36b39df358965da8564de06330f92b9d71dbd2b46cc68797117355f4a4779": {
    "version": 1,
@@ -536,7 +633,8 @@
    "collection_kind": "set",
    "element": "else",
    "id": "2ea36b39df358965da8564de06330f92b9d71dbd2b46cc68797117355f4a4779",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "2f28d51920275bfc04fe18ff1339a1aab0d7c900b3b32fd6f9b29618f428d048": {
    "version": 1,
@@ -546,7 +644,8 @@
    "collection_kind": "charset",
    "element": "B",
    "id": "2f28d51920275bfc04fe18ff1339a1aab0d7c900b3b32fd6f9b29618f428d048",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "2f80c17226e95d580e8fa4bd7936e8a9739af4aff6357d3413f171530d7fa7ad": {
    "version": 1,
@@ -556,7 +655,19 @@
    "collection_kind": "dict",
    "element": "deny",
    "id": "2f80c17226e95d580e8fa4bd7936e8a9739af4aff6357d3413f171530d7fa7ad",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "invalid-receipt"
+  },
+  "30ab4695bcf7da02be88367fc8b8e0aee54858a2b4753b7b267c8743ed76e91f": {
+   "version": 1,
+   "kind": "set-element",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "name": "_GIT_TERMINAL_OPTIONS",
+   "collection_kind": "set",
+   "element": "--info-path",
+   "id": "30ab4695bcf7da02be88367fc8b8e0aee54858a2b4753b7b267c8743ed76e91f",
+   "outcome": "survived",
+   "reason": "survived"
   },
   "31a68aaa689108e5a05ef5721d666da9dcf39068a43b7ace8dd2272f16432ac0": {
    "version": 1,
@@ -566,7 +677,8 @@
    "collection_kind": "dict",
    "element": "MAX_PREFIX_DEPTH",
    "id": "31a68aaa689108e5a05ef5721d666da9dcf39068a43b7ace8dd2272f16432ac0",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "31b4de8c9eea3a4b35be1d76bf8b5cd7870686479d9b167208198c87325f741a": {
    "version": 1,
@@ -576,7 +688,8 @@
    "collection_kind": "set",
    "element": "archive",
    "id": "31b4de8c9eea3a4b35be1d76bf8b5cd7870686479d9b167208198c87325f741a",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "323d503754e397be61794c374b83fc6af30e1039846cc1ce632d205abc3c9c7b": {
    "version": 1,
@@ -586,7 +699,8 @@
    "collection_kind": "set",
    "element": "f",
    "id": "323d503754e397be61794c374b83fc6af30e1039846cc1ce632d205abc3c9c7b",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "32eb4f9a5b286ac9fba15a52d339b37217fbc8bb7bd55affde18f72285742f09": {
    "version": 1,
@@ -596,7 +710,8 @@
    "collection_kind": "set",
    "element": "--no-fixed-strings",
    "id": "32eb4f9a5b286ac9fba15a52d339b37217fbc8bb7bd55affde18f72285742f09",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "33035f8b2be0f6fc1e0a2754ee00e122658509d27ab16f0445184077d841251e": {
    "version": 1,
@@ -606,7 +721,8 @@
    "collection_kind": "dict",
    "element": "default",
    "id": "33035f8b2be0f6fc1e0a2754ee00e122658509d27ab16f0445184077d841251e",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "3386c635f9a61a1c3a5bcd3c785e9d754f18bc6e8da5059af8df41660d7bd3c5": {
    "version": 1,
@@ -616,7 +732,19 @@
    "collection_kind": "set",
    "element": "--namespace",
    "id": "3386c635f9a61a1c3a5bcd3c785e9d754f18bc6e8da5059af8df41660d7bd3c5",
-   "outcome": "survived"
+   "outcome": "caught",
+   "reason": "suite-failure"
+  },
+  "34f66107aea1438714e06aaa6a9d791f97908dbc4ddc4be278219ee04ae98cab": {
+   "version": 1,
+   "kind": "set-element",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "name": "_GIT_TERMINAL_OPTIONS",
+   "collection_kind": "set",
+   "element": "--help",
+   "id": "34f66107aea1438714e06aaa6a9d791f97908dbc4ddc4be278219ee04ae98cab",
+   "outcome": "survived",
+   "reason": "survived"
   },
   "3561eafc0550b0fdf2864bbd2f4c43b7cefb3a6cc389b90febcec8bd9e683a8d": {
    "version": 1,
@@ -626,7 +754,8 @@
    "collection_kind": "set",
    "element": "--files-with-matches",
    "id": "3561eafc0550b0fdf2864bbd2f4c43b7cefb3a6cc389b90febcec8bd9e683a8d",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "36ae3dd79cca4bbafe63a105eb23ffb7a84318fd501fcc54a9cf212130448b2b": {
    "version": 1,
@@ -636,7 +765,8 @@
    "collection_kind": "charset",
    "element": "L",
    "id": "36ae3dd79cca4bbafe63a105eb23ffb7a84318fd501fcc54a9cf212130448b2b",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "37447b9257ab748b423945fed59ea7dbdf36fc8a75d2a08646e0068cee875bad": {
    "version": 1,
@@ -646,7 +776,8 @@
    "collection_kind": "dict",
    "element": "timeout",
    "id": "37447b9257ab748b423945fed59ea7dbdf36fc8a75d2a08646e0068cee875bad",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "37a5ac8c5a8f828fc2b5849aee98c44a12e1d99a063cd0a4a4bf0767e2de026d": {
    "version": 1,
@@ -656,7 +787,8 @@
    "collection_kind": "dict",
    "element": "--fixed-strings",
    "id": "37a5ac8c5a8f828fc2b5849aee98c44a12e1d99a063cd0a4a4bf0767e2de026d",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "37e1a4f1f79cad3d93fc495b8a7e567bacef673525e0973f73ba3b0fe0a039b2": {
    "version": 1,
@@ -666,7 +798,8 @@
    "collection_kind": "dict",
    "element": "--fixed-strings",
    "id": "37e1a4f1f79cad3d93fc495b8a7e567bacef673525e0973f73ba3b0fe0a039b2",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "3855c77954e439f66e9538ade49d7d29b9c81cce6303c5751cee0d46c8f86019": {
    "version": 1,
@@ -676,7 +809,8 @@
    "collection_kind": "set",
    "element": "--context",
    "id": "3855c77954e439f66e9538ade49d7d29b9c81cce6303c5751cee0d46c8f86019",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "389222a02fafb72089ee0722ab258bdb238a77207a0124c052ebb6f54f01bd90": {
    "version": 1,
@@ -686,7 +820,8 @@
    "collection_kind": "charset",
    "element": "I",
    "id": "389222a02fafb72089ee0722ab258bdb238a77207a0124c052ebb6f54f01bd90",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "38e487575f7c818335168e48001a801dbc3018d5ff00eadf6792836390f432e8": {
    "version": 1,
@@ -696,7 +831,8 @@
    "collection_kind": "dict",
    "element": "a",
    "id": "38e487575f7c818335168e48001a801dbc3018d5ff00eadf6792836390f432e8",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "390431cc49401a944da18ac54e73ff8f7a6b6b57071855c73e354426c5f74f9b": {
    "version": 1,
@@ -706,7 +842,8 @@
    "collection_kind": "charset",
    "element": "X",
    "id": "390431cc49401a944da18ac54e73ff8f7a6b6b57071855c73e354426c5f74f9b",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "393e96c4033f224d65f49d8c7649ab872c4f300667711200d539514f1ca611e7": {
    "version": 1,
@@ -716,7 +853,8 @@
    "collection_kind": "computed-set",
    "element": "log",
    "id": "393e96c4033f224d65f49d8c7649ab872c4f300667711200d539514f1ca611e7",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "39934b633378e4d9aa51b54ea3fba195b02e3c821083036d8d1569c2380b72f9": {
    "version": 1,
@@ -726,7 +864,8 @@
    "anchor_sha256": "93c065aa51dd66e0f9ee0331637c4b54038c027ab6aff9336c0330f89c574036",
    "replacement_sha256": "a0ede61353a5cd5cac1fab362ac23f9d1706ac96ac9fc101fcbdfd2846f9ba19",
    "id": "39934b633378e4d9aa51b54ea3fba195b02e3c821083036d8d1569c2380b72f9",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "3a0bfd3d4d033bbc9c9381ed5994d2763c925b712f0296f06590319210990bf1": {
    "version": 1,
@@ -736,7 +875,8 @@
    "collection_kind": "set",
    "element": "--perl-regexp",
    "id": "3a0bfd3d4d033bbc9c9381ed5994d2763c925b712f0296f06590319210990bf1",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "3bb21f2503d776482c0d3ee74b8ec101a57ad7bfa644a8c08e47f5d459c28e39": {
    "version": 1,
@@ -746,7 +886,8 @@
    "collection_kind": "set",
    "element": "/bin/cat",
    "id": "3bb21f2503d776482c0d3ee74b8ec101a57ad7bfa644a8c08e47f5d459c28e39",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "408c02f3582b8a17e31d25a95d45e26e2a6872c412e4436ee26e3c18aa4b2859": {
    "version": 1,
@@ -756,7 +897,8 @@
    "anchor_sha256": "ea2c3efd25ec453865e8bbbb78c42022035ea45b704a01add3c82e38f332f1d3",
    "replacement_sha256": "0da1cefc34e5ba522bb43811b0070fde5797d04e18b6dd5b9d1b632f9295d10c",
    "id": "408c02f3582b8a17e31d25a95d45e26e2a6872c412e4436ee26e3c18aa4b2859",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "409f13d30907a4d4649a71a65597d366ccaef198b0dfa2d06a061a01c72e810f": {
    "version": 1,
@@ -766,7 +908,8 @@
    "collection_kind": "set",
    "element": "--function-context",
    "id": "409f13d30907a4d4649a71a65597d366ccaef198b0dfa2d06a061a01c72e810f",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "40afd00f8bf76b4950daa934f366de47e90204694ca1aed06411ce6e8d5948a1": {
    "version": 1,
@@ -776,7 +919,8 @@
    "collection_kind": "charset",
    "element": "W",
    "id": "40afd00f8bf76b4950daa934f366de47e90204694ca1aed06411ce6e8d5948a1",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "40d51bb153560e13aa37581405cf3e0a820c7f3c07c73e427c28be273acfc5dc": {
    "version": 1,
@@ -786,7 +930,8 @@
    "collection_kind": "set",
    "element": "rev-parse",
    "id": "40d51bb153560e13aa37581405cf3e0a820c7f3c07c73e427c28be273acfc5dc",
-   "outcome": "survived"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "41985315df720e153c310ba878f6927ce01e875cc5a98ef51b9b1d46ada4ce98": {
    "version": 1,
@@ -796,7 +941,8 @@
    "collection_kind": "dict",
    "element": "--perl-regexp",
    "id": "41985315df720e153c310ba878f6927ce01e875cc5a98ef51b9b1d46ada4ce98",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "4263044e1ae04ec521cd981b30edbd3760267ac85deb6421e6b1758f01298ce3": {
    "version": 1,
@@ -806,7 +952,8 @@
    "collection_kind": "set",
    "element": "--context",
    "id": "4263044e1ae04ec521cd981b30edbd3760267ac85deb6421e6b1758f01298ce3",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "42865ea138736aa64863b5e2f8974101c70f5221c4ea16cee0dd6083f23321fd": {
    "version": 1,
@@ -816,7 +963,8 @@
    "anchor_sha256": "a25485ab7bf547a47d74cffc1c1ae4e89e0170194f837717ecd8079c325912cf",
    "replacement_sha256": "a7f038750b16bbc919ed83fa8e0d9f5f0bb7a04ad896d1a3de6c8dc399fec4e4",
    "id": "42865ea138736aa64863b5e2f8974101c70f5221c4ea16cee0dd6083f23321fd",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "42b415a7be9e8543fd3b8e86e198713e0c3cff9340a1b61cb8d60c2d81431133": {
    "version": 1,
@@ -826,7 +974,8 @@
    "collection_kind": "computed-set",
    "element": "ls-tree",
    "id": "42b415a7be9e8543fd3b8e86e198713e0c3cff9340a1b61cb8d60c2d81431133",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "445f079d8898af7533431ce2d119f36d2195515a3841c656e612f4bffca7b9ac": {
    "version": 1,
@@ -836,7 +985,8 @@
    "collection_kind": "set",
    "element": "zsh",
    "id": "445f079d8898af7533431ce2d119f36d2195515a3841c656e612f4bffca7b9ac",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "4628658b73d78a6e8396339ad654ed4b7cb7155ea52a7c06694dec6327d1e999": {
    "version": 1,
@@ -846,7 +996,8 @@
    "collection_kind": "dict",
    "element": "setsid",
    "id": "4628658b73d78a6e8396339ad654ed4b7cb7155ea52a7c06694dec6327d1e999",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "468effa02c99e7c7a7a63db822c0e86567ef12f5a7b85f6ce71a035dcfb23957": {
    "version": 1,
@@ -856,7 +1007,8 @@
    "collection_kind": "charset",
    "element": "h",
    "id": "468effa02c99e7c7a7a63db822c0e86567ef12f5a7b85f6ce71a035dcfb23957",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "4766b8718486a3bbe016651e24ca2b915f2f605e0f58abd4db484af01344a047": {
    "version": 1,
@@ -866,7 +1018,8 @@
    "collection_kind": "charset",
    "element": "p",
    "id": "4766b8718486a3bbe016651e24ca2b915f2f605e0f58abd4db484af01344a047",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "48ee0f666e93e4542c86d63d5dda4897dce68a539d37d54cf8161d4853a1a20a": {
    "version": 1,
@@ -876,7 +1029,8 @@
    "collection_kind": "dict",
    "element": "l",
    "id": "48ee0f666e93e4542c86d63d5dda4897dce68a539d37d54cf8161d4853a1a20a",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "4b7645b18942ea2dc771effdbc7ace83b0f581e83243927e39085963b82637ea": {
    "version": 1,
@@ -886,7 +1040,8 @@
    "collection_kind": "set",
    "element": "--git-dir",
    "id": "4b7645b18942ea2dc771effdbc7ace83b0f581e83243927e39085963b82637ea",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "4c357867bbba99d975398fa39a97d46997e62dcd695e1dcab2e5ddff8805a046": {
    "version": 1,
@@ -896,7 +1051,8 @@
    "collection_kind": "computed-set",
    "element": "archive",
    "id": "4c357867bbba99d975398fa39a97d46997e62dcd695e1dcab2e5ddff8805a046",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "4ceb81a3beb6e1a66a318ce547921480621e1ca066ee46451384bac4d196d212": {
    "version": 1,
@@ -906,7 +1062,8 @@
    "collection_kind": "set",
    "element": "claude",
    "id": "4ceb81a3beb6e1a66a318ce547921480621e1ca066ee46451384bac4d196d212",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "4dbcf27180ab4be0123b5379e033a1a710008c24b6db87971f088a0d23b1ec41": {
    "version": 1,
@@ -916,7 +1073,8 @@
    "anchor_sha256": "24707fe459e19f84e658f575649601a60a5ba8ba1f9a23616f6c513ac06094fc",
    "replacement_sha256": "1226f1ed1bb2be18cf9a49df5446aca296a8a4b927256e20acf2cb7e71bf0e44",
    "id": "4dbcf27180ab4be0123b5379e033a1a710008c24b6db87971f088a0d23b1ec41",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "4e501202b9efbaefdde0f1dc3fac61b15f7a4536f9b58d4f57a8cc1547673ea0": {
    "version": 1,
@@ -926,7 +1084,8 @@
    "collection_kind": "charset",
    "element": "u",
    "id": "4e501202b9efbaefdde0f1dc3fac61b15f7a4536f9b58d4f57a8cc1547673ea0",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "4f898558ecdd4b567f885c6d055d6f6415385fa3d4d3eea3b6794f0930ad819b": {
    "version": 1,
@@ -936,7 +1095,8 @@
    "collection_kind": "set",
    "element": "--recursive",
    "id": "4f898558ecdd4b567f885c6d055d6f6415385fa3d4d3eea3b6794f0930ad819b",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "5030833d3016855279a4404e6a6098f2e96ea784473b084081f700e7ea33cabe": {
    "version": 1,
@@ -946,7 +1106,8 @@
    "collection_kind": "set",
    "element": "--basic-regexp",
    "id": "5030833d3016855279a4404e6a6098f2e96ea784473b084081f700e7ea33cabe",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "50519674ab7bf3cae4438768d0600e316eef758cc6ee4e8cf7b553bc6ac05aac": {
    "version": 1,
@@ -956,7 +1117,8 @@
    "collection_kind": "set",
    "element": "--all-match",
    "id": "50519674ab7bf3cae4438768d0600e316eef758cc6ee4e8cf7b553bc6ac05aac",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "520e25765d49d5fff8be84b8366b15e58ff255557097498f77e574136d611f12": {
    "version": 1,
@@ -966,7 +1128,8 @@
    "collection_kind": "set",
    "element": "--line-number",
    "id": "520e25765d49d5fff8be84b8366b15e58ff255557097498f77e574136d611f12",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "524337c91e4e460bad62247aecf94ff497c9a9b69807a3da6763515eb6570720": {
    "version": 1,
@@ -976,7 +1139,8 @@
    "collection_kind": "charset",
    "element": "g",
    "id": "524337c91e4e460bad62247aecf94ff497c9a9b69807a3da6763515eb6570720",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "5470a22680434907138a8c31bb1649251a0f8bc092bf2f1a3913cfccdb6dbb48": {
    "version": 1,
@@ -986,7 +1150,8 @@
    "anchor_sha256": "f7cafa02542b79ca7a2d3b57d8feb23a68b2dcbd66dc5e38496c763d37c53374",
    "replacement_sha256": "d0a5882beb77755d3b20d142c9360325f65323b95d4bc32583846bc7b5a6ba7c",
    "id": "5470a22680434907138a8c31bb1649251a0f8bc092bf2f1a3913cfccdb6dbb48",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "55c38240401b8908bf47f73bcd28d1735b26057e1d1665356045a0c768d6e37b": {
    "version": 1,
@@ -996,7 +1161,8 @@
    "anchor_sha256": "b9cac4b81550df2624535279a011d6259b0fabffff7118e6f4b166024a4c8be4",
    "replacement_sha256": "0165df9bec50c6a692e9a9a1f8e5e7845569164b2b74bba26156805440cd37f9",
    "id": "55c38240401b8908bf47f73bcd28d1735b26057e1d1665356045a0c768d6e37b",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "55eb4e361559c6e365beb8197a5e56c7c6c87ec4c0b94cfb8b76893a30bc75cf": {
    "version": 1,
@@ -1006,7 +1172,8 @@
    "collection_kind": "charset",
    "element": "D",
    "id": "55eb4e361559c6e365beb8197a5e56c7c6c87ec4c0b94cfb8b76893a30bc75cf",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "572b22281e07cc3358bddee3b72a1de7b9b0a34cc4676f0bdddb4fd4d9cbf3c9": {
    "version": 1,
@@ -1016,7 +1183,8 @@
    "collection_kind": "set",
    "element": "log",
    "id": "572b22281e07cc3358bddee3b72a1de7b9b0a34cc4676f0bdddb4fd4d9cbf3c9",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "57fd69f2091988bc3bb3e37ea6095903647968ee7290455d03df8c36530286eb": {
    "version": 1,
@@ -1026,7 +1194,8 @@
    "collection_kind": "charset",
    "element": "v",
    "id": "57fd69f2091988bc3bb3e37ea6095903647968ee7290455d03df8c36530286eb",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "5863b63b0996f224f05bd67cb58d5dac2555f8ad5ff1dc3b75f0b008b08a6ab8": {
    "version": 1,
@@ -1036,7 +1205,8 @@
    "collection_kind": "charset",
    "element": "P",
    "id": "5863b63b0996f224f05bd67cb58d5dac2555f8ad5ff1dc3b75f0b008b08a6ab8",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "58779f4d9882eceecd60573ad14f859ba34f7978521dd6b43f23087b602d40cb": {
    "version": 1,
@@ -1046,7 +1216,8 @@
    "collection_kind": "charset",
    "element": "B",
    "id": "58779f4d9882eceecd60573ad14f859ba34f7978521dd6b43f23087b602d40cb",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "58f21da087e9e4d1a2c3a4c19327e1387ee1bdebe8d9905e73add6b65ecfabe4": {
    "version": 1,
@@ -1056,7 +1227,8 @@
    "collection_kind": "set",
    "element": "--count",
    "id": "58f21da087e9e4d1a2c3a4c19327e1387ee1bdebe8d9905e73add6b65ecfabe4",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "599c7fd803bf2480949b151cc436f7a705f326b5d93103e63de2f252d751097a": {
    "version": 1,
@@ -1066,7 +1238,8 @@
    "anchor_sha256": "30a62d2a8e10ecc7c2ef30f3268922b62c0b16f30e553d20555099badff0b739",
    "replacement_sha256": "2591933b465d6db40e40d197579d8fe57814c0327f7d5432cf0f8f32f556c6ff",
    "id": "599c7fd803bf2480949b151cc436f7a705f326b5d93103e63de2f252d751097a",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "59c4941eaa51c254685fafdc1a24da4fc8aa0a003d1b5e1399bfacc293e63452": {
    "version": 1,
@@ -1076,7 +1249,8 @@
    "collection_kind": "set",
    "element": "add",
    "id": "59c4941eaa51c254685fafdc1a24da4fc8aa0a003d1b5e1399bfacc293e63452",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "5ab443f5c75bef0a151a815fe90b663d4018eb45884941c2310e8bf445a53352": {
    "version": 1,
@@ -1086,7 +1260,8 @@
    "collection_kind": "charset",
    "element": "r",
    "id": "5ab443f5c75bef0a151a815fe90b663d4018eb45884941c2310e8bf445a53352",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "5ad88f820796b5161ea9d3f9001bcd0a266005b6db1cd65982bc31762753558a": {
    "version": 1,
@@ -1096,7 +1271,8 @@
    "anchor_sha256": "7d3b4c006ab5ec1b41a31296e0bd80df6adeb058f79cf32a37bbadbfa7416ca4",
    "replacement_sha256": "6223f31d04866d4f1f96d452a8ab44209bcd882e420f1a6fe010d82176e119fa",
    "id": "5ad88f820796b5161ea9d3f9001bcd0a266005b6db1cd65982bc31762753558a",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "5b07a53af93c5d1f55eb7ec1feece31e0c4102cdd178447897f9c5f80657bf94": {
    "version": 1,
@@ -1106,7 +1282,8 @@
    "collection_kind": "computed-set",
    "element": "blame",
    "id": "5b07a53af93c5d1f55eb7ec1feece31e0c4102cdd178447897f9c5f80657bf94",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "5b38eb38a7dd282aa10e87166bfb85057461f4a38094ec408c1f7157470cf1f2": {
    "version": 1,
@@ -1116,7 +1293,8 @@
    "anchor_sha256": "3edd24d373d2c013124e73ffc060f99a32d115d2b90310f515e17afd02dcfe4f",
    "replacement_sha256": "8051a5b16b214e6b41bcc4be6053fb94aecead7303a2465d0abacea4bf0c4895",
    "id": "5b38eb38a7dd282aa10e87166bfb85057461f4a38094ec408c1f7157470cf1f2",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "5d9a3263012cb336d74c212bbeccdc484b273506df06c1420909de3c4b38cdbe": {
    "version": 1,
@@ -1126,7 +1304,8 @@
    "anchor_sha256": "2722a3d8fe8af72153608c622d05d265300b40190d027ea7e53eb134d0e2b0a2",
    "replacement_sha256": "8887fd830fc0ab65f5a0bbd3c8579033f6fb13bd85c120bd84b79fb373d5d4ab",
    "id": "5d9a3263012cb336d74c212bbeccdc484b273506df06c1420909de3c4b38cdbe",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "5f0b0cfb68a707f7ff5ed2971aab8240554cd95a5e8027aa20c343f395b0e907": {
    "version": 1,
@@ -1136,7 +1315,8 @@
    "collection_kind": "charset",
    "element": "W",
    "id": "5f0b0cfb68a707f7ff5ed2971aab8240554cd95a5e8027aa20c343f395b0e907",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "5f75ee797b45a2990baf8d4041e07cae43eda650767ee878017c782be8f7f399": {
    "version": 1,
@@ -1146,7 +1326,8 @@
    "collection_kind": "set",
    "element": "rev-list",
    "id": "5f75ee797b45a2990baf8d4041e07cae43eda650767ee878017c782be8f7f399",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "5fa61d86ec2ed6c592a43ac1b0af13b0427d31902f7582f6fa8ecd4a0717cec4": {
    "version": 1,
@@ -1156,7 +1337,8 @@
    "collection_kind": "set",
    "element": "--no-perl-regexp",
    "id": "5fa61d86ec2ed6c592a43ac1b0af13b0427d31902f7582f6fa8ecd4a0717cec4",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "607252a17f661b7cb706525e93f41c8a183fd8fbab1d9a723f84ce80d69d64de": {
    "version": 1,
@@ -1166,7 +1348,8 @@
    "collection_kind": "set",
    "element": "--full-name",
    "id": "607252a17f661b7cb706525e93f41c8a183fd8fbab1d9a723f84ce80d69d64de",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "60d86f05c437ea112075dad851096b9120eaf41c3b243d71677d327c516370d6": {
    "version": 1,
@@ -1176,7 +1359,8 @@
    "collection_kind": "dict",
    "element": "--extended-regexp",
    "id": "60d86f05c437ea112075dad851096b9120eaf41c3b243d71677d327c516370d6",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "62b540b0ddb60ec48fb95401724bb3ba1f5372d1d5a400caac0e156c33d364f9": {
    "version": 1,
@@ -1186,7 +1370,8 @@
    "anchor_sha256": "a83ef1af3fcdd293aceefc6fbbb8100d125757f659af06f4c3999e2bdb58eb4b",
    "replacement_sha256": "36d4d3ecaae67f17154e4361eba4b297cd34b959f603c280da5e5f9695d53906",
    "id": "62b540b0ddb60ec48fb95401724bb3ba1f5372d1d5a400caac0e156c33d364f9",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "62c714b05b1a25506e8366f2c01ba5ac53c5077499c121ceb3616c93fd1609af": {
    "version": 1,
@@ -1196,7 +1381,8 @@
    "anchor_sha256": "6813caa55397fe8ae2973fd6761ca46a5e9f776adcd62a49fc03e472f899e0cb",
    "replacement_sha256": "8051a5b16b214e6b41bcc4be6053fb94aecead7303a2465d0abacea4bf0c4895",
    "id": "62c714b05b1a25506e8366f2c01ba5ac53c5077499c121ceb3616c93fd1609af",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "653266d1fe842cfcc6e15fb780b1886faa0a3f008e745e3c4022ba030a5fa372": {
    "version": 1,
@@ -1206,7 +1392,8 @@
    "collection_kind": "set",
    "element": "ls-tree",
    "id": "653266d1fe842cfcc6e15fb780b1886faa0a3f008e745e3c4022ba030a5fa372",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "65b6232d489b468c8b840bd90c40ad66b350454a708ad138e48c1096dc699415": {
    "version": 1,
@@ -1216,7 +1403,8 @@
    "anchor_sha256": "5c4da6130a2bcf0927a9d98e5e0458279d4f5344d23b1ac5f61b152ceca691d9",
    "replacement_sha256": "c842f490c760816ee596067fac4e10187904ee18fd0ec696f70d675edd28be82",
    "id": "65b6232d489b468c8b840bd90c40ad66b350454a708ad138e48c1096dc699415",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "65f31834c60d9a2b8721af009a3308233cb9e92fc201569b41b4baf18cec8696": {
    "version": 1,
@@ -1226,7 +1414,8 @@
    "anchor_sha256": "72bbb37347fb2c1fc2f71c16377ec734cda328681a366c9a231fd6b047c0daf6",
    "replacement_sha256": "a4610d7b09aadcf2886f4041f3ac22dcd81b5afd71b2abdf000d6cfaa6e317dd",
    "id": "65f31834c60d9a2b8721af009a3308233cb9e92fc201569b41b4baf18cec8696",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "66eae14bcd0328d244e6022fe70e66e1c39268989f856c7dbae52d18900d39de": {
    "version": 1,
@@ -1236,7 +1425,8 @@
    "collection_kind": "dict",
    "element": "--extended-regexp",
    "id": "66eae14bcd0328d244e6022fe70e66e1c39268989f856c7dbae52d18900d39de",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "6830e1052a5a259a159aa51486cbdcf312b30a24224b11480a54eb73ac4a04b7": {
    "version": 1,
@@ -1246,7 +1436,8 @@
    "collection_kind": "set",
    "element": "time",
    "id": "6830e1052a5a259a159aa51486cbdcf312b30a24224b11480a54eb73ac4a04b7",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "6886b74385789949f17754eca870f2c1a9dc6e65030deb7ec6ff86c8ad098aa8": {
    "version": 1,
@@ -1256,7 +1447,8 @@
    "collection_kind": "computed-set",
    "element": "cat-file",
    "id": "6886b74385789949f17754eca870f2c1a9dc6e65030deb7ec6ff86c8ad098aa8",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "68d6fe58831375c14a8fc997e22767bb0d0fd41ea5373f0f1e196718dae37611": {
    "version": 1,
@@ -1266,7 +1458,8 @@
    "collection_kind": "set",
    "element": "commit",
    "id": "68d6fe58831375c14a8fc997e22767bb0d0fd41ea5373f0f1e196718dae37611",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "698a5b9df56360a633b6e6ae090070082bc1344f8d1dd5b40f1c8b3ead040ff4": {
    "version": 1,
@@ -1276,7 +1469,8 @@
    "collection_kind": "set",
    "element": "--max-depth",
    "id": "698a5b9df56360a633b6e6ae090070082bc1344f8d1dd5b40f1c8b3ead040ff4",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "6af05c86f11d4351ad7c8a7463220e10a7658ed5575bf1095cc0c6d427fc0561": {
    "version": 1,
@@ -1286,7 +1480,8 @@
    "collection_kind": "computed-set",
    "element": "diff",
    "id": "6af05c86f11d4351ad7c8a7463220e10a7658ed5575bf1095cc0c6d427fc0561",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "6b879209c1914a58559cd47164531b0bb089fad9d5a3c3abd99c04a91e73f54f": {
    "version": 1,
@@ -1296,7 +1491,8 @@
    "collection_kind": "dict",
    "element": "-P",
    "id": "6b879209c1914a58559cd47164531b0bb089fad9d5a3c3abd99c04a91e73f54f",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "6c3e1db0941dcd620c38bc6ab888ba266bd817cdd04bfd9c09f297e1ed681f9f": {
    "version": 1,
@@ -1306,7 +1502,8 @@
    "collection_kind": "set",
    "element": "O",
    "id": "6c3e1db0941dcd620c38bc6ab888ba266bd817cdd04bfd9c09f297e1ed681f9f",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "6c8d992e1256c662ae9a6a361f9aeef5f08159ba0319e5060ce27f4885514152": {
    "version": 1,
@@ -1316,7 +1513,8 @@
    "anchor_sha256": "ffc78bd36825d3c6e4f63e597630c528afbcbad7f2ed73a80881ad5ea9c6bbf4",
    "replacement_sha256": "55ee2b32f2607de90c3fc3b7280d1445e0339279eb08419bde29b1e105e9f3af",
    "id": "6c8d992e1256c662ae9a6a361f9aeef5f08159ba0319e5060ce27f4885514152",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "6cd7887782cf33004f21297ae3e2137567b2551425fa73511f4331d47d3df36d": {
    "version": 1,
@@ -1326,7 +1524,8 @@
    "collection_kind": "charset",
    "element": "H",
    "id": "6cd7887782cf33004f21297ae3e2137567b2551425fa73511f4331d47d3df36d",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "6ce74f5b49dea616965e78158e31f63e4f13a51476b8ae6d9817f72b340065a3": {
    "version": 1,
@@ -1336,7 +1535,8 @@
    "collection_kind": "set",
    "element": "e",
    "id": "6ce74f5b49dea616965e78158e31f63e4f13a51476b8ae6d9817f72b340065a3",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "6d614b5869e2a72ed80ba0d11ad0904f0dbbe3491a89cb234fc741049c02853c": {
    "version": 1,
@@ -1346,7 +1546,8 @@
    "collection_kind": "set",
    "element": "if",
    "id": "6d614b5869e2a72ed80ba0d11ad0904f0dbbe3491a89cb234fc741049c02853c",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "6e01a04b7dbf1cf26e383ad5f5e085f27890d3d8fbc98133823c0d29c9e8def9": {
    "version": 1,
@@ -1356,7 +1557,8 @@
    "collection_kind": "charset",
    "element": "n",
    "id": "6e01a04b7dbf1cf26e383ad5f5e085f27890d3d8fbc98133823c0d29c9e8def9",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "6f5bd8b30fffc22d87fb0c2a75a1b030c97046797e77c70283468feb2285ecd3": {
    "version": 1,
@@ -1366,7 +1568,8 @@
    "collection_kind": "set",
    "element": "do",
    "id": "6f5bd8b30fffc22d87fb0c2a75a1b030c97046797e77c70283468feb2285ecd3",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "6ffb35c03b01a402ba149c04bb1516cbcc48a0b9ef738d006dd2efc4ff49430e": {
    "version": 1,
@@ -1376,7 +1579,8 @@
    "collection_kind": "charset",
    "element": "V",
    "id": "6ffb35c03b01a402ba149c04bb1516cbcc48a0b9ef738d006dd2efc4ff49430e",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "71c913806717e6cb5b9900916e72bb928bfb7ad84b460ec6327ce68aba285b64": {
    "version": 1,
@@ -1386,7 +1590,8 @@
    "collection_kind": "set",
    "element": "until",
    "id": "71c913806717e6cb5b9900916e72bb928bfb7ad84b460ec6327ce68aba285b64",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "724075ee4d0a963cbb25ea8791d0395367db4d37ee6ed48f91b7b67a1d63996a": {
    "version": 1,
@@ -1396,7 +1601,8 @@
    "collection_kind": "charset",
    "element": "b",
    "id": "724075ee4d0a963cbb25ea8791d0395367db4d37ee6ed48f91b7b67a1d63996a",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "73583a1b38176a35f9252ed5585c4cdd410712c5729319222f2dd688a4987e2e": {
    "version": 1,
@@ -1406,7 +1612,8 @@
    "collection_kind": "set",
    "element": "push",
    "id": "73583a1b38176a35f9252ed5585c4cdd410712c5729319222f2dd688a4987e2e",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "73eaade8ed227cdaafe7f32dca95b97d5fc721bb556c8bd927d7bfd3802892a9": {
    "version": 1,
@@ -1416,7 +1623,8 @@
    "collection_kind": "dict",
    "element": "-F",
    "id": "73eaade8ed227cdaafe7f32dca95b97d5fc721bb556c8bd927d7bfd3802892a9",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "73eefa42c94f02b9c698ffceacdcb1cd32f474e512a4116098fe9551deab885c": {
    "version": 1,
@@ -1426,7 +1634,8 @@
    "anchor_sha256": "7428ceb9e6d0737c761ea934a85f3f25675575a2c2fe814b14d3c659234b81a4",
    "replacement_sha256": "9bbfe59f351b0a50f48a002401e33fc1e107cdaaee9d04df8c1698ecb22426ee",
    "id": "73eefa42c94f02b9c698ffceacdcb1cd32f474e512a4116098fe9551deab885c",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "74a1afebb54995629b862bf43bc5c4d37139c188461ab7bec05eb5b2956ee874": {
    "version": 1,
@@ -1436,7 +1645,8 @@
    "collection_kind": "set",
    "element": "--super-prefix",
    "id": "74a1afebb54995629b862bf43bc5c4d37139c188461ab7bec05eb5b2956ee874",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "74b60a565969173127a482df7427e778ce72f9e9ec4373c0b96afc937069bf85": {
    "version": 1,
@@ -1446,7 +1656,8 @@
    "collection_kind": "charset",
    "element": "i",
    "id": "74b60a565969173127a482df7427e778ce72f9e9ec4373c0b96afc937069bf85",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "75622fda4ef821451e2e2a707b608c6c7f9826d09c534684345ff4298407a634": {
    "version": 1,
@@ -1456,7 +1667,8 @@
    "collection_kind": "set",
    "element": "--show-function",
    "id": "75622fda4ef821451e2e2a707b608c6c7f9826d09c534684345ff4298407a634",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "76e15d18d96c0a40d0117d05ba6e201bedd5cae1ab3fec94a3469b1e7aad43bd": {
    "version": 1,
@@ -1466,7 +1678,8 @@
    "collection_kind": "set",
    "element": "fetch",
    "id": "76e15d18d96c0a40d0117d05ba6e201bedd5cae1ab3fec94a3469b1e7aad43bd",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "77b96b4de93104350e2e83744fef71ce84bfdb23cfcad29e5c8aee058c38e420": {
    "version": 1,
@@ -1476,7 +1689,19 @@
    "collection_kind": "charset",
    "element": "A",
    "id": "77b96b4de93104350e2e83744fef71ce84bfdb23cfcad29e5c8aee058c38e420",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
+  },
+  "7c09098415c80701a703c366af35f731bd1af858b7e1632feceb3060e2e53749": {
+   "version": 1,
+   "kind": "set-element",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "name": "_GIT_TERMINAL_OPTIONS",
+   "collection_kind": "set",
+   "element": "--man-path",
+   "id": "7c09098415c80701a703c366af35f731bd1af858b7e1632feceb3060e2e53749",
+   "outcome": "survived",
+   "reason": "survived"
   },
   "7ed0e7fcb11557fcab75a57edb8a042a2d6553b039a299d67b59a2866afebe0b": {
    "version": 1,
@@ -1486,7 +1711,8 @@
    "anchor_sha256": "30bfe3416d534e6940e4ddf4a5a455bbf97c2111907c888097b6bc8a2b6581ff",
    "replacement_sha256": "c1f74bc4eb5f8e922681f1d1b36bae1fc38865fee4ac6382cc7f1c938b0be042",
    "id": "7ed0e7fcb11557fcab75a57edb8a042a2d6553b039a299d67b59a2866afebe0b",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "801e941694ef67e11464d4b49400e418c739d1e2849032b9b224500b3e0c99c9": {
    "version": 1,
@@ -1496,7 +1722,8 @@
    "collection_kind": "set",
    "element": "fetch",
    "id": "801e941694ef67e11464d4b49400e418c739d1e2849032b9b224500b3e0c99c9",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "80ec1a411e3e80452eed11e2b1641d560ebd68eb31b9e54d7e7cb2874c993863": {
    "version": 1,
@@ -1506,7 +1733,8 @@
    "collection_kind": "charset",
    "element": "w",
    "id": "80ec1a411e3e80452eed11e2b1641d560ebd68eb31b9e54d7e7cb2874c993863",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "81b3cc75aa54d131a4e642758d919c9d7efdef52fb6af6f838fc5bbcdcd24bd2": {
    "version": 1,
@@ -1516,7 +1744,8 @@
    "anchor_sha256": "993cb7132749050763e84f704ede8ae174e4e83cbd64e3ecfe5ea70b30360f84",
    "replacement_sha256": "33b13c7b44100ab524527128429cc214ad643c1cceabece54c2a67f41cf6a110",
    "id": "81b3cc75aa54d131a4e642758d919c9d7efdef52fb6af6f838fc5bbcdcd24bd2",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "82e17c162fc72af53854f5fa07aee978d7e1f1a5411419e4070210d2c6ae2a1c": {
    "version": 1,
@@ -1526,7 +1755,8 @@
    "collection_kind": "dict",
    "element": "u",
    "id": "82e17c162fc72af53854f5fa07aee978d7e1f1a5411419e4070210d2c6ae2a1c",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "841f1f86d5235d8b3804a30ca48f9c2ea66ed4be38d26db624045f20e9eb6de2": {
    "version": 1,
@@ -1536,7 +1766,8 @@
    "collection_kind": "set",
    "element": "--before-context",
    "id": "841f1f86d5235d8b3804a30ca48f9c2ea66ed4be38d26db624045f20e9eb6de2",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "8437e722960b8ddd81a27076eaef45d279541063b0ab7f30b9adc18a3533f031": {
    "version": 1,
@@ -1546,7 +1777,8 @@
    "collection_kind": "set",
    "element": "cat-file",
    "id": "8437e722960b8ddd81a27076eaef45d279541063b0ab7f30b9adc18a3533f031",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "844a85366271ebc584d55e2bb0a1bee5e1f626e348cdb39a5f3cbaca231ff9b6": {
    "version": 1,
@@ -1556,7 +1788,19 @@
    "collection_kind": "set",
    "element": "--cached",
    "id": "844a85366271ebc584d55e2bb0a1bee5e1f626e348cdb39a5f3cbaca231ff9b6",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
+  },
+  "84c1514ff7129550730d8ada69215bae72033343ea0c96547973ceea6f5a7b4a": {
+   "version": 1,
+   "kind": "set-element",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "name": "_GIT_TERMINAL_OPTIONS",
+   "collection_kind": "set",
+   "element": "--exec-path",
+   "id": "84c1514ff7129550730d8ada69215bae72033343ea0c96547973ceea6f5a7b4a",
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "84c99eb70f3d54718505656b8e5609ab9ea13174bdbda01f7718bdd2f0dc3999": {
    "version": 1,
@@ -1566,7 +1810,8 @@
    "collection_kind": "set",
    "element": "--before-context",
    "id": "84c99eb70f3d54718505656b8e5609ab9ea13174bdbda01f7718bdd2f0dc3999",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "869a6bb0cf127489dd9f5d3e75f9153145e0e6c1a4a9e38b1c43c56e351b0ef6": {
    "version": 1,
@@ -1576,7 +1821,8 @@
    "collection_kind": "dict",
    "element": "F",
    "id": "869a6bb0cf127489dd9f5d3e75f9153145e0e6c1a4a9e38b1c43c56e351b0ef6",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "8943c9d6e827548463ec4263963a22f77c700004cbbaab83c797e695e73f660c": {
    "version": 1,
@@ -1586,7 +1832,8 @@
    "collection_kind": "dict",
    "element": "perl",
    "id": "8943c9d6e827548463ec4263963a22f77c700004cbbaab83c797e695e73f660c",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "899db848a30f03e7a05b83b441b16534dac5f09e43545ab6ca49a08758f33e8f": {
    "version": 1,
@@ -1596,7 +1843,8 @@
    "collection_kind": "set",
    "element": "noglob",
    "id": "899db848a30f03e7a05b83b441b16534dac5f09e43545ab6ca49a08758f33e8f",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "8a9330b20b5619a471a4f1c0128262a288236908ae18a3a803286a620ee9eb4f": {
    "version": 1,
@@ -1606,7 +1854,8 @@
    "collection_kind": "set",
    "element": "archive",
    "id": "8a9330b20b5619a471a4f1c0128262a288236908ae18a3a803286a620ee9eb4f",
-   "outcome": "survived"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "8b93e4ce987ed330a917dbd365876dddf32a835a0b10a64b8ea906223c080e90": {
    "version": 1,
@@ -1616,7 +1865,8 @@
    "collection_kind": "charset",
    "element": "C",
    "id": "8b93e4ce987ed330a917dbd365876dddf32a835a0b10a64b8ea906223c080e90",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "8bb692f9d312ae3d4ec5a4e6b2ee240ff7558472c17d718db94eec420b59c150": {
    "version": 1,
@@ -1626,7 +1876,8 @@
    "collection_kind": "set",
    "element": "gc",
    "id": "8bb692f9d312ae3d4ec5a4e6b2ee240ff7558472c17d718db94eec420b59c150",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "8ca14d99a08881500c90624a42c4f379de4ddfe0124b2ec6b7c73ca5f701018e": {
    "version": 1,
@@ -1636,7 +1887,8 @@
    "collection_kind": "set",
    "element": "--name-only",
    "id": "8ca14d99a08881500c90624a42c4f379de4ddfe0124b2ec6b7c73ca5f701018e",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "8ca5fde04567887b508f979a125eb49212b5a57378341a2ea8cee8b6716358bc": {
    "version": 1,
@@ -1646,7 +1898,8 @@
    "collection_kind": "computed-set",
    "element": "rev-parse",
    "id": "8ca5fde04567887b508f979a125eb49212b5a57378341a2ea8cee8b6716358bc",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "8eaf742ce45e00b7454785277e547363cf448e8a976105850174415bab2ef292": {
    "version": 1,
@@ -1656,7 +1909,8 @@
    "collection_kind": "dict",
    "element": "Q",
    "id": "8eaf742ce45e00b7454785277e547363cf448e8a976105850174415bab2ef292",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "8f17cd485798cc06dc41a481c949ae5b27b28b924c910e745e9154895fa1bf34": {
    "version": 1,
@@ -1666,7 +1920,8 @@
    "collection_kind": "set",
    "element": "--quiet",
    "id": "8f17cd485798cc06dc41a481c949ae5b27b28b924c910e745e9154895fa1bf34",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "90fa72c2b6491bbf60850f1eb4813f4e2781b305224ed1dede2f209173e56fad": {
    "version": 1,
@@ -1676,7 +1931,8 @@
    "collection_kind": "charset",
    "element": "r",
    "id": "90fa72c2b6491bbf60850f1eb4813f4e2781b305224ed1dede2f209173e56fad",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "9194e74106308406d25327565dc756377a32a681dc47cacc9ceaccfd3534f172": {
    "version": 1,
@@ -1686,7 +1942,8 @@
    "anchor_sha256": "1b795c39986df86f9a29a0d47c4b181b50d03f644e27879a58ec1e23807f4f77",
    "replacement_sha256": "f2dbaec32851736f16dbf54d8ca81d1139dc2b5104c25f2beffad27b96b72182",
    "id": "9194e74106308406d25327565dc756377a32a681dc47cacc9ceaccfd3534f172",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "919b2e00de5b9151a51b4896d21e6915e6b9fef4b97195b41d60f13ed8a23576": {
    "version": 1,
@@ -1696,7 +1953,8 @@
    "collection_kind": "computed-set",
    "element": "grep",
    "id": "919b2e00de5b9151a51b4896d21e6915e6b9fef4b97195b41d60f13ed8a23576",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "925d24269762f0496cea122e3043f738ba23c4b71b4d825cf60e017484790b33": {
    "version": 1,
@@ -1706,7 +1964,8 @@
    "collection_kind": "charset",
    "element": "Q",
    "id": "925d24269762f0496cea122e3043f738ba23c4b71b4d825cf60e017484790b33",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "93c9a424f1893c45b49e46699e18a89078f0c4f0259b656388696a3e871e75f7": {
    "version": 1,
@@ -1716,7 +1975,8 @@
    "collection_kind": "charset",
    "element": "z",
    "id": "93c9a424f1893c45b49e46699e18a89078f0c4f0259b656388696a3e871e75f7",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "9447985711c437f58209e4ebf3df03930f3d2692a497a95b55d9d6673785595f": {
    "version": 1,
@@ -1726,7 +1986,8 @@
    "anchor_sha256": "ae870301577154ccfcec8e8f1d37c3f668a6c87af8b4fdbbe1aec0d501fd1bba",
    "replacement_sha256": "c0bbf0054a1ead08072b7e67a990ef8fe909131da7d4325d60dad90be97f6512",
    "id": "9447985711c437f58209e4ebf3df03930f3d2692a497a95b55d9d6673785595f",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "9475fddaeb704411b1c67c6d8afb401d19c90c2106b6d6374b5b493d36e42a63": {
    "version": 1,
@@ -1736,7 +1997,19 @@
    "collection_kind": "charset",
    "element": "c",
    "id": "9475fddaeb704411b1c67c6d8afb401d19c90c2106b6d6374b5b493d36e42a63",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
+  },
+  "951ddc719d95df219cf580fdbcb47dc9f2bea94eae6218232391cd3f6935d47d": {
+   "version": 1,
+   "kind": "set-element",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "name": "_GIT_TERMINAL_OPTIONS",
+   "collection_kind": "set",
+   "element": "--html-path",
+   "id": "951ddc719d95df219cf580fdbcb47dc9f2bea94eae6218232391cd3f6935d47d",
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "96ca2770c703e5bd0e23a21999055af4cf71e639cfa0b1a4e4f2d43c43f91972": {
    "version": 1,
@@ -1746,7 +2019,8 @@
    "collection_kind": "set",
    "element": "--work-tree",
    "id": "96ca2770c703e5bd0e23a21999055af4cf71e639cfa0b1a4e4f2d43c43f91972",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "972d35559ea43d8186297a87e717b6e4b1cd7e60dbcfb8b496ff7f1f224f7d4f": {
    "version": 1,
@@ -1756,7 +2030,8 @@
    "collection_kind": "dict",
    "element": "stdbuf",
    "id": "972d35559ea43d8186297a87e717b6e4b1cd7e60dbcfb8b496ff7f1f224f7d4f",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "974406cf78f89524d098ba630d2afb1d52daf6eba3d158fe06629b82bff04281": {
    "version": 1,
@@ -1766,7 +2041,8 @@
    "anchor_sha256": "18edff295cf4d4096d7c3968574ba9f4343deb344339fafec89531c1d82a1ff1",
    "replacement_sha256": "c4737f8fc719a28c4966c5fd11075ce41eeea37e7c443f8786a79e2ff976590e",
    "id": "974406cf78f89524d098ba630d2afb1d52daf6eba3d158fe06629b82bff04281",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "97cf042660ae9cd8dbd676da67e7c24855a395043dbb05f7d56b055bb21004fd": {
    "version": 1,
@@ -1776,7 +2052,8 @@
    "collection_kind": "computed-set",
    "element": "restore",
    "id": "97cf042660ae9cd8dbd676da67e7c24855a395043dbb05f7d56b055bb21004fd",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "97cf87372e275f57c979f2af13567fbac869f80f75493fd2e261fa78473cee85": {
    "version": 1,
@@ -1786,7 +2063,8 @@
    "collection_kind": "set",
    "element": "cat-file",
    "id": "97cf87372e275f57c979f2af13567fbac869f80f75493fd2e261fa78473cee85",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "980c230244119c01d21a6d1d743433746078f13baf55859fc32c131841c22914": {
    "version": 1,
@@ -1796,7 +2074,8 @@
    "collection_kind": "set",
    "element": "--recurse-submodules",
    "id": "980c230244119c01d21a6d1d743433746078f13baf55859fc32c131841c22914",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "981025032676fd2913f67b54efeab98bae5ce6331034a8c401c166bdbc5005a2": {
    "version": 1,
@@ -1806,7 +2085,8 @@
    "collection_kind": "computed-set",
    "element": "push",
    "id": "981025032676fd2913f67b54efeab98bae5ce6331034a8c401c166bdbc5005a2",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "98c90b8889d5fca907412d677e30ca20738c90f1ab6eb05aa1951e57f97ac30b": {
    "version": 1,
@@ -1816,7 +2096,8 @@
    "anchor_sha256": "863299bd19fa9d0bf0d453b36aa6e6b0939d6731f5edb9719fbdc1a0bcc7ab08",
    "replacement_sha256": "bf64e13540526c8b1614155ab22875b456b7c3dfe2836c57924f15e5116c85e7",
    "id": "98c90b8889d5fca907412d677e30ca20738c90f1ab6eb05aa1951e57f97ac30b",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "98eed6740226ac0e9594ff5d871cb9732fa8477e26e726d77a57468b0ca4c239": {
    "version": 1,
@@ -1826,7 +2107,8 @@
    "collection_kind": "dict",
    "element": "e",
    "id": "98eed6740226ac0e9594ff5d871cb9732fa8477e26e726d77a57468b0ca4c239",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "997a209f5593e659c65e31d3f3508e44b49f577c5d60e7a3d675a59d8ca840f6": {
    "version": 1,
@@ -1836,7 +2118,8 @@
    "collection_kind": "set",
    "element": "--color",
    "id": "997a209f5593e659c65e31d3f3508e44b49f577c5d60e7a3d675a59d8ca840f6",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "999baecc128ebec63c6fc1c7adb1a24dec267be0e9f508af55fc7e9b1f3a8575": {
    "version": 1,
@@ -1846,7 +2129,8 @@
    "anchor_sha256": "3eb97e0f03b0a19010752e8fd745637c98755bb1dd69e59a814cd08ece323f0d",
    "replacement_sha256": "59a69d490e4eb0cc164a57e52444dd21a686ce977db44a55701c9fe4090eb57f",
    "id": "999baecc128ebec63c6fc1c7adb1a24dec267be0e9f508af55fc7e9b1f3a8575",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "9b12e87bab347842634a58992b33551659da755d65d9d3f3ded496ad3de12ab6": {
    "version": 1,
@@ -1856,7 +2140,8 @@
    "collection_kind": "set",
    "element": "nocorrect",
    "id": "9b12e87bab347842634a58992b33551659da755d65d9d3f3ded496ad3de12ab6",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "9d0e773d15eab724f72000a882b8e5a18363380ec915a5d1a288bc1eec363066": {
    "version": 1,
@@ -1866,7 +2151,8 @@
    "collection_kind": "set",
    "element": "grep",
    "id": "9d0e773d15eab724f72000a882b8e5a18363380ec915a5d1a288bc1eec363066",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "9d35fe1257b25c1a9ab220b9a83e50a93c3d4fce7c17621fe7fcc3f77794ff36": {
    "version": 1,
@@ -1876,7 +2162,8 @@
    "collection_kind": "set",
    "element": "--color",
    "id": "9d35fe1257b25c1a9ab220b9a83e50a93c3d4fce7c17621fe7fcc3f77794ff36",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "9dacc78a36648852d0371e9f54f2a2bbe166cf282e18ab8d5cc66df217b7f8a3": {
    "version": 1,
@@ -1886,7 +2173,8 @@
    "collection_kind": "charset",
    "element": "q",
    "id": "9dacc78a36648852d0371e9f54f2a2bbe166cf282e18ab8d5cc66df217b7f8a3",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "9db2e359f1d3dbd726b6a2ede48511254d6562ba7c5ab5a7a8b43e317aaaaebc": {
    "version": 1,
@@ -1896,7 +2184,8 @@
    "collection_kind": "set",
    "element": "--word-regexp",
    "id": "9db2e359f1d3dbd726b6a2ede48511254d6562ba7c5ab5a7a8b43e317aaaaebc",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "9dd7a27a0a3b3be67dce38778fb2068b1be6790a2cebce1b5a4743a9b4723b1f": {
    "version": 1,
@@ -1906,7 +2195,8 @@
    "collection_kind": "set",
    "element": "--index",
    "id": "9dd7a27a0a3b3be67dce38778fb2068b1be6790a2cebce1b5a4743a9b4723b1f",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "9e1faea104bd71b6e4c7c80774b9ef267b1d7472999ed893c2efe4bea08e9225": {
    "version": 1,
@@ -1916,7 +2206,8 @@
    "anchor_sha256": "5a5c1e211bfff4d52dc66f88e059d322d265c7ce622895ab3d65e15d93600ca2",
    "replacement_sha256": "d41faf8a330731c62fb7c18251d4c2199a8e99ce1381baf13f479a4a00302130",
    "id": "9e1faea104bd71b6e4c7c80774b9ef267b1d7472999ed893c2efe4bea08e9225",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "invalid-receipt"
   },
   "9e550e1db98c0eb91962502509c08583481e61f8ad55725f2350decade3198bc": {
    "version": 1,
@@ -1926,7 +2217,8 @@
    "collection_kind": "dict",
    "element": "ere",
    "id": "9e550e1db98c0eb91962502509c08583481e61f8ad55725f2350decade3198bc",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "9e616eff9532b8174dd53822e28a4c847d13f143d3f58804ccac82e1ba241568": {
    "version": 1,
@@ -1936,7 +2228,8 @@
    "collection_kind": "dispatch",
    "element": "zsh_rev_modifier",
    "id": "9e616eff9532b8174dd53822e28a4c847d13f143d3f58804ccac82e1ba241568",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "9eaf4697d1cd0a153b9387611cc51f542e4830b0d7267ca38cabb9ed274d98f3": {
    "version": 1,
@@ -1946,7 +2239,8 @@
    "collection_kind": "set",
    "element": "diff",
    "id": "9eaf4697d1cd0a153b9387611cc51f542e4830b0d7267ca38cabb9ed274d98f3",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "a009c6da8d3491b899cd21a8dcda57abe71e0d16802cd4d03d1e643e863535a6": {
    "version": 1,
@@ -1956,7 +2250,8 @@
    "collection_kind": "charset",
    "element": "s",
    "id": "a009c6da8d3491b899cd21a8dcda57abe71e0d16802cd4d03d1e643e863535a6",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "a00eaad2966119033897e85eb746a0a8234f855773ec519faa5c3825470ac2a4": {
    "version": 1,
@@ -1966,7 +2261,8 @@
    "collection_kind": "dict",
    "element": "pcre",
    "id": "a00eaad2966119033897e85eb746a0a8234f855773ec519faa5c3825470ac2a4",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "a1560f11151b5a574bde5a999d9201ad8255106bce9e2723681b63e2e7cf4475": {
    "version": 1,
@@ -1976,7 +2272,8 @@
    "collection_kind": "set",
    "element": "--help",
    "id": "a1560f11151b5a574bde5a999d9201ad8255106bce9e2723681b63e2e7cf4475",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "a19113996e7aa5a5c192219028116b88bbdb22179d76fd77ac8a588f180d43f0": {
    "version": 1,
@@ -1986,7 +2283,8 @@
    "collection_kind": "dict",
    "element": "MAX_ENV_SPLITS",
    "id": "a19113996e7aa5a5c192219028116b88bbdb22179d76fd77ac8a588f180d43f0",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "a2e881d37a3fa58369c22112627019a472488de4e42e6824c86af49fd3024c14": {
    "version": 1,
@@ -1996,7 +2294,8 @@
    "collection_kind": "dict",
    "element": "MAX_SUBCOMMANDS",
    "id": "a2e881d37a3fa58369c22112627019a472488de4e42e6824c86af49fd3024c14",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "a41d4713d84a6158d1a299ffaadba054dbeb7cecfe0c84bd80008d165cae7e5e": {
    "version": 1,
@@ -2006,7 +2305,8 @@
    "collection_kind": "set",
    "element": "!",
    "id": "a41d4713d84a6158d1a299ffaadba054dbeb7cecfe0c84bd80008d165cae7e5e",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "a5a9bb104e7daa2a2f0897ca3f92bedd34588ed302347407c81bbb0058b73d1d": {
    "version": 1,
@@ -2016,7 +2316,8 @@
    "collection_kind": "computed-set",
    "element": "show",
    "id": "a5a9bb104e7daa2a2f0897ca3f92bedd34588ed302347407c81bbb0058b73d1d",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "a5ae359ead9bc312b142bc1851258ecc24dd31af9d902911db913a6da9fc5565": {
    "version": 1,
@@ -2026,7 +2327,8 @@
    "collection_kind": "charset",
    "element": "S",
    "id": "a5ae359ead9bc312b142bc1851258ecc24dd31af9d902911db913a6da9fc5565",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "a5b2550dd7c21171c585dc844625544d618e88788e5650794f6a82dcb5c065af": {
    "version": 1,
@@ -2036,7 +2338,8 @@
    "collection_kind": "charset",
    "element": "R",
    "id": "a5b2550dd7c21171c585dc844625544d618e88788e5650794f6a82dcb5c065af",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "a5d2ad5171199400ef1725dd3bafc69784b97974af4a6874380f16504022aed0": {
    "version": 1,
@@ -2046,7 +2349,8 @@
    "collection_kind": "charset",
    "element": "d",
    "id": "a5d2ad5171199400ef1725dd3bafc69784b97974af4a6874380f16504022aed0",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "a5ec0a7229cef0884c522ba4de0a1814e3e1c29299c53fb2a246655d4127d272": {
    "version": 1,
@@ -2056,7 +2360,8 @@
    "collection_kind": "dict",
    "element": "G",
    "id": "a5ec0a7229cef0884c522ba4de0a1814e3e1c29299c53fb2a246655d4127d272",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "a5fbe378ac34966b234cf6979b5ccd5ffe3714be7580edf345a2a4ea1e4820f9": {
    "version": 1,
@@ -2066,7 +2371,8 @@
    "collection_kind": "set",
    "element": "then",
    "id": "a5fbe378ac34966b234cf6979b5ccd5ffe3714be7580edf345a2a4ea1e4820f9",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "a624d4230c0d75606e3cdb97d088536aa617fdf3e9fa37a471abb22b655cda0f": {
    "version": 1,
@@ -2076,7 +2382,8 @@
    "collection_kind": "set",
    "element": "echo",
    "id": "a624d4230c0d75606e3cdb97d088536aa617fdf3e9fa37a471abb22b655cda0f",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "a64ef6c78503496b9255cff3ae486726c4a9f74e29ecd3280ffb0f898eaf0918": {
    "version": 1,
@@ -2086,7 +2393,8 @@
    "collection_kind": "set",
    "element": "--exclude-standard",
    "id": "a64ef6c78503496b9255cff3ae486726c4a9f74e29ecd3280ffb0f898eaf0918",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "a6c8ddbf8b6348d76d24312a59878bb256be1daf1da46c737accbc47450aee45": {
    "version": 1,
@@ -2096,7 +2404,8 @@
    "anchor_sha256": "3ef78eed68c274cb3d8454d625a899bc233eeaa4de92919300041b288ea9c153",
    "replacement_sha256": "7c3403e86e5b46b2831b9fac6349f67903d5c81768115625eed16cb1b02b91b6",
    "id": "a6c8ddbf8b6348d76d24312a59878bb256be1daf1da46c737accbc47450aee45",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "a7ce0ea748f57d706a1a8abc8f994f67093baf84db77a20a9da0a4b3c687e97c": {
    "version": 1,
@@ -2106,7 +2415,8 @@
    "collection_kind": "set",
    "element": "shortlog",
    "id": "a7ce0ea748f57d706a1a8abc8f994f67093baf84db77a20a9da0a4b3c687e97c",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "a89727164deb89e70073352f489de4617440545799bbee2d024e2cb220384ea2": {
    "version": 1,
@@ -2116,7 +2426,8 @@
    "anchor_sha256": "7d4612e869eec7623424b560a252550552972802261b35554d1c8c4f1c0acfdb",
    "replacement_sha256": "0e3efb5c622b0f678ed8b59cb915d4276e69b2aa5f94647225aa88727386fa09",
    "id": "a89727164deb89e70073352f489de4617440545799bbee2d024e2cb220384ea2",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "a8ee94c2bd17db83d0223422d719af3a70b3adfe50f29f8ad155434ef1009c81": {
    "version": 1,
@@ -2126,7 +2437,8 @@
    "collection_kind": "computed-set",
    "element": "rev-list",
    "id": "a8ee94c2bd17db83d0223422d719af3a70b3adfe50f29f8ad155434ef1009c81",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "aadbf19703e846a9295b4609a14454a9a11edfaa40aa9b1440baeca13b6425b4": {
    "version": 1,
@@ -2136,7 +2448,8 @@
    "collection_kind": "charset",
    "element": "t",
    "id": "aadbf19703e846a9295b4609a14454a9a11edfaa40aa9b1440baeca13b6425b4",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "ab15e77229e6b6cb66c18a0f2bdcf2d8edfce115b69f14a44766f5f66ff4460d": {
    "version": 1,
@@ -2146,7 +2459,8 @@
    "collection_kind": "computed-set",
    "element": "difftool",
    "id": "ab15e77229e6b6cb66c18a0f2bdcf2d8edfce115b69f14a44766f5f66ff4460d",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "acd05d82b556607f84e1cd0ea6d1e165145576dd5afeaf17891d5d8d2522a00d": {
    "version": 1,
@@ -2156,7 +2470,8 @@
    "collection_kind": "set",
    "element": "show",
    "id": "acd05d82b556607f84e1cd0ea6d1e165145576dd5afeaf17891d5d8d2522a00d",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "ad9778055323bcc79a9307448f47d25f7a10853c17b2c2f7ff43e420ebfbb888": {
    "version": 1,
@@ -2166,17 +2481,20 @@
    "collection_kind": "dict",
    "element": "MAX_TOKENS",
    "id": "ad9778055323bcc79a9307448f47d25f7a10853c17b2c2f7ff43e420ebfbb888",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
-  "b00e6e7736370c09b9b550a2f7ae8b70c0215f611038d7d0615d6676b5e9d67c": {
+  "adcb98384e895cd459341fb036b1ab39cef34fc276c38e0cf88bb31ff2ec0814": {
    "version": 1,
-   "kind": "set-element",
+   "kind": "set-addition",
    "module": "hooks/guards/git_grep_engine_guard.py",
-   "name": "_GIT_GLOBAL_OPTIONS_WITH_VALUES",
+   "name": "_GIT_TERMINAL_OPTIONS",
    "collection_kind": "set",
-   "element": "--exec-path",
-   "id": "b00e6e7736370c09b9b550a2f7ae8b70c0215f611038d7d0615d6676b5e9d67c",
-   "outcome": "survived"
+   "element": "--icase-pathspecs",
+   "label": "a non-terminating git global is treated as terminal",
+   "id": "adcb98384e895cd459341fb036b1ab39cef34fc276c38e0cf88bb31ff2ec0814",
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "b093cdf59e53cdcfca66dd65c20089c65f545584a7c652c9ab0bca1c73394a84": {
    "version": 1,
@@ -2186,7 +2504,8 @@
    "collection_kind": "charset",
    "element": "a",
    "id": "b093cdf59e53cdcfca66dd65c20089c65f545584a7c652c9ab0bca1c73394a84",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "b2592bb00ba06db740f836dd25b6ecfcfb122357ebb5437b48f080d3af76aba4": {
    "version": 1,
@@ -2196,7 +2515,8 @@
    "collection_kind": "set",
    "element": "--invert-match",
    "id": "b2592bb00ba06db740f836dd25b6ecfcfb122357ebb5437b48f080d3af76aba4",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "b404b531d350091ae9d990ce8510134495b9404982ffc132b688d03319bc96ee": {
    "version": 1,
@@ -2206,7 +2526,8 @@
    "collection_kind": "set",
    "element": "--and",
    "id": "b404b531d350091ae9d990ce8510134495b9404982ffc132b688d03319bc96ee",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "b502321a37c70f3161c21cea54d2a39adfbcf9262964b748d50d694f581acdd8": {
    "version": 1,
@@ -2216,7 +2537,8 @@
    "collection_kind": "set",
    "element": "--textconv",
    "id": "b502321a37c70f3161c21cea54d2a39adfbcf9262964b748d50d694f581acdd8",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "b5641522ba476e64ff9054ef0ea18fd019c9300a7252ea6504ce8e2e6d4aace3": {
    "version": 1,
@@ -2226,7 +2548,8 @@
    "collection_kind": "set",
    "element": "log",
    "id": "b5641522ba476e64ff9054ef0ea18fd019c9300a7252ea6504ce8e2e6d4aace3",
-   "outcome": "survived"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "b58729996f984f5165c1fcc016c50948202db2747630eecb7502d1437b03a931": {
    "version": 1,
@@ -2236,7 +2559,8 @@
    "collection_kind": "dict",
    "element": "t",
    "id": "b58729996f984f5165c1fcc016c50948202db2747630eecb7502d1437b03a931",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "b6365d9871da9277dc0e4a62c1e28fedea13ea8f8cbe1a7fb50e7a102d5d477a": {
    "version": 1,
@@ -2246,7 +2570,8 @@
    "anchor_sha256": "7b984360290e08e06952b61a20baeaef18a3dd2db8a8b89c8c79a4ef3238c6de",
    "replacement_sha256": "0107d1964420fdfeab32699c1720dd32eb41fe6bca82041af2901f21005724b0",
    "id": "b6365d9871da9277dc0e4a62c1e28fedea13ea8f8cbe1a7fb50e7a102d5d477a",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "b64e2149d63a4b20439b4f52de50f158a3acc925b89f3508f162dd1f7c9ed052": {
    "version": 1,
@@ -2256,7 +2581,8 @@
    "collection_kind": "dict",
    "element": "extended",
    "id": "b64e2149d63a4b20439b4f52de50f158a3acc925b89f3508f162dd1f7c9ed052",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "b76c30a705ce832cadeed5c1b4c4a86e8af08b195f34d2051296836cc10b9853": {
    "version": 1,
@@ -2266,7 +2592,8 @@
    "collection_kind": "set",
    "element": "--max-count",
    "id": "b76c30a705ce832cadeed5c1b4c4a86e8af08b195f34d2051296836cc10b9853",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "b81f9dfbd9fb28bed7ab8f0657f813c9908145abef1c4aa1af07389ae5451124": {
    "version": 1,
@@ -2276,7 +2603,8 @@
    "collection_kind": "dict",
    "element": "ask",
    "id": "b81f9dfbd9fb28bed7ab8f0657f813c9908145abef1c4aa1af07389ae5451124",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "b8b3ec319b49c1bbafc0609e99587004a44ccf6f865b43f2a12a85f1f4dde5d0": {
    "version": 1,
@@ -2286,7 +2614,8 @@
    "anchor_sha256": "65c48ac16bf38db7cbaec6c85f1a3cd34a0a07ffb2808836b51e56c365b2a122",
    "replacement_sha256": "8d9001883d15c697eb0a274eee4084840dab580adba4e559d04e2dbb99a46434",
    "id": "b8b3ec319b49c1bbafc0609e99587004a44ccf6f865b43f2a12a85f1f4dde5d0",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "bae6cbfa4b29abc757ecb5b22995851871df168d11cd009cf1c2635b208185da": {
    "version": 1,
@@ -2296,7 +2625,8 @@
    "collection_kind": "dict",
    "element": "MAX_SOURCE_DEPTH",
    "id": "bae6cbfa4b29abc757ecb5b22995851871df168d11cd009cf1c2635b208185da",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "bb4408cb93de223993b000bdcefa719e36d4a6bd36e17ed32626668964a26d6b": {
    "version": 1,
@@ -2306,7 +2636,8 @@
    "anchor_sha256": "a5da3ce8c76ebdab5650f8cace46fde83207c10254546f2d7ffe9406c06b7738",
    "replacement_sha256": "cb8f2196e0e192e7586b7d225593ec7540d5b3f76688254700c4091439bfc2ac",
    "id": "bb4408cb93de223993b000bdcefa719e36d4a6bd36e17ed32626668964a26d6b",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "bb4635ec193be59eaea0a40b5dcd3f07d353ebed6610a2f8ed0bfd638f9b1d39": {
    "version": 1,
@@ -2316,7 +2647,8 @@
    "collection_kind": "charset",
    "element": "N",
    "id": "bb4635ec193be59eaea0a40b5dcd3f07d353ebed6610a2f8ed0bfd638f9b1d39",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "bbd779aeea2d302bc0eaf5e87218a1289f21092cf94ddb6a6b7dc89ab0ea6ed8": {
    "version": 1,
@@ -2326,7 +2658,8 @@
    "collection_kind": "computed-set",
    "element": "fetch",
    "id": "bbd779aeea2d302bc0eaf5e87218a1289f21092cf94ddb6a6b7dc89ab0ea6ed8",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "bc9d7671fe731568c89e41a8c24cd9dceb93b97ed00231cf03694dd994dd0190": {
    "version": 1,
@@ -2336,7 +2669,8 @@
    "collection_kind": "set",
    "element": "--break",
    "id": "bc9d7671fe731568c89e41a8c24cd9dceb93b97ed00231cf03694dd994dd0190",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "bdfdecd2d36e5bc685417842f334a3ad2995a4bea8630487ec4493169fbf2914": {
    "version": 1,
@@ -2346,7 +2680,8 @@
    "collection_kind": "charset",
    "element": "w",
    "id": "bdfdecd2d36e5bc685417842f334a3ad2995a4bea8630487ec4493169fbf2914",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "be84b3cef0664051c7718728beef3d54fe6f4126bc8f9b13f93af3bd67fa8ed1": {
    "version": 1,
@@ -2356,7 +2691,8 @@
    "collection_kind": "charset",
    "element": "w",
    "id": "be84b3cef0664051c7718728beef3d54fe6f4126bc8f9b13f93af3bd67fa8ed1",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "bfd6a6d1f2fbd74cad77f28504b5346d7d745436ea09bf51e2760898bc94f5a5": {
    "version": 1,
@@ -2366,7 +2702,8 @@
    "collection_kind": "dict",
    "element": "c",
    "id": "bfd6a6d1f2fbd74cad77f28504b5346d7d745436ea09bf51e2760898bc94f5a5",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "c10e7b93d112690ceda985d51627d48eb4af8137dad5fd76f2d0b6aa3bde419c": {
    "version": 1,
@@ -2376,7 +2713,8 @@
    "collection_kind": "set",
    "element": "pull",
    "id": "c10e7b93d112690ceda985d51627d48eb4af8137dad5fd76f2d0b6aa3bde419c",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "c129d74bea664d31531ed25fb07cc62277b91050953d04684f7cd4598afdd224": {
    "version": 1,
@@ -2386,7 +2724,8 @@
    "collection_kind": "set",
    "element": "--attr-source",
    "id": "c129d74bea664d31531ed25fb07cc62277b91050953d04684f7cd4598afdd224",
-   "outcome": "survived"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "c17d8a0ad396a82e6a4479bea1e0780afb52a11e6f4c717990fedf69ed6f8aa0": {
    "version": 1,
@@ -2396,7 +2735,8 @@
    "collection_kind": "set",
    "element": "ls-tree",
    "id": "c17d8a0ad396a82e6a4479bea1e0780afb52a11e6f4c717990fedf69ed6f8aa0",
-   "outcome": "survived"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "c2a8b09fbff50db271ee42948d28ff60464269a56affa137b065576a4b22493d": {
    "version": 1,
@@ -2406,7 +2746,8 @@
    "collection_kind": "charset",
    "element": "h",
    "id": "c2a8b09fbff50db271ee42948d28ff60464269a56affa137b065576a4b22493d",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "c40ea0d0e3dca6ed405b6f219399e8d2d548b0f09be210802d5ccb8311b6ddd4": {
    "version": 1,
@@ -2416,7 +2757,8 @@
    "collection_kind": "charset",
    "element": "z",
    "id": "c40ea0d0e3dca6ed405b6f219399e8d2d548b0f09be210802d5ccb8311b6ddd4",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "c71905b6ebf6911a52ad962ed8cd08d2f30fb0b85e5fa7b15cc5649541ca0ad7": {
    "version": 1,
@@ -2426,7 +2768,8 @@
    "collection_kind": "set",
    "element": "branch",
    "id": "c71905b6ebf6911a52ad962ed8cd08d2f30fb0b85e5fa7b15cc5649541ca0ad7",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "c79e87bd9d615f9bd61897463c811379891972af69fe8de49e3e43ba31845e87": {
    "version": 1,
@@ -2436,7 +2779,8 @@
    "collection_kind": "set",
    "element": "--ext-grep",
    "id": "c79e87bd9d615f9bd61897463c811379891972af69fe8de49e3e43ba31845e87",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "c93b556da03271d6a42d79630f8e98449963a7428e57c6279558098a69d14a6b": {
    "version": 1,
@@ -2446,7 +2790,8 @@
    "collection_kind": "set",
    "element": "--or",
    "id": "c93b556da03271d6a42d79630f8e98449963a7428e57c6279558098a69d14a6b",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "c99bf2699ea9a42491d27bec121fc0495e1fe84a9bda3b3895bae6a99d4b604e": {
    "version": 1,
@@ -2456,7 +2801,8 @@
    "collection_kind": "charset",
    "element": "e",
    "id": "c99bf2699ea9a42491d27bec121fc0495e1fe84a9bda3b3895bae6a99d4b604e",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "caa99f7d77c5cc377f813c6e66cec6b17a7d940339e750073f19e201656a4616": {
    "version": 1,
@@ -2466,7 +2812,8 @@
    "collection_kind": "set",
    "element": "checkout",
    "id": "caa99f7d77c5cc377f813c6e66cec6b17a7d940339e750073f19e201656a4616",
-   "outcome": "survived"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "cab2f4f412e111184a3c67edbfe54942eb9644d4acc9dd04e5134298ccb82f6b": {
    "version": 1,
@@ -2476,7 +2823,8 @@
    "collection_kind": "set",
    "element": "--only-matching",
    "id": "cab2f4f412e111184a3c67edbfe54942eb9644d4acc9dd04e5134298ccb82f6b",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "cb2474e86287f7df71a13953cd5218566e8a077dd6cb1cba6d8ed5afbf5bfaa3": {
    "version": 1,
@@ -2486,7 +2834,8 @@
    "collection_kind": "set",
    "element": "--ignore-case",
    "id": "cb2474e86287f7df71a13953cd5218566e8a077dd6cb1cba6d8ed5afbf5bfaa3",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "cb8aeb3b21fceb8174671c39b2639769c38ee509a649dc17483ebf6322b2ef77": {
    "version": 1,
@@ -2496,7 +2845,8 @@
    "collection_kind": "set",
    "element": "rev-parse",
    "id": "cb8aeb3b21fceb8174671c39b2639769c38ee509a649dc17483ebf6322b2ef77",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "cc35deba32d59f9902b035f52adc0c70abbd6cc202c5a35029e4e61db4037f68": {
    "version": 1,
@@ -2506,7 +2856,8 @@
    "collection_kind": "set",
    "element": "--files-without-match",
    "id": "cc35deba32d59f9902b035f52adc0c70abbd6cc202c5a35029e4e61db4037f68",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "ccce624c4196d8d87ba98ed30ffe75f94bbcd8a88cd28047a13c4d322c93bbd4": {
    "version": 1,
@@ -2516,7 +2867,8 @@
    "anchor_sha256": "47b9385c39496509596265680b89f0507bbbdd7942bd88ae11ac79ca497b0f4d",
    "replacement_sha256": "4139eff6a2f048bdea0f452daadac244214375c397247598dabb71234f5bc8af",
    "id": "ccce624c4196d8d87ba98ed30ffe75f94bbcd8a88cd28047a13c4d322c93bbd4",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "cd8f76f8bc1a53bca6bf14ce44487f602103e1059a52a43144b53de27b2fb0eb": {
    "version": 1,
@@ -2526,7 +2878,8 @@
    "collection_kind": "set",
    "element": "while",
    "id": "cd8f76f8bc1a53bca6bf14ce44487f602103e1059a52a43144b53de27b2fb0eb",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "d05bc78222117ecdbc2b166796d250a2440eb5b106039a7040abad5280019d05": {
    "version": 1,
@@ -2536,7 +2889,8 @@
    "collection_kind": "charset",
    "element": "E",
    "id": "d05bc78222117ecdbc2b166796d250a2440eb5b106039a7040abad5280019d05",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "d0f79a14a245a1e5f9f33c14e94a0ffd97021a08c8a20855ef22f8d76a6d9294": {
    "version": 1,
@@ -2546,7 +2900,8 @@
    "collection_kind": "charset",
    "element": "Z",
    "id": "d0f79a14a245a1e5f9f33c14e94a0ffd97021a08c8a20855ef22f8d76a6d9294",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "d1db7efa6739b4f2832cd65633ee944799796d43020b832536abb3f8ae54b657": {
    "version": 1,
@@ -2556,7 +2911,8 @@
    "anchor_sha256": "4b7fedb6b0058c51d58fda77a8f4849d608cea275864ef26ca955ad4b44a3750",
    "replacement_sha256": "4f99409f20602ec08e7177b0bf0859d3301b3ca317b03a57c332d8c5fa3f5bd9",
    "id": "d1db7efa6739b4f2832cd65633ee944799796d43020b832536abb3f8ae54b657",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "timeout"
   },
   "d2953dce86e267df6bf5a2acfbe90f666907b1d7070b0b61c8437f73e053621c": {
    "version": 1,
@@ -2566,7 +2922,8 @@
    "collection_kind": "set",
    "element": "pull",
    "id": "d2953dce86e267df6bf5a2acfbe90f666907b1d7070b0b61c8437f73e053621c",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "d2af096a6335fe57256a65b846be9da653c2ad3814d4f2437c7e0106a1f914cc": {
    "version": 1,
@@ -2576,7 +2933,8 @@
    "collection_kind": "set",
    "element": "--after-context",
    "id": "d2af096a6335fe57256a65b846be9da653c2ad3814d4f2437c7e0106a1f914cc",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "d2f776d7e3efd8273cff0c915b02c41e0b9f2489c2e6a54fd874b889c42cc3d9": {
    "version": 1,
@@ -2586,7 +2944,8 @@
    "anchor_sha256": "9f97a8058e444ff69a8a32bac49847e6bc80847a6499e9a9ede4015dcf3688a6",
    "replacement_sha256": "80905722a6c2e30c3f8b2f0b8887a0c306695f458d247b89cec3d8fb4ff9f65b",
    "id": "d2f776d7e3efd8273cff0c915b02c41e0b9f2489c2e6a54fd874b889c42cc3d9",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "d3fd39e4a3622130bf6e9a1a1ea84a01c00860a1527a86642d03151e891bd8e3": {
    "version": 1,
@@ -2596,7 +2955,8 @@
    "anchor_sha256": "91b76bd75e44cd7faa8c1631fabf7db93d021586c4554898c29246ee5671b81a",
    "replacement_sha256": "3913da5151f712ff4c8c892eeaf503413a2d29016d9e49bead8f9f4a258c249e",
    "id": "d3fd39e4a3622130bf6e9a1a1ea84a01c00860a1527a86642d03151e891bd8e3",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "d46509365a0f7fd301037fc7b7822e8531830205becf19ae3c9a4af125e68dee": {
    "version": 1,
@@ -2606,7 +2966,8 @@
    "collection_kind": "charset",
    "element": "h",
    "id": "d46509365a0f7fd301037fc7b7822e8531830205becf19ae3c9a4af125e68dee",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "d46fceda4bf8d1f9558e81ab5e40b2d1267bb4fa996cc36dc8cf26ae2bed3f9f": {
    "version": 1,
@@ -2616,7 +2977,8 @@
    "collection_kind": "set",
    "element": "-C",
    "id": "d46fceda4bf8d1f9558e81ab5e40b2d1267bb4fa996cc36dc8cf26ae2bed3f9f",
-   "outcome": "survived"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "d4f3281bfc89421fb80941905c88ab0aceb3da84193229bbef0c52b4f16c67d6": {
    "version": 1,
@@ -2626,7 +2988,8 @@
    "collection_kind": "charset",
    "element": "q",
    "id": "d4f3281bfc89421fb80941905c88ab0aceb3da84193229bbef0c52b4f16c67d6",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "d5772cb0d1bf740af6cad03268182de0ecc641fca346683c969c2513913911da": {
    "version": 1,
@@ -2636,7 +2999,8 @@
    "collection_kind": "dict",
    "element": "r",
    "id": "d5772cb0d1bf740af6cad03268182de0ecc641fca346683c969c2513913911da",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "d6605b1436d6798f62aed7c5a0d4c1d972f67ee0e8972d663f38adf346cdb8a0": {
    "version": 1,
@@ -2646,7 +3010,8 @@
    "anchor_sha256": "8b76c70c20a0d0d0a3c8933fbaae22dc16702bbb63dc2e844dee9d430941e0ae",
    "replacement_sha256": "0f073c549fb0c9b0cadcd9ee0afa94a3a7ba7ecff1c1c9e1d41a267af3e8e24b",
    "id": "d6605b1436d6798f62aed7c5a0d4c1d972f67ee0e8972d663f38adf346cdb8a0",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "d6acb0993e829d21c023de32ac28cb6254810e749a3f30e16619b10c5b1a2b2d": {
    "version": 1,
@@ -2656,7 +3021,8 @@
    "collection_kind": "charset",
    "element": "W",
    "id": "d6acb0993e829d21c023de32ac28cb6254810e749a3f30e16619b10c5b1a2b2d",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "d6b2b0ea8b01322cd7f3c8171c8dd005818863fc1fc72a4f9041e794f8e3f5ed": {
    "version": 1,
@@ -2666,7 +3032,8 @@
    "collection_kind": "set",
    "element": "-c",
    "id": "d6b2b0ea8b01322cd7f3c8171c8dd005818863fc1fc72a4f9041e794f8e3f5ed",
-   "outcome": "survived"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "d6c38ab50b337d6d570da26ea2b87ab9ba67e427d8d529ca8142fd1d216f16b7": {
    "version": 1,
@@ -2676,7 +3043,8 @@
    "collection_kind": "charset",
    "element": "A",
    "id": "d6c38ab50b337d6d570da26ea2b87ab9ba67e427d8d529ca8142fd1d216f16b7",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "d87e22b8c98349625dee3b7ee24eb8e704996467157713c74eadf0e68ed55001": {
    "version": 1,
@@ -2686,7 +3054,8 @@
    "collection_kind": "dict",
    "element": "--basic-regexp",
    "id": "d87e22b8c98349625dee3b7ee24eb8e704996467157713c74eadf0e68ed55001",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "daef6b224b7b5ab8d005159158e302e3df6071b5ffb788a666c777b6a0571941": {
    "version": 1,
@@ -2696,7 +3065,8 @@
    "collection_kind": "set",
    "element": "--max-count",
    "id": "daef6b224b7b5ab8d005159158e302e3df6071b5ffb788a666c777b6a0571941",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "dbaa6100175dbebff67fc49b6095ce96e5b6e33337d965bc4a8592cb777750c1": {
    "version": 1,
@@ -2706,7 +3076,8 @@
    "collection_kind": "set",
    "element": "--open-files-in-pager",
    "id": "dbaa6100175dbebff67fc49b6095ce96e5b6e33337d965bc4a8592cb777750c1",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "dbe1e36a9c8c1d697dbd45303a641d39c98547de65a3a1a094c1463f792dbd56": {
    "version": 1,
@@ -2716,7 +3087,8 @@
    "collection_kind": "set",
    "element": "blame",
    "id": "dbe1e36a9c8c1d697dbd45303a641d39c98547de65a3a1a094c1463f792dbd56",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "dc0d3b0961a0b03063729bbef369ec65e0d86a8038d6073240138f1862aa9c78": {
    "version": 1,
@@ -2726,7 +3098,8 @@
    "collection_kind": "set",
    "element": "restore",
    "id": "dc0d3b0961a0b03063729bbef369ec65e0d86a8038d6073240138f1862aa9c78",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "dc19976299148a69f47a70837cd80ae56d703bfcbd98f99f6ed7428351955be2": {
    "version": 1,
@@ -2736,7 +3109,8 @@
    "anchor_sha256": "bbb8b27c83f9d22a4d82be9c3e81b4c5fcedbd6450b52c5ec710cead14f41d81",
    "replacement_sha256": "91e2c00f0cb89ee8492c5f781b84d4deff2dcc7250110ffc6a3f25423e766e14",
    "id": "dc19976299148a69f47a70837cd80ae56d703bfcbd98f99f6ed7428351955be2",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "dc1c119ecb0b359b4bb820d716ff6b0b4bbfc93d1759fc5db5a4954a1d953b80": {
    "version": 1,
@@ -2746,7 +3120,8 @@
    "collection_kind": "dict",
    "element": "A",
    "id": "dc1c119ecb0b359b4bb820d716ff6b0b4bbfc93d1759fc5db5a4954a1d953b80",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "dc5e27fa6b51a9cbf7e8b83225fb74750bca552694795ada750389854733dd9c": {
    "version": 1,
@@ -2756,7 +3131,8 @@
    "collection_kind": "charset",
    "element": "H",
    "id": "dc5e27fa6b51a9cbf7e8b83225fb74750bca552694795ada750389854733dd9c",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "dcbdd0f0b3e2e41faf1126b7f0c0e84ac0c148d22f0608606ab69817068ff978": {
    "version": 1,
@@ -2766,7 +3142,8 @@
    "collection_kind": "set",
    "element": "--null",
    "id": "dcbdd0f0b3e2e41faf1126b7f0c0e84ac0c148d22f0608606ab69817068ff978",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "ddb0c2498920609bb28acd84ed278a56e3b1f6125ba59e612db563b581f7c15b": {
    "version": 1,
@@ -2776,7 +3153,8 @@
    "collection_kind": "charset",
    "element": "K",
    "id": "ddb0c2498920609bb28acd84ed278a56e3b1f6125ba59e612db563b581f7c15b",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "e0ab055170ef8179134de977261c88ccdf6c62a95cc2d96ec44b41a8ea659dcd": {
    "version": 1,
@@ -2786,7 +3164,8 @@
    "anchor_sha256": "72cc2a0bbf79fbbdfd22217c910ceb2b22470c4e0da91fc666ce5d2865ad5bdc",
    "replacement_sha256": "f41db7f0fd5944797ef70218870f5e71cf1e4372ee4a399bc57e411439276d28",
    "id": "e0ab055170ef8179134de977261c88ccdf6c62a95cc2d96ec44b41a8ea659dcd",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "e1477ce8fe10da60513dc2be9dce0464b15b76481b431adca1ad7389e11e6f3a": {
    "version": 1,
@@ -2796,7 +3175,8 @@
    "collection_kind": "set",
    "element": "--committer",
    "id": "e1477ce8fe10da60513dc2be9dce0464b15b76481b431adca1ad7389e11e6f3a",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "e2089109c2b8d8560e15a01ba8a7eca277b9d8457fdaea0ecf3738703efb4775": {
    "version": 1,
@@ -2806,7 +3186,8 @@
    "anchor_sha256": "bf1b3548be96a524cb0ebe5cfad581f8e2f4eb9d2829db330a4b1e5fd783fb5c",
    "replacement_sha256": "24d6a9531647c6ca34c75b5c41f093fd375f4303fc01b5ec6337a3ce7555ae1c",
    "id": "e2089109c2b8d8560e15a01ba8a7eca277b9d8457fdaea0ecf3738703efb4775",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "e352e2f9558f818b0e3b82710692c3b30878852a3b17c346409483dd11290d02": {
    "version": 1,
@@ -2816,7 +3197,8 @@
    "collection_kind": "set",
    "element": "codex",
    "id": "e352e2f9558f818b0e3b82710692c3b30878852a3b17c346409483dd11290d02",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "e46f8d26724fe857f777bc603302abe6c30b729cf4c7058a2b35b9ab01ad83bd": {
    "version": 1,
@@ -2826,7 +3208,8 @@
    "collection_kind": "dict",
    "element": "E",
    "id": "e46f8d26724fe857f777bc603302abe6c30b729cf4c7058a2b35b9ab01ad83bd",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "e47606a137327b6834e24d17d88f9cba6b86cf04e96c04747359e0a96a060cf4": {
    "version": 1,
@@ -2836,7 +3219,8 @@
    "anchor_sha256": "e0b42f5e826cb9e835b44ebedb7c463b0d5736ed4f8aa7739b210872a71c4dbb",
    "replacement_sha256": "03f32f2d7e12e0853b19fe0b42b859c0342c02924575e9345bd153d6058cac32",
    "id": "e47606a137327b6834e24d17d88f9cba6b86cf04e96c04747359e0a96a060cf4",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "e48bf70a301d03c385c47d0ea6a3e08a32352da71ce87d64664aca50b877777b": {
    "version": 1,
@@ -2846,7 +3230,8 @@
    "collection_kind": "set",
    "element": "sh",
    "id": "e48bf70a301d03c385c47d0ea6a3e08a32352da71ce87d64664aca50b877777b",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "e686b9497534fcd2a2174313ad5e5d7579ce8d6827a2cb5c3af6fca70dda5deb": {
    "version": 1,
@@ -2856,7 +3241,8 @@
    "collection_kind": "set",
    "element": "/bin/echo",
    "id": "e686b9497534fcd2a2174313ad5e5d7579ce8d6827a2cb5c3af6fca70dda5deb",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "e6c3d67e40ed1e81a5ceffd62b6b83225f0d7beb90aba55abf3a28ada914c014": {
    "version": 1,
@@ -2866,7 +3252,8 @@
    "collection_kind": "computed-set",
    "element": "checkout",
    "id": "e6c3d67e40ed1e81a5ceffd62b6b83225f0d7beb90aba55abf3a28ada914c014",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "e6cc42411f58a6df2497925a26969cbbf9f82a9dc43fa750607e42b3b008a3a1": {
    "version": 1,
@@ -2876,7 +3263,8 @@
    "collection_kind": "charset",
    "element": "Q",
    "id": "e6cc42411f58a6df2497925a26969cbbf9f82a9dc43fa750607e42b3b008a3a1",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "e92b303fcbb84654f1c4f23a861637ced8509affcff51278301464ae359710fb": {
    "version": 1,
@@ -2886,7 +3274,8 @@
    "collection_kind": "charset",
    "element": "l",
    "id": "e92b303fcbb84654f1c4f23a861637ced8509affcff51278301464ae359710fb",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "ea39a52eb29690c634d9e04d129f020ed1d940ca53231d251d5075922d5c634f": {
    "version": 1,
@@ -2896,7 +3285,8 @@
    "collection_kind": "set",
    "element": "diff",
    "id": "ea39a52eb29690c634d9e04d129f020ed1d940ca53231d251d5075922d5c634f",
-   "outcome": "survived"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "ec4d67a2cbcf9795d9e161e306f11502ec1ce82845c5a50835bea849ac4d2536": {
    "version": 1,
@@ -2906,7 +3296,8 @@
    "anchor_sha256": "57b0fe0653cb6937c92e3dff48bace1a26178a518ba1adc06bb60e7b35499dcd",
    "replacement_sha256": "47c32ca923e9011b828427f0129104c78ac6be4adff007f7e89411fde0df0307",
    "id": "ec4d67a2cbcf9795d9e161e306f11502ec1ce82845c5a50835bea849ac4d2536",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "ee4ca8e1cca71117a042a99470dc29dd8fc56dd5caa66edca8687f4d1205fe56": {
    "version": 1,
@@ -2916,7 +3307,8 @@
    "collection_kind": "dict",
    "element": "--basic-regexp",
    "id": "ee4ca8e1cca71117a042a99470dc29dd8fc56dd5caa66edca8687f4d1205fe56",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "ef0bbc7573b97f3ff21d9cb49977d8943cd90f322439cf75f6662d5032d7e3fa": {
    "version": 1,
@@ -2926,7 +3318,8 @@
    "collection_kind": "dict",
    "element": "--perl-regexp",
    "id": "ef0bbc7573b97f3ff21d9cb49977d8943cd90f322439cf75f6662d5032d7e3fa",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "f025bf28504a8b3beab3e8ec5a65cf79a390618f0fdd7fe838db40b0270f268e": {
    "version": 1,
@@ -2936,7 +3329,8 @@
    "anchor_sha256": "f7ac14929e176cdb6d85542e6f16e37bdad0a0e97746fedd962d96719898494e",
    "replacement_sha256": "2700415033a868eced4fc878c3bb88dff6c16b4f9f765bcf1218857ed71a1751",
    "id": "f025bf28504a8b3beab3e8ec5a65cf79a390618f0fdd7fe838db40b0270f268e",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "f08d4c1506173aabb8fdc25ae11cd13077a69735fa0753d998ccf616f70f93af": {
    "version": 1,
@@ -2946,7 +3340,19 @@
    "collection_kind": "set",
    "element": "--threads",
    "id": "f08d4c1506173aabb8fdc25ae11cd13077a69735fa0753d998ccf616f70f93af",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
+  },
+  "f09aa9a3a9a8bf9ed7ca89cd826c559c72fe22ac613f5e4912589f9752a051cb": {
+   "version": 1,
+   "kind": "set-element",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "name": "_GIT_TERMINAL_OPTIONS",
+   "collection_kind": "set",
+   "element": "--version",
+   "id": "f09aa9a3a9a8bf9ed7ca89cd826c559c72fe22ac613f5e4912589f9752a051cb",
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "f266b0e65324e80d0718b9eb80a1513318e982456a0da7e5fa51787bb4dbf888": {
    "version": 1,
@@ -2956,7 +3362,8 @@
    "anchor_sha256": "fd814e738411b1f0be9033c7268af9284a44553dc2c50b0749f581ebc3be6ea5",
    "replacement_sha256": "a8a00aedd57093e0a251e9f1d5149f2c964abc0eace0ee3a84f2e44b80894cba",
    "id": "f266b0e65324e80d0718b9eb80a1513318e982456a0da7e5fa51787bb4dbf888",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "f2704b8cf0f4e04641be5f3c9e6d7d4ff4c1be3169cc6aeb1e827fc236765a0f": {
    "version": 1,
@@ -2966,7 +3373,8 @@
    "collection_kind": "set",
    "element": "elif",
    "id": "f2704b8cf0f4e04641be5f3c9e6d7d4ff4c1be3169cc6aeb1e827fc236765a0f",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "f2eec2e188ad3017ffeb7b16b18bf48e1162f375c26ef7e1568200801f06515a": {
    "version": 1,
@@ -2976,7 +3384,8 @@
    "collection_kind": "set",
    "element": "--heading",
    "id": "f2eec2e188ad3017ffeb7b16b18bf48e1162f375c26ef7e1568200801f06515a",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "f3587b9d2e95623780a17b8ef2ad904c4c284c8d0402938b0dd96885b86e1fb1": {
    "version": 1,
@@ -2986,7 +3395,8 @@
    "collection_kind": "set",
    "element": "--config-env",
    "id": "f3587b9d2e95623780a17b8ef2ad904c4c284c8d0402938b0dd96885b86e1fb1",
-   "outcome": "survived"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "f3b881c17699a9a3939ef6a7380a5e3fd28ecc49d09df062f03033154ee72bd2": {
    "version": 1,
@@ -2996,7 +3406,8 @@
    "collection_kind": "set",
    "element": "--after-context",
    "id": "f3b881c17699a9a3939ef6a7380a5e3fd28ecc49d09df062f03033154ee72bd2",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "f3e0a720b0018e28980153febf86a2eeda8cd08282e4908c103ae04174966794": {
    "version": 1,
@@ -3006,7 +3417,8 @@
    "collection_kind": "set",
    "element": "--not",
    "id": "f3e0a720b0018e28980153febf86a2eeda8cd08282e4908c103ae04174966794",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "f3f79cbeb20ba512679ba73551f6c51ac566f3aae9f746fcb06718984fdcdd39": {
    "version": 1,
@@ -3016,7 +3428,8 @@
    "collection_kind": "charset",
    "element": "l",
    "id": "f3f79cbeb20ba512679ba73551f6c51ac566f3aae9f746fcb06718984fdcdd39",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "f42b7da0375232a9d38ee0bbaa103d6c3d1876ddd233ebdb41becc34e5507a83": {
    "version": 1,
@@ -3026,7 +3439,8 @@
    "collection_kind": "charset",
    "element": "m",
    "id": "f42b7da0375232a9d38ee0bbaa103d6c3d1876ddd233ebdb41becc34e5507a83",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "f4a3495d17b814478a84e571dc0eeba86ba7152a79e7076b58521c0e39e333e6": {
    "version": 1,
@@ -3036,7 +3450,8 @@
    "anchor_sha256": "f018995073e0ba69944f5374e22178896c8834b78efa0ad08f8866fbcddcf1e2",
    "replacement_sha256": "5996ec652a91e7e90adc68f06c8a96ac0904d6d05f41505fc693994d4bd70315",
    "id": "f4a3495d17b814478a84e571dc0eeba86ba7152a79e7076b58521c0e39e333e6",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "f57536f65222bf0d25c1c69d272051721c95ebf99e24b0c5e55126f8f34587e2": {
    "version": 1,
@@ -3046,7 +3461,8 @@
    "collection_kind": "set",
    "element": "--max-depth",
    "id": "f57536f65222bf0d25c1c69d272051721c95ebf99e24b0c5e55126f8f34587e2",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "f5799de437e3539636eea044239bfe2f1503f92517439b7ab0bca85fd4a68456": {
    "version": 1,
@@ -3056,7 +3472,8 @@
    "collection_kind": "set",
    "element": "grep",
    "id": "f5799de437e3539636eea044239bfe2f1503f92517439b7ab0bca85fd4a68456",
-   "outcome": "survived"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "f731e4119c27aac4af536e9fe8e5b7fb712796b3c3d87d91cad0b8be39927493": {
    "version": 1,
@@ -3066,7 +3483,8 @@
    "collection_kind": "set",
    "element": "blame",
    "id": "f731e4119c27aac4af536e9fe8e5b7fb712796b3c3d87d91cad0b8be39927493",
-   "outcome": "survived"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "f80159c4da352e0d460c129fe0eceb389e9dc712750a166a07e3c8a16f14c7d7": {
    "version": 1,
@@ -3076,7 +3494,8 @@
    "collection_kind": "dict",
    "element": "-E",
    "id": "f80159c4da352e0d460c129fe0eceb389e9dc712750a166a07e3c8a16f14c7d7",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "fb1f6c55d5f1d5c077e3fc3b5a5f2525fd232079a094e617c8767e7e14ae4d10": {
    "version": 1,
@@ -3086,7 +3505,8 @@
    "collection_kind": "charset",
    "element": "A",
    "id": "fb1f6c55d5f1d5c077e3fc3b5a5f2525fd232079a094e617c8767e7e14ae4d10",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "fb507ef3e0a8dab3f7c840be9ad945a47a09a26232494744c4c97c5354b49110": {
    "version": 1,
@@ -3096,7 +3516,8 @@
    "collection_kind": "set",
    "element": "--untracked",
    "id": "fb507ef3e0a8dab3f7c840be9ad945a47a09a26232494744c4c97c5354b49110",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
   },
   "fb8e8b12b4c974a05d8ab077fe432d90d37e7f5c4e647f3828648fd12fae4aa1": {
    "version": 1,
@@ -3106,7 +3527,8 @@
    "collection_kind": "set",
    "element": "--no-basic-regexp",
    "id": "fb8e8b12b4c974a05d8ab077fe432d90d37e7f5c4e647f3828648fd12fae4aa1",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "fc12c498aec08a7c6926394094d801c49290c66b8c18f43f54aaf668e6230a61": {
    "version": 1,
@@ -3116,7 +3538,19 @@
    "collection_kind": "dict",
    "element": "q",
    "id": "fc12c498aec08a7c6926394094d801c49290c66b8c18f43f54aaf668e6230a61",
-   "outcome": "survived"
+   "outcome": "survived",
+   "reason": "survived"
+  },
+  "fc9390dabe1c6cf6562336aba3ff8721f0b5d6223760043abe75114363b7a027": {
+   "version": 1,
+   "kind": "set-element",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "name": "_GIT_TERMINAL_OPTIONS",
+   "collection_kind": "set",
+   "element": "-v",
+   "id": "fc9390dabe1c6cf6562336aba3ff8721f0b5d6223760043abe75114363b7a027",
+   "outcome": "survived",
+   "reason": "survived"
   },
   "ffd1c1e0d13edbc114b455d949c5bf9967fa62d2b41d3779a0f767c47a33d9ec": {
    "version": 1,
@@ -3126,11 +3560,13 @@
    "collection_kind": "set",
    "element": "stash",
    "id": "ffd1c1e0d13edbc114b455d949c5bf9967fa62d2b41d3779a0f767c47a33d9ec",
-   "outcome": "caught"
+   "outcome": "caught",
+   "reason": "suite-failure"
   }
  },
  "survivors": [
   "003e9a148fe636b06384150018d7e569c9731266e7301520608a86aa06905628",
+  "017d147392f9a1742a810d203c34a04d1481769bac2fc4dfd5ca1755b3811698",
   "02a2ed33f9c0ea1f12fc7594a2da5773486e68b765c976bfc3f19fbe27acfc60",
   "10909fef1c50679d8b6b38343e19fe2d01fb787f9e5f3fef9abc1d4bc4c4ec61",
   "113984889b5f63ba65708bb7e6b69093a1f557d5b31549235f531057270b675e",
@@ -3141,15 +3577,15 @@
   "2c1e31b050751ab81236bb963f512e5b4f1b5a7a53f4cc89b9ef72c4c4e06c1d",
   "2c76eed682d1dea4236c6ad72be0903f3990652918fcb16832bb3caba153eb90",
   "2ea36b39df358965da8564de06330f92b9d71dbd2b46cc68797117355f4a4779",
+  "30ab4695bcf7da02be88367fc8b8e0aee54858a2b4753b7b267c8743ed76e91f",
   "31a68aaa689108e5a05ef5721d666da9dcf39068a43b7ace8dd2272f16432ac0",
   "33035f8b2be0f6fc1e0a2754ee00e122658509d27ab16f0445184077d841251e",
-  "3386c635f9a61a1c3a5bcd3c785e9d754f18bc6e8da5059af8df41660d7bd3c5",
+  "34f66107aea1438714e06aaa6a9d791f97908dbc4ddc4be278219ee04ae98cab",
   "3561eafc0550b0fdf2864bbd2f4c43b7cefb3a6cc389b90febcec8bd9e683a8d",
   "37a5ac8c5a8f828fc2b5849aee98c44a12e1d99a063cd0a4a4bf0767e2de026d",
   "37e1a4f1f79cad3d93fc495b8a7e567bacef673525e0973f73ba3b0fe0a039b2",
   "38e487575f7c818335168e48001a801dbc3018d5ff00eadf6792836390f432e8",
   "409f13d30907a4d4649a71a65597d366ccaef198b0dfa2d06a061a01c72e810f",
-  "40d51bb153560e13aa37581405cf3e0a820c7f3c07c73e427c28be273acfc5dc",
   "41985315df720e153c310ba878f6927ce01e875cc5a98ef51b9b1d46ada4ce98",
   "48ee0f666e93e4542c86d63d5dda4897dce68a539d37d54cf8161d4853a1a20a",
   "4b7645b18942ea2dc771effdbc7ace83b0f581e83243927e39085963b82637ea",
@@ -3162,9 +3598,9 @@
   "71c913806717e6cb5b9900916e72bb928bfb7ad84b460ec6327ce68aba285b64",
   "74a1afebb54995629b862bf43bc5c4d37139c188461ab7bec05eb5b2956ee874",
   "75622fda4ef821451e2e2a707b608c6c7f9826d09c534684345ff4298407a634",
+  "7c09098415c80701a703c366af35f731bd1af858b7e1632feceb3060e2e53749",
   "82e17c162fc72af53854f5fa07aee978d7e1f1a5411419e4070210d2c6ae2a1c",
   "844a85366271ebc584d55e2bb0a1bee5e1f626e348cdb39a5f3cbaca231ff9b6",
-  "8a9330b20b5619a471a4f1c0128262a288236908ae18a3a803286a620ee9eb4f",
   "8ca14d99a08881500c90624a42c4f379de4ddfe0124b2ec6b7c73ca5f701018e",
   "8eaf742ce45e00b7454785277e547363cf448e8a976105850174415bab2ef292",
   "8f17cd485798cc06dc41a481c949ae5b27b28b924c910e745e9154895fa1bf34",
@@ -3182,44 +3618,35 @@
   "a2e881d37a3fa58369c22112627019a472488de4e42e6824c86af49fd3024c14",
   "a64ef6c78503496b9255cff3ae486726c4a9f74e29ecd3280ffb0f898eaf0918",
   "ad9778055323bcc79a9307448f47d25f7a10853c17b2c2f7ff43e420ebfbb888",
-  "b00e6e7736370c09b9b550a2f7ae8b70c0215f611038d7d0615d6676b5e9d67c",
   "b2592bb00ba06db740f836dd25b6ecfcfb122357ebb5437b48f080d3af76aba4",
   "b404b531d350091ae9d990ce8510134495b9404982ffc132b688d03319bc96ee",
   "b502321a37c70f3161c21cea54d2a39adfbcf9262964b748d50d694f581acdd8",
-  "b5641522ba476e64ff9054ef0ea18fd019c9300a7252ea6504ce8e2e6d4aace3",
   "b58729996f984f5165c1fcc016c50948202db2747630eecb7502d1437b03a931",
   "bae6cbfa4b29abc757ecb5b22995851871df168d11cd009cf1c2635b208185da",
   "bc9d7671fe731568c89e41a8c24cd9dceb93b97ed00231cf03694dd994dd0190",
   "bfd6a6d1f2fbd74cad77f28504b5346d7d745436ea09bf51e2760898bc94f5a5",
-  "c129d74bea664d31531ed25fb07cc62277b91050953d04684f7cd4598afdd224",
-  "c17d8a0ad396a82e6a4479bea1e0780afb52a11e6f4c717990fedf69ed6f8aa0",
   "c93b556da03271d6a42d79630f8e98449963a7428e57c6279558098a69d14a6b",
-  "caa99f7d77c5cc377f813c6e66cec6b17a7d940339e750073f19e201656a4616",
   "cab2f4f412e111184a3c67edbfe54942eb9644d4acc9dd04e5134298ccb82f6b",
   "cb2474e86287f7df71a13953cd5218566e8a077dd6cb1cba6d8ed5afbf5bfaa3",
   "cc35deba32d59f9902b035f52adc0c70abbd6cc202c5a35029e4e61db4037f68",
   "cd8f76f8bc1a53bca6bf14ce44487f602103e1059a52a43144b53de27b2fb0eb",
-  "d46fceda4bf8d1f9558e81ab5e40b2d1267bb4fa996cc36dc8cf26ae2bed3f9f",
   "d5772cb0d1bf740af6cad03268182de0ecc641fca346683c969c2513913911da",
-  "d6b2b0ea8b01322cd7f3c8171c8dd005818863fc1fc72a4f9041e794f8e3f5ed",
   "d87e22b8c98349625dee3b7ee24eb8e704996467157713c74eadf0e68ed55001",
   "dbaa6100175dbebff67fc49b6095ce96e5b6e33337d965bc4a8592cb777750c1",
   "dc0d3b0961a0b03063729bbef369ec65e0d86a8038d6073240138f1862aa9c78",
   "dc1c119ecb0b359b4bb820d716ff6b0b4bbfc93d1759fc5db5a4954a1d953b80",
   "dcbdd0f0b3e2e41faf1126b7f0c0e84ac0c148d22f0608606ab69817068ff978",
   "e1477ce8fe10da60513dc2be9dce0464b15b76481b431adca1ad7389e11e6f3a",
-  "ea39a52eb29690c634d9e04d129f020ed1d940ca53231d251d5075922d5c634f",
   "ee4ca8e1cca71117a042a99470dc29dd8fc56dd5caa66edca8687f4d1205fe56",
   "ef0bbc7573b97f3ff21d9cb49977d8943cd90f322439cf75f6662d5032d7e3fa",
   "f2704b8cf0f4e04641be5f3c9e6d7d4ff4c1be3169cc6aeb1e827fc236765a0f",
   "f2eec2e188ad3017ffeb7b16b18bf48e1162f375c26ef7e1568200801f06515a",
-  "f3587b9d2e95623780a17b8ef2ad904c4c284c8d0402938b0dd96885b86e1fb1",
   "f3e0a720b0018e28980153febf86a2eeda8cd08282e4908c103ae04174966794",
-  "f5799de437e3539636eea044239bfe2f1503f92517439b7ab0bca85fd4a68456",
-  "f731e4119c27aac4af536e9fe8e5b7fb712796b3c3d87d91cad0b8be39927493",
   "fb507ef3e0a8dab3f7c840be9ad945a47a09a26232494744c4c97c5354b49110",
-  "fc12c498aec08a7c6926394094d801c49290c66b8c18f43f54aaf668e6230a61"
+  "fc12c498aec08a7c6926394094d801c49290c66b8c18f43f54aaf668e6230a61",
+  "fc9390dabe1c6cf6562336aba3ff8721f0b5d6223760043abe75114363b7a027"
  ],
- "caught": 221,
- "total": 310
+ "unasserted_kills": [],
+ "caught": 241,
+ "total": 321
 }

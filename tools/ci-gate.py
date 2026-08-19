@@ -39,8 +39,8 @@ EVAL_SKILL_FLOOR = 6
 SUITE_FLOORS = {
     "harness_check": 78,
     "render-packages": 192,
-    "bash_command_guard": 1338,
-    "git_grep_engine_guard": 1137,
+    "bash_command_guard": 1366,
+    "git_grep_engine_guard": 1149,
     "zsh_rev_modifier_guard": 487,
 }
 EXPECTED_WORKFLOW = """name: harness-check
@@ -403,7 +403,7 @@ DECISION_WRITER = ROOT / "tools/write-decision-golden.py"
 RETAINED_DECISION_COMMANDS = ROOT / "contracts/goldens/retained-guard-commands.json"
 SUITE_SOURCE_GOLDEN = ROOT / "contracts/goldens/suite-sources.json"
 HARNESS_SOURCE = ROOT / "hooks/harness_check.py"
-DECISION_CORPUS_FLOOR = 947
+DECISION_CORPUS_FLOOR = 975
 DECISION_WRITER_SHA256 = "8c4180468fc05a88c69fafba3a79f2387f5df2d1aa728def1670f5497a442e9d"
 RETAINED_DECISION_SCHEMA_VERSION = 1
 RETAINED_DECISION_NOTE = (
@@ -488,6 +488,33 @@ def harness_source_error(golden_data=None, source_bytes=None) -> str:
         return f"cannot verify harness_check source: {exc}"
     if actual != expected:
         return "hooks/harness_check.py differs from its reviewed suite source digest"
+    return ""
+
+
+def mutation_generator_source_error(golden_data=None, source_bytes=None) -> str:
+    """Bind the mutation generator to the reviewed source registry.
+
+    The three guards carry an authored digest here, so editing one reddens this gate until a
+    reviewer updates the registry in the same commit. The tool that MEASURES those guards had
+    no such binding: its only digest was ``generator_sha256`` inside the receipt it writes
+    itself, so editing the generator and regenerating in one commit moved both together and
+    the gate stayed green. A self-attesting measurement instrument is not attested.
+    """
+    try:
+        if golden_data is None:
+            golden_data = _json_without_duplicate_keys(SUITE_SOURCE_GOLDEN)
+        suites = golden_data.get("suites") if isinstance(golden_data, dict) else None
+        expected = suites.get("write-mutation-receipt") if isinstance(suites, dict) else None
+        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+            return "suite source registry has no valid write-mutation-receipt digest"
+        current = ((ROOT / "tools/write-mutation-receipt.py").read_bytes()
+                   if source_bytes is None else source_bytes)
+        actual = hashlib.sha256(current).hexdigest()
+    except (OSError, ValueError) as exc:
+        return f"cannot verify write-mutation-receipt source: {exc}"
+    if actual != expected:
+        return ("tools/write-mutation-receipt.py differs from its reviewed suite source "
+                "digest; update its entry in the same commit and review that diff")
     return ""
 
 
@@ -614,8 +641,28 @@ def decision_golden_error(golden_data=None, decide=None, snapshot=None,
 
 MUTATION_RECEIPT = ROOT / "contracts/goldens/mutation-receipt.json"
 MUTATION_SUMMARY = ROOT / "contracts/goldens/mutation-summary.md"
-MUTATION_SURVIVOR_DEBT_CEILING = 89
-MUTATION_PLAN_FLOOR = 310
+MUTATION_SURVIVOR_DEBT_CEILING = 80
+MUTATION_PLAN_FLOOR = 317
+# Kills scored only because the recorded check count moved, with no assertion failing. A
+# guard that increments its counter once per element of the collection under mutation moves
+# that count on any removal, so such a kill is decided by loop structure before any probe
+# runs and inflates `caught` without evidence. This was 17 of the 22 CROSS_VERSION_ALIAS_PROOF
+# elements, thirteen of which moved a real merged verdict from deny to ask while every gate
+# stayed green. Fixtures now assert those verdicts, and an arithmetic kill no longer preempts
+# the merged suite that sees them, so the measured count is zero and the ceiling holds it
+# there: any new one means a mutation is recorded caught that nothing actually detected.
+MUTATION_UNASSERTED_KILL_CEILING = 0
+# Declared additions, pinned here independently of the generator. The element sweep only
+# REMOVES members, and removal makes a collection that grants an exemption stricter, so the
+# generated sweep cannot express the direction these fail in. Each entry must be caught; a
+# survivor is a live fail-open rather than coverage debt. Pinned so an entry cannot be
+# dropped without this gate saying so.
+EXPECTED_MUTATION_ADDITIONS = {
+    ("hooks/guards/git_grep_engine_guard.py", "_GIT_TERMINAL_OPTIONS", "--icase-pathspecs"),
+    ("hooks/guards/git_grep_engine_guard.py", "_GIT_GLOBAL_OPTIONS_WITH_VALUES", "--no-advice"),
+    ("hooks/guards/git_grep_engine_guard.py", "GREP_SHORT_PATTERN_ARG", "w"),
+    ("hooks/guards/git_grep_engine_guard.py", "GREP_SHORT_OPTIONAL_VALUE", "w"),
+}
 EXPECTED_MUTATION_COLLECTIONS = {
     ("hooks/bash_command_guard.py", "GUARDS"): 2,
     ("hooks/bash_command_guard.py", "RANK"): 3,
@@ -646,7 +693,8 @@ EXPECTED_MUTATION_COLLECTIONS = {
     ("hooks/guards/git_grep_engine_guard.py", "TRUSTED_EXTERNAL_NON_FORWARDING_COMMANDS"): 3,
     ("hooks/guards/git_grep_engine_guard.py", "WRAPPER_TERMINAL_OPTIONS"): 2,
     ("hooks/guards/git_grep_engine_guard.py", "_CLOSED_LIMITS"): 5,
-    ("hooks/guards/git_grep_engine_guard.py", "_GIT_GLOBAL_OPTIONS_WITH_VALUES"): 9,
+    ("hooks/guards/git_grep_engine_guard.py", "_GIT_GLOBAL_OPTIONS_WITH_VALUES"): 8,
+    ("hooks/guards/git_grep_engine_guard.py", "_GIT_TERMINAL_OPTIONS"): 8,
     ("hooks/guards/zsh_rev_modifier_guard.py", "MODS"): 13,
     ("hooks/guards/zsh_rev_modifier_guard.py", "MOD_MEANING"): 13,
     ("hooks/guards/zsh_rev_modifier_guard.py", "MOD_PREFIXES"): 4,
@@ -761,6 +809,7 @@ def mutation_site_policy_digest(descriptors) -> str:
 def mutation_policy_error(plan, exclusions, policy) -> str:
     """Validate the plan against a closed inventory independent of its generator."""
     collection_counts = {}
+    addition_identities = []
     site_identities = []
     site_descriptors = []
     semantic_targets = []
@@ -797,8 +846,24 @@ def mutation_policy_error(plan, exclusions, policy) -> str:
             }
             site_descriptors.append(normalized)
             semantic_targets.append((module, anchor, replacement))
+        elif descriptor.get("kind") == "set-addition":
+            module = descriptor.get("module")
+            name = descriptor.get("name")
+            element = descriptor.get("element")
+            if (not isinstance(module, str) or not isinstance(name, str)
+                    or not isinstance(element, str)):
+                problems.append(
+                    f"addition descriptor fields are invalid for {(module, name)}")
+                continue
+            addition_identities.append((module, name, element))
         else:
             return f"mutation plan contains unknown kind {descriptor.get('kind')!r}"
+    if len(addition_identities) != len(set(addition_identities)):
+        problems.append("addition inventory contains duplicate module/name/element triples")
+    if set(addition_identities) != policy["additions"]:
+        problems.append(
+            f"addition inventory differs: observed={set(addition_identities)} "
+            f"required={policy['additions']}")
     if collection_counts != policy["collections"]:
         problems.append(
             f"collection inventory differs: observed={collection_counts} "
@@ -827,7 +892,7 @@ def mutation_policy_error(plan, exclusions, policy) -> str:
 
 def mutation_receipt_error(receipt_data=None, plan=None, exclusions=None,
                            contract=None, current_sources=None, ceiling=None,
-                           policy=None) -> str:
+                           policy=None, unasserted_ceiling=None) -> str:
     """Validate exact mutation schema, plan coverage, and every derived field."""
     try:
         production_contract = plan is None or exclusions is None or contract is None
@@ -843,13 +908,20 @@ def mutation_receipt_error(receipt_data=None, plan=None, exclusions=None,
             plan, exclusions = module.mutation_plan()
             contract = {
                 "schema_version": module.SCHEMA_VERSION,
-                "generated_by": (
-                    f"{module.GENERATOR} --aggregate ... --accept-receipt-changes"),
+                # A schema pin, not an attestation: this field is a constant the gate
+                # compares, so it can never record which flags actually ran. It previously
+                # named --accept-receipt-changes unconditionally, which read as provenance
+                # for the one bypass that skips receipt comparison. CI aggregates in verify
+                # mode, so a real mode field cannot live here either -- the freshly computed
+                # value would never equal the committed one.
+                "generated_by": f"{module.GENERATOR} --aggregate",
                 "note": module.NOTE,
                 "keys": tuple(module.RECEIPT_KEYS),
                 "generator_sha256": module.file_sha256(ROOT / module.GENERATOR),
                 "guards": tuple(module.GUARDS),
                 "plan_sha256": module.digest(plan),
+                "kill_reasons": frozenset(module.KILL_REASONS),
+                "unasserted_reason": module.UNASSERTED_KILL_REASON,
             }
             current_sources = module.source_digests()
         if policy is None and production_contract:
@@ -858,10 +930,13 @@ def mutation_receipt_error(receipt_data=None, plan=None, exclusions=None,
                 "sites": EXPECTED_MUTATION_SITES,
                 "site_digest": EXPECTED_MUTATION_SITE_DIGEST,
                 "exclusions": EXPECTED_MUTATION_EXCLUSIONS,
+                "additions": EXPECTED_MUTATION_ADDITIONS,
                 "floor": MUTATION_PLAN_FLOOR,
             }
         if ceiling is None:
             ceiling = MUTATION_SURVIVOR_DEBT_CEILING
+        if unasserted_ceiling is None:
+            unasserted_ceiling = MUTATION_UNASSERTED_KILL_CEILING
     except Exception as exc:
         return f"cannot verify the mutation receipt: {exc!r}"
     if not isinstance(receipt_data, dict):
@@ -900,9 +975,11 @@ def mutation_receipt_error(receipt_data=None, plan=None, exclusions=None,
         problems.append(f"result inventory missing={missing[:4]} foreign={foreign[:4]}")
     observed_survivors = []
     site_survivors = []
+    observed_unasserted = []
+    unasserted_reason = contract["unasserted_reason"]
     for mutation_id in sorted(set(plan_by_id) & set(results)):
         expected = dict(plan_by_id[mutation_id])
-        expected.pop("allowed_statuses", None)
+        allowed_statuses = set(expected.pop("allowed_statuses", ()) or ())
         recorded = results[mutation_id]
         if not isinstance(recorded, dict):
             problems.append(f"result {mutation_id} is not an object")
@@ -911,15 +988,41 @@ def mutation_receipt_error(receipt_data=None, plan=None, exclusions=None,
         if outcome not in {"caught", "survived"}:
             problems.append(f"result {mutation_id} has invalid outcome {outcome!r}")
             continue
+        reason = recorded.get("reason")
+        if reason not in contract["kill_reasons"]:
+            problems.append(f"result {mutation_id} has invalid reason {reason!r}")
+            continue
+        # A survived outcome has exactly one truthful reason, and a kill can never carry it.
+        # Without this the reason is decorative: a caught result could record "survived" and
+        # the unasserted tally below would be whatever the generator chose to report.
+        if (outcome == "survived") != (reason == "survived"):
+            problems.append(
+                f"result {mutation_id} outcome {outcome!r} contradicts reason {reason!r}")
+            continue
+        # A crash status is only a legitimate kill where the plan declared it tolerable.
+        if reason in {"timeout", "invalid-receipt"} and reason not in allowed_statuses:
+            problems.append(
+                f"result {mutation_id} records status {reason!r} its plan does not allow")
+            continue
         expected["outcome"] = outcome
+        expected["reason"] = reason
         if recorded != expected:
             problems.append(f"result {mutation_id} fields do not match its planned mutation")
         if outcome == "survived":
             observed_survivors.append(mutation_id)
             if expected["kind"] == "site":
                 site_survivors.append(mutation_id)
+        elif reason == unasserted_reason:
+            observed_unasserted.append(mutation_id)
     if receipt_data.get("survivors") != observed_survivors:
         problems.append("survivor IDs are not exactly derived from results")
+    if receipt_data.get("unasserted_kills") != observed_unasserted:
+        problems.append("unasserted-kill IDs are not exactly derived from results")
+    if len(observed_unasserted) > unasserted_ceiling:
+        problems.append(
+            f"unasserted kills {len(observed_unasserted)} exceed ceiling "
+            f"{unasserted_ceiling}: these mutations are recorded caught while no assertion "
+            f"failed, so the count is not evidence the suites observe them")
     if receipt_data.get("total") != len(plan_by_id):
         problems.append("total is not the exact mutation-plan cardinality")
     if receipt_data.get("caught") != len(plan_by_id) - len(observed_survivors):
@@ -1156,6 +1259,10 @@ def gate(
     print(f"  {'FAIL' if harness_source_problem else 'PASS'} harness-source")
     if harness_source_problem:
         failures.append(harness_source_problem)
+    generator_source_problem = mutation_generator_source_error()
+    print(f"  {'FAIL' if generator_source_problem else 'PASS'} mutation-generator-source")
+    if generator_source_problem:
+        failures.append(generator_source_problem)
     budget_problem = hook_budget_error()
     print(f"  {'FAIL' if budget_problem else 'PASS'} hook-budget")
     if budget_problem:
@@ -1368,6 +1475,25 @@ def selftest() -> int:
         "removing the harness source digest is not permission to skip the binding",
         harness_source_error(golden_data=without_harness) != "",
     )
+    expect(
+        "the mutation generator matches its reviewed source digest",
+        mutation_generator_source_error() == "",
+    )
+    expect(
+        "editing the mutation generator invalidates its source digest",
+        mutation_generator_source_error(
+            source_bytes=(ROOT / "tools/write-mutation-receipt.py").read_bytes()
+            + b"# planted mutation\n") != "",
+    )
+    without_generator = dict(source_registry)
+    without_generator["suites"] = {
+        name: value for name, value in source_registry["suites"].items()
+        if name != "write-mutation-receipt"
+    }
+    expect(
+        "removing the generator source digest is not permission to skip the binding",
+        mutation_generator_source_error(golden_data=without_generator) != "",
+    )
     expect("hook timeout and internal budget contract matches", hook_budget_error() == "")
     def retime_bash_hook(data: dict, seconds: int) -> int:
         """Set the Bash guard hook's timeout by identity, not by list position.
@@ -1536,28 +1662,42 @@ def selftest() -> int:
         "anchor_sha256": "a" * 64, "replacement_sha256": "b" * 64,
         "allowed_statuses": [], "id": "site-id",
     }
-    mutation_plan_probe = [set_mutation, site_mutation]
+    addition_mutation = {
+        "version": 1, "kind": "set-addition", "module": "guard-a.py",
+        "name": "TOKENS", "collection_kind": "set", "element": "z",
+        "label": "probe addition", "allowed_statuses": [], "id": "add-id",
+    }
+    mutation_plan_probe = [set_mutation, site_mutation, addition_mutation]
     mutation_contract = {
-        "schema_version": 2,
-        "generated_by": (
-            "tools/write-mutation-receipt.py --aggregate ... --accept-receipt-changes"),
+        "schema_version": 3,
+        "generated_by": "tools/write-mutation-receipt.py --aggregate",
         "note": "probe-note", "generator_sha256": "c" * 64,
         "plan_sha256": "d" * 64,
         "keys": (
             "schema_version", "generated_by", "note", "generator_sha256",
             "source_digests", "plan_sha256", "baseline", "sweep_exclusions",
-            "results", "survivors", "caught", "total",
+            "results", "survivors", "unasserted_kills", "caught", "total",
         ),
         "guards": ("guard-a.py", "guard-b.py", "guard-c.py"),
+        "kill_reasons": frozenset({
+            "suite-failure", "exact-check-count", "survived", "invalid-receipt",
+            "timeout",
+        }),
+        "unasserted_reason": "exact-check-count",
     }
     mutation_sources = {name: str(index) * 64 for index, name in enumerate(
         mutation_contract["guards"], 1)}
-    set_result = dict(set_mutation, outcome="survived")
+    set_result = dict(set_mutation, outcome="survived", reason="survived")
     site_result = {key: value for key, value in site_mutation.items()
                    if key != "allowed_statuses"}
     site_result["outcome"] = "caught"
+    site_result["reason"] = "suite-failure"
+    addition_result = {key: value for key, value in addition_mutation.items()
+                       if key != "allowed_statuses"}
+    addition_result["outcome"] = "caught"
+    addition_result["reason"] = "suite-failure"
     mutation_probe = {
-        "schema_version": 2,
+        "schema_version": 3,
         "generated_by": mutation_contract["generated_by"],
         "note": "probe-note",
         "generator_sha256": "c" * 64,
@@ -1565,8 +1705,9 @@ def selftest() -> int:
         "plan_sha256": "d" * 64,
         "baseline": {name: "passed" for name in mutation_contract["guards"]},
         "sweep_exclusions": {"guard-a.py::FIXTURES": "fixture corpus"},
-        "results": {"set-id": set_result, "site-id": site_result},
-        "survivors": ["set-id"], "caught": 1, "total": 2,
+        "results": {"set-id": set_result, "site-id": site_result,
+                    "add-id": addition_result},
+        "survivors": ["set-id"], "unasserted_kills": [], "caught": 2, "total": 3,
     }
     mutation_args = {
         "plan": mutation_plan_probe,
@@ -1574,12 +1715,14 @@ def selftest() -> int:
         "contract": mutation_contract,
         "current_sources": mutation_sources,
         "ceiling": 1,
+        "unasserted_ceiling": 1,
         "policy": {
             "collections": {("guard-a.py", "TOKENS"): 1},
             "sites": {("guard-b.py", "site probe")},
             "site_digest": mutation_site_policy_digest([site_mutation]),
             "exclusions": mutation_probe["sweep_exclusions"],
-            "floor": 2,
+            "additions": {("guard-a.py", "TOKENS", "z")},
+            "floor": 3,
         },
     }
     writer_spec = importlib.util.spec_from_file_location(
@@ -1747,6 +1890,89 @@ def selftest() -> int:
     expect(
         "an exact synthetic mutation receipt clears",
         mutation_receipt_error(mutation_probe, **mutation_args) == "",
+    )
+    # A kill scored only by a moved check count inflates `caught` without any assertion
+    # having failed. The receipt records those separately so the distinction survives into
+    # the artifact; these probe that the tally is derived, bounded, and cannot be forged.
+    unasserted_site = dict(site_result, reason="exact-check-count")
+    unasserted_probe = dict(
+        mutation_probe,
+        results={"set-id": set_result, "site-id": unasserted_site,
+                 "add-id": addition_result},
+        unasserted_kills=["site-id"],
+    )
+    expect(
+        "a kill scored only by a moved check count is recorded as unasserted",
+        mutation_receipt_error(unasserted_probe, **mutation_args) == "",
+    )
+    expect(
+        "an unasserted kill omitted from the tally fails",
+        mutation_receipt_error(
+            dict(unasserted_probe, unasserted_kills=[]), **mutation_args) != "",
+    )
+    expect(
+        "an unasserted tally naming a mutation that asserted fails",
+        mutation_receipt_error(
+            dict(mutation_probe, unasserted_kills=["site-id"]), **mutation_args) != "",
+    )
+    expect(
+        "unasserted kills above the reviewed ceiling fail",
+        mutation_receipt_error(
+            unasserted_probe, **dict(mutation_args, unasserted_ceiling=0)) != "",
+    )
+    expect(
+        "a result carrying a reason outside the generator vocabulary fails",
+        mutation_receipt_error(
+            dict(mutation_probe,
+                 results={"set-id": set_result, "add-id": addition_result,
+                          "site-id": dict(site_result, reason="looks-fine")}),
+            **mutation_args) != "",
+    )
+    expect(
+        "a caught result claiming the survived reason fails",
+        mutation_receipt_error(
+            dict(mutation_probe,
+                 results={"set-id": set_result, "add-id": addition_result,
+                          "site-id": dict(site_result, reason="survived")}),
+            **mutation_args) != "",
+    )
+    expect(
+        "a survived result claiming a kill reason fails",
+        mutation_receipt_error(
+            dict(mutation_probe,
+                 results={"set-id": dict(set_result, reason="suite-failure"),
+                          "add-id": addition_result, "site-id": site_result}),
+            **mutation_args) != "",
+    )
+    expect(
+        "a crash status the plan never allowed fails",
+        mutation_receipt_error(
+            dict(mutation_probe,
+                 results={"set-id": set_result, "add-id": addition_result,
+                          "site-id": dict(site_result, reason="timeout")}),
+            **mutation_args) != "",
+    )
+    expect(
+        "a result missing its reason entirely fails",
+        mutation_receipt_error(
+            dict(mutation_probe,
+                 results={"set-id": set_result, "add-id": addition_result,
+                          "site-id": {k: v for k, v in site_result.items()
+                                      if k != "reason"}}),
+            **mutation_args) != "",
+    )
+    # result_kill can return any status the plan tolerates, so a new allowed_statuses entry
+    # that nobody added to the vocabulary would make every result carrying it unvalidatable.
+    planned_statuses = set()
+    for _descriptor in writer.mutation_plan()[0]:
+        planned_statuses.update(_descriptor.get("allowed_statuses", ()) or ())
+    expect(
+        "every status the plan tolerates is a reason the gate can validate",
+        planned_statuses <= set(writer.KILL_REASONS),
+    )
+    expect(
+        "the unasserted reason is one the generator can actually emit",
+        writer.UNASSERTED_KILL_REASON in writer.KILL_REASONS,
     )
     shrunk_contract = dict(mutation_contract, plan_sha256="e" * 64)
     shrunk_probe = dict(

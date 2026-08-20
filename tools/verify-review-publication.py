@@ -363,6 +363,22 @@ def selftest() -> int:
         failures += (not ok)
         print(f"  {'PASS' if ok else 'FAIL'} {label}")
 
+    def receipt_field(call, field):
+        """The named field from the receipt payload the call printed.
+
+        A field the receipt reports is a published claim. Recording which terminal form
+        matched while nothing asserts the label lets it be wrong in either direction.
+        """
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            call()
+        captured = stream.getvalue()
+        sys.stdout.write(captured)
+        for line in captured.splitlines():
+            if line.startswith("{"):
+                return json.loads(line).get(field)
+        return None
+
     def denies(call, named: str, code: int = 1) -> bool:
         """True when `call` fails with the NAMED problem, not merely with some problem.
 
@@ -476,6 +492,14 @@ def selftest() -> int:
         # this case, a retained-form branch that echoed the published bytes verified clean.
         retained_but_changed = dict(
             comment, body="X" + body_bytes.decode()[1:])
+        expect("the receipt names the retained form when the line feed survived",
+               receipt_field(lambda: verify_comment(
+                   repo, pr, comment_id, head, author, body,
+                   runner_for(retained)), "terminal_line_feed") == "retained")
+        expect("the receipt names the stripped form when the line feed did not",
+               receipt_field(lambda: verify_comment(
+                   repo, pr, comment_id, head, author, body,
+                   runner_for()), "terminal_line_feed") == "stripped")
         expect("a retained-line-feed body whose interior changed still fails", denies(
             lambda: verify_comment(repo, pr, comment_id, head, author, body,
                                    runner_for(retained_but_changed)),
@@ -606,6 +630,15 @@ def selftest() -> int:
         body.write_bytes(body_bytes)
         def broken_runner(argv, **kwargs):
             return Done(1, stderr=b"gh: Not Found (HTTP 404)")
+        def array_runner(argv, **kwargs):
+            return Done(0, json.dumps([1, 2]).encode())
+        expect("a JSON array where an object is required fails closed", denies(
+            lambda: verify_comment(repo, pr, comment_id, head, author, body, array_runner),
+            "is not a JSON object", 2))
+        expect("a comment carrying no body string fails closed", denies(
+            lambda: verify_comment(repo, pr, comment_id, head, author, body,
+                                   runner_for(dict(comment, body=None))),
+            "comment is not a string", 2))
         expect("transport failure exits 2", denies(
             lambda: verify_comment(repo, pr, comment_id, head, author, body, broken_runner),
             "cannot read comment", 2))

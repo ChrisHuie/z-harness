@@ -9,14 +9,14 @@
     "codex-cost": "fc46c95da8babd276e705c9578c5857a6563588b588da540ea4222c2c6ca793c",
     "codex_session_start": "b9dbedba94d623304ef97ca1b13a14b2f7b000cc98f35e016448ed4c85030567",
     "git_grep_engine_guard": "2fa728eb17d041bdf1c4f38fc6416f0bbf90df7d122ba3b1da15b1aa4c254bd0",
-    "harness_check": "4dd45789b405468dea63bf79a326788d1e8272c6eaa171b8434e18a6f8539a78",
+    "harness_check": "1a49127c266e2bebae21c168efa5a8f9018f30795a6be9edbab0dc48046d94ce",
     "harness_report": "eec022de9c2f7dec81c612e751dac472f2f8b695029d627784e7e5d840312cbc",
     "portable-conformance": "8eb48510971d0e4f7371cd7a4d16c41850e8e1324a739b70b71d3b85c5823606",
     "pr-delivery-state": "da5293b7134b159c1b6bb91b67c40193550076c908db8e185ddcb9d82011fe6b",
     "render-packages": "6b05aa44c351651202e8a5e720bd1a13ed8d2301705367cea0dc198d7f5a178e",
     "run-skill-evals": "38115603816e7698926a290d401179c3db2f4f5ffa12b49e2bfe04b3f294a508",
     "spawn_preflight_guard": "b2a0fc907102ab997cd10a7bad6c6cf4f3a5cd4cfd18cf4fc2e7807f81db1a54",
-    "verify-review-publication": "426945961fbcfb3f2b752fea5e285037e7927e50d769f8d75e832adea7db4e15",
+    "verify-review-publication": "178b90c45be278b0be82cd93630235b1407008a85e77fb8183feaf9a440108ac",
     "write-mutation-receipt": "76427aaa51e13a025d27fc0a023bc88ab6c78cf0c7821404e0352d072e51f769",
     "zsh_rev_modifier_guard": "a056e1f8375467c6c7a6b878aff858c257b44c10faaeb0fa3bb685d073c0fb9c"
   }

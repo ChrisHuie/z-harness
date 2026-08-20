@@ -69,6 +69,10 @@ codex plugin marketplace upgrade z-harness
 codex plugin add z-harness@z-harness
 ```
 
+Merging source does not update an already installed Codex cache. Until that refresh, reinstall,
+and new task occur, the active cache remains evidence for the preceding installed release rather
+than for the new source head.
+
 If the installed version remains unchanged, remove that cached install before adding it again:
 
 ```text

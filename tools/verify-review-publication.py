@@ -12,7 +12,8 @@ one terminal line feed. Whether publication keeps that final line feed is a prop
 posting method, not of GitHub: on this repository's own pull request the body field retained
 the source's terminal line feed verbatim while the title field dropped it, from one
 publication event. Comment mode therefore accepts the published body with or without the
-terminal line feed and records which form matched. Interior bytes are never normalised.
+terminal line feed and records which form matched, or `mismatch` when neither did. Interior
+bytes are never normalised.
 """
 from __future__ import annotations
 
@@ -28,7 +29,7 @@ import tempfile
 from pathlib import Path
 
 
-VERSION = "3.0"
+VERSION = "3.1"
 RECEIPT = "REVIEW-PUBLICATION-SUMMARY"
 HEAD_LINE = re.compile(rb"^Head: `([0-9a-f]{40})`$", re.MULTILINE)
 SNAPSHOT_SCHEMA_VERSION = 1
@@ -98,7 +99,7 @@ def _source_bytes(path: Path) -> bytes:
 
 
 def _accepted_form(published: bytes, submitted: bytes) -> tuple[bytes, str]:
-    """The canonical source form to compare against, and which form matched.
+    """The source form to compare against and its closed transport classification.
 
     A canonical source ends in exactly one line feed. Posting with a body file preserves it;
     posting through a shell command substitution strips it before GitHub ever sees the bytes.
@@ -107,7 +108,9 @@ def _accepted_form(published: bytes, submitted: bytes) -> tuple[bytes, str]:
     """
     if published == submitted:
         return submitted, "retained"
-    return submitted[:-1], "stripped"
+    if published == submitted[:-1]:
+        return submitted[:-1], "stripped"
+    return submitted, "mismatch"
 
 
 def _text_bytes(value, label: str) -> bytes:
@@ -305,6 +308,7 @@ def verify_comment(repo: str, pr: int, comment_id: int, expected_head: str,
         author_association=comment.get("author_association"),
         created_at=comment.get("created_at"), updated_at=comment.get("updated_at"),
         edited=comment.get("created_at") != comment.get("updated_at"),
+        submitted_bytes=len(submitted), submitted_sha256=_sha256(submitted),
         terminal_line_feed=terminal_line_feed,
     )
     return 1 if problem else 0
@@ -363,21 +367,26 @@ def selftest() -> int:
         failures += (not ok)
         print(f"  {'PASS' if ok else 'FAIL'} {label}")
 
+    def captured_receipt(call):
+        """Return the code and JSON receipt payload printed by one verifier call."""
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            code = call()
+        captured = stream.getvalue()
+        sys.stdout.write(captured)
+        for line in captured.splitlines():
+            if line.startswith("{"):
+                return code, json.loads(line)
+        return code, {}
+
     def receipt_field(call, field):
         """The named field from the receipt payload the call printed.
 
         A field the receipt reports is a published claim. Recording which terminal form
         matched while nothing asserts the label lets it be wrong in either direction.
         """
-        stream = io.StringIO()
-        with contextlib.redirect_stdout(stream):
-            call()
-        captured = stream.getvalue()
-        sys.stdout.write(captured)
-        for line in captured.splitlines():
-            if line.startswith("{"):
-                return json.loads(line).get(field)
-        return None
+        _code, payload = captured_receipt(call)
+        return payload.get(field)
 
     def denies(call, named: str, code: int = 1) -> bool:
         """True when `call` fails with the NAMED problem, not merely with some problem.
@@ -434,6 +443,63 @@ def selftest() -> int:
         "title_sha256": _sha256(title.encode()),
         "note": SNAPSHOT_NOTE,
     }
+    comment_receipt_fields = frozenset({
+        "author", "author_association", "author_id", "comment_id", "comment_url",
+        "created_at", "edited", "expected_bytes", "expected_head",
+        "expected_sha256", "kind", "pr", "problem", "published_bytes",
+        "published_sha256", "repo", "submitted_bytes", "submitted_sha256",
+        "terminal_line_feed", "updated_at", "verified",
+    })
+
+    def comment_receipt_is_closed(payload):
+        return set(payload) == comment_receipt_fields
+
+    def expected_comment_receipt(
+            published, expected, verified, problem, terminal, comment_data=None):
+        comment_data = comment if comment_data is None else comment_data
+        comment_user = _object(comment_data.get("user"))
+        return {
+            "kind": "comment", "repo": repo, "pr": pr, "expected_head": head,
+            "published_bytes": len(published),
+            "published_sha256": _sha256(published),
+            "expected_bytes": len(expected), "expected_sha256": _sha256(expected),
+            "verified": verified, "problem": problem or "none",
+            "comment_id": comment_id, "comment_url": comment_data.get("html_url"),
+            "author": comment_user.get("login"), "author_id": comment_user.get("id"),
+            "author_association": comment_data.get("author_association"),
+            "created_at": comment_data.get("created_at"),
+            "updated_at": comment_data.get("updated_at"),
+            "edited": comment_data.get("created_at") != comment_data.get("updated_at"),
+            "submitted_bytes": len(body_bytes),
+            "submitted_sha256": _sha256(body_bytes),
+            "terminal_line_feed": terminal,
+        }
+
+    snapshot_receipt_fields = frozenset({
+        "body_bytes", "body_sha256", "expected_head", "frozen_at_head", "kind",
+        "manifest_bytes", "manifest_sha256", "pr", "pr_url", "problem", "repo",
+        "snapshot_body_bytes", "snapshot_body_sha256", "snapshot_title_bytes",
+        "snapshot_title_sha256", "title_bytes", "title_sha256", "verified",
+    })
+
+    def expected_snapshot_receipt(pull_data, manifest_raw, verified, problem):
+        published_body = pull_data["body"].encode()
+        published_title = pull_data["title"].encode()
+        return {
+            "kind": "pr-snapshot", "repo": repo, "pr": pr,
+            "expected_head": head, "pr_url": pull_data["html_url"],
+            "frozen_at_head": snapshot["frozen_at_head"],
+            "manifest_bytes": len(manifest_raw),
+            "manifest_sha256": _sha256(manifest_raw),
+            "body_bytes": len(published_body), "body_sha256": _sha256(published_body),
+            "snapshot_body_bytes": snapshot["body_bytes"],
+            "snapshot_body_sha256": snapshot["body_sha256"],
+            "title_bytes": len(published_title),
+            "title_sha256": _sha256(published_title),
+            "snapshot_title_bytes": snapshot["title_bytes"],
+            "snapshot_title_sha256": snapshot["title_sha256"],
+            "verified": verified, "problem": problem or "none",
+        }
 
     class Done:
         def __init__(self, returncode, stdout=b"", stderr=b""):
@@ -479,8 +545,16 @@ def selftest() -> int:
         manifest.write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf-8")
         expect("matching comment publication verifies", verify_comment(
             repo, pr, comment_id, head, author, body, runner_for()) == 0)
-        expect("matching frozen pull-request publication verifies", verify_pr_snapshot(
-            repo, pr, head, manifest, runner_for()) == 0)
+        manifest_raw = manifest.read_bytes()
+        matching_snapshot_code, matching_snapshot = captured_receipt(
+            lambda: verify_pr_snapshot(repo, pr, head, manifest, runner_for()))
+        expect(
+            "matching frozen pull-request publication emits the exact closed receipt",
+            matching_snapshot_code == 0
+            and set(matching_snapshot) == snapshot_receipt_fields
+            and matching_snapshot == expected_snapshot_receipt(
+                pull, manifest_raw, True, ""),
+        )
 
         # Both publication forms are correct postings of one canonical source. The default
         # comment fixture is the stripped form; this is the retained one.
@@ -500,10 +574,55 @@ def selftest() -> int:
                receipt_field(lambda: verify_comment(
                    repo, pr, comment_id, head, author, body,
                    runner_for()), "terminal_line_feed") == "stripped")
+        retained_success_code, retained_success = captured_receipt(
+            lambda: verify_comment(repo, pr, comment_id, head, author, body,
+                                   runner_for(retained)))
+        expect(
+            "a retained success receipt has the closed schema and canonical source fields",
+            retained_success_code == 0
+            and comment_receipt_is_closed(retained_success)
+            and retained_success == expected_comment_receipt(
+                body_bytes, body_bytes, True, "", "retained"),
+        )
+        stripped_success_code, stripped_success = captured_receipt(
+            lambda: verify_comment(repo, pr, comment_id, head, author, body, runner_for()))
+        expect(
+            "a stripped success receipt distinguishes transport bytes from canonical source",
+            stripped_success_code == 0
+            and comment_receipt_is_closed(stripped_success)
+            and stripped_success == expected_comment_receipt(
+                body_bytes[:-1], body_bytes[:-1], True, "", "stripped"),
+        )
         expect("a retained-line-feed body whose interior changed still fails", denies(
             lambda: verify_comment(repo, pr, comment_id, head, author, body,
                                    runner_for(retained_but_changed)),
             "published body differs"))
+        retained_mismatch_code, retained_mismatch = captured_receipt(
+            lambda: verify_comment(repo, pr, comment_id, head, author, body,
+                                   runner_for(retained_but_changed)))
+        expect(
+            "a changed retained-form receipt claims mismatch and canonical source bytes",
+            retained_mismatch_code == 1
+            and comment_receipt_is_closed(retained_mismatch)
+            and retained_mismatch == expected_comment_receipt(
+                retained_but_changed["body"].encode(), body_bytes, False,
+                _difference(retained_but_changed["body"].encode(), body_bytes),
+                "mismatch"),
+        )
+        stripped_but_changed = dict(
+            comment, body=("X" + body_bytes.decode()[1:])[:-1])
+        stripped_mismatch_code, stripped_mismatch = captured_receipt(
+            lambda: verify_comment(repo, pr, comment_id, head, author, body,
+                                   runner_for(stripped_but_changed)))
+        expect(
+            "a changed stripped-form receipt claims mismatch, never a transport match",
+            stripped_mismatch_code == 1
+            and comment_receipt_is_closed(stripped_mismatch)
+            and stripped_mismatch == expected_comment_receipt(
+                stripped_but_changed["body"].encode(), body_bytes, False,
+                _difference(stripped_but_changed["body"].encode(), body_bytes),
+                "mismatch"),
+        )
         expect("a frozen_at_head that names no commit fails", denies(
             lambda: verify_pr_snapshot(
                 repo, pr, head, manifest, runner_for(commit_rc=1)),
@@ -517,11 +636,29 @@ def selftest() -> int:
         expect("changed comment bytes fail", denies(lambda: verify_comment(
             repo, pr, comment_id, head, author, body, runner_for(changed)), 'published body differs', 1))
         crlf_published = dict(comment, body=comment["body"].replace("\n", "\r\n"))
-        expect("published CRLF bytes fail", denies(lambda: verify_comment(
-            repo, pr, comment_id, head, author, body, runner_for(crlf_published)), 'differs only in line endings', 1))
+        crlf_code, crlf_receipt = captured_receipt(lambda: verify_comment(
+            repo, pr, comment_id, head, author, body, runner_for(crlf_published)))
+        expect(
+            "published CRLF bytes fail without claiming an accepted terminal form",
+            crlf_code == 1 and crlf_receipt.get("verified") is False
+            and comment_receipt_is_closed(crlf_receipt)
+            and crlf_receipt == expected_comment_receipt(
+                crlf_published["body"].encode(), body_bytes, False,
+                _difference(crlf_published["body"].encode(), body_bytes), "mismatch"),
+        )
         prefixed_pull = dict(pull, body="prefix\n" + pull["body"])
-        expect("a changed frozen pull-request body fails", denies(lambda: verify_pr_snapshot(
-            repo, pr, head, manifest, runner_for(pull_data=prefixed_pull)), 'published body has', 1))
+        prefixed_code, prefixed_receipt = captured_receipt(
+            lambda: verify_pr_snapshot(
+                repo, pr, head, manifest, runner_for(pull_data=prefixed_pull)))
+        prefixed_problem = _snapshot_error(
+            snapshot, repo, pr, prefixed_pull["body"].encode(), title.encode())
+        expect(
+            "a changed frozen pull-request body emits the exact closed failure receipt",
+            prefixed_code == 1
+            and set(prefixed_receipt) == snapshot_receipt_fields
+            and prefixed_receipt == expected_snapshot_receipt(
+                prefixed_pull, manifest_raw, False, prefixed_problem),
+        )
         same_length_body = dict(
             pull, body=("X" if not pull["body"].startswith("X") else "Y") + pull["body"][1:])
         expect("a same-length frozen body digest change fails", denies(lambda: verify_pr_snapshot(
@@ -530,8 +667,18 @@ def selftest() -> int:
         expect("pull-request CRLF bytes fail", denies(lambda: verify_pr_snapshot(
             repo, pr, head, manifest, runner_for(pull_data=crlf_pull)), 'published body has', 1))
         changed_title = dict(pull, title=title[::-1])
-        expect("a same-length frozen title digest change fails", denies(lambda: verify_pr_snapshot(
-            repo, pr, head, manifest, runner_for(pull_data=changed_title)), 'published title digest is', 1))
+        changed_title_code, changed_title_receipt = captured_receipt(
+            lambda: verify_pr_snapshot(
+                repo, pr, head, manifest, runner_for(pull_data=changed_title)))
+        changed_title_problem = _snapshot_error(
+            snapshot, repo, pr, body_bytes, changed_title["title"].encode())
+        expect(
+            "a same-length title failure emits the exact closed snapshot receipt",
+            changed_title_code == 1
+            and set(changed_title_receipt) == snapshot_receipt_fields
+            and changed_title_receipt == expected_snapshot_receipt(
+                changed_title, manifest_raw, False, changed_title_problem),
+        )
 
         for label, named, changed_comment in (
             ("wrong comment repository metadata fails", "comment issue URL is", dict(comment, issue_url="https://api.github.com/repos/x/y/issues/8")),
@@ -544,6 +691,20 @@ def selftest() -> int:
             expect(label, denies(lambda: verify_comment(
                 repo, pr, comment_id, head, author, body, runner_for(changed_comment)),
                 named))
+        wrong_author = dict(comment, user={"login": "other", "id": 42})
+        wrong_author_code, wrong_author_receipt = captured_receipt(
+            lambda: verify_comment(
+                repo, pr, comment_id, head, author, body, runner_for(wrong_author)))
+        wrong_author_problem = _comment_metadata_error(
+            wrong_author, repo, pr, comment_id, author, head, body_bytes)
+        expect(
+            "a comment metadata failure emits the exact closed receipt",
+            wrong_author_code == 1
+            and set(wrong_author_receipt) == comment_receipt_fields
+            and wrong_author_receipt == expected_comment_receipt(
+                body_bytes[:-1], body_bytes[:-1], False, wrong_author_problem,
+                "stripped", wrong_author),
+        )
         missing = dict(comment); missing.pop("author_association")
         expect("missing comment metadata fails", denies(lambda: verify_comment(
             repo, pr, comment_id, head, author, body, runner_for(missing)), 'missing author_association', 1))
@@ -554,9 +715,31 @@ def selftest() -> int:
         wrong_head_pull = dict(pull, head={"sha": "b" * 40})
         expect("wrong current pull-request head fails", denies(lambda: verify_comment(
             repo, pr, comment_id, head, author, body, runner_for(pull_data=wrong_head_pull)), 'pull request head is', 1))
+        wrong_head_code, wrong_head_receipt = captured_receipt(
+            lambda: verify_comment(
+                repo, pr, comment_id, head, author, body,
+                runner_for(pull_data=wrong_head_pull)))
+        wrong_head_problem = _pr_metadata_error(wrong_head_pull, repo, pr, head)
+        expect(
+            "a pull-request head failure emits the exact closed comment receipt",
+            wrong_head_code == 1
+            and set(wrong_head_receipt) == comment_receipt_fields
+            and wrong_head_receipt == expected_comment_receipt(
+                body_bytes[:-1], body_bytes[:-1], False, wrong_head_problem,
+                "stripped"),
+        )
         wrong_number_pull = dict(pull, number=9)
-        expect("wrong pull-request number fails", denies(lambda: verify_pr_snapshot(
-            repo, pr, head, manifest, runner_for(pull_data=wrong_number_pull)), 'pull request number is', 1))
+        wrong_number_code, wrong_number_receipt = captured_receipt(
+            lambda: verify_pr_snapshot(
+                repo, pr, head, manifest, runner_for(pull_data=wrong_number_pull)))
+        wrong_number_problem = _pr_metadata_error(wrong_number_pull, repo, pr, head)
+        expect(
+            "a pull-request metadata failure emits the exact closed snapshot receipt",
+            wrong_number_code == 1
+            and set(wrong_number_receipt) == snapshot_receipt_fields
+            and wrong_number_receipt == expected_snapshot_receipt(
+                wrong_number_pull, manifest_raw, False, wrong_number_problem),
+        )
         wrong_base_pull = dict(pull, base={"repo": {"full_name": "x/y"}})
         expect("wrong pull-request repository fails", denies(lambda: verify_pr_snapshot(
             repo, pr, head, manifest, runner_for(pull_data=wrong_base_pull)), 'pull request base repository is', 1))

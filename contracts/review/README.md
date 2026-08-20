@@ -69,6 +69,10 @@ or JSON failure. Nothing else in this repository can see a posted comment or liv
 publication that is never read back carries no mechanical evidence, whatever the gate says about
 its source.
 
+Comment receipts classify `terminal_line_feed` as `retained`, `stripped`, or `mismatch`. The first
+two values are emitted only when the complete published bytes equal one accepted source form;
+failed comparisons use `mismatch` and retain the canonical submitted byte count and digest.
+
 A correction never rewrites published text. Build a new comment that states the correction,
 links the superseded publication, and binds the evidence to the new exact head.
 

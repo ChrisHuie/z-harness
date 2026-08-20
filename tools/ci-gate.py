@@ -17,7 +17,7 @@ import tempfile
 from typing import Callable, List, Optional, Sequence, Tuple
 
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github/workflows/check.yml"
 MUTATION_WORKFLOW = ROOT / ".github/workflows/mutation-proof.yml"
@@ -52,7 +52,7 @@ EVAL_SKILL_FLOOR = 7
 # 165 here and 178 in harness_check -- and a fake that hardcodes its own number tests the
 # literal rather than the contract.
 SUITE_FLOORS = {
-    "harness_check": 146,
+    "harness_check": 160,
     "render-packages": 192,
     "bash_command_guard": 1366,
     "git_grep_engine_guard": 1149,
@@ -368,6 +368,186 @@ def workflow_error(data: str, mutation_data: Optional[str] = None) -> Optional[s
             "immutable actions, artifact aggregation, and tracked-receipt comparison"
         )
     return None
+
+
+def _yaml_mapping_block(data: str, header: str) -> str:
+    """Return one indentation-delimited mapping block, or an empty string."""
+    lines = data.splitlines(keepends=True)
+    matches = [index for index, line in enumerate(lines) if line.rstrip("\r\n") == header]
+    if len(matches) != 1:
+        return ""
+    start = matches[0]
+    indentation = len(header) - len(header.lstrip(" "))
+    end = start + 1
+    while end < len(lines):
+        content = lines[end].rstrip("\r\n")
+        if content and len(content) - len(content.lstrip(" ")) <= indentation:
+            break
+        end += 1
+    return "".join(lines[start:end])
+
+
+def publication_workflow_error(data: str) -> str:
+    """Independently require the live pull-request publication read-back job."""
+    top_fields = [
+        line.strip()
+        for line in data.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+        and len(line) - len(line.lstrip(" ")) == 0
+    ]
+    if top_fields != ["name: harness-check", "on:", "permissions:", "jobs:"]:
+        return "publication workflow top-level fields permit an unreviewed environment"
+    trigger = _yaml_mapping_block(data, "on:")
+    pull_request = _yaml_mapping_block(trigger, "  pull_request:") if trigger else ""
+    if not pull_request:
+        return "publication workflow has no unfiltered pull_request trigger"
+    if any(line.strip() for line in pull_request.splitlines()[1:]):
+        return "publication workflow pull_request trigger is filtered"
+
+    publication = _yaml_mapping_block(data, "  publication:")
+    if not publication:
+        return "publication workflow job is absent or duplicated"
+    job_fields = [
+        line.strip()
+        for line in publication.splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+        and len(line) - len(line.lstrip(" ")) == 4
+    ]
+    if job_fields != [
+            "if: github.event_name == 'pull_request'", "runs-on: ubuntu-24.04",
+            "permissions:", "steps:"]:
+        return "publication workflow job fields are not exactly the closed contract"
+    required_once = (
+        ("    if: github.event_name == 'pull_request'\n", "pull-request job condition"),
+        ("    runs-on: ubuntu-24.04\n", "runner"),
+        ("      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n",
+         "pinned checkout action"),
+        ("          persist-credentials: false\n", "non-persisted checkout credentials"),
+        ("      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97\n",
+         "pinned setup-python action"),
+        ("          python-version: 3.13.14\n", "Python version"),
+        ("          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n", "GitHub token binding"),
+        ("          PR_NUMBER: ${{ github.event.pull_request.number }}\n",
+         "pull-request number binding"),
+        ("          HEAD_SHA: ${{ github.event.pull_request.head.sha }}\n",
+         "pull-request head binding"),
+        ('          MANIFEST="contracts/review/pr-$PR_NUMBER/frozen-publication.json"\n',
+         "PR-scoped publication manifest"),
+        ('          if [ ! -f "$MANIFEST" ]; then\n', "unregistered-PR manifest branch"),
+        ('            exit 0\n', "unregistered-PR manifest exit"),
+        ("python3 tools/verify-review-publication.py ", "publication verifier executable"),
+        ("tools/verify-review-publication.py pr-snapshot", "snapshot verifier mode"),
+        ('--repo "$GITHUB_REPOSITORY"', "repository argument"),
+        ('--pr "$PR_NUMBER"', "pull-request argument"),
+        ('--expected-head "$HEAD_SHA"', "head argument"),
+        ('--manifest "$MANIFEST"', "manifest argument"),
+    )
+    for needle, label in required_once:
+        if publication.count(needle) != 1:
+            return f"publication workflow {label} is absent or duplicated"
+    permissions = _yaml_mapping_block(publication, "    permissions:")
+    permission_lines = {
+        line.strip() for line in permissions.splitlines()[1:] if line.strip()
+    }
+    if permission_lines != {"contents: read", "pull-requests: read"}:
+        return "publication workflow job permissions are not exactly read-only"
+    step_headers = [
+        line.strip()
+        for line in publication.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+        and len(line) - len(line.lstrip(" ")) == 6
+        and (line.strip() == "-" or line.strip().startswith("- "))
+    ]
+    if step_headers != [
+            "- uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+            "- uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
+            "- name: frozen publication still matches the live pull request"]:
+        return "publication workflow step inventory is not exactly ordered and closed"
+    checkout_step = _yaml_mapping_block(
+        publication,
+        "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+    )
+    checkout_fields = [
+        line.strip()
+        for line in checkout_step.splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+        and len(line) - len(line.lstrip(" ")) == 8
+    ]
+    checkout_with = _yaml_mapping_block(checkout_step, "        with:")
+    checkout_values = [
+        line.strip()
+        for line in checkout_with.splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if checkout_fields != ["with:"] or checkout_values != [
+            "persist-credentials: false"]:
+        return "publication workflow checkout step is not exactly unconditional at PR head"
+    setup_step = _yaml_mapping_block(
+        publication,
+        "      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
+    )
+    setup_fields = [
+        line.strip()
+        for line in setup_step.splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+        and len(line) - len(line.lstrip(" ")) == 8
+    ]
+    setup_with = _yaml_mapping_block(setup_step, "        with:")
+    setup_values = [
+        line.strip()
+        for line in setup_with.splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if setup_fields != ["with:"] or setup_values != ["python-version: 3.13.14"]:
+        return "publication workflow setup-python step is not exactly unconditional"
+    verification_step = _yaml_mapping_block(
+        publication, "      - name: frozen publication still matches the live pull request")
+    if not verification_step:
+        return "publication workflow verification step is absent or duplicated"
+    step_fields = [
+        line.strip()
+        for line in verification_step.splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+        and len(line) - len(line.lstrip(" ")) == 8
+    ]
+    if step_fields != ["env:", "run: |"]:
+        return (
+            "publication workflow verification step fields are not exactly "
+            "unconditional env and run"
+        )
+    env_block = _yaml_mapping_block(verification_step, "        env:")
+    env_values = [
+        line.strip()
+        for line in env_block.splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if env_values != [
+            "GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
+            "PR_NUMBER: ${{ github.event.pull_request.number }}",
+            "HEAD_SHA: ${{ github.event.pull_request.head.sha }}"]:
+        return "publication workflow verifier environment is not exactly PR-scoped"
+    run_block = _yaml_mapping_block(verification_step, "        run: |")
+    commands = tuple(
+        line.strip()
+        for line in run_block.splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+    )
+    expected_commands = (
+        'MANIFEST="contracts/review/pr-$PR_NUMBER/frozen-publication.json"',
+        'if [ ! -f "$MANIFEST" ]; then',
+        'echo "no frozen publication registered for PR $PR_NUMBER at $MANIFEST"',
+        "exit 0",
+        "fi",
+        "python3 tools/verify-review-publication.py pr-snapshot "
+        '--repo "$GITHUB_REPOSITORY" --pr "$PR_NUMBER" '
+        '--expected-head "$HEAD_SHA" --manifest "$MANIFEST"',
+    )
+    if commands != expected_commands:
+        return (
+            "publication workflow verifier command sequence is not exact and "
+            "failure-propagating"
+        )
+    return ""
 
 
 CHILD_TIMEOUT_SECONDS = 120
@@ -1636,6 +1816,13 @@ def gate(
     print(f"  {'FAIL' if problem else 'PASS'} workflow-contract")
     if problem:
         failures.append(problem)
+    publication_workflow_problem = publication_workflow_error(workflow)
+    print(
+        f"  {'FAIL' if publication_workflow_problem else 'PASS'} "
+        "publication-workflow-contract"
+    )
+    if publication_workflow_problem:
+        failures.append(publication_workflow_problem)
     present = (
         tuple(sorted(p.name for p in WORKFLOW_DIR.iterdir() if p.is_file()))
         if WORKFLOW_DIR.is_dir() else ()
@@ -1772,6 +1959,190 @@ def selftest() -> int:
         ) is not None,
     )
     expect("workflow baseline matches exact contract", workflow_error(EXPECTED_WORKFLOW) is None)
+    expect(
+        "publication workflow baseline matches its independent semantic contract",
+        publication_workflow_error(EXPECTED_WORKFLOW) == "",
+    )
+
+    def publication_semantic_mutation(old, new, diagnosis):
+        block = _yaml_mapping_block(EXPECTED_WORKFLOW, "  publication:")
+        if not block or block.count(old) != 1:
+            return False
+        mutated = EXPECTED_WORKFLOW.replace(block, block.replace(old, new, 1), 1)
+        problem = publication_workflow_error(mutated)
+        return diagnosis in problem
+
+    publication_block = _yaml_mapping_block(EXPECTED_WORKFLOW, "  publication:")
+    workflow_without_publication = EXPECTED_WORKFLOW.replace(publication_block, "", 1)
+    original_expected_workflow = EXPECTED_WORKFLOW
+    globals()["EXPECTED_WORKFLOW"] = workflow_without_publication
+    try:
+        expect(
+            "coordinated publication-job and workflow-oracle deletion still turns red",
+            workflow_error(workflow_without_publication) is None
+            and publication_workflow_error(workflow_without_publication) != "",
+        )
+    finally:
+        globals()["EXPECTED_WORKFLOW"] = original_expected_workflow
+    expect(
+        "publication workflow rejects a filtered pull-request trigger",
+        EXPECTED_WORKFLOW.count("  pull_request:\n") == 1
+        and "trigger is filtered" in publication_workflow_error(
+            EXPECTED_WORKFLOW.replace(
+                "  pull_request:\n",
+                "  pull_request:\n    paths: [README.md]\n", 1)),
+    )
+    for label, old, new, diagnosis in (
+        ("job condition", "    if: github.event_name == 'pull_request'\n",
+         "    if: always()\n", "job fields"),
+        ("runner", "    runs-on: ubuntu-24.04\n", "    runs-on: macos-15\n", "job fields"),
+        ("contents permission", "      contents: read\n", "      contents: write\n",
+         "permissions"),
+        ("pull-request permission", "      pull-requests: read\n",
+         "      pull-requests: write\n", "permissions"),
+        ("checkout action pin", "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+         "actions/checkout@main", "pinned checkout action"),
+        ("checkout credential policy", "          persist-credentials: false\n",
+         "          persist-credentials: true\n", "checkout credentials"),
+        ("setup-python action pin",
+         "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
+         "actions/setup-python@main", "pinned setup-python action"),
+        ("Python version", "          python-version: 3.13.14\n",
+         "          python-version: '3.x'\n", "Python version"),
+        ("GitHub token binding", "          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n",
+         "          GH_TOKEN: missing\n", "GitHub token binding"),
+        ("pull-request number binding",
+         "          PR_NUMBER: ${{ github.event.pull_request.number }}\n",
+         "          PR_NUMBER: 0\n", "pull-request number binding"),
+        ("pull-request head binding",
+         "          HEAD_SHA: ${{ github.event.pull_request.head.sha }}\n",
+         "          HEAD_SHA: ${{ github.sha }}\n", "pull-request head binding"),
+        ("PR-scoped manifest",
+         '          MANIFEST="contracts/review/pr-$PR_NUMBER/frozen-publication.json"\n',
+         '          MANIFEST="contracts/review/pr-8/frozen-publication.json"\n',
+         "PR-scoped publication manifest"),
+        ("verifier executable", "python3 tools/verify-review-publication.py ",
+         "python3 tools/other.py ", "publication verifier executable"),
+        ("snapshot mode", "tools/verify-review-publication.py pr-snapshot",
+         "tools/verify-review-publication.py comment", "snapshot verifier mode"),
+        ("repository argument", '--repo "$GITHUB_REPOSITORY"', '--repo wrong/repo',
+         "repository argument"),
+        ("pull-request argument", '--pr "$PR_NUMBER"', '--pr 0',
+         "pull-request argument"),
+        ("head argument", '--expected-head "$HEAD_SHA"', '--expected-head deadbeef',
+         "head argument"),
+        ("manifest argument", '--manifest "$MANIFEST"', '--manifest missing.json',
+         "manifest argument"),
+    ):
+        expect(
+            f"publication workflow rejects a changed {label}",
+            publication_semantic_mutation(old, new, diagnosis),
+        )
+    expect(
+        "publication workflow retains the unregistered-PR manifest branch",
+        publication_semantic_mutation(
+            '          if [ ! -f "$MANIFEST" ]; then\n'
+            '            echo "no frozen publication registered for PR $PR_NUMBER at $MANIFEST"\n'
+            '            exit 0\n'
+            '          fi\n',
+            "", "unregistered-PR manifest"),
+    )
+    expect(
+        "publication workflow rejects an early success exit before the verifier",
+        publication_semantic_mutation(
+            '          fi\n'
+            '          python3 tools/verify-review-publication.py pr-snapshot ',
+            '          fi\n'
+            '          exit 0\n'
+            '          python3 tools/verify-review-publication.py pr-snapshot ',
+            "command sequence"),
+    )
+    expect(
+        "publication workflow rejects a skipped verification step",
+        publication_semantic_mutation(
+            "      - name: frozen publication still matches the live pull request\n",
+            "      - name: frozen publication still matches the live pull request\n"
+            "        if: false\n",
+            "step fields"),
+    )
+    expect(
+        "publication workflow rejects a non-blocking verification step",
+        publication_semantic_mutation(
+            "      - name: frozen publication still matches the live pull request\n",
+            "      - name: frozen publication still matches the live pull request\n"
+            "        continue-on-error: true\n",
+            "step fields"),
+    )
+    expect(
+        "publication workflow rejects a verifier whose failure is ignored",
+        publication_semantic_mutation(
+            '--expected-head "$HEAD_SHA" --manifest "$MANIFEST"\n',
+            '--expected-head "$HEAD_SHA" --manifest "$MANIFEST" || true\n',
+            "command sequence"),
+    )
+    expect(
+        "publication workflow rejects a backgrounded verifier",
+        publication_semantic_mutation(
+            '--expected-head "$HEAD_SHA" --manifest "$MANIFEST"\n',
+            '--expected-head "$HEAD_SHA" --manifest "$MANIFEST" &\n',
+            "command sequence"),
+    )
+    expect(
+        "publication workflow rejects a top-level environment or defaults override",
+        "top-level fields" in publication_workflow_error(
+            EXPECTED_WORKFLOW.replace(
+                "name: harness-check\n", "name: harness-check\nenv:\n  BASH_ENV: planted\n",
+                1)),
+    )
+    expect(
+        "publication workflow rejects an unexpected pre-verifier step",
+        publication_semantic_mutation(
+            "      - name: frozen publication still matches the live pull request\n",
+            "      - name: remove the frozen publication\n"
+            "        run: rm -f contracts/review/pr-8/frozen-publication.json\n"
+            "      - name: frozen publication still matches the live pull request\n",
+            "step inventory"),
+    )
+    expect(
+        "publication workflow rejects a bare-dash pre-verifier step",
+        publication_semantic_mutation(
+            "      - name: frozen publication still matches the live pull request\n",
+            "      -\n"
+            "        name: remove the frozen publication\n"
+            "        run: rm -f contracts/review/pr-8/frozen-publication.json\n"
+            "      - name: frozen publication still matches the live pull request\n",
+            "step inventory"),
+    )
+    for label, old, new, diagnosis in (
+        ("job-level non-blocking policy", "    runs-on: ubuntu-24.04\n",
+         "    continue-on-error: true\n    runs-on: ubuntu-24.04\n", "job fields"),
+        ("skipped checkout",
+         "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n",
+         "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n"
+         "        if: false\n", "checkout step"),
+        ("non-blocking checkout", "        with:\n          persist-credentials: false\n",
+         "        continue-on-error: true\n        with:\n"
+         "          persist-credentials: false\n", "checkout step"),
+        ("redirected checkout", "          persist-credentials: false\n",
+         "          persist-credentials: false\n          path: nested\n", "checkout step"),
+        ("wrong checkout ref", "          persist-credentials: false\n",
+         "          persist-credentials: false\n          ref: main\n", "checkout step"),
+        ("skipped setup-python",
+         "      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97\n",
+         "      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97\n"
+         "        if: false\n", "setup-python step"),
+        ("non-blocking setup-python", "          python-version: 3.13.14\n",
+         "          python-version: 3.13.14\n        continue-on-error: true\n",
+         "setup-python step"),
+        ("extra verifier environment",
+         "          HEAD_SHA: ${{ github.event.pull_request.head.sha }}\n",
+         "          HEAD_SHA: ${{ github.event.pull_request.head.sha }}\n"
+         "          BASH_ENV: planted\n", "verifier environment"),
+    ):
+        expect(
+            f"publication workflow rejects a {label}",
+            publication_semantic_mutation(old, new, diagnosis),
+        )
     expect(
         "ordinary full-gate checkout must retain the fixed decision-corpus base",
         workflow_error(EXPECTED_WORKFLOW.replace("          fetch-depth: 0\n", "", 1))
@@ -3164,6 +3535,16 @@ def selftest() -> int:
         )
     finally:
         globals()["review_publication_manifest_error"] = original_publication_manifest
+    original_publication_workflow = publication_workflow_error
+    globals()["publication_workflow_error"] = (
+        lambda _data: "planted publication-workflow failure")
+    try:
+        expect(
+            "production gate adopts the independent publication workflow result",
+            gate(fake_runner, emit_child_output=False) != 0,
+        )
+    finally:
+        globals()["publication_workflow_error"] = original_publication_workflow
     def invalid_child_runner(argv: Sequence[str]) -> Result:
         result = fake_runner(argv)
         if "harness_check.py --ci" in " ".join(argv):

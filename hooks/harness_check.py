@@ -18,7 +18,7 @@ Runs from either clone (repo root auto-detected from this file's location). Chec
       every tracked file except the declared SCAN_EXCLUSIONS
   C7  anchors: routing-table skills exist; Claude and Codex hook commands resolve;
       [local] original audit paths and askq anchors hold, and every repository-owned
-      installed skill payload matches its complete reviewed source tree
+      Claude-installed skill payload matches its complete reviewed source tree
   C8  reserved context basenames (CLAUDE.md/AGENTS.md/GEMINI.md) exist nowhere but
       the repo root across tracked and authored-untracked files; nested Git ownership
       boundaries are pruned and `.git` is matched as a component, not a substring
@@ -52,7 +52,7 @@ import sys
 import tempfile
 import time
 
-VERSION = "3.1.0"
+VERSION = "3.2.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # C11 anchor. AGENTS.md bans self-assessment carrying no technical sense and keeps words
@@ -91,7 +91,10 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 146
+SELFTEST_FLOOR = 160
+# This pin gives the current package a reviewable release identity. Update it with the
+# manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
+CURRENT_PLUGIN_VERSION = "0.3.1"
 
 AUTHORING_SKILLS = {"craft-prompt", "craft-skill", "craft-context-file", "review-prompt"}
 BODY_CHAR_CAP = 5000          # chars after frontmatter — the builders' instrument
@@ -111,10 +114,10 @@ SELFTEST_SUITES = [
     ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 42),
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 8),
     ("verify-review-publication",
-     ["tools/verify-review-publication.py", "--selftest"], 51),
+     ["tools/verify-review-publication.py", "--selftest"], 57),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
-    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 194),
+    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 233),
     ("write-mutation-receipt",
      ["tools/write-mutation-receipt.py", "--selftest"], 59),
     ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 65),
@@ -480,11 +483,77 @@ def git_command_failure(returncode, stderr, command="git ls-files"):
     return f"{command} exited {returncode} with no diagnostic on stderr"
 
 
-def package_paths(root):
+_GIT_REPOSITORY_ENV = frozenset({
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE", "GIT_PREFIX", "GIT_INTERNAL_SUPER_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_NAMESPACE",
+})
+
+
+def sanitized_git_environment(source=None):
+    """Remove ambient repository/config selectors from one Git subprocess."""
+    env = dict(os.environ if source is None else source)
+    for key in tuple(env):
+        if (key in _GIT_REPOSITORY_ENV or key == "GIT_CONFIG"
+                or key.startswith("GIT_CONFIG_")):
+            del env[key]
+    return env
+
+
+def run_git(runner, argv, **kwargs):
+    """Run Git without allowing ambient state to substitute another repository."""
+    kwargs["env"] = sanitized_git_environment(kwargs.get("env"))
+    return runner(argv, **kwargs)
+
+
+def _same_file(left, right):
+    """Return whether two path spellings identify the same filesystem object."""
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return False
+
+
+def _git_toplevel_error(root, runner):
+    """Return why Git did not resolve exactly the repository root it was given."""
+    try:
+        done = run_git(
+            runner, ["git", "-C", root, "rev-parse", "--show-toplevel"],
+            capture_output=True, text=False)
+    except OSError as exc:
+        return f"cannot run git rev-parse --show-toplevel: {exc}"
+    if done.returncode != 0:
+        return git_command_failure(
+            done.returncode, done.stderr, "git rev-parse --show-toplevel")
+    raw = bytes(done.stdout)
+    if not raw.endswith(b"\n") or b"\0" in raw:
+        return "git rev-parse --show-toplevel returned a malformed path"
+    value = raw[:-1]
+    if value.endswith(b"\r"):
+        value = value[:-1]
+    reported = os.fsdecode(value)
+    if not _same_file(reported, root):
+        return (
+            "git rev-parse --show-toplevel resolved "
+            f"{reported!r}, expected {os.path.realpath(root)!r}"
+        )
+    return ""
+
+
+def package_paths(root, runner=None):
     """Return (surface, paths, error) for source or installed package contents."""
+    runner = subprocess.run if runner is None else runner
     if os.path.exists(os.path.join(root, ".git")):
+        problem = _git_toplevel_error(root, runner)
+        if problem:
+            return "source", [], problem
         try:
-            tracked = subprocess.run(
+            tracked = run_git(
+                runner,
                 ["git", "-C", root, "ls-files"], capture_output=True, text=True,
             )
         except OSError as exc:
@@ -661,7 +730,8 @@ def _indexed_gitlink(path, owner_root, runner):
     relative = os.path.relpath(path, owner_root).replace(os.sep, "/")
     if relative == ".." or relative.startswith("../"):
         return False
-    staged = runner(
+    staged = run_git(
+        runner,
         ["git", "-C", owner_root, "ls-files", "--stage", "-z", "--", relative],
         capture_output=True, text=False)
     if staged.returncode != 0:
@@ -683,14 +753,14 @@ def _registered_linked_worktree(path, marker):
     if common_pointer is None:
         return False
     common = _git_common_dir(admin)
-    if os.path.dirname(admin) != os.path.realpath(os.path.join(common, "worktrees")):
+    if not _same_file(os.path.dirname(admin), os.path.join(common, "worktrees")):
         return False
     backlink = _git_path_line(os.path.join(admin, "gitdir"))
     if backlink is None:
         return False
     backlink = os.path.realpath(
         backlink if os.path.isabs(backlink) else os.path.join(admin, backlink))
-    return backlink == os.path.realpath(marker)
+    return _same_file(backlink, marker)
 
 
 def _bound_separate_gitdir(path, marker, runner):
@@ -703,7 +773,8 @@ def _bound_separate_gitdir(path, marker, runner):
     if (os.path.lexists(os.path.join(admin, "commondir"))
             or os.path.lexists(os.path.join(admin, "gitdir"))):
         return False
-    configured = runner(
+    configured = run_git(
+        runner,
         ["git", "--git-dir", admin, "config", "--local", "--path", "--null",
          "--get-all", "core.worktree"], capture_output=True, text=False)
     raw = bytes(configured.stdout)
@@ -712,17 +783,14 @@ def _bound_separate_gitdir(path, marker, runner):
     worktree = os.fsdecode(raw[:-1])
     if not os.path.isabs(worktree):
         worktree = os.path.join(admin, worktree)
-    return os.path.realpath(worktree) == os.path.realpath(path)
+    return _same_file(worktree, path)
 
 
 def _is_git_worktree_root(path, runner, owner_root=None):
     marker = os.path.join(path, ".git")
     if not os.path.lexists(marker) or os.path.islink(marker):
         return False
-    done = runner(
-        ["git", "-C", path, "rev-parse", "--show-prefix"],
-        capture_output=True, text=False)
-    if done.returncode != 0 or bytes(done.stdout) not in (b"\n", b"\r\n"):
+    if _git_toplevel_error(path, runner):
         return False
     if os.path.isdir(marker):
         return True
@@ -826,6 +894,10 @@ def git_owned_live_paths(root, runner=None):
     nothing alike and neither was named.
     """
     runner = subprocess.run if runner is None else runner
+    if os.path.lexists(os.path.join(root, ".git")):
+        problem = _git_toplevel_error(root, runner)
+        if problem:
+            return _git_inventory_failure(problem)
     groups = []
     failed = False
     failure = ""
@@ -838,7 +910,8 @@ def git_owned_live_paths(root, runner=None):
     )
     for args in queries:
         try:
-            done = runner(
+            done = run_git(
+                runner,
                 ["git", "-C", root, "ls-files", "-z", *args],
                 capture_output=True, text=False)
         except OSError as exc:
@@ -1171,13 +1244,14 @@ class Run:
                         + (f" e.g. {os.path.relpath(hits[0], self.root)}" if hits else ""))
 
     # ---- C7 ----------------------------------------------------------------
-    def c7_installed_skill_payload(self, source_root=None, installed_root=None):
+    def c7_claude_installed_skill_payload(self, source_root=None, installed_root=None):
         source_root = source_root or os.path.join(self.root, "skills")
         installed_root = installed_root or os.path.expanduser("~/.claude/skills")
         problem = installed_skill_payload_error(source_root, installed_root)
         self.result(
             "C7", not problem,
-            "[local] complete installed skill payload matches reviewed source"
+            "[local] complete Claude-installed skill payload under ~/.claude/skills "
+            "matches reviewed source"
             + (f": {problem}" if problem else ""),
         )
 
@@ -1268,7 +1342,7 @@ class Run:
             # roots, manifests, references, evals, scripts, stale files, symlinks, byte
             # drift, and executable-bit drift all fail. CI proves the helper's red arms;
             # only local mode claims to inspect the live installation.
-            self.c7_installed_skill_payload()
+            self.c7_claude_installed_skill_payload()
 
     # ---- C8 ----------------------------------------------------------------
     def c8_reserved_basenames(self, runner=None):
@@ -1316,6 +1390,9 @@ class Run:
         self.result("C9", bool(re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?",
                                            str(manifest.get("version", "")))),
                     f"manifest version is semver: {manifest.get('version')!r}")
+        self.result("C9", manifest.get("version") == CURRENT_PLUGIN_VERSION,
+                    f"manifest version is the reviewed release: "
+                    f"{manifest.get('version')!r} == {CURRENT_PLUGIN_VERSION!r}")
         self.result("C9", manifest.get("skills") == "./skills/",
                     "manifest skills path is ./skills/")
         self.result("C9", isinstance(manifest.get("description"), str)
@@ -2215,9 +2292,9 @@ def selftest():
                 run.c6_stale_patterns(scan_floor=1)
                 return error, run
             error, run = with_patched_run(unlaunchable_git_scan, probe)
-            return ("cannot run git ls-files" in (error or "")
+            return ("cannot run git rev-parse --show-toplevel" in (error or "")
                     and any(c == "C6" and "cannot enumerate scan set" in d
-                            and "cannot run git ls-files" in d
+                            and "cannot run git rev-parse --show-toplevel" in d
                             for c, d in run.failures))
 
         expect_red(
@@ -2225,9 +2302,30 @@ def selftest():
             c6_names_an_unlaunchable_git,
         )
 
-        # C7 owns every file below each repository skill directory. The installed root may
-        # contain unrelated top-level skills, but no reviewed file may disappear, drift, or
-        # gain a stale installed sibling without making the local comparison red.
+        hostile_git_env = {
+            key: "planted" for key in (
+                *_GIT_REPOSITORY_ENV, "GIT_CONFIG", "GIT_CONFIG_COUNT",
+                "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_PARAMETERS",
+                "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM",
+            )
+        }
+        hostile_git_env.update(PATH="retained", Z_HARNESS_SENTINEL="retained",
+                               GIT_AUTHOR_NAME="retained")
+        scrubbed_git_env = sanitized_git_environment(hostile_git_env)
+        expect_red(
+            "Git subprocesses discard repository and config selectors but retain benign env",
+            lambda: (set(hostile_git_env) - set(scrubbed_git_env)
+                     == set(hostile_git_env) - {
+                         "PATH", "Z_HARNESS_SENTINEL", "GIT_AUTHOR_NAME"}
+            and scrubbed_git_env == {
+                "PATH": "retained", "Z_HARNESS_SENTINEL": "retained",
+                "GIT_AUTHOR_NAME": "retained"}),
+        )
+
+        # C7 owns every file below each repository skill directory in Claude's installed
+        # skill root. That root may contain unrelated top-level skills, but no reviewed file
+        # may disappear, drift, or gain a stale installed sibling without making the local
+        # comparison red.
         skill_fixture = os.path.join(td, "skill-payload")
         source_skills = os.path.join(skill_fixture, "source")
         installed_skills = os.path.join(skill_fixture, "installed")
@@ -2305,7 +2403,7 @@ def selftest():
         reset_skill_payload()
         os.remove(os.path.join(installed_skills, "alpha", "references", "rule.md"))
         c7_payload_run = Run(td, ci=False)
-        c7_payload_run.c7_installed_skill_payload(source_skills, installed_skills)
+        c7_payload_run.c7_claude_installed_skill_payload(source_skills, installed_skills)
         expect_red("C7 production call adopts the full-payload failure",
                    lambda: any(c == "C7" and "missing payload" in d
                                for c, d in c7_payload_run.failures))
@@ -2348,6 +2446,149 @@ def selftest():
         expect_red("C8 Git mode catches an authored untracked nested context file",
                    lambda: any(c == "C8" and "docs/AGENTS.md" in d
                                for c, d in live_run.failures))
+
+        decoy_repo = os.path.join(td, "ambient-git-decoy")
+        os.makedirs(decoy_repo)
+        subprocess.run(["git", "init", "--quiet", decoy_repo], check=True)
+        open(os.path.join(decoy_repo, "README.md"), "w").write("decoy\n")
+        subprocess.run(["git", "-C", decoy_repo, "add", "README.md"], check=True)
+        stale_path = os.path.join(live_repo, "stale.md")
+        open(stale_path, "w").write("NOT INSTALLED\n")
+        subprocess.run(["git", "-C", live_repo, "add", "stale.md"], check=True)
+
+        def with_ambient_git_decoy(call):
+            keys = ("GIT_DIR", "GIT_WORK_TREE", "GIT_CONFIG_COUNT",
+                    "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0")
+            previous = {key: os.environ.get(key) for key in keys}
+            os.environ.update({
+                "GIT_DIR": os.path.join(decoy_repo, ".git"),
+                "GIT_WORK_TREE": decoy_repo,
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "core.worktree",
+                "GIT_CONFIG_VALUE_0": decoy_repo,
+            })
+            try:
+                return call()
+            finally:
+                for key, value in previous.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
+
+        contaminated_c8 = with_ambient_git_decoy(
+            lambda: Run(live_repo, ci=True))
+        with_ambient_git_decoy(contaminated_c8.c8_reserved_basenames)
+        expect_red(
+            "C8 inspects its explicit root despite ambient Git repository substitution",
+            lambda: (any(c == "C8" and "docs/AGENTS.md" in d
+                         for c, d in live_run.failures)
+                     and any(c == "C8" and "docs/AGENTS.md" in d
+                             for c, d in contaminated_c8.failures)),
+        )
+        control_c6 = Run(live_repo, ci=True)
+        control_c6.c6_stale_patterns(scan_floor=1)
+        contaminated_c6 = Run(live_repo, ci=True)
+        with_ambient_git_decoy(
+            lambda: contaminated_c6.c6_stale_patterns(scan_floor=1))
+        expect_red(
+            "C6 inspects its explicit root despite ambient Git repository substitution",
+            lambda: (any(c == "C6" and "NOT INSTALLED" in d
+                         for c, d in control_c6.failures)
+                     and any(c == "C6" and "NOT INSTALLED" in d
+                             for c, d in contaminated_c6.failures)),
+        )
+
+        def wrong_toplevel(args, **kwargs):
+            if (list(args[:2]) == ["git", "-C"]
+                    and os.path.realpath(args[2]) == os.path.realpath(live_repo)
+                    and list(args[3:]) == ["rev-parse", "--show-toplevel"]):
+                return subprocess.CompletedProcess(
+                    args, 0, stdout=os.fsencode(decoy_repo) + b"\n", stderr=b"")
+            return subprocess.run(args, **kwargs)
+
+        wrong_root_inventory = git_owned_live_paths(live_repo, runner=wrong_toplevel)
+        expect_red(
+            "C8 rejects an inventory whose successful Git probe names another root",
+            lambda: (not wrong_root_inventory["paths"]
+                     and "resolved" in wrong_root_inventory["error"]
+                     and os.path.realpath(live_repo) in wrong_root_inventory["error"]),
+        )
+        wrong_root_surface, wrong_root_paths, wrong_root_error = package_paths(
+            live_repo, runner=wrong_toplevel)
+        expect_red(
+            "C6 rejects package enumeration whose successful Git probe names another root",
+            lambda: (wrong_root_surface == "source" and not wrong_root_paths
+                     and "resolved" in wrong_root_error
+                     and os.path.realpath(live_repo) in wrong_root_error),
+        )
+
+        def missing_toplevel(args, **kwargs):
+            if (list(args[:2]) == ["git", "-C"]
+                    and os.path.realpath(args[2]) == os.path.realpath(live_repo)
+                    and list(args[3:]) == ["rev-parse", "--show-toplevel"]):
+                return subprocess.CompletedProcess(
+                    args, 0, stdout=os.fsencode(
+                        os.path.join(td, "missing-repository-root")) + b"\n",
+                    stderr=b"")
+            return subprocess.run(args, **kwargs)
+
+        expect_red(
+            "C8 treats an unstatable reported top level as a mismatch, never authority",
+            lambda: "resolved" in _git_toplevel_error(live_repo, missing_toplevel),
+        )
+
+        def unterminated_toplevel(args, **kwargs):
+            if (list(args[:2]) == ["git", "-C"]
+                    and os.path.realpath(args[2]) == os.path.realpath(live_repo)
+                    and list(args[3:]) == ["rev-parse", "--show-toplevel"]):
+                return subprocess.CompletedProcess(
+                    args, 0, stdout=os.fsencode(live_repo) + b"x", stderr=b"")
+            return subprocess.run(args, **kwargs)
+
+        def nul_toplevel(args, **kwargs):
+            if (list(args[:2]) == ["git", "-C"]
+                    and os.path.realpath(args[2]) == os.path.realpath(live_repo)
+                    and list(args[3:]) == ["rev-parse", "--show-toplevel"]):
+                return subprocess.CompletedProcess(
+                    args, 0, stdout=os.fsencode(live_repo) + b"\0junk\n", stderr=b"")
+            return subprocess.run(args, **kwargs)
+
+        expect_red(
+            "C8 rejects an unterminated top-level path whose final byte masks as a terminator",
+            lambda: "malformed path" in _git_toplevel_error(
+                live_repo, unterminated_toplevel),
+        )
+        expect_red(
+            "C8 rejects an embedded NUL in the reported top-level path",
+            lambda: "malformed path" in _git_toplevel_error(live_repo, nul_toplevel),
+        )
+
+        case_alias = os.path.join(
+            os.path.dirname(live_repo), os.path.basename(live_repo).swapcase())
+        case_alias_supported = (
+            sys.platform != "darwin"
+            or (os.path.isdir(case_alias) and os.path.samefile(case_alias, live_repo))
+        )
+        expect_red(
+            "C8 case-alias fixture names the same directory on case-insensitive macOS",
+            lambda: case_alias_supported,
+        )
+        case_alias_surface = case_alias_paths = case_alias_error = None
+        case_alias_inventory = None
+        if sys.platform == "darwin" and case_alias_supported:
+            case_alias_surface, case_alias_paths, case_alias_error = package_paths(case_alias)
+            case_alias_inventory = git_owned_live_paths(case_alias)
+        expect_red(
+            "C6 and C8 accept filesystem-identical root spellings on macOS",
+            lambda: (sys.platform != "darwin"
+                     or (case_alias_supported
+                         and _git_toplevel_error(case_alias, subprocess.run) == ""
+                         and case_alias_surface == "source"
+                         and not case_alias_error and bool(case_alias_paths)
+                         and not case_alias_inventory["error"]
+                         and bool(case_alias_inventory["paths"]))),
+        )
 
         def failed_git_inventory(_args, **_kwargs):
             return subprocess.CompletedProcess(_args, 1, stdout=b"", stderr=b"planted")
@@ -2399,7 +2640,8 @@ def selftest():
             run = Run(live_repo, ci=True)
             run.c8_reserved_basenames(runner=unlaunchable_git_inventory)
             return any(c == "C8" and "cannot enumerate" in d
-                       and "cannot run git ls-files" in d for c, d in run.failures)
+                       and "cannot run git rev-parse --show-toplevel" in d
+                       for c, d in run.failures)
 
         expect_red(
             "C8 names an unlaunchable git binary instead of propagating OSError",
@@ -2465,28 +2707,29 @@ def selftest():
         # still become unusable after enumeration already succeeded. The control above
         # proves this fixture reaches that call at all.
         def git_lost_during_resolution(args, **kwargs):
-            if list(args[3:5]) == ["rev-parse", "--show-prefix"]:
+            if (list(args[:2]) == ["git", "-C"]
+                    and os.path.realpath(args[2]) == os.path.realpath(nested_repo)
+                    and list(args[3:5]) == ["rev-parse", "--show-toplevel"]):
                 raise FileNotFoundError(2, "No such file or directory", "git")
             return subprocess.run(args, **kwargs)
 
         def c8_names_a_git_lost_while_resolving_ownership():
             run = Run(live_repo, ci=True)
             run.c8_reserved_basenames(runner=git_lost_during_resolution)
-            return any(c == "C8" and "cannot enumerate" in d
-                       and "cannot resolve Git ownership" in d
+            return any(c == "C8" and "nested-repo/CLAUDE.md" in d
                        for c, d in run.failures)
 
         expect_red(
-            "C8 names a git binary lost while resolving ownership boundaries",
+            "C8 retains a candidate whose ownership probe cannot launch Git",
             c8_names_a_git_lost_while_resolving_ownership,
         )
 
         def failed_exact_root(args, **kwargs):
             if (args[:2] == ["git", "-C"]
                     and os.path.realpath(args[2]) == os.path.realpath(nested_repo)
-                    and args[3:] == ["rev-parse", "--show-prefix"]):
+                    and args[3:] == ["rev-parse", "--show-toplevel"]):
                 return subprocess.CompletedProcess(
-                    args, 1, stdout=b"\n", stderr=b"planted")
+                    args, 1, stdout=os.fsencode(nested_repo) + b"\n", stderr=b"planted")
             return subprocess.run(args, **kwargs)
 
         failed_exact_root_run = Run(live_repo, ci=True)
@@ -2618,6 +2861,12 @@ def selftest():
         linked_run.c8_reserved_basenames()
         expect_red("C8 prunes a registered nested worktree boundary",
                    lambda: not linked_run.failures)
+        linked_case_alias_run = Run(case_alias, ci=True)
+        linked_case_alias_run.c8_reserved_basenames()
+        expect_red(
+            "C8 prunes registered linked worktrees through a case-alias owner root",
+            lambda: sys.platform != "darwin" or not linked_case_alias_run.failures,
+        )
 
         worktree_list_calls = []
         def no_worktree_list(args, **kwargs):
@@ -2656,6 +2905,26 @@ def selftest():
 
         linked_marker = os.path.join(linked, ".git")
         linked_admin = _gitdir_from_marker(linked, linked_marker)
+        linked_common = os.path.join(linked_admin, "commondir")
+        linked_common_bytes = open(linked_common, "rb").read()
+        alias_common_supported = sys.platform != "darwin"
+        if sys.platform == "darwin" and case_alias_supported:
+            open(linked_common, "wb").write(
+                os.fsencode(os.path.join(case_alias, ".git")) + b"\n")
+            linked_git_probe = subprocess.run(
+                ["git", "-C", linked, "rev-parse", "--show-toplevel"],
+                capture_output=True)
+            alias_common_run = Run(case_alias, ci=True)
+            alias_common_run.c8_reserved_basenames()
+            alias_common_supported = (
+                linked_git_probe.returncode == 0
+                and _registered_linked_worktree(linked, linked_marker)
+                and not alias_common_run.failures)
+            open(linked_common, "wb").write(linked_common_bytes)
+        expect_red(
+            "C8 accepts an absolute case-alias common-dir for a registered worktree",
+            lambda: alias_common_supported,
+        )
         linked_backlink = os.path.join(linked_admin, "gitdir")
         linked_backlink_bytes = open(linked_backlink, "rb").read()
         os.remove(linked_backlink)
@@ -2939,20 +3208,47 @@ def selftest():
             ["git", "--git-dir", separate_admin, "config", "core.worktree",
              separate_tree], check=True)
         separate_config_queries = []
+        separate_config_environments = []
         def record_separate_config(args, **kwargs):
+            separate_config_environments.append(dict(kwargs.get("env", {})))
             if (args[:3] == ["git", "--git-dir", os.path.realpath(separate_admin)]
                     and args[-2:] == ["--get-all", "core.worktree"]):
                 separate_config_queries.append(args)
             return subprocess.run(args, **kwargs)
         bound_separate_run = Run(live_repo, ci=True)
-        bound_separate_run.c8_reserved_basenames(runner=record_separate_config)
+        prior_sentinel = os.environ.get("Z_HARNESS_GIT_SENTINEL")
+        prior_config_count = os.environ.get("GIT_CONFIG_COUNT")
+        os.environ["Z_HARNESS_GIT_SENTINEL"] = "retained"
+        os.environ["GIT_CONFIG_COUNT"] = "1"
+        try:
+            bound_separate_run.c8_reserved_basenames(runner=record_separate_config)
+        finally:
+            if prior_sentinel is None:
+                os.environ.pop("Z_HARNESS_GIT_SENTINEL", None)
+            else:
+                os.environ["Z_HARNESS_GIT_SENTINEL"] = prior_sentinel
+            if prior_config_count is None:
+                os.environ.pop("GIT_CONFIG_COUNT", None)
+            else:
+                os.environ["GIT_CONFIG_COUNT"] = prior_config_count
         expect_red("C8 prunes an external gitdir explicitly bound to its worktree",
                    lambda: not bound_separate_run.failures)
+        bound_separate_alias_run = Run(case_alias, ci=True)
+        bound_separate_alias_run.c8_reserved_basenames()
+        expect_red(
+            "C8 prunes bound separate gitdirs through a case-alias owner root",
+            lambda: sys.platform != "darwin" or not bound_separate_alias_run.failures,
+        )
         expect_red("C8 reads only the local admin-owned core.worktree binding",
                    lambda: {tuple(args) for args in separate_config_queries} == {(
                        "git", "--git-dir", os.path.realpath(separate_admin), "config",
                        "--local", "--path", "--null", "--get-all", "core.worktree",
-                   )})
+                   )}
+                   and separate_config_environments
+                   and all(env.get("Z_HARNESS_GIT_SENTINEL") == "retained"
+                           and "GIT_CONFIG_COUNT" not in env
+                           and not any(key in _GIT_REPOSITORY_ENV for key in env)
+                           for env in separate_config_environments))
         other_separate_tree = os.path.join(td, "other-separate-tree")
         os.makedirs(other_separate_tree)
         subprocess.run(
@@ -3239,7 +3535,8 @@ def selftest():
         open(os.path.join(valid, "CLAUDE.md"), "w").write("@AGENTS.md\n")
         open(os.path.join(valid, "settings.json"), "w").write("{}")
         manifest = {
-            "name": "z-harness", "version": "0.1.0", "description": "fixture",
+            "name": "z-harness", "version": CURRENT_PLUGIN_VERSION,
+            "description": "fixture",
             "author": {"name": "Chris"}, "skills": "./skills/",
             "interface": {
                 "displayName": "z-harness", "shortDescription": "fixture",
@@ -3304,6 +3601,15 @@ def selftest():
 
         baseline = c9_after()
         expect_red("C9 valid fixture has no failures", lambda: not baseline.failures)
+
+        stale_release = json.loads(json.dumps(manifest))
+        stale_release["version"] = "0.3.0"
+        stale_release_run = c9_after(mutated_manifest=stale_release)
+        expect_red(
+            "C9 rejects a manifest that keeps the predecessor release identity",
+            lambda: any("reviewed release" in detail
+                        for _check, detail in stale_release_run.failures),
+        )
 
         bad_top = json.loads(json.dumps(hook_fixture))
         bad_top["version"] = 1

@@ -37,11 +37,20 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import sys
 
 VERSION = "1.3.0"
 SPAWN_TOOLS = {"Agent", "Task", "spawn_agent"}
 RUNTIMES = {"claude", "codex"}
+# Claude puts the spawn text in tool_input.prompt; Codex uses tool_input.message. Both were
+# read from a real payload, not assumed: a live PreToolUse carried
+# tool_input keys ['description', 'name', 'prompt', 'subagent_type'] with the full prompt.
+PROMPT_FIELDS = ("prompt", "message")
+SCRATCH_LINE = re.compile(r"^Scratch:[ \t]+(\S+)[ \t]*$", re.MULTILINE)
+# The guard is installed user-wide, so a blanket requirement would impose one repository's
+# convention on every unrelated project. A project opts in by carrying the rule itself.
+WORKSPACE_RULE_MARKER = "Every dispatched worker owns an exclusive scratch directory"
 DATA_VOLUME = "/System/Volumes/Data" if sys.platform == "darwin" else "/"
 
 
@@ -111,6 +120,82 @@ def selftest():
         bad += (not ok)
         checks += 1
         print(f"  {'PASS' if ok else 'FAIL'} want={want:<5} got={got:<5} {label}")
+    # --- worker-workspace arm --------------------------------------------------------
+    # Every case drives scratch_decision/project_requires_scratch directly, and the two
+    # end-to-end rows below drive the real envelope so the wiring is proved, not assumed.
+    import tempfile as _tf
+    with _tf.TemporaryDirectory(prefix="spawn-guard-") as _root:
+        adopted = os.path.join(_root, "adopted")
+        plain = os.path.join(_root, "plain")
+        os.makedirs(adopted); os.makedirs(plain)
+        with open(os.path.join(adopted, "AGENTS.md"), "w", encoding="utf-8") as fh:
+            fh.write("policy\n" + WORKSPACE_RULE_MARKER + ", assigned at spawn.\n")
+        with open(os.path.join(plain, "AGENTS.md"), "w", encoding="utf-8") as fh:
+            fh.write("a project that never adopted the rule\n")
+        good = os.path.join(_tf.gettempdir(), "agent-scratch", "s1", "w1")
+
+        for label, want, cwd in (
+            ("a project carrying the rule opts in", True, adopted),
+            ("a project without the rule is out of scope", False, plain),
+            ("a missing cwd is out of scope, never an unchecked deny", False, None),
+        ):
+            got = project_requires_scratch(cwd)
+            ok = got is want
+            bad += (not ok); checks += 1
+            print(f"  {'PASS' if ok else 'FAIL'} {label}")
+
+        # Assert the REASON, not merely that something denied. Every one of these paths also
+        # trips a later check, so a decision-only assertion is satisfied by a neighbour and
+        # survives neutering the check it names.
+        for label, want, named, ti in (
+            ("an assigned per-worker directory is allowed", "allow", "",
+             {"name": "w1", "prompt": f"do it\nScratch: {good}\n"}),
+            ("no Scratch line is denied", "deny", "expected 1",
+             {"name": "w1", "prompt": "do it"}),
+            ("two Scratch lines are denied", "deny", "expected 1",
+             {"name": "w1", "prompt": f"Scratch: {good}\nScratch: {good}\n"}),
+            ("a relative scratch path is denied", "deny", "is not absolute",
+             {"name": "w1", "prompt": "Scratch: ./w1\n"}),
+            ("a scratch path inside the checkout is denied", "deny",
+             "inside or above the checkout",
+             {"name": "w1", "prompt": f"Scratch: {os.path.join(adopted, 'w1')}\n"}),
+            ("a scratch path above the checkout is denied", "deny",
+             "inside or above the checkout",
+             {"name": "w1", "prompt": f"Scratch: {os.path.dirname(adopted)}\n"}),
+            ("a path that does not name the worker is denied", "deny",
+             "does not name the worker",
+             {"name": "w1", "prompt": f"Scratch: {os.path.join(_tf.gettempdir(), 'shared')}\n"}),
+            ("the Codex message field is read like a Claude prompt", "deny", "expected 1",
+             {"name": "w1", "message": "do it"}),
+            ("a non-object tool_input fails closed", "deny", "fails closed", None),
+        ):
+            got, why = scratch_decision(ti, adopted, session_id="s1",
+                                        agent_name=(ti or {}).get("name")
+                                        if isinstance(ti, dict) else None)
+            ok = got == want and (named in why)
+            bad += (not ok); checks += 1
+            print(f"  {'PASS' if ok else 'FAIL'} want={want:<5} got={got:<5} {label}")
+
+        payload = {"tool_name": "Agent", "cwd": adopted, "session_id": "s1",
+                   "tool_input": {"name": "w1", "prompt": "do it"}}
+        rc, out = run_payload(payload, runtime="claude")
+        ok = rc == 0 and '"permissionDecision": "deny"' in out and "Scratch:" in out
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} end to end: an unassigned spawn is denied and told the fix")
+
+        payload["tool_input"]["prompt"] = f"do it\nScratch: {good}\n"
+        rc, out = run_payload(payload, runtime="claude")
+        ok = rc == 0 and out == ""
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} end to end: an assigned spawn passes silently")
+
+        os.environ["SPAWN_GUARD_DF_PCT"] = "99"
+        rc, out = run_payload(payload, runtime="claude")
+        del os.environ["SPAWN_GUARD_DF_PCT"]
+        ok = rc == 0 and "data volume" in out
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} capacity still outranks the workspace check")
+
     # envelope arm: out-of-scope tool is silent-allow
     payload = {"tool_name": "Bash", "tool_input": {}}
     rc, out = run_payload(payload)
@@ -221,7 +306,18 @@ def hook_mode(raw, runtime="claude"):
         )
         return 2
     if decision == "allow":
-        return 0
+        tool_input = payload.get("tool_input")
+        cwd = payload.get("cwd")
+        if project_requires_scratch(cwd):
+            decision, reason = scratch_decision(
+                tool_input, cwd,
+                session_id=payload.get("session_id"),
+                agent_name=(tool_input or {}).get("name")
+                if isinstance(tool_input, dict) else None)
+            if decision == "allow":
+                return 0
+        else:
+            return 0
     if runtime == "codex" and decision == "ask":
         decision = "deny"
         reason += (" Codex PreToolUse cannot request confirmation, so z-harness "
@@ -231,6 +327,79 @@ def hook_mode(raw, runtime="claude"):
         "permissionDecision": decision,
         "permissionDecisionReason": reason}}, indent=1))
     return 0
+
+
+def project_requires_scratch(cwd, marker=WORKSPACE_RULE_MARKER, opener=None):
+    """True when the project containing `cwd` declares the worker-workspace rule."""
+    opener = open if opener is None else opener
+    if not isinstance(cwd, str) or not cwd:
+        return False
+    here = os.path.abspath(cwd)
+    while True:
+        try:
+            with opener(os.path.join(here, "AGENTS.md"), encoding="utf-8",
+                        errors="replace") as handle:
+                if marker in re.sub(r"\s+", " ", handle.read()):
+                    return True
+        except OSError:
+            pass
+        parent = os.path.dirname(here)
+        if parent == here:
+            return False
+        here = parent
+
+
+def suggested_scratch(cwd, session_id, agent_name):
+    """An absolute, per-worker path that is never inside the checkout."""
+    leaf = agent_name if isinstance(agent_name, str) and agent_name else "worker"
+    session = session_id if isinstance(session_id, str) and session_id else "session"
+    return os.path.join(tempfile.gettempdir(), "agent-scratch", session, leaf)
+
+
+def scratch_decision(tool_input, cwd, session_id=None, agent_name=None):
+    """-> (decision, reason). Deny a spawn that names no exclusive worker directory.
+
+    The reason carries the exact line to add, so a denial hands back the fix rather than only
+    refusing. The parent cannot be given the directory any other way: a PreToolUse hook returns
+    a decision and cannot write into the child, and no per-subagent prompt channel exists in
+    the installed CLI.
+    """
+    if not isinstance(tool_input, dict):
+        return ("deny", "spawn payload carries no tool_input object, so the worker's scratch "
+                        "directory cannot be checked; z-harness fails closed.")
+    prompt = ""
+    for field in PROMPT_FIELDS:
+        value = tool_input.get(field)
+        if isinstance(value, str) and value:
+            prompt = value
+            break
+    suggestion = suggested_scratch(cwd, session_id, agent_name)
+    fix = f"Add a line reading exactly: Scratch: {suggestion}"
+    found = SCRATCH_LINE.findall(prompt)
+    if len(found) != 1:
+        return ("deny",
+                f"this project requires every dispatched worker to own an exclusive scratch "
+                f"directory, and the spawn prompt has {len(found)} 'Scratch:' lines, expected "
+                f"1. Concurrent workers sharing one directory overwrite each other silently "
+                f"and the loser measures the wrong thing. {fix}")
+    path = found[0]
+    if not os.path.isabs(path):
+        return ("deny", f"the worker's scratch path {path!r} is not absolute, so it resolves "
+                        f"against whatever directory the worker happens to start in. {fix}")
+    root = os.path.abspath(cwd) if isinstance(cwd, str) and cwd else None
+    target = os.path.abspath(path)
+    if root and (target == root
+                 or target.startswith(root + os.sep)
+                 or root.startswith(target + os.sep)):
+        return ("deny", f"the worker's scratch path {path!r} is inside or above the checkout "
+                        f"at {root!r}. Scratch never shares a tree with the code under "
+                        f"measurement. {fix}")
+    if (isinstance(agent_name, str) and agent_name
+            and agent_name not in os.path.basename(target)):
+        return ("deny", f"the worker's scratch path {path!r} does not name the worker "
+                        f"{agent_name!r}, so two workers can be handed the same directory. "
+                        f"{fix}")
+    return ("allow", "")
 
 
 def read_hook_input(stream):

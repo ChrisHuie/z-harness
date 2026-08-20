@@ -114,7 +114,7 @@ SELFTEST_SUITES = [
      ["tools/verify-review-publication.py", "--selftest"], 45),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
-    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 193),
+    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 194),
     ("write-mutation-receipt",
      ["tools/write-mutation-receipt.py", "--selftest"], 59),
     ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 65),

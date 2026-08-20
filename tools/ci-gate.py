@@ -1510,7 +1510,7 @@ def review_publication_manifest_error(data=None) -> str:
 
 
 def review_handoff_policy_error(source_texts=None, review_root=None,
-                                extra_texts=None) -> str:
+                                extra_texts=None, required_includes=None) -> str:
     """Require append-only head-specific handoffs and reject the retired mutable artifact."""
     problems = []
     if source_texts is None:
@@ -1567,8 +1567,13 @@ def review_handoff_policy_error(source_texts=None, review_root=None,
     inventory_problem = review_document_inventory_error(root)
     if inventory_problem:
         problems.append(inventory_problem)
+    # Injectable so the error arm can execute. Reading only the module constant left this
+    # clause unreachable while that constant is empty, which is the shape of a detector whose
+    # failure branch has never run.
+    if required_includes is None:
+        required_includes = REQUIRED_REVIEW_INCLUDES
     unknown_include_documents = sorted(
-        set(REQUIRED_REVIEW_INCLUDES) - REGISTERED_REVIEW_PATHS)
+        set(required_includes) - REGISTERED_REVIEW_PATHS)
     if unknown_include_documents:
         problems.append(
             f"required includes name unregistered documents: {unknown_include_documents}")
@@ -2810,6 +2815,12 @@ def selftest() -> int:
     expect(
         "review handoff doctrine requires append-only exact-head comments",
         review_handoff_policy_error(source_texts=handoff_sources) == "",
+    )
+    expect(
+        "a required include naming an unregistered document is rejected",
+        "unregistered documents" in review_handoff_policy_error(
+            source_texts=handoff_sources,
+            required_includes={"pr-8/not-registered.md": ()}),
     )
     expect(
         "the frozen PR publication manifest matches its reviewed snapshot",

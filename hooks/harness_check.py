@@ -91,7 +91,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 138
+SELFTEST_FLOOR = 146
 
 AUTHORING_SKILLS = {"craft-prompt", "craft-skill", "craft-context-file", "review-prompt"}
 BODY_CHAR_CAP = 5000          # chars after frontmatter — the builders' instrument
@@ -2513,6 +2513,49 @@ def selftest():
              "indexed-then-nested/AGENTS.md"], check=True)
         shutil.rmtree(indexed_then_nested)
 
+        # The clause above decides an INDEXED path. A separate clause decides the untracked
+        # ones by walking their parent components, and nothing reached it: Git does not
+        # descend into a nested repository, so `--others` normally lists nothing below one
+        # and that walk could be made inert with the whole suite green. Index a file inside
+        # the directory first and Git does descend, so an untracked context file beside it
+        # arrives in the inventory and only the parent-component walk keeps the nested
+        # repository's own file out of the owner's scan set.
+        below_boundary_owner = os.path.join(td, "below-boundary-owner")
+        os.makedirs(os.path.join(below_boundary_owner, "nested"))
+        subprocess.run(["git", "init", "--quiet", below_boundary_owner], check=True)
+        open(os.path.join(below_boundary_owner, "README.md"), "w").write("root\n")
+        open(os.path.join(below_boundary_owner, "nested", "keep.md"), "w").write(
+            "outer owner\n")
+        subprocess.run(
+            ["git", "-C", below_boundary_owner, "add", "README.md", "nested/keep.md"],
+            check=True)
+        subprocess.run(
+            ["git", "-C", below_boundary_owner, "-c", "user.name=fixture", "-c",
+             "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "fixture"],
+            check=True)
+        subprocess.run(
+            ["git", "init", "--quiet", os.path.join(below_boundary_owner, "nested")],
+            check=True)
+        open(os.path.join(below_boundary_owner, "nested", "AGENTS.md"), "w").write(
+            "other owner\n")
+        below_boundary_others = subprocess.run(
+            ["git", "-C", below_boundary_owner, "ls-files", "--others",
+             "--exclude-standard", "-z"], capture_output=True).stdout
+        below_boundary_run = Run(below_boundary_owner, ci=True)
+        below_boundary_run.c8_reserved_basenames()
+        # Without this the proof below passes over an empty inventory: if Git ever stops
+        # descending here, nothing reaches the parent-component walk at all, and "pruned"
+        # and "never enumerated" produce the same green.
+        expect_red(
+            "C8 below-boundary fixture really does enumerate the file below the boundary",
+            lambda: b"nested/AGENTS.md" in below_boundary_others.split(b"\0"),
+        )
+        expect_red(
+            "C8 prunes an untracked file below a boundary Git still descended into",
+            lambda: not below_boundary_run.failures,
+        )
+        shutil.rmtree(below_boundary_owner)
+
         fake_boundary = os.path.join(live_repo, "fake-boundary")
         os.makedirs(fake_boundary)
         open(os.path.join(fake_boundary, ".git"), "w").write("not a repository\n")
@@ -2672,6 +2715,62 @@ def selftest():
             ["git", "-C", foreign_repo, "worktree", "remove", "--force",
              foreign_linked], check=True)
         shutil.rmtree(foreign_repo)
+
+        # The rejection above holds because that admin has no `core.worktree` binding at
+        # all, so the query below it fails and the reciprocal-registration clause guarding
+        # it is never the reason. Bind one and they separate. `--local` on a linked
+        # worktree's admin resolves to the repository's COMMON config, so the binding is
+        # written there -- in the FOREIGN repository, leaving the owner's own worktree
+        # resolution untouched -- and the borrowing directory then answers every question
+        # an independently bound separate gitdir would. Only the clause that says a linked
+        # admin is owned by its registration keeps it from pruning the tree.
+        bound_foreign_repo = os.path.join(td, "bound-linked-owner")
+        subprocess.run(["git", "init", "--quiet", bound_foreign_repo], check=True)
+        subprocess.run(
+            ["git", "-C", bound_foreign_repo, "-c", "user.name=fixture", "-c",
+             "user.email=fixture@example.invalid", "commit", "--quiet",
+             "--allow-empty", "-m", "fixture"], check=True)
+        bound_foreign_linked = os.path.join(td, "bound-linked-worktree")
+        subprocess.run(
+            ["git", "-C", bound_foreign_repo, "worktree", "add", "--quiet", "--detach",
+             bound_foreign_linked, "HEAD"], check=True)
+        bound_foreign_admin = _gitdir_from_marker(
+            bound_foreign_linked, os.path.join(bound_foreign_linked, ".git"))
+        bound_borrowed = os.path.join(live_repo, "borrowed-bound-linked-admin")
+        os.makedirs(bound_borrowed)
+        open(os.path.join(bound_borrowed, ".git"), "wb").write(
+            b"gitdir: " + os.fsencode(bound_foreign_admin) + b"\n")
+        open(os.path.join(bound_borrowed, "AGENTS.md"), "w").write(
+            "still owned here\n")
+        subprocess.run(
+            ["git", "-C", bound_foreign_repo, "config", "core.worktree",
+             bound_borrowed], check=True)
+        bound_borrowed_binding = subprocess.run(
+            ["git", "--git-dir", bound_foreign_admin, "config", "--local", "--path",
+             "--null", "--get-all", "core.worktree"], capture_output=True)
+        bound_borrowed_run = Run(live_repo, ci=True)
+        bound_borrowed_run.c8_reserved_basenames()
+        # The binding has to actually be visible through that admin, or the rejection
+        # below is the absent-binding rejection already proved above wearing a new name.
+        expect_red(
+            "C8 bound-linked fixture really does answer the separate-gitdir query",
+            lambda: bound_borrowed_binding.returncode == 0
+            and os.path.realpath(os.fsdecode(
+                bytes(bound_borrowed_binding.stdout).rstrip(b"\0")))
+            == os.path.realpath(bound_borrowed)
+            and os.path.lexists(os.path.join(bound_foreign_admin, "commondir")),
+        )
+        expect_red(
+            "C8 keeps a registered linked admin owned by its registration, not by a "
+            "core.worktree binding",
+            lambda: any(c == "C8" and "borrowed-bound-linked-admin/AGENTS.md" in d
+                        for c, d in bound_borrowed_run.failures),
+        )
+        shutil.rmtree(bound_borrowed)
+        subprocess.run(
+            ["git", "-C", bound_foreign_repo, "worktree", "remove", "--force",
+             bound_foreign_linked], check=True)
+        shutil.rmtree(bound_foreign_repo)
 
         sibling_repo = os.path.join(live_repo, "sibling-ordinary-repository")
         subprocess.run(["git", "init", "--quiet", sibling_repo], check=True)
@@ -2946,6 +3045,84 @@ def selftest():
                                for c, d in unterminated_run.failures))
         shutil.rmtree(unterminated_tree)
         shutil.rmtree(unterminated_admin)
+
+        # Truncating the terminator above also destroys the path, so the requirement and
+        # the unconditional final-byte strip that follows it agree and neither is isolated:
+        # dropping the requirement still leaves a directory that does not exist. Give the
+        # marker one byte of slack -- a trailing separator, still unterminated -- and they
+        # disagree. Git accepts the marker either way, so only the requirement stands
+        # between the strip and a valid admin directory to prune the tree with.
+        slack_tree = os.path.join(live_repo, "unterminated-slack-marker")
+        subprocess.run(
+            ["git", "-C", live_repo, "worktree", "add", "--quiet", "--detach",
+             slack_tree, "HEAD"], check=True)
+        slack_marker = os.path.join(slack_tree, ".git")
+        slack_admin = _gitdir_from_marker(slack_tree, slack_marker)
+        open(slack_marker, "wb").write(b"gitdir: " + os.fsencode(slack_admin) + b"/")
+        open(os.path.join(slack_tree, "CLAUDE.md"), "w").write("still owned here\n")
+        slack_prefix = subprocess.run(
+            ["git", "-C", slack_tree, "rev-parse", "--show-prefix"],
+            capture_output=True)
+        slack_run = Run(live_repo, ci=True)
+        slack_run.c8_reserved_basenames()
+        # The rejection has to be this file's doing. If Git itself refused the marker, the
+        # exact-root gate would reject the tree first and the requirement below would be
+        # asserted by a fixture that never reaches it.
+        expect_red(
+            "C8 unterminated-slack fixture is a marker Git itself still accepts",
+            lambda: slack_prefix.returncode == 0
+            and bytes(slack_prefix.stdout) in (b"\n", b"\r\n")
+            and os.path.isdir(slack_admin)
+            and open(slack_marker, "rb").read()[:-1].endswith(os.fsencode(slack_admin)),
+        )
+        expect_red(
+            "C8 requires the final terminator even when the last byte is strippable slack",
+            lambda: any(c == "C8" and "unterminated-slack-marker/CLAUDE.md" in d
+                        for c, d in slack_run.failures),
+        )
+        shutil.rmtree(slack_tree)
+        shutil.rmtree(slack_admin)
+
+        # Same condition, other operand. A marker carrying an embedded NUL is one Git
+        # itself accepts -- it stops at the newline -- so nothing upstream rejects the
+        # tree, and the NUL never reaches a path call only because this clause drops it
+        # first. Without the clause the byte reaches `realpath`, which raises ValueError
+        # rather than returning; the inventory catches OSError only, so the gate would
+        # end on a traceback with no verdict line instead of naming a failure.
+        nul_tree = os.path.join(live_repo, "nul-bearing-marker")
+        subprocess.run(
+            ["git", "-C", live_repo, "worktree", "add", "--quiet", "--detach",
+             nul_tree, "HEAD"], check=True)
+        nul_marker = os.path.join(nul_tree, ".git")
+        nul_admin = _gitdir_from_marker(nul_tree, nul_marker)
+        open(nul_marker, "wb").write(
+            b"gitdir: " + os.fsencode(nul_admin) + b"\0junk\n")
+        open(os.path.join(nul_tree, "AGENTS.md"), "w").write("still owned here\n")
+        nul_prefix = subprocess.run(
+            ["git", "-C", nul_tree, "rev-parse", "--show-prefix"], capture_output=True)
+        # The scan runs inside the proof on purpose. Dropping the clause makes this tree
+        # raise out of the inventory, and a raise at fixture-construction time takes the
+        # whole meta-suite down before it can print a receipt -- the missing-receipt arm,
+        # which says only that something broke. Inside, the same raise is caught and
+        # attributed to the proof whose subject it is.
+        def c8_drops_a_nul_bearing_marker():
+            run = Run(live_repo, ci=True)
+            run.c8_reserved_basenames()
+            return any(c == "C8" and "nul-bearing-marker/AGENTS.md" in d
+                       for c, d in run.failures)
+
+        expect_red(
+            "C8 nul-bearing fixture is a marker Git itself still accepts",
+            lambda: nul_prefix.returncode == 0
+            and bytes(nul_prefix.stdout) in (b"\n", b"\r\n")
+            and b"\0" in open(nul_marker, "rb").read(),
+        )
+        expect_red(
+            "C8 drops a NUL-bearing marker instead of carrying the byte into a path call",
+            c8_drops_a_nul_bearing_marker,
+        )
+        shutil.rmtree(nul_tree)
+        shutil.rmtree(nul_admin)
 
         submodule_source = os.path.join(td, "submodule-source")
         subprocess.run(["git", "init", "--quiet", submodule_source], check=True)

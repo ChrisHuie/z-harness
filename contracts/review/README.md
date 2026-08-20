@@ -1,6 +1,7 @@
 # Outbound review text
 
-Review text that will be posted to a pull request is drafted here and posted from here.
+Publication policy and frozen pull-request metadata live here. Head-specific review text is
+prepared only after exact-head verification and posted as a new comment.
 
 The gate for this directory has a narrow claim: required generated include blocks must be
 present in the registered documents and byte-identical to their sources. Free prose and
@@ -19,10 +20,10 @@ and outbound text INCLUDES that file rather than restating it:
 <!-- end include -->
 ```
 
-`tools/ci-gate.py` checks every live include block under this directory against its source,
-requires the registered PR description include, and enforces the exact relative-path inventory
-`README.md`, `pr-8/description.md`, and `pr-8/title.txt`. A nested duplicate, symlink, missing
-file, renamed handoff, or restored roll-up is rejected.
+`tools/ci-gate.py` checks every live include block under this directory against its source and
+enforces the exact relative-path inventory `README.md` and
+`pr-8/frozen-publication.json`. A nested duplicate, symlink, missing file, mutable body draft,
+renamed handoff, or restored roll-up is rejected.
 `tools/write-mutation-receipt.py` writes the receipt and summary from one accepted
 aggregate of exact-plan shard fragments; its normal aggregate mode refuses changed output.
 Historical measurements may remain as context only when the document says they are not
@@ -30,17 +31,17 @@ final-head evidence; the include gate does not validate those free-prose claims.
 
 ## Layout
 
-    contracts/review/pr-<number>/description.md    the pull request body
-    contracts/review/pr-<number>/title.txt         the pull request title
+    contracts/review/pr-<number>/frozen-publication.json    frozen body/title digests
 
 Head-specific handoffs are append-only external comments, one verified head per comment.
 Never edit, replace, or delete a published handoff. A later head or correction gets a new
 comment that links the earlier record and states what changed. Individual findings remain
 inline `path:line` threads because a PR-level handoff has no finding lifecycle.
 
-The description and title are mutable current-state documents and live here because both carry
-measured figures. Build each by editing the file and posting from it, never by retyping a number
-into the web form.
+All published PR narrative is append-only. The pull-request body and title are frozen after
+initial publication; later summaries, corrections, and exact-head evidence are new comments.
+The frozen manifest records only the bytes observed when this rule was adopted. It does not claim
+that GitHub independently attested who wrote the earlier body or when an earlier edit occurred.
 
 Do not keep a mutable tracked file as the current handoff. Its exact head does not exist until
 the implementation commit is final, and committing that head back into the same branch creates
@@ -54,21 +55,22 @@ tools/verify-review-publication.py comment \
   --repo <owner/name> --pr <number> --comment-id <id> \
   --expected-head <40-hex-sha> --expected-author <login> --body-file <draft>
 
-tools/verify-review-publication.py pr-body \
+tools/verify-review-publication.py pr-snapshot \
   --repo <owner/name> --pr <number> --expected-head <40-hex-sha> \
-  --body-file contracts/review/pr-<number>/description.md
+  --manifest contracts/review/pr-<number>/frozen-publication.json
 ```
 
-Both modes require raw UTF-8 bytes, the requested repository and pull request, the exact head, and
-the canonical URL. Comment mode additionally binds the expected author, comment identity, and
-unedited timestamps; the PR-body API does not expose an equivalent body-edit identity. Exit 1 is a
-publication mismatch and exit 2 is local I/O, transport, or JSON failure. Nothing else in this
-repository can see a posted comment or live PR body, so a publication that is never read back
-carries no mechanical evidence, whatever the gate says about its source.
+Both modes require the requested repository, pull request, exact current head, and canonical URL.
+Comment mode additionally binds raw UTF-8 body bytes, the expected author, comment identity, and
+unedited timestamps. Snapshot mode binds the live body and title bytes to the frozen manifest; the
+PR API exposes no body-edit identity or timestamp, so the receipt proves current equality, not the
+history before the snapshot. Exit 1 is a publication mismatch and exit 2 is local I/O, transport,
+or JSON failure. Nothing else in this repository can see a posted comment or live PR body, so a
+publication that is never read back carries no mechanical evidence, whatever the gate says about
+its source.
 
-A document that revises published text is built by splicing the published body, not by
-retyping the parts that are unchanged. Retyping is how a wrong figure enters, so it is not
-the method for removing one.
+A correction never rewrites published text. Build a new comment that states the correction,
+links the superseded publication, and binds the evidence to the new exact head.
 
 ## What does not go here
 

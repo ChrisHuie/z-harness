@@ -41,10 +41,10 @@ EVAL_SCENARIO_FLOORS = {
     "craft-skill": 3,
     "git-workflow": 3,
     "ground-claims": 6,
-    "outbound-drafts": 3,
+    "outbound-drafts": 4,
     "review-prompt": 4,
 }
-EVAL_SCENARIO_FLOOR = 25
+EVAL_SCENARIO_FLOOR = 26
 EVAL_SKILL_FLOOR = 7
 
 # One floor per suite, read by both the production spec table and the selftest's fake
@@ -1205,21 +1205,26 @@ def mutation_summary_error(receipt_data=None, summary_bytes=None) -> str:
 
 
 REVIEW_ROOT = ROOT / "contracts/review"
+FROZEN_PUBLICATION = REVIEW_ROOT / "pr-8/frozen-publication.json"
 INCLUDE_OPEN = "<!-- include: "
 INCLUDE_CLOSE = "<!-- end include -->"
 FENCE_MARKERS = ("```", "~~~")
-REQUIRED_REVIEW_INCLUDES = {
-    "pr-8/description.md": ("contracts/goldens/mutation-summary.md",),
-}
+REQUIRED_REVIEW_INCLUDES = {}
 REGISTERED_REVIEW_PATHS = frozenset({
     "README.md",
-    "pr-8/description.md",
-    "pr-8/title.txt",
+    "pr-8/frozen-publication.json",
 })
 HANDOFF_DOCTRINE = {
+    "AGENTS.md": (
+        "Published pull-request narrative is append-only.",
+        "leave its title, body, and existing comments unchanged",
+        "publish corrections, later-head evidence, and handoffs as new comments",
+    ),
     "skills/outbound-drafts/SKILL.md": (
         "Review handoffs are append-only, one exact head per comment.",
         "Never edit, replace, or delete a posted handoff",
+        "Published PR narrative is append-only.",
+        "Freeze the body and title after creation",
     ),
     "skills/pr-review-method/SKILL.md": (
         "A head-specific handoff",
@@ -1231,6 +1236,8 @@ HANDOFF_DOCTRINE = {
     "contracts/review/README.md": (
         "Head-specific handoffs are append-only external comments",
         "Do not keep a mutable tracked file as the current handoff",
+        "All published PR narrative is append-only.",
+        "The pull-request body and title are frozen after initial publication",
     ),
 }
 FORBIDDEN_HANDOFF_DOCTRINE = (
@@ -1239,7 +1246,25 @@ FORBIDDEN_HANDOFF_DOCTRINE = (
     "one tracking comment edited in place",
     "edited in place across rounds",
     "edited rather than reposted",
+    "description and title are mutable current-state documents",
+    "build each by editing the file and posting from it",
 )
+EXPECTED_FROZEN_PUBLICATION = {
+    "schema_version": 1,
+    "kind": "pull-request-frozen-publication",
+    "repo": "ChrisHuie/z-harness",
+    "pr": 8,
+    "frozen_at_head": "695563715187810cf0dcfa9e52985974ee343831",
+    "body_bytes": 33954,
+    "body_sha256": "eb4115200a3dc487c9af24d727c871cfc203a5dbe6723aa41a6e7dac18e00e9e",
+    "title_bytes": 91,
+    "title_sha256": "e47233e8b50dad03d41ce2309f90e7c47328dfa12435f52a4fcdc30de33db8ac",
+    "note": (
+        "The body and title bytes were frozen when the append-only publication rule was "
+        "adopted at this observed head. Later review narrative, corrections, and exact-head "
+        "evidence are append-only pull-request comments."
+    ),
+}
 
 
 def include_blocks(lines):
@@ -1419,6 +1444,29 @@ def review_document_inventory_error(review_root=None, expected_paths=None) -> st
     if unexpected:
         problems.append(f"unexpected={unexpected}")
     return "review document inventory: " + " ".join(problems) if problems else ""
+
+
+def review_publication_manifest_error(data=None) -> str:
+    """Require the frozen PR publication snapshot to match its reviewed contract."""
+    try:
+        if data is None:
+            data = _json_without_duplicate_keys(FROZEN_PUBLICATION)
+    except (OSError, ValueError) as exc:
+        return f"cannot read frozen PR publication manifest: {exc}"
+    if not isinstance(data, dict):
+        return "frozen PR publication manifest is not an object"
+    if data != EXPECTED_FROZEN_PUBLICATION:
+        missing = sorted(set(EXPECTED_FROZEN_PUBLICATION) - set(data))
+        unexpected = sorted(set(data) - set(EXPECTED_FROZEN_PUBLICATION))
+        changed = sorted(
+            key for key in set(data) & set(EXPECTED_FROZEN_PUBLICATION)
+            if data[key] != EXPECTED_FROZEN_PUBLICATION[key]
+        )
+        return (
+            "frozen PR publication manifest differs from the reviewed snapshot: "
+            f"missing={missing} unexpected={unexpected} changed={changed}"
+        )
+    return ""
 
 
 def review_handoff_policy_error(source_texts=None, review_root=None,
@@ -1609,6 +1657,10 @@ def gate(
     print(f"  {'FAIL' if handoff_problem else 'PASS'} review-handoff-policy")
     if handoff_problem:
         failures.append(handoff_problem)
+    publication_problem = review_publication_manifest_error()
+    print(f"  {'FAIL' if publication_problem else 'PASS'} review-publication-snapshot")
+    if publication_problem:
+        failures.append(publication_problem)
     completed = 1
     with tempfile.TemporaryDirectory(prefix="z-harness-ci-gate-") as raw:
         render_root = Path(raw) / "rendered"
@@ -2717,6 +2769,22 @@ def selftest() -> int:
         "review handoff doctrine requires append-only exact-head comments",
         review_handoff_policy_error(source_texts=handoff_sources) == "",
     )
+    expect(
+        "the frozen PR publication manifest matches its reviewed snapshot",
+        review_publication_manifest_error() == "",
+    )
+    expect(
+        "changing a frozen PR body digest turns the manifest check red",
+        review_publication_manifest_error(dict(
+            EXPECTED_FROZEN_PUBLICATION, body_sha256="0" * 64)) != "",
+    )
+    expect(
+        "removing frozen PR publication metadata turns the manifest check red",
+        review_publication_manifest_error({
+            key: value for key, value in EXPECTED_FROZEN_PUBLICATION.items()
+            if key != "frozen_at_head"
+        }) != "",
+    )
     missing_append_only = dict(handoff_sources)
     missing_append_only["skills/outbound-drafts/SKILL.md"] = (
         missing_append_only["skills/outbound-drafts/SKILL.md"].replace(
@@ -2729,6 +2797,16 @@ def selftest() -> int:
         "removing the append-only rule turns the doctrine check red",
         review_handoff_policy_error(source_texts=missing_append_only) != "",
     )
+    missing_always_on = dict(handoff_sources)
+    missing_always_on["AGENTS.md"] = missing_always_on["AGENTS.md"].replace(
+        "Published pull-request narrative is append-only.",
+        "Published pull-request narrative may be revised.",
+        1,
+    )
+    expect(
+        "removing the always-on append-only rule turns the doctrine check red",
+        review_handoff_policy_error(source_texts=missing_always_on) != "",
+    )
     mutable_comment_rule = dict(handoff_sources)
     mutable_comment_rule["skills/outbound-drafts/SKILL.md"] += (
         "\nOne roll-up comment per PR, edited in place across rounds.\n"
@@ -2736,6 +2814,14 @@ def selftest() -> int:
     expect(
         "reintroducing the edit-in-place rule turns the doctrine check red",
         review_handoff_policy_error(source_texts=mutable_comment_rule) != "",
+    )
+    mutable_body_rule = dict(handoff_sources)
+    mutable_body_rule["contracts/review/README.md"] += (
+        "\nThe description and title are mutable current-state documents.\n"
+    )
+    expect(
+        "reintroducing mutable PR narrative turns the doctrine check red",
+        review_handoff_policy_error(source_texts=mutable_body_rule) != "",
     )
     with tempfile.TemporaryDirectory(prefix="z-harness-handoff-policy-") as raw:
         retired_review_root = Path(raw)
@@ -2760,9 +2846,8 @@ def selftest() -> int:
                     path.rmdir()
             (inventory_root / "pr-8").mkdir(exist_ok=True)
             (inventory_root / "README.md").write_text("policy\n", encoding="utf-8")
-            (inventory_root / "pr-8/description.md").write_text(
-                "description\n", encoding="utf-8")
-            (inventory_root / "pr-8/title.txt").write_text("title\n", encoding="utf-8")
+            (inventory_root / "pr-8/frozen-publication.json").write_text(
+                "{}\n", encoding="utf-8")
 
         reset_review_inventory()
         expect("an exact review-document relative-path inventory clears",
@@ -2782,12 +2867,12 @@ def selftest() -> int:
         expect("a misplaced review README is rejected",
                review_document_inventory_error(inventory_root) != "")
         reset_review_inventory()
-        (inventory_root / "pr-8/description.md").unlink()
-        expect("a missing registered description is rejected",
+        (inventory_root / "pr-8/frozen-publication.json").unlink()
+        expect("a missing registered publication snapshot is rejected",
                review_document_inventory_error(inventory_root) != "")
         reset_review_inventory()
-        (inventory_root / "pr-8/title.txt").unlink()
-        os.symlink("../README.md", inventory_root / "pr-8/title.txt")
+        (inventory_root / "pr-8/frozen-publication.json").unlink()
+        os.symlink("../README.md", inventory_root / "pr-8/frozen-publication.json")
         expect("a registered-path symlink is rejected",
                review_document_inventory_error(inventory_root) != "")
         reset_review_inventory()
@@ -2995,6 +3080,16 @@ def selftest() -> int:
         )
     finally:
         globals()["review_handoff_policy_error"] = original_handoff_policy
+    original_publication_manifest = review_publication_manifest_error
+    globals()["review_publication_manifest_error"] = (
+        lambda: "planted frozen-publication failure")
+    try:
+        expect(
+            "production gate adopts the frozen publication manifest result",
+            gate(fake_runner, emit_child_output=False) != 0,
+        )
+    finally:
+        globals()["review_publication_manifest_error"] = original_publication_manifest
     def invalid_child_runner(argv: Sequence[str]) -> Result:
         result = fake_runner(argv)
         if "harness_check.py --ci" in " ".join(argv):

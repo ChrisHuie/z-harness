@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Verify a published review comment or pull-request body against its source bytes.
+"""Verify an append-only review comment or frozen pull-request publication.
 
 The repository gate can validate a draft's inputs but cannot see what GitHub received.
-This tool reads complete REST objects back, binds both modes to the requested repository,
-pull request and head, and compares raw UTF-8 body bytes. Comment mode additionally binds
-the author, comment identity and unedited timestamps.
+This tool reads complete REST objects back and binds both modes to the requested repository,
+pull request and current head. Comment mode compares raw UTF-8 body bytes and additionally
+binds the author, comment identity and unedited timestamps. Snapshot mode compares the live
+pull-request body and title to a reviewed frozen digest; it does not rewrite either surface.
 
 Local source files use one canonical form: strict UTF-8, no carriage returns, and exactly
-one terminal line feed. GitHub removes that final line feed from issue comments but retains
-it in pull-request bodies; those are the only publication transformations accepted.
+one terminal line feed. GitHub removes that final line feed from issue comments; that is the
+only publication transformation accepted.
 """
 from __future__ import annotations
 
@@ -22,9 +23,20 @@ import tempfile
 from pathlib import Path
 
 
-VERSION = "2.0"
+VERSION = "3.0"
 RECEIPT = "REVIEW-PUBLICATION-SUMMARY"
 HEAD_LINE = re.compile(rb"^Head: `([0-9a-f]{40})`$", re.MULTILINE)
+SNAPSHOT_SCHEMA_VERSION = 1
+SNAPSHOT_KIND = "pull-request-frozen-publication"
+SNAPSHOT_NOTE = (
+    "The body and title bytes were frozen when the append-only publication rule was adopted "
+    "at this observed head. Later review narrative, corrections, and exact-head evidence are "
+    "append-only pull-request comments."
+)
+SNAPSHOT_FIELDS = {
+    "schema_version", "kind", "repo", "pr", "frozen_at_head",
+    "body_bytes", "body_sha256", "title_bytes", "title_sha256", "note",
+}
 
 
 class PublicationError(ValueError):
@@ -80,9 +92,9 @@ def _source_bytes(path: Path) -> bytes:
     return raw
 
 
-def _body_bytes(value, label: str) -> bytes:
+def _text_bytes(value, label: str) -> bytes:
     if not isinstance(value, str):
-        raise TransportError(f"{label} body is not a string")
+        raise TransportError(f"{label} is not a string")
     return value.encode("utf-8")
 
 
@@ -172,6 +184,48 @@ def _comment_metadata_error(
     return ""
 
 
+def _snapshot_error(snapshot: dict, repo: str, pr: int, body: bytes,
+                    title: bytes) -> str:
+    if set(snapshot) != SNAPSHOT_FIELDS:
+        return (
+            "snapshot manifest fields differ from the closed schema: "
+            f"missing={sorted(SNAPSHOT_FIELDS - set(snapshot))} "
+            f"unexpected={sorted(set(snapshot) - SNAPSHOT_FIELDS)}"
+        )
+    expected_scalars = {
+        "schema_version": SNAPSHOT_SCHEMA_VERSION,
+        "kind": SNAPSHOT_KIND,
+        "repo": repo,
+        "pr": pr,
+        "note": SNAPSHOT_NOTE,
+    }
+    for field, expected in expected_scalars.items():
+        if snapshot.get(field) != expected:
+            return f"snapshot {field} is {snapshot.get(field)!r}, expected {expected!r}"
+    if not re.fullmatch(r"[0-9a-f]{40}", snapshot.get("frozen_at_head") or ""):
+        return "snapshot frozen_at_head is not a full lowercase commit SHA"
+    for label, published in (("body", body), ("title", title)):
+        expected_bytes = snapshot.get(f"{label}_bytes")
+        expected_sha = snapshot.get(f"{label}_sha256")
+        if not isinstance(expected_bytes, int) or expected_bytes < 0:
+            return f"snapshot {label}_bytes is not a non-negative integer"
+        if not isinstance(expected_sha, str) or not re.fullmatch(
+                r"[0-9a-f]{64}", expected_sha):
+            return f"snapshot {label}_sha256 is not a lowercase SHA-256 digest"
+        if len(published) != expected_bytes:
+            return (
+                f"published {label} has {len(published)} bytes, "
+                f"snapshot records {expected_bytes}"
+            )
+        actual_sha = _sha256(published)
+        if actual_sha != expected_sha:
+            return (
+                f"published {label} digest is {actual_sha}, "
+                f"snapshot records {expected_sha}"
+            )
+    return ""
+
+
 def _receipt(kind: str, repo: str, pr: int, expected_head: str, published: bytes,
              expected: bytes, verified: bool, problem: str, **metadata) -> None:
     payload = {
@@ -196,7 +250,7 @@ def verify_comment(repo: str, pr: int, comment_id: int, expected_head: str,
     try:
         submitted = _source_bytes(body_path)
         comment = _api_object(repo, f"issues/comments/{comment_id}", "comment", runner)
-        published = _body_bytes(comment.get("body"), "comment")
+        published = _text_bytes(comment.get("body"), "comment")
         expected = submitted[:-1]
         problem = _comment_metadata_error(
             comment, repo, pr, comment_id, expected_author, expected_head, submitted)
@@ -220,20 +274,45 @@ def verify_comment(repo: str, pr: int, comment_id: int, expected_head: str,
     return 1 if problem else 0
 
 
-def verify_pr_body(repo: str, pr: int, expected_head: str, body_path: Path,
-                   runner=None) -> int:
+def verify_pr_snapshot(repo: str, pr: int, expected_head: str,
+                       manifest_path: Path, runner=None) -> int:
     try:
-        expected = _source_bytes(body_path)
+        manifest_raw = _source_bytes(manifest_path)
+        manifest = _json_object(manifest_raw, "snapshot manifest")
         pull = _api_object(repo, f"pulls/{pr}", "pull request", runner)
-        published = _body_bytes(pull.get("body"), "pull request")
+        body = _text_bytes(pull.get("body"), "pull request")
+        title = _text_bytes(pull.get("title"), "pull request title")
         problem = _pr_metadata_error(pull, repo, pr, expected_head)
         if not problem:
-            problem = _difference(published, expected)
+            problem = _snapshot_error(manifest, repo, pr, body, title)
     except (OSError, subprocess.SubprocessError, TransportError) as exc:
-        print(f"{RECEIPT} kind=pr-body verified=0 problem={exc}")
+        print(f"{RECEIPT} kind=pr-snapshot verified=0 problem={exc}")
         return 2
-    _receipt("pr-body", repo, pr, expected_head, published, expected, not problem, problem,
-             pr_url=pull.get("html_url"))
+    payload = {
+        "kind": "pr-snapshot",
+        "repo": repo,
+        "pr": pr,
+        "expected_head": expected_head,
+        "pr_url": pull.get("html_url"),
+        "frozen_at_head": manifest.get("frozen_at_head"),
+        "manifest_bytes": len(manifest_raw),
+        "manifest_sha256": _sha256(manifest_raw),
+        "body_bytes": len(body),
+        "body_sha256": _sha256(body),
+        "snapshot_body_bytes": manifest.get("body_bytes"),
+        "snapshot_body_sha256": manifest.get("body_sha256"),
+        "title_bytes": len(title),
+        "title_sha256": _sha256(title),
+        "snapshot_title_bytes": manifest.get("title_bytes"),
+        "snapshot_title_sha256": manifest.get("title_sha256"),
+        "verified": not problem,
+        "problem": problem or "none",
+    }
+    print(
+        f"{RECEIPT} kind=pr-snapshot verified={int(not problem)} "
+        f"problem={problem or 'none'}"
+    )
+    print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
     return 1 if problem else 0
 
 
@@ -257,10 +336,23 @@ def selftest() -> int:
         "user": {"login": author, "id": 42}, "author_association": "OWNER",
         "created_at": "2026-08-19T00:00:00Z", "updated_at": "2026-08-19T00:00:00Z",
     }
+    title = "Probe title"
     pull = {
-        "number": pr, "body": body_bytes.decode(),
+        "number": pr, "body": body_bytes.decode(), "title": title,
         "html_url": f"https://github.com/{repo}/pull/{pr}",
         "base": {"repo": {"full_name": repo}}, "head": {"sha": head},
+    }
+    snapshot = {
+        "schema_version": SNAPSHOT_SCHEMA_VERSION,
+        "kind": SNAPSHOT_KIND,
+        "repo": repo,
+        "pr": pr,
+        "frozen_at_head": head,
+        "body_bytes": len(body_bytes),
+        "body_sha256": _sha256(body_bytes),
+        "title_bytes": len(title.encode()),
+        "title_sha256": _sha256(title.encode()),
+        "note": SNAPSHOT_NOTE,
     }
 
     class Done:
@@ -283,11 +375,13 @@ def selftest() -> int:
 
     with tempfile.TemporaryDirectory(prefix="z-harness-publication-") as raw:
         body = Path(raw) / "body.md"
+        manifest = Path(raw) / "frozen-publication.json"
         body.write_bytes(body_bytes)
+        manifest.write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf-8")
         expect("matching comment publication verifies", verify_comment(
             repo, pr, comment_id, head, author, body, runner_for()) == 0)
-        expect("matching pull-request body verifies", verify_pr_body(
-            repo, pr, head, body, runner_for()) == 0)
+        expect("matching frozen pull-request publication verifies", verify_pr_snapshot(
+            repo, pr, head, manifest, runner_for()) == 0)
 
         changed = dict(comment, body="changed")
         expect("changed comment bytes fail", verify_comment(
@@ -296,11 +390,18 @@ def selftest() -> int:
         expect("published CRLF bytes fail", verify_comment(
             repo, pr, comment_id, head, author, body, runner_for(crlf_published)) == 1)
         prefixed_pull = dict(pull, body="prefix\n" + pull["body"])
-        expect("an untracked pull-request body prefix fails", verify_pr_body(
-            repo, pr, head, body, runner_for(pull_data=prefixed_pull)) == 1)
+        expect("a changed frozen pull-request body fails", verify_pr_snapshot(
+            repo, pr, head, manifest, runner_for(pull_data=prefixed_pull)) == 1)
+        same_length_body = dict(
+            pull, body=("X" if not pull["body"].startswith("X") else "Y") + pull["body"][1:])
+        expect("a same-length frozen body digest change fails", verify_pr_snapshot(
+            repo, pr, head, manifest, runner_for(pull_data=same_length_body)) == 1)
         crlf_pull = dict(pull, body=pull["body"].replace("\n", "\r\n"))
-        expect("pull-request CRLF bytes fail", verify_pr_body(
-            repo, pr, head, body, runner_for(pull_data=crlf_pull)) == 1)
+        expect("pull-request CRLF bytes fail", verify_pr_snapshot(
+            repo, pr, head, manifest, runner_for(pull_data=crlf_pull)) == 1)
+        changed_title = dict(pull, title=title[::-1])
+        expect("a same-length frozen title digest change fails", verify_pr_snapshot(
+            repo, pr, head, manifest, runner_for(pull_data=changed_title)) == 1)
 
         for label, changed_comment in (
             ("wrong comment repository metadata fails", dict(comment, issue_url="https://api.github.com/repos/x/y/issues/8")),
@@ -323,11 +424,30 @@ def selftest() -> int:
         expect("wrong current pull-request head fails", verify_comment(
             repo, pr, comment_id, head, author, body, runner_for(pull_data=wrong_head_pull)) == 1)
         wrong_number_pull = dict(pull, number=9)
-        expect("wrong pull-request number fails", verify_pr_body(
-            repo, pr, head, body, runner_for(pull_data=wrong_number_pull)) == 1)
+        expect("wrong pull-request number fails", verify_pr_snapshot(
+            repo, pr, head, manifest, runner_for(pull_data=wrong_number_pull)) == 1)
         wrong_base_pull = dict(pull, base={"repo": {"full_name": "x/y"}})
-        expect("wrong pull-request repository fails", verify_pr_body(
-            repo, pr, head, body, runner_for(pull_data=wrong_base_pull)) == 1)
+        expect("wrong pull-request repository fails", verify_pr_snapshot(
+            repo, pr, head, manifest, runner_for(pull_data=wrong_base_pull)) == 1)
+        malformed_snapshot = dict(snapshot, body_sha256="not-a-digest")
+        manifest.write_text(
+            json.dumps(malformed_snapshot, indent=2) + "\n", encoding="utf-8")
+        expect("a malformed frozen-publication digest fails", verify_pr_snapshot(
+            repo, pr, head, manifest, runner_for()) == 1)
+        manifest.write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf-8")
+        duplicate_manifest = manifest.read_text(encoding="utf-8").replace(
+            '  "schema_version": 1,',
+            '  "schema_version": 1,\n  "schema_version": 1,',
+            1,
+        )
+        manifest.write_text(duplicate_manifest, encoding="utf-8")
+        expect("duplicate frozen-publication fields fail closed", verify_pr_snapshot(
+            repo, pr, head, manifest, runner_for()) == 2)
+        manifest.write_bytes(
+            (json.dumps(snapshot, indent=2) + "\n").encode().replace(b"\n", b"\r\n"))
+        expect("CRLF frozen-publication source bytes fail closed", verify_pr_snapshot(
+            repo, pr, head, manifest, runner_for()) == 2)
+        manifest.write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf-8")
 
         for label, content in (
             ("missing Head line fails", b"Ran: exact check.\n"),
@@ -387,14 +507,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     comment.add_argument("--expected-head", required=True, type=_head)
     comment.add_argument("--expected-author", required=True)
     comment.add_argument("--body-file", required=True, type=Path)
-    pr_body = subparsers.add_parser("pr-body")
-    pr_body.add_argument("--repo", required=True)
-    pr_body.add_argument("--pr", required=True, type=int)
-    pr_body.add_argument("--expected-head", required=True, type=_head)
-    pr_body.add_argument("--body-file", required=True, type=Path)
+    pr_snapshot = subparsers.add_parser("pr-snapshot")
+    pr_snapshot.add_argument("--repo", required=True)
+    pr_snapshot.add_argument("--pr", required=True, type=int)
+    pr_snapshot.add_argument("--expected-head", required=True, type=_head)
+    pr_snapshot.add_argument("--manifest", required=True, type=Path)
     args = parser.parse_args(argv)
     if not args.selftest and args.mode is None:
-        parser.error("choose comment or pr-body")
+        parser.error("choose comment or pr-snapshot")
     return args
 
 
@@ -405,7 +525,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.mode == "comment":
         return verify_comment(args.repo, args.pr, args.comment_id, args.expected_head,
                               args.expected_author, args.body_file)
-    return verify_pr_body(args.repo, args.pr, args.expected_head, args.body_file)
+    return verify_pr_snapshot(
+        args.repo, args.pr, args.expected_head, args.manifest)
 
 
 if __name__ == "__main__":

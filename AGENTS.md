@@ -39,6 +39,9 @@ Merge, force-push, review comments or thread resolution, issue creation, reposit
 other outward mutations still require an explicit user instruction aimed at that operation. Local
 git operations are authorized.
 
+Published pull-request narrative is append-only. After a PR is created, leave its title, body, and
+existing comments unchanged; publish corrections, later-head evidence, and handoffs as new comments.
+
 Do not add AI co-author trailers to commits. If one is already public, offer an amend plus
 `--force-with-lease`; do not assume permission to rewrite it.
 

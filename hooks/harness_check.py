@@ -40,6 +40,7 @@ zero inputs (an empty scan set is an error, never a clean verdict).
 """
 import fnmatch
 import hashlib
+import io
 import json
 import os
 import re
@@ -90,7 +91,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 125
+SELFTEST_FLOOR = 133
 
 AUTHORING_SKILLS = {"craft-prompt", "craft-skill", "craft-context-file", "review-prompt"}
 BODY_CHAR_CAP = 5000          # chars after frontmatter — the builders' instrument
@@ -457,14 +458,38 @@ def validate_codex_hook_config(hook_config):
     return handler_count, errors
 
 
+def git_command_failure(returncode, stderr, command="git ls-files"):
+    """Describe a nonzero Git exit, naming the code even when the child said nothing.
+
+    The exit status is the failure signal; the child's stderr is only the detail. Reading
+    the signal off `stderr.strip()` instead made every silent nonzero exit — `1` with an
+    empty stream, or a negative code from a signal — indistinguishable from success at the
+    call site, which then skipped its failure handling and worked on an inventory it never
+    got. Naming the code keeps a broken instrument legible when it produced no text.
+    """
+    if isinstance(stderr, (bytes, bytearray)):
+        detail = bytes(stderr).decode("utf-8", "replace").strip()
+    else:
+        detail = (stderr or "").strip()
+    if detail:
+        return f"{command} exited {returncode}: {detail}"
+    return f"{command} exited {returncode} with no diagnostic on stderr"
+
+
 def package_paths(root):
     """Return (surface, paths, error) for source or installed package contents."""
     if os.path.exists(os.path.join(root, ".git")):
-        tracked = subprocess.run(
-            ["git", "-C", root, "ls-files"], capture_output=True, text=True,
-        )
+        try:
+            tracked = subprocess.run(
+                ["git", "-C", root, "ls-files"], capture_output=True, text=True,
+            )
+        except OSError as exc:
+            # Git absent from PATH raised FileNotFoundError out through every caller, so
+            # the gate died with a traceback and no verdict line. An unusable instrument
+            # is a named failure of the checks that depend on it.
+            return "source", [], f"cannot run git ls-files: {exc}"
         if tracked.returncode != 0:
-            return "source", [], tracked.stderr.strip() or "git ls-files failed"
+            return "source", [], git_command_failure(tracked.returncode, tracked.stderr)
         return "source", [line for line in tracked.stdout.splitlines() if line], None
     paths = []
     for dirpath, dirs, files in os.walk(root):
@@ -775,10 +800,30 @@ def _outer_indexed_live_paths(root, relatives, runner):
     return list(dict.fromkeys(retained)), pruned
 
 
+def _git_inventory_failure(error, surface="git"):
+    """A named, fail-closed inventory. C8 prints this rather than raising through Run."""
+    return {
+        "surface": surface,
+        "tracked": 0,
+        "untracked": 0,
+        "ignored_context": 0,
+        "pruned": 0,
+        "paths": (),
+        "error": error,
+    }
+
+
 def git_owned_live_paths(root, runner=None):
-    """Inventory committed and authored-untracked files, pruning nested Git ownership."""
+    """Inventory committed and authored-untracked files, pruning nested Git ownership.
+
+    Every way this inventory can fail leaves by the `error` key. Two ways used to leave by
+    raising instead, which cost the caller its whole verdict: the gate exited on a
+    traceback with no summary line, so a broken instrument and a real violation looked
+    nothing alike and neither was named.
+    """
     runner = subprocess.run if runner is None else runner
     groups = []
+    failed = False
     failure = ""
     queries = (
         ("--cached",),
@@ -788,43 +833,51 @@ def git_owned_live_paths(root, runner=None):
          ":(icase,glob)**/gemini.md"),
     )
     for args in queries:
-        done = runner(
-            ["git", "-C", root, "ls-files", "-z", *args],
-            capture_output=True, text=False)
+        try:
+            done = runner(
+                ["git", "-C", root, "ls-files", "-z", *args],
+                capture_output=True, text=False)
+        except OSError as exc:
+            # A `git` that cannot be launched cannot enumerate anything, and the
+            # filesystem fallback below needs the same binary to find ownership
+            # boundaries. Say so and stop, rather than raising or walking blind.
+            return _git_inventory_failure(f"cannot run git ls-files: {exc}")
         if done.returncode != 0:
+            # The exit status decides, not the presence of stderr text. Deriving the
+            # decision from a stripped stderr read a silent nonzero exit as success,
+            # left `groups` empty, and died indexing it.
             groups = []
-            failure = bytes(done.stderr).decode("utf-8", "replace").strip()
+            failed = True
+            failure = git_command_failure(done.returncode, done.stderr)
             break
         groups.append([
             item.decode("utf-8", "surrogateescape")
             for item in bytes(done.stdout).split(b"\0") if item
         ])
     surface = "git"
-    if failure and os.path.lexists(os.path.join(root, ".git")):
-        return {
-            "surface": surface,
-            "tracked": 0,
-            "untracked": 0,
-            "pruned": 0,
-            "paths": (),
-            "error": failure or "git ls-files failed",
-        }
-    if failure:
-        surface = "filesystem"
-        walked, pruned = _walk_owned_files(root, root, runner)
-        groups = [walked, [], []]
-    else:
-        pruned = 0
-    expanded = []
-    for index, group in enumerate(groups):
-        if surface == "git" and index == 0:
-            paths, group_pruned = _outer_indexed_live_paths(root, group, runner)
+    if failed and os.path.lexists(os.path.join(root, ".git")):
+        return _git_inventory_failure(failure)
+    try:
+        if failed:
+            surface = "filesystem"
+            walked, pruned = _walk_owned_files(root, root, runner)
+            groups = [walked, [], []]
+        else:
+            pruned = 0
+        expanded = []
+        for index, group in enumerate(groups):
+            if surface == "git" and index == 0:
+                paths, group_pruned = _outer_indexed_live_paths(root, group, runner)
+                expanded.append(paths)
+                pruned += group_pruned
+                continue
+            paths, group_pruned = _expand_git_inventory_group(root, group, runner)
             expanded.append(paths)
             pruned += group_pruned
-            continue
-        paths, group_pruned = _expand_git_inventory_group(root, group, runner)
-        expanded.append(paths)
-        pruned += group_pruned
+    except OSError as exc:
+        # Ownership resolution shells out to `git` per candidate boundary, so the binary
+        # can still go away after enumeration succeeded.
+        return _git_inventory_failure(f"cannot resolve Git ownership: {exc}", surface)
     groups = expanded
     retained = list(dict.fromkeys(groups[0] + groups[1] + groups[2]))
     return {
@@ -2108,6 +2161,66 @@ def selftest():
                    lambda: any(c == "C6" and "ph-lint" in d for c, d in r3_root.failures))
         os.remove(os.path.join(td, "statusline.sh"))
 
+        # C6 and C9 both enumerate through package_paths. `git ls-files` failing there is a
+        # broken instrument, and the check has to say which one: an empty stderr is no
+        # evidence of success, and a `git` that will not launch raised straight through the
+        # check rather than being reported by it.
+        scan_repo = os.path.join(td, "scan-set-repo")
+        os.makedirs(scan_repo)
+        open(os.path.join(scan_repo, ".git"), "w").write("gitdir: elsewhere\n")
+        open(os.path.join(scan_repo, "README.md"), "w").write("root\n")
+        real_subprocess_run = subprocess.run
+
+        def with_patched_run(replacement, call):
+            subprocess.run = replacement
+            try:
+                return call()
+            finally:
+                subprocess.run = real_subprocess_run
+
+        def silent_git_scan(args, **kwargs):
+            if list(args[:1]) == ["git"]:
+                return subprocess.CompletedProcess(args, 3, stdout="", stderr="")
+            return real_subprocess_run(args, **kwargs)
+
+        def unlaunchable_git_scan(args, **kwargs):
+            if list(args[:1]) == ["git"]:
+                raise FileNotFoundError(2, "No such file or directory", "git")
+            return real_subprocess_run(args, **kwargs)
+
+        def c6_names_a_silent_git_exit():
+            def probe():
+                _surface, paths, error = package_paths(scan_repo)
+                run = Run(scan_repo, ci=True)
+                run.c6_stale_patterns(scan_floor=1)
+                return paths, error, run
+            paths, error, run = with_patched_run(silent_git_scan, probe)
+            return (paths == [] and "exited 3" in (error or "")
+                    and any(c == "C6" and "cannot enumerate scan set" in d
+                            and "exited 3" in d for c, d in run.failures))
+
+        expect_red(
+            "C6 names a silent nonzero git ls-files exit, never an unexplained scan set",
+            c6_names_a_silent_git_exit,
+        )
+
+        def c6_names_an_unlaunchable_git():
+            def probe():
+                _surface, _paths, error = package_paths(scan_repo)
+                run = Run(scan_repo, ci=True)
+                run.c6_stale_patterns(scan_floor=1)
+                return error, run
+            error, run = with_patched_run(unlaunchable_git_scan, probe)
+            return ("cannot run git ls-files" in (error or "")
+                    and any(c == "C6" and "cannot enumerate scan set" in d
+                            and "cannot run git ls-files" in d
+                            for c, d in run.failures))
+
+        expect_red(
+            "C6 reports an unlaunchable git as a named failure, never as an exception",
+            c6_names_an_unlaunchable_git,
+        )
+
         # C7 owns every file below each repository skill directory. The installed root may
         # contain unrelated top-level skills, but no reviewed file may disappear, drift, or
         # gain a stale installed sibling without making the local comparison red.
@@ -2241,6 +2354,99 @@ def selftest():
                    lambda: any(c == "C8" and "cannot enumerate" in d
                                for c, d in failed_inventory_run.failures))
 
+        # stderr carries the detail; the exit status carries the verdict. A nonzero exit
+        # over an empty or whitespace-only stream took neither failure branch, so the
+        # inventory stayed empty, indexing it ended the process on a traceback, and no
+        # HARNESS-SUMMARY line was printed at all -- a broken instrument reading as
+        # neither a pass nor a named failure.
+        def silent_git_inventory(_args, **_kwargs):
+            return subprocess.CompletedProcess(_args, 1, stdout=b"", stderr=b"")
+
+        def whitespace_git_inventory(_args, **_kwargs):
+            return subprocess.CompletedProcess(_args, -9, stdout=b"", stderr=b"  \n\t ")
+
+        def unlaunchable_git_inventory(_args, **_kwargs):
+            raise FileNotFoundError(2, "No such file or directory", "git")
+
+        def c8_names_a_silent_git_exit():
+            run = Run(live_repo, ci=True)
+            run.c8_reserved_basenames(runner=silent_git_inventory)
+            return any(c == "C8" and "cannot enumerate" in d and "exited 1" in d
+                       for c, d in run.failures)
+
+        expect_red(
+            "C8 names a silent nonzero git ls-files exit instead of indexing an empty "
+            "inventory",
+            c8_names_a_silent_git_exit,
+        )
+
+        def c8_reads_whitespace_stderr_as_failure():
+            run = Run(live_repo, ci=True)
+            run.c8_reserved_basenames(runner=whitespace_git_inventory)
+            return any(c == "C8" and "cannot enumerate" in d and "exited -9" in d
+                       for c, d in run.failures)
+
+        expect_red(
+            "C8 reads whitespace-only git stderr as failure, never as a clean inventory",
+            c8_reads_whitespace_stderr_as_failure,
+        )
+
+        def c8_names_an_unlaunchable_git():
+            run = Run(live_repo, ci=True)
+            run.c8_reserved_basenames(runner=unlaunchable_git_inventory)
+            return any(c == "C8" and "cannot enumerate" in d
+                       and "cannot run git ls-files" in d for c, d in run.failures)
+
+        expect_red(
+            "C8 names an unlaunchable git binary instead of propagating OSError",
+            c8_names_an_unlaunchable_git,
+        )
+
+        # Failing closed on the exit status may not cost the check its non-Git surface: a
+        # silent failure outside a worktree still has to reach the filesystem fallback.
+        def c8_keeps_its_filesystem_fallback_on_a_silent_failure():
+            fallback = os.path.join(td, "silent-failure-fallback")
+            os.makedirs(os.path.join(fallback, "sub"), exist_ok=True)
+            open(os.path.join(fallback, "README.md"), "w").write("root\n")
+            open(os.path.join(fallback, "sub", "CLAUDE.md"), "w").write("nested\n")
+            run = Run(fallback, ci=True)
+            run.c8_reserved_basenames(runner=silent_git_inventory)
+            return any(c == "C8" and "sub/CLAUDE.md" in d and "filesystem files" in d
+                       for c, d in run.failures)
+
+        expect_red(
+            "C8 still reaches its filesystem fallback when a silent git failure has no .git",
+            c8_keeps_its_filesystem_fallback_on_a_silent_failure,
+        )
+
+        # The point of a named failure is the verdict line. Driving Run.run through the
+        # broken instrument has to end in a HARNESS-SUMMARY receipt, not a traceback.
+        def harness_summary_survives_a_broken_git_inventory():
+            summary_run = Run(live_repo, ci=True)
+            for _check_id, method_name in PRODUCTION_CHECKS:
+                if method_name != "c8_reserved_basenames":
+                    setattr(summary_run, method_name, lambda: None)
+            summary_run.c8_reserved_basenames = (
+                lambda: Run.c8_reserved_basenames(
+                    summary_run, runner=silent_git_inventory))
+            buffer = io.StringIO()
+            original_stdout = sys.stdout
+            sys.stdout = buffer
+            try:
+                code = summary_run.run()
+            finally:
+                sys.stdout = original_stdout
+            return (code == 1
+                    and "HARNESS-SUMMARY mode=ci checks=1 failures=1 exit=1"
+                    in buffer.getvalue()
+                    and any(c == "C8" and "exited 1" in d
+                            for c, d in summary_run.failures))
+
+        expect_red(
+            "Run.run still prints HARNESS-SUMMARY when the Git inventory instrument fails",
+            harness_summary_survives_a_broken_git_inventory,
+        )
+
         os.remove(os.path.join(live_repo, "docs", "AGENTS.md"))
         nested_repo = os.path.join(live_repo, "nested-repo")
         os.makedirs(nested_repo)
@@ -2250,6 +2456,26 @@ def selftest():
         nested_run.c8_reserved_basenames()
         expect_red("C8 prunes a nested repository boundary",
                    lambda: not nested_run.failures)
+
+        # Ownership resolution shells out once per candidate boundary, so the binary can
+        # still become unusable after enumeration already succeeded. The control above
+        # proves this fixture reaches that call at all.
+        def git_lost_during_resolution(args, **kwargs):
+            if list(args[3:5]) == ["rev-parse", "--show-prefix"]:
+                raise FileNotFoundError(2, "No such file or directory", "git")
+            return subprocess.run(args, **kwargs)
+
+        def c8_names_a_git_lost_while_resolving_ownership():
+            run = Run(live_repo, ci=True)
+            run.c8_reserved_basenames(runner=git_lost_during_resolution)
+            return any(c == "C8" and "cannot enumerate" in d
+                       and "cannot resolve Git ownership" in d
+                       for c, d in run.failures)
+
+        expect_red(
+            "C8 names a git binary lost while resolving ownership boundaries",
+            c8_names_a_git_lost_while_resolving_ownership,
+        )
 
         def failed_exact_root(args, **kwargs):
             if (args[:2] == ["git", "-C"]

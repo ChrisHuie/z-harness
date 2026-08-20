@@ -8,13 +8,18 @@ binds the author, comment identity and unedited timestamps. Snapshot mode compar
 pull-request body and title to a reviewed frozen digest; it does not rewrite either surface.
 
 Local source files use one canonical form: strict UTF-8, no carriage returns, and exactly
-one terminal line feed. GitHub removes that final line feed from issue comments; that is the
-only publication transformation accepted.
+one terminal line feed. Whether publication keeps that final line feed is a property of the
+posting method, not of GitHub: on this repository's own pull request the body field retained
+the source's terminal line feed verbatim while the title field dropped it, from one
+publication event. Comment mode therefore accepts the published body with or without the
+terminal line feed and records which form matched. Interior bytes are never normalised.
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 import re
 import subprocess
@@ -90,6 +95,19 @@ def _source_bytes(path: Path) -> bytes:
     if not raw.endswith(b"\n") or raw.endswith(b"\n\n"):
         raise TransportError(f"{path} must end in exactly one line feed")
     return raw
+
+
+def _accepted_form(published: bytes, submitted: bytes) -> tuple[bytes, str]:
+    """The canonical source form to compare against, and which form matched.
+
+    A canonical source ends in exactly one line feed. Posting with a body file preserves it;
+    posting through a shell command substitution strips it before GitHub ever sees the bytes.
+    Both are correct publications of the same source, so both are accepted -- and nothing
+    else is: every interior byte still has to match exactly.
+    """
+    if published == submitted:
+        return submitted, "retained"
+    return submitted[:-1], "stripped"
 
 
 def _text_bytes(value, label: str) -> bytes:
@@ -226,6 +244,23 @@ def _snapshot_error(snapshot: dict, repo: str, pr: int, body: bytes,
     return ""
 
 
+def _frozen_head_error(repo: str, snapshot: dict, runner=None) -> str:
+    """Bind frozen_at_head to a commit that actually exists in this repository.
+
+    The shape check accepts any forty hexadecimal characters, so a fabricated head passes
+    while naming nothing. Resolve it through the API rather than the local object database:
+    a CI checkout is shallow by default and would report a real commit as missing.
+    """
+    sha = snapshot.get("frozen_at_head")
+    try:
+        commit = _api_object(repo, f"commits/{sha}", "frozen head commit", runner)
+    except TransportError as exc:
+        return f"frozen_at_head {sha} is not a commit in {repo}: {exc}"
+    if commit.get("sha") != sha:
+        return f"frozen_at_head resolved to {commit.get('sha')!r}, expected {sha!r}"
+    return ""
+
+
 def _receipt(kind: str, repo: str, pr: int, expected_head: str, published: bytes,
              expected: bytes, verified: bool, problem: str, **metadata) -> None:
     payload = {
@@ -251,7 +286,7 @@ def verify_comment(repo: str, pr: int, comment_id: int, expected_head: str,
         submitted = _source_bytes(body_path)
         comment = _api_object(repo, f"issues/comments/{comment_id}", "comment", runner)
         published = _text_bytes(comment.get("body"), "comment")
-        expected = submitted[:-1]
+        expected, terminal_line_feed = _accepted_form(published, submitted)
         problem = _comment_metadata_error(
             comment, repo, pr, comment_id, expected_author, expected_head, submitted)
         if not problem:
@@ -270,6 +305,7 @@ def verify_comment(repo: str, pr: int, comment_id: int, expected_head: str,
         author_association=comment.get("author_association"),
         created_at=comment.get("created_at"), updated_at=comment.get("updated_at"),
         edited=comment.get("created_at") != comment.get("updated_at"),
+        terminal_line_feed=terminal_line_feed,
     )
     return 1 if problem else 0
 
@@ -285,6 +321,8 @@ def verify_pr_snapshot(repo: str, pr: int, expected_head: str,
         problem = _pr_metadata_error(pull, repo, pr, expected_head)
         if not problem:
             problem = _snapshot_error(manifest, repo, pr, body, title)
+        if not problem:
+            problem = _frozen_head_error(repo, manifest, runner)
     except (OSError, subprocess.SubprocessError, TransportError) as exc:
         print(f"{RECEIPT} kind=pr-snapshot verified=0 problem={exc}")
         return 2
@@ -325,6 +363,27 @@ def selftest() -> int:
         failures += (not ok)
         print(f"  {'PASS' if ok else 'FAIL'} {label}")
 
+    def denies(call, named: str, code: int = 1) -> bool:
+        """True when `call` fails with the NAMED problem, not merely with some problem.
+
+        Every publication mismatch exits 1, so an exit-code assertion cannot say which
+        check fired. A case that varies the submitted bytes is satisfied by the body
+        comparison whatever rule it targets, which is how four head-line cases passed
+        against a build with the head-line rule deleted. The receipt line is the bytes a
+        consumer reads, so the assertion is made against that rather than an internal
+        return value.
+        """
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            observed = call()
+        captured = stream.getvalue()
+        sys.stdout.write(captured)
+        problem = ""
+        for line in captured.splitlines():
+            if line.startswith(RECEIPT):
+                _, _, problem = line.partition(" problem=")
+        return observed == code and named in problem
+
     repo, pr = "o/r", 8
     head = "a" * 40
     comment_id, author = 123, "owner"
@@ -361,10 +420,20 @@ def selftest() -> int:
 
     transport_calls = []
 
-    def runner_for(comment_data=comment, pull_data=pull):
+    def runner_for(comment_data=comment, pull_data=pull, commit_data=None,
+                   commit_rc=0):
         def run(argv, **kwargs):
             transport_calls.append((tuple(argv), dict(kwargs)))
-            payload = comment_data if "issues/comments" in argv[-1] else pull_data
+            endpoint = argv[-1]
+            if "issues/comments" in endpoint:
+                payload = comment_data
+            elif "/commits/" in endpoint:
+                if commit_rc:
+                    return Done(commit_rc, b"", b"gh: Not Found (HTTP 404)")
+                payload = (commit_data if commit_data is not None
+                           else {"sha": endpoint.rsplit("/", 1)[-1]})
+            else:
+                payload = pull_data
             return Done(0, json.dumps(payload).encode())
         return run
 
@@ -383,57 +452,98 @@ def selftest() -> int:
         expect("matching frozen pull-request publication verifies", verify_pr_snapshot(
             repo, pr, head, manifest, runner_for()) == 0)
 
+        # Both publication forms are correct postings of one canonical source. The default
+        # comment fixture is the stripped form; this is the retained one.
+        retained = dict(comment, body=body_bytes.decode())
+        expect("a published body that retains the terminal line feed verifies",
+               verify_comment(repo, pr, comment_id, head, author, body,
+                              runner_for(retained)) == 0)
+        expect("a frozen_at_head that names no commit fails", denies(
+            lambda: verify_pr_snapshot(
+                repo, pr, head, manifest, runner_for(commit_rc=1)),
+            "is not a commit in"))
+        expect("a frozen_at_head that resolves to another commit fails", denies(
+            lambda: verify_pr_snapshot(
+                repo, pr, head, manifest, runner_for(commit_data={"sha": "c" * 40})),
+            "frozen_at_head resolved to"))
+
         changed = dict(comment, body="changed")
-        expect("changed comment bytes fail", verify_comment(
-            repo, pr, comment_id, head, author, body, runner_for(changed)) == 1)
+        expect("changed comment bytes fail", denies(lambda: verify_comment(
+            repo, pr, comment_id, head, author, body, runner_for(changed)), 'published body differs', 1))
         crlf_published = dict(comment, body=comment["body"].replace("\n", "\r\n"))
-        expect("published CRLF bytes fail", verify_comment(
-            repo, pr, comment_id, head, author, body, runner_for(crlf_published)) == 1)
+        expect("published CRLF bytes fail", denies(lambda: verify_comment(
+            repo, pr, comment_id, head, author, body, runner_for(crlf_published)), 'differs only in line endings', 1))
         prefixed_pull = dict(pull, body="prefix\n" + pull["body"])
-        expect("a changed frozen pull-request body fails", verify_pr_snapshot(
-            repo, pr, head, manifest, runner_for(pull_data=prefixed_pull)) == 1)
+        expect("a changed frozen pull-request body fails", denies(lambda: verify_pr_snapshot(
+            repo, pr, head, manifest, runner_for(pull_data=prefixed_pull)), 'published body has', 1))
         same_length_body = dict(
             pull, body=("X" if not pull["body"].startswith("X") else "Y") + pull["body"][1:])
-        expect("a same-length frozen body digest change fails", verify_pr_snapshot(
-            repo, pr, head, manifest, runner_for(pull_data=same_length_body)) == 1)
+        expect("a same-length frozen body digest change fails", denies(lambda: verify_pr_snapshot(
+            repo, pr, head, manifest, runner_for(pull_data=same_length_body)), 'published body digest is', 1))
         crlf_pull = dict(pull, body=pull["body"].replace("\n", "\r\n"))
-        expect("pull-request CRLF bytes fail", verify_pr_snapshot(
-            repo, pr, head, manifest, runner_for(pull_data=crlf_pull)) == 1)
+        expect("pull-request CRLF bytes fail", denies(lambda: verify_pr_snapshot(
+            repo, pr, head, manifest, runner_for(pull_data=crlf_pull)), 'published body has', 1))
         changed_title = dict(pull, title=title[::-1])
-        expect("a same-length frozen title digest change fails", verify_pr_snapshot(
-            repo, pr, head, manifest, runner_for(pull_data=changed_title)) == 1)
+        expect("a same-length frozen title digest change fails", denies(lambda: verify_pr_snapshot(
+            repo, pr, head, manifest, runner_for(pull_data=changed_title)), 'published title digest is', 1))
 
-        for label, changed_comment in (
-            ("wrong comment repository metadata fails", dict(comment, issue_url="https://api.github.com/repos/x/y/issues/8")),
-            ("wrong comment pull request fails", dict(comment, issue_url=f"https://api.github.com/repos/{repo}/issues/9")),
-            ("wrong comment identity fails", dict(comment, id=999)),
-            ("wrong canonical comment URL fails", dict(comment, html_url=f"https://github.com/{repo}/pull/9#issuecomment-123")),
-            ("wrong comment author fails", dict(comment, user={"login": "other", "id": 42})),
-            ("edited comment metadata fails", dict(comment, updated_at="2026-08-19T00:01:00Z")),
+        for label, named, changed_comment in (
+            ("wrong comment repository metadata fails", "comment issue URL is", dict(comment, issue_url="https://api.github.com/repos/x/y/issues/8")),
+            ("wrong comment pull request fails", "comment issue URL is", dict(comment, issue_url=f"https://api.github.com/repos/{repo}/issues/9")),
+            ("wrong comment identity fails", "comment id is", dict(comment, id=999)),
+            ("wrong canonical comment URL fails", "comment URL is", dict(comment, html_url=f"https://github.com/{repo}/pull/9#issuecomment-123")),
+            ("wrong comment author fails", "comment author is", dict(comment, user={"login": "other", "id": 42})),
+            ("edited comment metadata fails", "comment was edited", dict(comment, updated_at="2026-08-19T00:01:00Z")),
         ):
-            expect(label, verify_comment(
-                repo, pr, comment_id, head, author, body, runner_for(changed_comment)) == 1)
+            expect(label, denies(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body, runner_for(changed_comment)),
+                named))
         missing = dict(comment); missing.pop("author_association")
-        expect("missing comment metadata fails", verify_comment(
-            repo, pr, comment_id, head, author, body, runner_for(missing)) == 1)
+        expect("missing comment metadata fails", denies(lambda: verify_comment(
+            repo, pr, comment_id, head, author, body, runner_for(missing)), 'missing author_association', 1))
         missing_user = dict(comment, user=None)
-        expect("a malformed comment user object fails closed", verify_comment(
-            repo, pr, comment_id, head, author, body, runner_for(missing_user)) == 1)
+        expect("a malformed comment user object fails closed", denies(lambda: verify_comment(
+            repo, pr, comment_id, head, author, body, runner_for(missing_user)), 'missing user.login', 1))
 
         wrong_head_pull = dict(pull, head={"sha": "b" * 40})
-        expect("wrong current pull-request head fails", verify_comment(
-            repo, pr, comment_id, head, author, body, runner_for(pull_data=wrong_head_pull)) == 1)
+        expect("wrong current pull-request head fails", denies(lambda: verify_comment(
+            repo, pr, comment_id, head, author, body, runner_for(pull_data=wrong_head_pull)), 'pull request head is', 1))
         wrong_number_pull = dict(pull, number=9)
-        expect("wrong pull-request number fails", verify_pr_snapshot(
-            repo, pr, head, manifest, runner_for(pull_data=wrong_number_pull)) == 1)
+        expect("wrong pull-request number fails", denies(lambda: verify_pr_snapshot(
+            repo, pr, head, manifest, runner_for(pull_data=wrong_number_pull)), 'pull request number is', 1))
         wrong_base_pull = dict(pull, base={"repo": {"full_name": "x/y"}})
-        expect("wrong pull-request repository fails", verify_pr_snapshot(
-            repo, pr, head, manifest, runner_for(pull_data=wrong_base_pull)) == 1)
-        malformed_snapshot = dict(snapshot, body_sha256="not-a-digest")
-        manifest.write_text(
-            json.dumps(malformed_snapshot, indent=2) + "\n", encoding="utf-8")
-        expect("a malformed frozen-publication digest fails", verify_pr_snapshot(
-            repo, pr, head, manifest, runner_for()) == 1)
+        expect("wrong pull-request repository fails", denies(lambda: verify_pr_snapshot(
+            repo, pr, head, manifest, runner_for(pull_data=wrong_base_pull)), 'pull request base repository is', 1))
+        wrong_url_pull = dict(pull, html_url=f"https://github.com/{repo}/pull/9")
+        expect("wrong canonical pull-request URL fails", denies(
+            lambda: verify_pr_snapshot(
+                repo, pr, head, manifest, runner_for(pull_data=wrong_url_pull)),
+            "pull request URL is"))
+
+        # One case per manifest guard. Each guard rejects a DIFFERENT malformed manifest,
+        # so a shared fixture would let one guard stand in for the rest.
+        for label, named, bad_snapshot in (
+            ("a malformed frozen-publication digest fails",
+             "body_sha256 is not a lowercase SHA-256 digest",
+             dict(snapshot, body_sha256="not-a-digest")),
+            ("an unclosed frozen-publication field set fails",
+             "fields differ from the closed schema",
+             dict(snapshot, extra_field="present")),
+            ("a changed frozen-publication scalar fails",
+             "snapshot kind is",
+             dict(snapshot, kind="something-else")),
+            ("a malformed frozen_at_head fails",
+             "frozen_at_head is not a full lowercase commit SHA",
+             dict(snapshot, frozen_at_head="Z" * 40)),
+            ("a negative frozen body_bytes fails",
+             "body_bytes is not a non-negative integer",
+             dict(snapshot, body_bytes=-1)),
+        ):
+            manifest.write_text(
+                json.dumps(bad_snapshot, indent=2) + "\n", encoding="utf-8")
+            expect(label, denies(
+                lambda: verify_pr_snapshot(repo, pr, head, manifest, runner_for()),
+                named))
         manifest.write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf-8")
         duplicate_manifest = manifest.read_text(encoding="utf-8").replace(
             '  "schema_version": 1,',
@@ -441,43 +551,46 @@ def selftest() -> int:
             1,
         )
         manifest.write_text(duplicate_manifest, encoding="utf-8")
-        expect("duplicate frozen-publication fields fail closed", verify_pr_snapshot(
-            repo, pr, head, manifest, runner_for()) == 2)
+        expect("duplicate frozen-publication fields fail closed", denies(
+            lambda: verify_pr_snapshot(repo, pr, head, manifest, runner_for()),
+            "repeats JSON key", 2))
         manifest.write_bytes(
             (json.dumps(snapshot, indent=2) + "\n").encode().replace(b"\n", b"\r\n"))
-        expect("CRLF frozen-publication source bytes fail closed", verify_pr_snapshot(
-            repo, pr, head, manifest, runner_for()) == 2)
+        expect("CRLF frozen-publication source bytes fail closed", denies(
+            lambda: verify_pr_snapshot(repo, pr, head, manifest, runner_for()),
+            "contains a carriage return", 2))
         manifest.write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf-8")
 
-        for label, content in (
-            ("missing Head line fails", b"Ran: exact check.\n"),
-            ("duplicate Head lines fail", f"Head: `{head}`\nHead: `{head}`\n".encode()),
-            ("abbreviated Head line fails", f"Head: `{head[:12]}`\n".encode()),
-            ("mismatched Head line fails", f"Head: `{'b' * 40}`\n".encode()),
+        for label, named, content in (
+            ("missing Head line fails", "has 0 exact Head lines", b"Ran: exact check.\n"),
+            ("duplicate Head lines fail", "has 2 exact Head lines", f"Head: `{head}`\nHead: `{head}`\n".encode()),
+            ("abbreviated Head line fails", "has 0 exact Head lines", f"Head: `{head[:12]}`\n".encode()),
+            ("mismatched Head line fails", "handoff Head is", f"Head: `{'b' * 40}`\n".encode()),
         ):
             body.write_bytes(content)
-            expect(label, verify_comment(
-                repo, pr, comment_id, head, author, body, runner_for()) == 1)
+            expect(label, denies(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body, runner_for()), named))
 
-        for label, content in (
-            ("a CRLF source fails before publication comparison", body_bytes.replace(b"\n", b"\r\n")),
-            ("a source without terminal LF fails", body_bytes[:-1]),
-            ("a source with several terminal LFs fails", body_bytes + b"\n"),
-            ("invalid UTF-8 source fails", b"Head: `" + head.encode() + b"`\n\xff"),
+        for label, named, content in (
+            ("a CRLF source fails before publication comparison", "contains a carriage return", body_bytes.replace(b"\n", b"\r\n")),
+            ("a source without terminal LF fails", "must end in exactly one line feed", body_bytes[:-1]),
+            ("a source with several terminal LFs fails", "must end in exactly one line feed", body_bytes + b"\n"),
+            ("invalid UTF-8 source fails", "is not strict UTF-8", b"Head: `" + head.encode() + b"`\n\xff"),
         ):
             body.write_bytes(content)
-            expect(label, verify_comment(
-                repo, pr, comment_id, head, author, body, runner_for()) == 2)
+            expect(label, denies(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body, runner_for()), named, 2))
 
         body.write_bytes(body_bytes)
         def broken_runner(argv, **kwargs):
             return Done(1, stderr=b"gh: Not Found (HTTP 404)")
-        expect("transport failure exits 2", verify_comment(
-            repo, pr, comment_id, head, author, body, broken_runner) == 2)
+        expect("transport failure exits 2", denies(
+            lambda: verify_comment(repo, pr, comment_id, head, author, body, broken_runner),
+            "cannot read comment", 2))
         def invalid_json_runner(argv, **kwargs):
             return Done(0, b"not-json")
-        expect("invalid API JSON exits 2", verify_comment(
-            repo, pr, comment_id, head, author, body, invalid_json_runner) == 2)
+        expect("invalid API JSON exits 2", denies(
+            lambda: verify_comment(repo, pr, comment_id, head, author, body, invalid_json_runner), "cannot decode comment JSON", 2))
 
     expect(
         "production API transport is raw JSON without --jq or text mode",

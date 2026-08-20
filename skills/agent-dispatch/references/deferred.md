@@ -44,6 +44,17 @@ dispatched against it, and the file it deprioritised produced both of that round
 refutations. *Displaced because the `agent-dispatch` body is at its 5000-char cap with 7
 characters spare; this belongs beside the null rule and there is no room for it there.*
 
+**R289 — a dispatched worker owns its scratch directory, or the fan-out corrupts its own
+evidence.** Concurrent workers reach for the same obvious filenames — `probe.py`, `mutate.py`,
+`base.py` — in whatever writable directory they share. The lost-file case announces itself; the
+dangerous one does not, because the loser reads the winner's bytes and measures the wrong thing,
+which is a wrong number rather than an error. What a runtime provides differs: one hands every
+subagent the same session scratchpad, another hands none and leaves `cwd` on the repository, which
+turns the same pressure toward the checkout the mutation-worker rule already protects. So the rule
+is a property, not a path — assign an exclusive directory per worker at spawn, name it in the
+prompt, and never read a scratch path you did not assign. Observed: eight concurrent workers, 435
+files at one shared root, one file lost mid-run.
+
 ## MACHINE rows judged non-dispatch
 
 The MACHINE ruling put the machine facts that are dispatch/environment knowledge into the

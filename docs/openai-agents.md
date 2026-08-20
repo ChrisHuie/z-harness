@@ -95,6 +95,7 @@ Claude Code live tree.
 | question timeout | AskUserQuestion exposes `afkTimeoutMs` | no equivalent contract used here | Claude-only; no parity claim |
 | project memory | Claude injects its host-local project `MEMORY.md` | no project memory is packaged; optional Codex-home context only | host-bound data stays runtime-local; no false parity claim |
 | subagents | Agent/Task and Claude worktree mechanics | native Codex subagents and SubagentStart hook | shared opt-in policy and capacity gate; runtime orchestration differs |
+| worker scratch | one session scratchpad path, inherited by every subagent | no agent scratchpad; `cwd` is the project root | assign an exclusive per-worker directory in both; Codex column read from the installed artifact, not from a fan-out on a host |
 | cost accounting | requestId/UUID dedupe, max provisional usage | sums per-request `last_token_usage` once, replay dedupe | tokens only; no cross-provider price inference |
 | PR delivery state | shared `git`/`gh` evidence command | same command and GitHub API | local commit, remote PR head, and exact-head CI remain separate states |
 | skill telemetry | transcript `Skill`/`attributionSkill` evidence | no persisted equivalent asserted | Claude report remains Claude-only |
@@ -118,6 +119,13 @@ is appended only when present. Mandatory policy and the resolved adapter-tool co
 first. An unreadable or oversized optional file is omitted whole, with a diagnostic section when
 space permits; it cannot evict mandatory policy. If mandatory policy itself cannot fit the
 30,000-byte hard cap, SessionStart returns `continue:false` and stops before a model request.
+
+Codex hands a subagent no scratch directory. `~/.codex/tmp/arg0/` holds per-invocation `argv[0]`
+shims and `~/.codex/sessions/` holds date-partitioned rollout transcripts; neither is agent-facing,
+and `cwd` defaults to the project root. A worker with no assigned directory therefore writes into the
+checkout rather than beside it, which is the pressure the shared mutation-worker rule already names.
+SubagentStart is the channel that can assign one. This paragraph is read from the installed artifact
+at `@openai/codex@0.144.4`; no Codex fan-out was run on a host, so it carries no parity claim.
 
 The adapter also runs for SubagentStart so a spawned context does not depend on an implicit parent
 copy. Its matcherless registration covers every subagent type and constructs the full policy

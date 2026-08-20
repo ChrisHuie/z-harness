@@ -19,6 +19,12 @@ Claude's spawn tools are `Agent` and `Task`. Background agents must send their r
 `SendMessage`; never read an agent's `.output` symlink because it is the full JSONL transcript.
 Worktree isolation may branch from `main`, so pass the target SHA and make the worker verify it.
 
+Claude Code gives a session one scratchpad directory and every subagent inherits that exact path, so
+a fan-out writes into one shared namespace. Assign each worker its own subdirectory and name it in
+the worker's prompt; the shared root is not a workspace. Measured on this repository: eight
+concurrent workers left 435 files at one root, with `probe.py` through `probe4.py` and `mutate.py`
+through `mutate5.py` written by different workers, and one worker lost a file mid-run.
+
 The AskUserQuestion AFK control is Claude-specific. After every Claude Code upgrade run:
 
 ```text

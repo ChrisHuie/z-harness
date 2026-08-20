@@ -1464,6 +1464,35 @@ FORBIDDEN_HANDOFF_DOCTRINE = (
     "description and title are mutable current-state documents",
     "build each by editing the file and posting from it",
 )
+WORKSPACE_DOCTRINE = {
+    "AGENTS.md": (
+        "Every dispatched worker owns an exclusive scratch directory",
+        "The parent never reads a scratch path it did not assign.",
+    ),
+    "CLAUDE.md": (
+        "every subagent inherits that exact path",
+        "the shared root is not a workspace",
+    ),
+    "docs/openai-agents.md": (
+        "Codex hands a subagent no scratch directory.",
+        "assign an exclusive per-worker directory in both",
+    ),
+    "skills/agent-dispatch/references/deferred.md": (
+        "a dispatched worker owns its scratch directory",
+        "never read a scratch path you did not assign",
+    ),
+}
+# The shared policy is read by every runtime, so it states the property and never a path.
+# A concrete directory belongs to whichever adapter owns that runtime; naming one here hands
+# the other runtimes a rule they cannot satisfy and quietly makes the policy Claude-only.
+SHARED_POLICY_DOCUMENT = "AGENTS.md"
+RUNTIME_PATHS_FORBIDDEN_IN_SHARED_POLICY = (
+    "~/.claude",
+    "~/.codex",
+    "/private/tmp/claude",
+    ".claude/skills",
+    ".codex/tmp",
+)
 EXPECTED_FROZEN_PUBLICATION = {
     "schema_version": 1,
     "kind": "pull-request-frozen-publication",
@@ -1689,6 +1718,61 @@ def review_publication_manifest_error(data=None) -> str:
     return ""
 
 
+def workspace_doctrine_error(source_texts=None, doctrine=None,
+                             forbidden_paths=None) -> tuple[str, int, int]:
+    """(problem, documents scanned, forbidden-path hits) for the worker-workspace rule.
+
+    Two halves, because a required-phrase check is monotone: adding text never removes a
+    phrase, so presence alone cannot say the rule survived a rewrite. The forbidden half is
+    its dual and is what keeps the rule portable -- the shared policy must state the property
+    and must not name any single runtime's directory.
+
+    An empty table on either side is a failure rather than a clean verdict; this check cannot
+    assert anything over nothing.
+    """
+    doctrine = WORKSPACE_DOCTRINE if doctrine is None else doctrine
+    forbidden_paths = (RUNTIME_PATHS_FORBIDDEN_IN_SHARED_POLICY
+                       if forbidden_paths is None else forbidden_paths)
+    if not doctrine:
+        return ("workspace doctrine table is empty, so this check asserts nothing", 0, 0)
+    if not forbidden_paths:
+        return ("runtime-path forbidden set is empty, so the shared policy is "
+                "unconstrained", 0, 0)
+    problems = []
+    if source_texts is None:
+        source_texts = {}
+        for relative in doctrine:
+            path = ROOT / relative
+            if not path.is_file():
+                problems.append(f"missing workspace doctrine source {relative}")
+                continue
+            source_texts[relative] = path.read_text(encoding="utf-8")
+    for relative, required in doctrine.items():
+        text = source_texts.get(relative)
+        if text is None:
+            problems.append(f"missing workspace doctrine source {relative}")
+            continue
+        normalized = re.sub(r"\s+", " ", text)
+        for phrase in required:
+            if phrase not in normalized:
+                problems.append(
+                    f"{relative} is missing required workspace rule {phrase!r}")
+    shared = source_texts.get(SHARED_POLICY_DOCUMENT)
+    hits = 0
+    if shared is not None:
+        for path_text in forbidden_paths:
+            if path_text in shared:
+                hits += 1
+                problems.append(
+                    f"{SHARED_POLICY_DOCUMENT} names the runtime-specific path "
+                    f"{path_text!r}; the shared policy states the property and the adapter "
+                    "names the path")
+    if problems:
+        return ("worker-workspace doctrine: " + "; ".join(problems[:5]),
+                len(source_texts), hits)
+    return "", len(source_texts), hits
+
+
 def review_handoff_policy_error(source_texts=None, review_root=None,
                                 extra_texts=None, required_includes=None) -> str:
     """Require append-only head-specific handoffs and reject the retired mutable artifact."""
@@ -1877,6 +1961,12 @@ def gate(
     print(f"  {'FAIL' if summary_problem else 'PASS'} mutation-summary")
     if summary_problem:
         failures.append(summary_problem)
+    workspace_problem, workspace_documents, workspace_hits = workspace_doctrine_error()
+    print(f"  {'FAIL' if workspace_problem else 'PASS'} worker-workspace-doctrine "
+          f"over {workspace_documents} document(s), "
+          f"{workspace_hits} runtime-path hit(s) in {SHARED_POLICY_DOCUMENT}")
+    if workspace_problem:
+        failures.append(workspace_problem)
     review_problem, review_documents, review_blocks = review_include_scan()
     print(f"  {'FAIL' if review_problem else 'PASS'} review-includes "
           f"over {review_documents} document(s), {review_blocks} include block(s) "
@@ -3182,6 +3272,43 @@ def selftest() -> int:
         eval_corpus_distribution_error(
             counts=dict({k: v for k, v in EVAL_SCENARIO_FLOORS.items()},
                         **{"outbound-drafts": 0, "craft-prompt": 6})) != "",
+    )
+    workspace_sources = {
+        relative: (ROOT / relative).read_text(encoding="utf-8")
+        for relative in WORKSPACE_DOCTRINE
+    }
+    expect(
+        "worker-workspace doctrine is stated in every file that must carry it",
+        workspace_doctrine_error(source_texts=workspace_sources)[0] == "",
+    )
+    for relative, required in WORKSPACE_DOCTRINE.items():
+        stripped = dict(workspace_sources)
+        stripped[relative] = stripped[relative].replace(required[0], "", 1)
+        expect(
+            f"dropping the workspace rule from {relative} turns the doctrine check red",
+            "missing required workspace rule" in workspace_doctrine_error(
+                source_texts=stripped)[0],
+        )
+    # The portability arm: the shared policy may state the property and never a path.
+    leaked = dict(workspace_sources)
+    leaked[SHARED_POLICY_DOCUMENT] += "\nWorkers write under ~/.claude/scratch.\n"
+    expect(
+        "a runtime-specific path in the shared policy turns the doctrine check red",
+        "names the runtime-specific path" in workspace_doctrine_error(
+            source_texts=leaked)[0],
+    )
+    expect(
+        "the shared policy carries no runtime-specific path today",
+        workspace_doctrine_error(source_texts=workspace_sources)[2] == 0,
+    )
+    expect(
+        "an empty workspace doctrine table is a failure, not a clean verdict",
+        workspace_doctrine_error(source_texts=workspace_sources, doctrine={})[0] != "",
+    )
+    expect(
+        "an empty runtime-path forbidden set is a failure, not a clean verdict",
+        workspace_doctrine_error(
+            source_texts=workspace_sources, forbidden_paths=())[0] != "",
     )
     expect(
         "review handoff doctrine requires append-only exact-head comments",

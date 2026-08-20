@@ -4,12 +4,9 @@ name: mutation-proof
 # from the receipt's own contents and can never re-measure. It is the only check that tells a
 # real measurement from a fabricated one, so it must reach every head.
 #
-# It runs on every pull request. What varies is the work, not the coverage: a head that
-# changes nothing a sweep would observe inherits the proof its base already carries, and the
-# aggregate says so positively rather than being absent. A path filter would instead leave no
-# entry at all for such a head, and a job class with no entry is indistinguishable from a
-# workflow that failed to run -- absence is not evidence. `tools/write-mutation-receipt.py`
-# owns both decisions, so the rule is tested rather than expressed in unreachable YAML.
+# Every accepted head is measured afresh by the same six shards. A path filter, selector, or
+# inherited receipt would leave the result dependent on unverified prior workflow and runner
+# state; absence and self-consistency are not measurement evidence.
 on:
   pull_request:
   push:
@@ -20,39 +17,7 @@ permissions:
   contents: read
 
 jobs:
-  scope:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    outputs:
-      resweep: ${{ steps.decide.outputs.resweep }}
-      base: ${{ steps.decide.outputs.base }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 0
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
-        with:
-          python-version: 3.13.14
-      - name: decide whether this head can differ from its base in what a sweep observes
-        id: decide
-        run: |
-          BASE='${{ github.event.pull_request.base.sha }}'
-          if [ -z "$BASE" ]; then
-            echo "resweep=true" >> "$GITHUB_OUTPUT"
-            echo "base=" >> "$GITHUB_OUTPUT"
-            echo "no pull-request base: sweeping"
-          else
-            RESWEEP="$(python3 tools/write-mutation-receipt.py --resweep-needed "$BASE")"
-            echo "resweep=$RESWEEP" >> "$GITHUB_OUTPUT"
-            echo "base=$BASE" >> "$GITHUB_OUTPUT"
-            echo "base $BASE resweep=$RESWEEP"
-          fi
-
   mutations:
-    needs: scope
-    if: needs.scope.outputs.resweep == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -67,7 +32,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: 3.13.14
-      - name: install zsh and assert the exact pull-request head
+      - name: install zsh and assert the exact accepted head
         timeout-minutes: 10
         run: |
           # A stalled mirror does not fail, it hangs: `update` sat on one InRelease fetch
@@ -104,7 +69,7 @@ jobs:
 
   aggregate:
     if: always()
-    needs: [scope, mutations]
+    needs: mutations
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -112,11 +77,10 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: 3.13.14
-      - name: install zsh and assert the exact pull-request head
+      - name: install zsh and assert the exact accepted head
         timeout-minutes: 10
         run: |
           # A stalled mirror does not fail, it hangs: `update` sat on one InRelease fetch
@@ -137,24 +101,17 @@ jobs:
           done
           zsh --version
           git rev-parse HEAD | grep -Fx '${{ github.event.pull_request.head.sha || github.sha }}'
-      - name: refuse a swept head whose shards did not all succeed
-        if: needs.scope.outputs.resweep == 'true' && needs.mutations.result != 'success'
+      - name: refuse a head whose shards did not all succeed
+        if: needs.mutations.result != 'success'
         run: |
           echo "mutations result: ${{ needs.mutations.result }}"
           exit 1
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        if: needs.scope.outputs.resweep == 'true'
         with:
           pattern: mutation-fragment-*
           path: mutation-fragments
           merge-multiple: true
       - name: reject incomplete evidence and compare the tracked receipt
-        if: needs.scope.outputs.resweep == 'true'
         run: >-
           python3 tools/write-mutation-receipt.py
           --aggregate mutation-fragments/*.json
-      - name: assert this head inherits its base's proof
-        if: needs.scope.outputs.resweep != 'true'
-        run: >-
-          python3 tools/write-mutation-receipt.py
-          --verify-inherited '${{ needs.scope.outputs.base }}'

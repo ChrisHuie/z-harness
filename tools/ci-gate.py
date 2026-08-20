@@ -8,6 +8,7 @@ from pathlib import Path
 import hashlib
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -51,7 +52,7 @@ EVAL_SKILL_FLOOR = 7
 # 165 here and 178 in harness_check -- and a fake that hardcodes its own number tests the
 # literal rather than the contract.
 SUITE_FLOORS = {
-    "harness_check": 78,
+    "harness_check": 125,
     "render-packages": 192,
     "bash_command_guard": 1366,
     "git_grep_engine_guard": 1149,
@@ -125,12 +126,9 @@ EXPECTED_MUTATION_WORKFLOW = """name: mutation-proof
 # from the receipt's own contents and can never re-measure. It is the only check that tells a
 # real measurement from a fabricated one, so it must reach every head.
 #
-# It runs on every pull request. What varies is the work, not the coverage: a head that
-# changes nothing a sweep would observe inherits the proof its base already carries, and the
-# aggregate says so positively rather than being absent. A path filter would instead leave no
-# entry at all for such a head, and a job class with no entry is indistinguishable from a
-# workflow that failed to run -- absence is not evidence. `tools/write-mutation-receipt.py`
-# owns both decisions, so the rule is tested rather than expressed in unreachable YAML.
+# Every accepted head is measured afresh by the same six shards. A path filter, selector, or
+# inherited receipt would leave the result dependent on unverified prior workflow and runner
+# state; absence and self-consistency are not measurement evidence.
 on:
   pull_request:
   push:
@@ -141,39 +139,7 @@ permissions:
   contents: read
 
 jobs:
-  scope:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    outputs:
-      resweep: ${{ steps.decide.outputs.resweep }}
-      base: ${{ steps.decide.outputs.base }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 0
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
-        with:
-          python-version: 3.13.14
-      - name: decide whether this head can differ from its base in what a sweep observes
-        id: decide
-        run: |
-          BASE='${{ github.event.pull_request.base.sha }}'
-          if [ -z "$BASE" ]; then
-            echo "resweep=true" >> "$GITHUB_OUTPUT"
-            echo "base=" >> "$GITHUB_OUTPUT"
-            echo "no pull-request base: sweeping"
-          else
-            RESWEEP="$(python3 tools/write-mutation-receipt.py --resweep-needed "$BASE")"
-            echo "resweep=$RESWEEP" >> "$GITHUB_OUTPUT"
-            echo "base=$BASE" >> "$GITHUB_OUTPUT"
-            echo "base $BASE resweep=$RESWEEP"
-          fi
-
   mutations:
-    needs: scope
-    if: needs.scope.outputs.resweep == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -188,7 +154,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: 3.13.14
-      - name: install zsh and assert the exact pull-request head
+      - name: install zsh and assert the exact accepted head
         timeout-minutes: 10
         run: |
           # A stalled mirror does not fail, it hangs: `update` sat on one InRelease fetch
@@ -225,7 +191,7 @@ jobs:
 
   aggregate:
     if: always()
-    needs: [scope, mutations]
+    needs: mutations
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -233,11 +199,10 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: 3.13.14
-      - name: install zsh and assert the exact pull-request head
+      - name: install zsh and assert the exact accepted head
         timeout-minutes: 10
         run: |
           # A stalled mirror does not fail, it hangs: `update` sat on one InRelease fetch
@@ -258,27 +223,20 @@ jobs:
           done
           zsh --version
           git rev-parse HEAD | grep -Fx '${{ github.event.pull_request.head.sha || github.sha }}'
-      - name: refuse a swept head whose shards did not all succeed
-        if: needs.scope.outputs.resweep == 'true' && needs.mutations.result != 'success'
+      - name: refuse a head whose shards did not all succeed
+        if: needs.mutations.result != 'success'
         run: |
           echo "mutations result: ${{ needs.mutations.result }}"
           exit 1
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        if: needs.scope.outputs.resweep == 'true'
         with:
           pattern: mutation-fragment-*
           path: mutation-fragments
           merge-multiple: true
       - name: reject incomplete evidence and compare the tracked receipt
-        if: needs.scope.outputs.resweep == 'true'
         run: >-
           python3 tools/write-mutation-receipt.py
           --aggregate mutation-fragments/*.json
-      - name: assert this head inherits its base's proof
-        if: needs.scope.outputs.resweep != 'true'
-        run: >-
-          python3 tools/write-mutation-receipt.py
-          --verify-inherited '${{ needs.scope.outputs.base }}'
 """
 
 
@@ -370,8 +328,8 @@ def workflow_error(data: str, mutation_data: Optional[str] = None) -> Optional[s
         )
     if mutation_data != EXPECTED_MUTATION_WORKFLOW:
         return (
-            "mutation workflow differs from the closed contract: pull-request-only, "
-            "exact head checkout, six deterministic shards, read-only permissions, "
+            "mutation workflow differs from the closed contract: every accepted head "
+            "runs six deterministic shards at the exact head, with read-only permissions, "
             "immutable actions, artifact aggregation, and tracked-receipt comparison"
         )
     return None
@@ -792,11 +750,10 @@ MUTATION_PLAN_FLOOR = 322
 # laundering it now requires editing this constant, which a reader sees. This constrains the
 # committed artifact only; it does not claim any host observes the same set.
 # Empty because the committed receipt was measured on a host whose zsh consumes "W" as a
-# modifier, so that mutation reddens a real probe there. A host whose zsh does not will
-# observe one arithmetic kill instead, which the ceiling admits; the cross-host comparison
-# never sees the difference. This pin constrains the COMMITTED set only, and it ratchets in
-# both directions: a regeneration that produces a different set fails until this constant is
-# updated, so the set can neither grow unnoticed nor be quietly emptied.
+# modifier, so that mutation reddens a real probe there. The committed receipt currently
+# records no unasserted kills. Pinning the exact identity set makes a future non-empty
+# committed observation review-visible; fresh aggregation separately derives and applies
+# the writer-owned ceiling before comparing platform-stable outcomes.
 EXPECTED_UNASSERTED_KILLS: set[tuple] = set()
 EXPECTED_MUTATION_ADDITIONS = {
     (
@@ -1254,7 +1211,11 @@ FENCE_MARKERS = ("```", "~~~")
 REQUIRED_REVIEW_INCLUDES = {
     "pr-8/description.md": ("contracts/goldens/mutation-summary.md",),
 }
-REGISTERED_REVIEW_DOCUMENTS = frozenset({"description.md", "title.txt", "README.md"})
+REGISTERED_REVIEW_PATHS = frozenset({
+    "README.md",
+    "pr-8/description.md",
+    "pr-8/title.txt",
+})
 HANDOFF_DOCTRINE = {
     "skills/outbound-drafts/SKILL.md": (
         "Review handoffs are append-only, one exact head per comment.",
@@ -1433,6 +1394,33 @@ def _raises(call, kind) -> bool:
     return False
 
 
+def review_document_inventory_error(review_root=None, expected_paths=None) -> str:
+    """Require the review tree's exact registered relative paths and regular files."""
+    root = REVIEW_ROOT if review_root is None else Path(review_root)
+    expected = REGISTERED_REVIEW_PATHS if expected_paths is None else frozenset(expected_paths)
+    if not root.is_dir() or root.is_symlink():
+        return f"review document root is absent, symlinked, or not a directory: {root}"
+    observed, invalid = set(), []
+    for path in root.rglob("*"):
+        if path.is_dir() and not path.is_symlink():
+            continue
+        relative = str(path.relative_to(root))
+        if path.is_symlink() or not path.is_file():
+            invalid.append(relative)
+        else:
+            observed.add(relative)
+    missing = sorted(expected - observed)
+    unexpected = sorted(observed - expected)
+    problems = []
+    if invalid:
+        problems.append(f"symlinked or non-regular entries={sorted(invalid)}")
+    if missing:
+        problems.append(f"missing={missing}")
+    if unexpected:
+        problems.append(f"unexpected={unexpected}")
+    return "review document inventory: " + " ".join(problems) if problems else ""
+
+
 def review_handoff_policy_error(source_texts=None, review_root=None,
                                 extra_texts=None) -> str:
     """Require append-only head-specific handoffs and reject the retired mutable artifact."""
@@ -1487,21 +1475,15 @@ def review_handoff_policy_error(source_texts=None, review_root=None,
             if phrase in joined:
                 problems.append(
                     f"retired mutable-handoff rule is present in {relative}: {phrase!r}")
-    # An allowlist, not a denylist of one basename. The doctrine forbids keeping a mutable
-    # tracked file as the current handoff -- not keeping a file called rollup.md -- and a
-    # denylist is escaped by renaming, which is how a tracked handoff.md carrying a
-    # hand-typed figure passed every review check.
     root = REVIEW_ROOT if review_root is None else Path(review_root)
-    if root.is_dir():
-        unregistered = sorted(
-            str(review_path_label(path))
-            for path in root.rglob("*")
-            if path.is_file() and path.name not in REGISTERED_REVIEW_DOCUMENTS
-        )
-        if unregistered:
-            problems.append(
-                f"unregistered document in the review tree, which may be a mutable "
-                f"handoff: {unregistered[:6]}")
+    inventory_problem = review_document_inventory_error(root)
+    if inventory_problem:
+        problems.append(inventory_problem)
+    unknown_include_documents = sorted(
+        set(REQUIRED_REVIEW_INCLUDES) - REGISTERED_REVIEW_PATHS)
+    if unknown_include_documents:
+        problems.append(
+            f"required includes name unregistered documents: {unknown_include_documents}")
     if not problems:
         return ""
     # Per testing-ci: a guard that models only the spellings it knows must say so where the
@@ -1752,37 +1734,55 @@ def selftest() -> int:
         ) is not None,
     )
     # The sweep is the only check that can tell a truthful receipt from a self-consistent
-    # forgery, so it must reach every head. A `paths:` filter would leave no entry at all for
-    # a head it skips, and a job class with no entry cannot be told from a workflow that
-    # failed to run. Coverage is therefore unconditional and only the WORK is conditional:
-    # these pin that the verdict is always produced, by one arm or the other.
+    # forgery, so every accepted head must execute all six shards. A selector or job-level
+    # condition would make the result depend on an unproved base run and mutable runner state.
     expect(
-        "mutation workflow carries no paths filter that would silence a head",
-        "paths:" not in EXPECTED_MUTATION_WORKFLOW,
+        "mutation workflow carries no path filter that would silence a head",
+        "paths:" not in EXPECTED_MUTATION_WORKFLOW
+        and "paths-ignore:" not in EXPECTED_MUTATION_WORKFLOW,
     )
     expect(
-        "mutation aggregate depends on the scope decision and the shards",
+        "a path-ignore selector over runtime inputs is rejected",
         workflow_error(
             EXPECTED_WORKFLOW,
             EXPECTED_MUTATION_WORKFLOW.replace(
-                "    needs: [scope, mutations]\n", "    needs: mutations\n", 1),
+                "  pull_request:\n",
+                "  pull_request:\n"
+                "    paths-ignore: [settings.json, hooks/hooks.json]\n",
+                1),
         ) is not None,
     )
     expect(
-        "a swept head whose shards did not all succeed is refused",
+        "mutation shards cannot gain a job-level selector",
         workflow_error(
             EXPECTED_WORKFLOW,
             EXPECTED_MUTATION_WORKFLOW.replace(
-                "        if: needs.scope.outputs.resweep == 'true' "
-                "&& needs.mutations.result != 'success'\n", "", 1),
+                "  mutations:\n", "  mutations:\n    if: false\n", 1),
         ) is not None,
     )
     expect(
-        "a head that skips the sweep must still assert it inherits its base's proof",
+        "mutation workflow retains all six shards",
         workflow_error(
             EXPECTED_WORKFLOW,
             EXPECTED_MUTATION_WORKFLOW.replace(
-                "      - name: assert this head inherits its base's proof\n", "", 1),
+                "        shard: [0, 1, 2, 3, 4, 5]\n",
+                "        shard: [0, 1, 2, 3, 4]\n", 1),
+        ) is not None,
+    )
+    expect(
+        "shard commands retain the six-way assignment",
+        workflow_error(
+            EXPECTED_WORKFLOW,
+            EXPECTED_MUTATION_WORKFLOW.replace("--shard-count 6", "--shard-count 5", 1),
+        ) is not None,
+    )
+    expect(
+        "shard commands retain the exact-head fence",
+        workflow_error(
+            EXPECTED_WORKFLOW,
+            EXPECTED_MUTATION_WORKFLOW.replace(
+                "          --expected-head '${{ github.event.pull_request.head.sha "
+                "|| github.sha }}'\n", "", 1),
         ) is not None,
     )
     expect(
@@ -1798,6 +1798,50 @@ def selftest() -> int:
             EXPECTED_WORKFLOW,
             EXPECTED_MUTATION_WORKFLOW.replace("    if: always()\n", "", 1),
         ) is not None,
+    )
+    expect(
+        "mutation aggregate depends on the shards",
+        workflow_error(
+            EXPECTED_WORKFLOW,
+            EXPECTED_MUTATION_WORKFLOW.replace("    needs: mutations\n", "", 1),
+        ) is not None,
+    )
+    expect(
+        "a head whose shards did not all succeed is refused",
+        workflow_error(
+            EXPECTED_WORKFLOW,
+            EXPECTED_MUTATION_WORKFLOW.replace(
+                "        if: needs.mutations.result != 'success'\n", "", 1),
+        ) is not None,
+    )
+    expect(
+        "fragment upload fails when a shard writes no evidence",
+        workflow_error(
+            EXPECTED_WORKFLOW,
+            EXPECTED_MUTATION_WORKFLOW.replace("          if-no-files-found: error\n", "", 1),
+        ) is not None,
+    )
+    expect(
+        "aggregate retains artifact download",
+        workflow_error(
+            EXPECTED_WORKFLOW,
+            EXPECTED_MUTATION_WORKFLOW.replace(
+                "      - uses: actions/download-artifact@"
+                "d3f86a106a0bac45b974a628896c90dbdf5c8093\n", "", 1),
+        ) is not None,
+    )
+    expect(
+        "aggregate retains tracked-receipt comparison",
+        workflow_error(
+            EXPECTED_WORKFLOW,
+            EXPECTED_MUTATION_WORKFLOW.replace(
+                "          --aggregate mutation-fragments/*.json\n", "", 1),
+        ) is not None,
+    )
+    expect(
+        "mutation workflow has no inheritance or scope-selector mode",
+        all(term not in EXPECTED_MUTATION_WORKFLOW for term in (
+            "resweep", "verify-inherited", "needs.scope", "scope:")),
     )
     expect(
         "workflow source-bound bootstrap removal fails",
@@ -2367,27 +2411,7 @@ def selftest() -> int:
             f"the cross-host comparison still sees {_label}",
             writer.platform_stable(stable_probe) != writer.platform_stable(_changed),
         )
-    # The sweep-scope decision gates an hour of CI and the assertion that replaces it, so
-    # both arms need a red case. A runner stands in for git so the cases are exact rather
-    # than dependent on this checkout's history.
-    def _diff_runner(names):
-        def run(argv, **kwargs):
-            class Done:
-                returncode = 0
-                stdout = "".join(f"{n}\n" for n in names)
-                stderr = ""
-            return Done()
-        return run
-
-    def _broken_diff(argv, **kwargs):
-        class Done:
-            returncode = 128
-            stdout = ""
-            stderr = "fatal: bad revision"
-        return Done()
-
-    # The helper below decides three checks, so a helper that always answered "it raised"
-    # would make all three pass without testing anything. Control it first.
+    # The helper below controls the CLI-removal checks, so prove both arms first.
     expect(
         "the raise helper reports a call that does not raise",
         _raises(lambda: None, ValueError) is False,
@@ -2401,35 +2425,12 @@ def selftest() -> int:
         _raises(lambda: (_ for _ in ()).throw(ValueError("x")), ValueError) is True,
     )
     expect(
-        "a head touching nothing the sweep observes needs no resweep",
-        writer.resweep_needed("base", runner=_diff_runner([])) is False,
-    )
-    for _observed in ("hooks/guards/git_grep_engine_guard.py",
-                      "tools/write-mutation-receipt.py",
-                      "contracts/goldens/mutation-receipt.json",
-                      "hooks/bash_command_guard.py",
-                      ".github/workflows/mutation-proof.yml"):
-        expect(
-            f"a head touching {_observed} needs a resweep",
-            writer.resweep_needed("base", runner=_diff_runner([_observed])) is True,
-        )
-    expect(
-        "an unreadable base is an error, never a silent no-resweep",
-        _raises(lambda: writer.resweep_needed("base", runner=_broken_diff), ValueError),
+        "the removed resweep selector is rejected by the public CLI",
+        _raises(lambda: writer.parse_args(["--resweep-needed", "base"]), SystemExit),
     )
     expect(
-        "inheritance is refused when an observed input changed",
-        writer.inherited_proof_error(
-            "base", runner=_diff_runner(["hooks/guards/zsh_rev_modifier_guard.py"])) != "",
-    )
-    expect(
-        "inheritance is granted only when nothing observed changed",
-        writer.inherited_proof_error("base", runner=_diff_runner([])) == "",
-    )
-    expect(
-        "inheritance is refused when the base cannot be read",
-        _raises(lambda: writer.inherited_proof_error("base", runner=_broken_diff),
-                ValueError),
+        "the removed inheritance mode is rejected by the public CLI",
+        _raises(lambda: writer.parse_args(["--verify-inherited", "base"]), SystemExit),
     )
     expect("recorded mutation evidence matches the guards", mutation_receipt_error() == "")
     expect(
@@ -2748,6 +2749,52 @@ def selftest() -> int:
                 review_root=retired_review_root,
             ) != "",
         )
+    with tempfile.TemporaryDirectory(prefix="z-harness-review-inventory-") as raw:
+        inventory_root = Path(raw)
+
+        def reset_review_inventory():
+            for path in sorted(inventory_root.rglob("*"), reverse=True):
+                if path.is_symlink() or path.is_file():
+                    path.unlink()
+                elif path.is_dir():
+                    path.rmdir()
+            (inventory_root / "pr-8").mkdir(exist_ok=True)
+            (inventory_root / "README.md").write_text("policy\n", encoding="utf-8")
+            (inventory_root / "pr-8/description.md").write_text(
+                "description\n", encoding="utf-8")
+            (inventory_root / "pr-8/title.txt").write_text("title\n", encoding="utf-8")
+
+        reset_review_inventory()
+        expect("an exact review-document relative-path inventory clears",
+               review_document_inventory_error(inventory_root) == "")
+        (inventory_root / "pr-8/handoff").mkdir()
+        (inventory_root / "pr-8/handoff/description.md").write_text(
+            "nested\n", encoding="utf-8")
+        expect("a nested duplicate description is rejected",
+               review_document_inventory_error(inventory_root) != "")
+        reset_review_inventory()
+        (inventory_root / "pr-9").mkdir()
+        (inventory_root / "pr-9/title.txt").write_text("wrong PR\n", encoding="utf-8")
+        expect("a title under the wrong PR is rejected",
+               review_document_inventory_error(inventory_root) != "")
+        reset_review_inventory()
+        (inventory_root / "pr-8/README.md").write_text("misplaced\n", encoding="utf-8")
+        expect("a misplaced review README is rejected",
+               review_document_inventory_error(inventory_root) != "")
+        reset_review_inventory()
+        (inventory_root / "pr-8/description.md").unlink()
+        expect("a missing registered description is rejected",
+               review_document_inventory_error(inventory_root) != "")
+        reset_review_inventory()
+        (inventory_root / "pr-8/title.txt").unlink()
+        os.symlink("../README.md", inventory_root / "pr-8/title.txt")
+        expect("a registered-path symlink is rejected",
+               review_document_inventory_error(inventory_root) != "")
+        reset_review_inventory()
+        (inventory_root / "pr-8/rollup.md").write_text("mutable\n", encoding="utf-8")
+        expect("the handoff-policy call site adopts exact-path inventory failures",
+               review_handoff_policy_error(
+                   source_texts=handoff_sources, review_root=inventory_root) != "")
     expect("outbound review text matches the sources it includes", review_include_error() == "")
     with tempfile.TemporaryDirectory(prefix="z-harness-review-") as raw:
         review = Path(raw)

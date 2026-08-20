@@ -1,3 +1,44 @@
+## Scope and lineage
+
+This pull request began as a focused guard correction: keep shell wrappers and attached option
+spellings from bypassing the Git PCRE/ERE and zsh `rev:path` checks. The base is `654be2a`; the
+first implementation commit is `a328a02`; and `6f9fe03` is the last checkpoint before the
+evidence and review machinery was expanded. The guard remains the principal change. Everything
+after that checkpoint either closes an execution-path bypass found during adversarial review or
+makes the evidence about that guard reproducible and reviewable.
+
+The next evidence-remediation sequence strengthened mutation-plan accounting, exact-head decision
+goldens, source bindings, append-resistant review includes, and cross-platform receipt comparison:
+
+- `cfed07d` moves the measured figures to the head whose guards produced them;
+- `ed411e7` hardens the guard and evidence contracts;
+- `f1c9d83` fixes the operator-budget regression exposed on CI.
+
+The later commits are preserved separately so a reviewer can distinguish the original guard change
+from subsequent review-driven work:
+
+- `ca4300a` tests both mutation directions and grades kills by the assertion that fired;
+- `6bae4f1` records those operator and kill-reason changes in this source;
+- `79cbcde` compares only mutation facts intended to hold across hosts;
+- `6790cb1` keeps host observations out of the cross-host equality contract;
+- `e6a2b16` hardens receipt aggregation and addition-survivor enforcement;
+- `d73e04e` makes head-specific review handoffs append-only;
+- `50ab837` enforces that handoff rule and widens the committed scan set;
+- `75bd4fc` separates mutation-proof coverage from work selection;
+- `e7f6e57` and `35596e8` bound package-refresh stalls while retaining the zsh assertion;
+- `74ba1a7` records mutation-proof cost and trigger behavior;
+- `ca1cf34` red-tests both sweep-scope branches;
+- `0fc67b5` adds publication read-back using GitHub's stored-body behavior;
+- `08c32b2` controls the exception helper used by three CI-gate checks.
+
+This remediation removes sweep inheritance because the repository could not prove the base head
+had a complete compatible run, replaces text-normalized publication read-back with raw bytes and
+full GitHub metadata, compares the complete installed skill payload locally, scans authored
+untracked context files without crossing nested Git ownership, and makes the review-document
+inventory path-exact. Historical exact-head observations remain in their append-only comments;
+they are not current-head evidence. Publication evidence for the final commit is collected only
+after that commit is pushed.
+
 ## Summary
 
 The registered `PreToolUse(Bash)` predicates share a bounded parser for shell and Git
@@ -81,15 +122,20 @@ document names; required-phrase presence is monotone, so a document can carry th
 contradict it in the next paragraph, and a paraphrase walks past the denylist. It says so in
 its own output. And the repository gate can only ever validate the sources a handoff was
 built from -- never the comment that was published -- so the read-back is a command,
-`tools/verify-handoff-comment.py`, which byte-compares the posted body against the submitted
-file and exits non-zero on any difference or on a comment it cannot read.
+`tools/verify-review-publication.py`, which compares raw UTF-8 bytes and binds both modes to the
+requested repository, pull request, exact head, and canonical URL. Comment mode additionally binds
+the author, comment identity, and unedited timestamps. It exits non-zero on any mismatch or
+unreadable publication.
 
 The rule governs nothing until the installed copy carries it. `~/.claude` is the live
 installation and this tree is only a synchronization source, so an agent loads the installed
 bytes: a doctrine changed here and not there is enforced against a copy nobody executes. That
 is not hypothetical -- the handoff rule was rewritten here while agents went on following the
-retired one. A local-only check now compares each installed skill against its reviewed source
-and names the ones that drift; CI skips it, having no installation to compare.
+retired one. A local-only check now compares every regular payload file below each
+repository-owned skill, including references, evals, scripts, executable class, and stale or
+missing files. Missing roots, symlinks, and drift fail; unrelated top-level installed skills
+remain outside repository ownership. CI proves the helper's red arms but skips the live
+comparison, having no installation.
 
 ## What the mutation proof costs, and when
 
@@ -99,14 +145,11 @@ the receipt's own contents and can never re-measure, so it accepts a self-consis
 The sweep is therefore the only check that tells a real measurement from a fabricated one,
 and it reaches every head.
 
-What varies is the work, not the coverage. A head that changes nothing a sweep would
-observe inherits the proof its base carries, because a receipt reaches the base branch only
-through a run that swept it; the aggregate asserts that inheritance positively -- nothing
-observable changed, and the receipt still binds the sources present here. A path filter
-would express the same intent by leaving no entry at all for such a head, and a job class
-with no entry cannot be distinguished from a workflow that failed to run. `RESWEEP_PATHS`,
-`resweep_needed` and `inherited_proof_error` own both decisions so the rule is tested rather
-than expressed as unreachable workflow conditions.
+Every accepted pull-request, `main`-push, or manual-dispatch head runs the same six shards.
+There is no path selector or inherited-receipt branch: the prior design checked only local
+source and receipt consistency, not whether the base head had a successful complete sweep or
+whether its mutable runner state matched the later head. Missing or incompatible external proof
+therefore falls back to measurement by construction rather than to an unproved inheritance claim.
 
 Two failure modes in that workflow were infrastructure wearing the costume of a coverage
 failure. A stalled package mirror does not fail, it hangs, so a guard against a non-zero
@@ -211,11 +254,12 @@ files are trust roots: a workflow-only edit can bypass both runners, and edits t
 workflows can fabricate both in-repo job classes. Reviewer inspection or an externally
 administered required workflow must govern that boundary.
 
-The `mutation-proof` pull-request workflow checks out
-`github.event.pull_request.head.sha`, runs six deterministic shards, and aggregates their
-artifacts with `if: always()`. Missing, duplicated, overlapping, foreign, or stale mutation
-IDs fail aggregation. Final publication evidence is collected only after the final commit
-is pushed; a prior exact-head run is not evidence for a later fix.
+The `mutation-proof` workflow accepts pull requests, pushes to `main`, and manual dispatches. It
+checks out `github.event.pull_request.head.sha || github.sha`, runs six deterministic shards for
+every accepted head, and aggregates their artifacts with `if: always()`. Missing, duplicated,
+overlapping, foreign, or stale mutation IDs fail aggregation. Final publication evidence is
+collected only after the final commit is pushed; a prior exact-head run is not evidence for a
+later fix.
 
 <!-- include: contracts/goldens/mutation-summary.md -->
 <!-- generated by tools/write-mutation-receipt.py -- do not edit -->

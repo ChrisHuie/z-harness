@@ -69,9 +69,10 @@ executable form, plus the rules that only fire once there is a draft.
   `Not-run:`** — the head you asserted against, not the one you fetched first, and the scope of
   what actually executed.
 - **Review handoffs are append-only, one exact head per comment.** Never edit, replace, or
-  delete a posted handoff; a later head or correction gets a new comment that links the earlier
-  record. Re-read the created comment and require an exact body match. Individual findings stay
-  in inline `path:line` threads with their own lifecycle (`pr-review-method`).
+  delete a posted handoff; post a linked correction. Re-read the full object: raw body, repo,
+  PR, head, author, id, URL,
+  and unedited timestamps must match. Findings stay in inline `path:line` threads with their own
+  lifecycle (`pr-review-method`).
 
 ## Publishing tooling
 

@@ -220,8 +220,9 @@ fabricate both in-repo job classes. Reviewer inspection or an externally adminis
 workflow must govern that boundary. GitHub manages the image contents behind those labels, and this
 repository cannot prove that the jobs are required by branch protection.
 
-The pull-request-only `mutation-proof` workflow explicitly checks out the pull-request head and runs
-the deterministic guard-mutation plan in six private-tree shards. Its `if: always()` aggregate job
+The `mutation-proof` workflow accepts pull requests, pushes to `main`, and manual dispatches,
+checks out the exact accepted head, and runs the deterministic guard-mutation plan in six
+private-tree shards every time. Its `if: always()` aggregate job
 rejects missing, duplicated, overlapping, foreign, or stale fragment IDs, recomputes the raw suite
 outcomes, schema-compares the canonical tracked receipt, and byte-compares the tracked summary. The offline gate
 validates that receipt against the current source and plan, derives the canonical summary from that

@@ -20,7 +20,9 @@ and outbound text INCLUDES that file rather than restating it:
 ```
 
 `tools/ci-gate.py` checks every live include block under this directory against its source,
-requires the registered PR description include, and rejects unregistered live blocks.
+requires the registered PR description include, and enforces the exact relative-path inventory
+`README.md`, `pr-8/description.md`, and `pr-8/title.txt`. A nested duplicate, symlink, missing
+file, renamed handoff, or restored roll-up is rejected.
 `tools/write-mutation-receipt.py` writes the receipt and summary from one accepted
 aggregate of exact-plan shard fragments; its normal aggregate mode refuses changed output.
 Historical measurements may remain as context only when the document says they are not
@@ -48,13 +50,21 @@ bytes. The repository gate validates the sources used to build that handoff; the
 validates the external comment, and it is a command rather than an instruction:
 
 ```
-tools/verify-handoff-comment.py --repo <owner/name> --comment-id <id> --body-file <draft>
+tools/verify-review-publication.py comment \
+  --repo <owner/name> --pr <number> --comment-id <id> \
+  --expected-head <40-hex-sha> --expected-author <login> --body-file <draft>
+
+tools/verify-review-publication.py pr-body \
+  --repo <owner/name> --pr <number> --expected-head <40-hex-sha> \
+  --body-file contracts/review/pr-<number>/description.md
 ```
 
-It exits 0 only on a byte-exact match, 1 on a difference naming the first line that differs,
-and 2 when the comment cannot be read -- never silently clean. Nothing else in this repository
-can see a posted comment, so a handoff that is never read back carries no mechanical evidence
-at all, whatever the gate says about the sources it was built from.
+Both modes require raw UTF-8 bytes, the requested repository and pull request, the exact head, and
+the canonical URL. Comment mode additionally binds the expected author, comment identity, and
+unedited timestamps; the PR-body API does not expose an equivalent body-edit identity. Exit 1 is a
+publication mismatch and exit 2 is local I/O, transport, or JSON failure. Nothing else in this
+repository can see a posted comment or live PR body, so a publication that is never read back
+carries no mechanical evidence, whatever the gate says about its source.
 
 A document that revises published text is built by splicing the published body, not by
 retyping the parts that are unchanged. Retyping is how a wrong figure enters, so it is not

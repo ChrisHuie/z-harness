@@ -161,9 +161,10 @@ isolation fails before its claimed receipt is accepted when the declared workflo
 The in-repository workflow files are trust roots: a workflow-only edit can bypass those runners,
 and coordinated edits to both workflows can fabricate both in-repo job classes. Reviewer inspection
 or an externally administered required workflow must govern that boundary. GitHub still manages the
-image contents behind those labels. A pull-request-only `mutation-proof`
-workflow explicitly checks out `github.event.pull_request.head.sha`, runs the deterministic mutation
-plan in six private-tree shards, and aggregates raw artifacts with `if: always()`. The aggregator
+image contents behind those labels. A `mutation-proof` workflow accepts pull requests, pushes to
+`main`, and manual dispatches, explicitly checks out
+`github.event.pull_request.head.sha || github.sha`, runs the deterministic mutation plan in six
+private-tree shards for every accepted head, and aggregates raw artifacts with `if: always()`. The aggregator
 rejects missing, duplicate, overlapping, foreign, or stale mutation IDs, recomputes each raw outcome,
 schema-compares the canonical tracked receipt, and byte-compares the tracked summary. The offline gate validates that receipt against
 the current plan and sources, derives the canonical summary bytes from the strict receipt, and then
@@ -177,8 +178,10 @@ is a branch-protection required check. `tools/pr-delivery-state.py` proves gener
 and workflow presence; final mutation evidence additionally requires the named mutation workflow,
 six nonempty shard artifacts, and its successful aggregate job to be inspected explicitly.
 
-Local `harness_check.py` mode adds machine-specific Claude anchors. `--selftest` plants defects and
-proves each check family can turn red; a zero-input scan is an error, not a clean verdict. C1 requires
+Local `harness_check.py` mode adds machine-specific Claude anchors, compares the complete payload
+of repository-owned installed skills, and scans tracked plus authored-untracked context files
+without crossing nested Git ownership. `--selftest` plants defects and proves each check family can
+turn red; a zero-input scan is an error, not a clean verdict. C1 requires
 every direct selftest to be registered with a positive floor and a unique terminal suite receipt;
 `harness_check.py` is the sole recursive meta-suite exemption.
 

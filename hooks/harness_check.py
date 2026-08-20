@@ -17,10 +17,11 @@ Runs from either clone (repo root auto-detected from this file's location). Chec
   C6  stale-claim tripwires: patterns that once shipped false stay at zero across
       every tracked file except the declared SCAN_EXCLUSIONS
   C7  anchors: routing-table skills exist; Claude and Codex hook commands resolve;
-      [local] original audit paths exist, `timeout` still absent, askq binary
-      anchors hold
-  C8  reserved context basenames (CLAUDE.md/AGENTS.md/GEMINI.md) exist nowhere
-      but the repo root, .git excluded as a path component (not a substring)
+      [local] original audit paths and askq anchors hold, and every repository-owned
+      installed skill payload matches its complete reviewed source tree
+  C8  reserved context basenames (CLAUDE.md/AGENTS.md/GEMINI.md) exist nowhere but
+      the repo root across tracked and authored-untracked files; nested Git ownership
+      boundaries are pruned and `.git` is matched as a component, not a substring
   C9  Codex package contract: manifest, marketplace, hook config, context bridges,
       and their size budgets are internally consistent
   C10 PR delivery contract: scoped publication authority, state-proof command,
@@ -44,6 +45,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -88,7 +90,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 78
+SELFTEST_FLOOR = 125
 
 AUTHORING_SKILLS = {"craft-prompt", "craft-skill", "craft-context-file", "review-prompt"}
 BODY_CHAR_CAP = 5000          # chars after frontmatter — the builders' instrument
@@ -107,11 +109,11 @@ SELFTEST_SUITES = [
     ("codex-cost", ["tools/codex-cost.py", "--selftest"], 28),
     ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 42),
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 8),
-    ("verify-handoff-comment",
-     ["tools/verify-handoff-comment.py", "--selftest"], 14),
+    ("verify-review-publication",
+     ["tools/verify-review-publication.py", "--selftest"], 32),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
-    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 177),
+    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 184),
     ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 65),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
     ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 16),
@@ -509,6 +511,333 @@ def forbidden_package_entries(root):
     return surface, forbidden_paths, forbidden_contents, error
 
 
+def skill_payload_manifest(root, required_names=None):
+    """Return the full regular-file payload owned by repository skill directories."""
+    errors = []
+    if not os.path.isdir(root) or os.path.islink(root):
+        return (), {}, [f"skill root is absent, symlinked, or not a directory: {root}"]
+    if required_names is None:
+        entries = list(os.scandir(root))
+        errors.extend(
+            f"source skill entry is symlinked: {entry.name}"
+            for entry in entries if entry.is_symlink()
+        )
+        names = tuple(sorted(
+            entry.name for entry in entries
+            if entry.is_dir(follow_symlinks=False)
+        ))
+    else:
+        names = tuple(sorted(required_names))
+    if not names:
+        return names, {}, ["zero source-owned skill directories"]
+    manifest = {}
+    for name in names:
+        skill_root = os.path.join(root, name)
+        if os.path.islink(skill_root) or not os.path.isdir(skill_root):
+            errors.append(f"{name}: skill directory is absent, symlinked, or not a directory")
+            continue
+        skill_md = os.path.join(skill_root, "SKILL.md")
+        if os.path.islink(skill_md) or not os.path.isfile(skill_md):
+            errors.append(f"{name}: SKILL.md is absent, symlinked, or not a regular file")
+        for dirpath, dirs, files in os.walk(skill_root, followlinks=False):
+            retained = []
+            for directory in sorted(dirs):
+                path = os.path.join(dirpath, directory)
+                if os.path.islink(path):
+                    errors.append(
+                        f"{name}: directory symlink {os.path.relpath(path, skill_root)}")
+                else:
+                    retained.append(directory)
+            dirs[:] = retained
+            for filename in sorted(files):
+                path = os.path.join(dirpath, filename)
+                relative = os.path.relpath(path, skill_root).replace(os.sep, "/")
+                if os.path.islink(path) or not os.path.isfile(path):
+                    errors.append(f"{name}: non-regular payload {relative}")
+                    continue
+                try:
+                    data = open(path, "rb").read()
+                    mode = os.stat(path, follow_symlinks=False).st_mode
+                except OSError as exc:
+                    errors.append(f"{name}: cannot read {relative}: {exc}")
+                    continue
+                manifest[f"{name}/{relative}"] = (
+                    len(data), hashlib.sha256(data).hexdigest(),
+                    bool(mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)),
+                )
+    return names, manifest, errors
+
+
+def installed_skill_payload_error(source_root, installed_root):
+    """Return why the live installed payload differs from the repository-owned skills."""
+    names, source, errors = skill_payload_manifest(source_root)
+    _installed_names, installed, installed_errors = skill_payload_manifest(
+        installed_root, required_names=names)
+    errors.extend(installed_errors)
+    missing = sorted(set(source) - set(installed))
+    extra = sorted(set(installed) - set(source))
+    drifted = sorted(
+        path for path in set(source) & set(installed)
+        if source[path] != installed[path]
+    )
+    if missing:
+        errors.append(f"missing payload: {missing}")
+    if extra:
+        errors.append(f"stale payload: {extra}")
+    if drifted:
+        errors.append(f"drifted payload: {drifted}")
+    return "; ".join(errors)
+
+
+def _git_path_line(path, prefix=b""):
+    """Read one Git metadata path, removing only its final line terminator."""
+    try:
+        raw = open(path, "rb").read()
+    except OSError:
+        return None
+    if not raw.startswith(prefix):
+        return None
+    value = raw[len(prefix):]
+    if not value.endswith(b"\n") or b"\0" in value:
+        return None
+    value = value[:-1]
+    if value.endswith(b"\r"):
+        value = value[:-1]
+    return os.fsdecode(value)
+
+
+def _gitdir_from_marker(path, marker):
+    if os.path.isdir(marker):
+        return os.path.realpath(marker)
+    if not os.path.isfile(marker):
+        return None
+    pointer = _git_path_line(marker, b"gitdir: ")
+    if pointer is None:
+        return None
+    return os.path.realpath(
+        pointer if os.path.isabs(pointer) else os.path.join(path, pointer))
+
+
+def _git_common_dir(admin):
+    pointer = _git_path_line(os.path.join(admin, "commondir"))
+    if pointer is None:
+        return admin
+    return os.path.realpath(
+        pointer if os.path.isabs(pointer) else os.path.join(admin, pointer))
+
+
+def _indexed_gitlink(path, owner_root, runner):
+    if owner_root is None:
+        return False
+    relative = os.path.relpath(path, owner_root).replace(os.sep, "/")
+    if relative == ".." or relative.startswith("../"):
+        return False
+    staged = runner(
+        ["git", "-C", owner_root, "ls-files", "--stage", "-z", "--", relative],
+        capture_output=True, text=False)
+    if staged.returncode != 0:
+        return False
+    for record in bytes(staged.stdout).split(b"\0"):
+        metadata, separator, recorded_path = record.partition(b"\t")
+        if (separator and metadata.startswith(b"160000 ")
+                and recorded_path.decode("utf-8", "surrogateescape") == relative):
+            return True
+    return False
+
+
+def _registered_linked_worktree(path, marker):
+    """Prove a linked worktree from Git's reciprocal registration metadata."""
+    admin = _gitdir_from_marker(path, marker)
+    if admin is None:
+        return False
+    common_pointer = _git_path_line(os.path.join(admin, "commondir"))
+    if common_pointer is None:
+        return False
+    common = _git_common_dir(admin)
+    if os.path.dirname(admin) != os.path.realpath(os.path.join(common, "worktrees")):
+        return False
+    backlink = _git_path_line(os.path.join(admin, "gitdir"))
+    if backlink is None:
+        return False
+    backlink = os.path.realpath(
+        backlink if os.path.isabs(backlink) else os.path.join(admin, backlink))
+    return backlink == os.path.realpath(marker)
+
+
+def _bound_separate_gitdir(path, marker, runner):
+    """Accept an external gitdir only when its own config binds this worktree."""
+    admin = _gitdir_from_marker(path, marker)
+    if admin is None or not os.path.isdir(admin):
+        return False
+    # A linked-worktree admin is owned by its reciprocal registration. It cannot
+    # become an independent separate gitdir merely because another marker points at it.
+    if (os.path.lexists(os.path.join(admin, "commondir"))
+            or os.path.lexists(os.path.join(admin, "gitdir"))):
+        return False
+    configured = runner(
+        ["git", "--git-dir", admin, "config", "--local", "--path", "--null",
+         "--get-all", "core.worktree"], capture_output=True, text=False)
+    raw = bytes(configured.stdout)
+    if configured.returncode != 0 or not raw.endswith(b"\0") or raw.count(b"\0") != 1:
+        return False
+    worktree = os.fsdecode(raw[:-1])
+    if not os.path.isabs(worktree):
+        worktree = os.path.join(admin, worktree)
+    return os.path.realpath(worktree) == os.path.realpath(path)
+
+
+def _is_git_worktree_root(path, runner, owner_root=None):
+    marker = os.path.join(path, ".git")
+    if not os.path.lexists(marker) or os.path.islink(marker):
+        return False
+    done = runner(
+        ["git", "-C", path, "rev-parse", "--show-prefix"],
+        capture_output=True, text=False)
+    if done.returncode != 0 or bytes(done.stdout) not in (b"\n", b"\r\n"):
+        return False
+    if os.path.isdir(marker):
+        return True
+    if not os.path.isfile(marker):
+        return False
+    return (_indexed_gitlink(path, owner_root, runner)
+            or _registered_linked_worktree(path, marker)
+            or _bound_separate_gitdir(path, marker, runner))
+
+
+def _below_nested_git_boundary(root, relative, runner):
+    parts = relative.replace(os.sep, "/").split("/")[:-1]
+    current = root
+    for part in parts:
+        current = os.path.join(current, part)
+        if _is_git_worktree_root(current, runner, root):
+            return True
+    return False
+
+
+def _walk_owned_files(root, start, runner):
+    """Walk one owned directory, pruning only registered nested Git worktrees."""
+    retained, pruned = [], 0
+    for dirpath, dirs, files in os.walk(start, followlinks=False):
+        kept = []
+        for directory in sorted(dirs):
+            path = os.path.join(dirpath, directory)
+            relative = os.path.relpath(path, root)
+            if directory == ".git":
+                continue
+            if os.path.islink(path):
+                retained.append(relative)
+            elif _is_git_worktree_root(path, runner, root):
+                pruned += 1
+            else:
+                kept.append(directory)
+        dirs[:] = kept
+        for filename in sorted(files):
+            path = os.path.join(dirpath, filename)
+            if os.path.isfile(path) or os.path.islink(path):
+                retained.append(os.path.relpath(path, root))
+    return retained, pruned
+
+
+def _expand_git_inventory_group(root, relatives, runner):
+    """Expand Git-collapsed directories unless a registered worktree owns them."""
+    retained, pruned = [], 0
+    for relative in dict.fromkeys(relatives):
+        path = os.path.join(root, relative)
+        if _below_nested_git_boundary(root, relative, runner):
+            pruned += 1
+            continue
+        if os.path.isdir(path) and not os.path.islink(path):
+            if _is_git_worktree_root(path, runner, root):
+                pruned += 1
+                continue
+            walked, nested_pruned = _walk_owned_files(root, path, runner)
+            retained.extend(walked)
+            pruned += nested_pruned
+        elif os.path.isfile(path) or os.path.islink(path):
+            retained.append(relative)
+    return list(dict.fromkeys(retained)), pruned
+
+
+def _outer_indexed_live_paths(root, relatives, runner):
+    """Retain indexed files; validate or walk indexed directory entries."""
+    retained, pruned = [], 0
+    for relative in dict.fromkeys(relatives):
+        path = os.path.join(root, relative)
+        if os.path.isfile(path) or os.path.islink(path):
+            retained.append(relative)
+        elif os.path.isdir(path):
+            if _is_git_worktree_root(path, runner, root):
+                pruned += 1
+            else:
+                walked, nested_pruned = _walk_owned_files(root, path, runner)
+                retained.extend(walked)
+                pruned += nested_pruned
+    return list(dict.fromkeys(retained)), pruned
+
+
+def git_owned_live_paths(root, runner=None):
+    """Inventory committed and authored-untracked files, pruning nested Git ownership."""
+    runner = subprocess.run if runner is None else runner
+    groups = []
+    failure = ""
+    queries = (
+        ("--cached",),
+        ("--others", "--exclude-standard"),
+        ("--others", "--ignored", "--exclude-standard", "--",
+         ":(icase,glob)**/agents.md", ":(icase,glob)**/claude.md",
+         ":(icase,glob)**/gemini.md"),
+    )
+    for args in queries:
+        done = runner(
+            ["git", "-C", root, "ls-files", "-z", *args],
+            capture_output=True, text=False)
+        if done.returncode != 0:
+            groups = []
+            failure = bytes(done.stderr).decode("utf-8", "replace").strip()
+            break
+        groups.append([
+            item.decode("utf-8", "surrogateescape")
+            for item in bytes(done.stdout).split(b"\0") if item
+        ])
+    surface = "git"
+    if failure and os.path.lexists(os.path.join(root, ".git")):
+        return {
+            "surface": surface,
+            "tracked": 0,
+            "untracked": 0,
+            "pruned": 0,
+            "paths": (),
+            "error": failure or "git ls-files failed",
+        }
+    if failure:
+        surface = "filesystem"
+        walked, pruned = _walk_owned_files(root, root, runner)
+        groups = [walked, [], []]
+    else:
+        pruned = 0
+    expanded = []
+    for index, group in enumerate(groups):
+        if surface == "git" and index == 0:
+            paths, group_pruned = _outer_indexed_live_paths(root, group, runner)
+            expanded.append(paths)
+            pruned += group_pruned
+            continue
+        paths, group_pruned = _expand_git_inventory_group(root, group, runner)
+        expanded.append(paths)
+        pruned += group_pruned
+    groups = expanded
+    retained = list(dict.fromkeys(groups[0] + groups[1] + groups[2]))
+    return {
+        "surface": surface,
+        "tracked": len(groups[0]),
+        "untracked": len(groups[1]),
+        "ignored_context": len(groups[2]),
+        "pruned": pruned,
+        "paths": tuple(retained),
+        "error": "",
+    }
+
+
 class Run:
     def __init__(self, root, ci):
         self.root, self.ci, self.failures, self.checks = root, ci, [], 0
@@ -785,6 +1114,16 @@ class Run:
                         + (f" e.g. {os.path.relpath(hits[0], self.root)}" if hits else ""))
 
     # ---- C7 ----------------------------------------------------------------
+    def c7_installed_skill_payload(self, source_root=None, installed_root=None):
+        source_root = source_root or os.path.join(self.root, "skills")
+        installed_root = installed_root or os.path.expanduser("~/.claude/skills")
+        problem = installed_skill_payload_error(source_root, installed_root)
+        self.result(
+            "C7", not problem,
+            "[local] complete installed skill payload matches reviewed source"
+            + (f": {problem}" if problem else ""),
+        )
+
     def c7_anchors(self):
         for skill in ROUTING_SKILLS:
             p = os.path.join(self.root, "skills", skill)
@@ -867,33 +1206,15 @@ class Run:
                                 "--verify-harness"], capture_output=True)
             self.result("C7", v.returncode == 0,
                         f"[local] askq --verify-harness: exit {v.returncode}")
-            # A rule reviewed in this repository governs nothing until the installed copy
-            # carries it. `~/.claude` is the live installation and this tree is only a
-            # synchronization source, so an agent loads the installed bytes: a doctrine
-            # changed here and not there is enforced against a copy nobody executes. That
-            # is not hypothetical -- the handoff rule was rewritten here while every agent
-            # went on following the retired one, which no gate could see because CI has no
-            # `~/.claude` to compare against. Local-only for that same reason.
-            installed_root = os.path.expanduser("~/.claude/skills")
-            if os.path.isdir(installed_root):
-                drifted = []
-                for name in sorted(os.listdir(os.path.join(self.root, "skills"))):
-                    source = os.path.join(self.root, "skills", name, "SKILL.md")
-                    installed = os.path.join(installed_root, name, "SKILL.md")
-                    if not os.path.isfile(source) or not os.path.isfile(installed):
-                        continue
-                    with open(source, "rb") as fh:
-                        source_bytes = fh.read()
-                    with open(installed, "rb") as fh:
-                        installed_bytes = fh.read()
-                    if source_bytes != installed_bytes:
-                        drifted.append(name)
-                self.result("C7", not drifted,
-                            f"[local] installed skills match their reviewed source "
-                            f"(drifted: {drifted or 'none'})")
+            # The repository owns every payload file below its skill directories, while
+            # unrelated top-level installed skills remain outside this comparison. Missing
+            # roots, manifests, references, evals, scripts, stale files, symlinks, byte
+            # drift, and executable-bit drift all fail. CI proves the helper's red arms;
+            # only local mode claims to inspect the live installation.
+            self.c7_installed_skill_payload()
 
     # ---- C8 ----------------------------------------------------------------
-    def c8_reserved_basenames(self):
+    def c8_reserved_basenames(self, runner=None):
         """A reserved context basename anywhere but the repo root is auto-loaded instructions.
 
         The exclusion is the `.git` directory itself, matched as a path component. A
@@ -901,36 +1222,26 @@ class Run:
         identical bytes under docs/ failed — so the one directory a reviewer is least
         likely to read was the one place the guard could not see.
         """
-        # Tracked files only. A directory walk also descends into nested worktrees and any
-        # other untracked checkout living inside the tree, whose reserved basenames are
-        # another branch's bytes rather than this commit's claim -- so the check went red
-        # locally and stayed green in CI, where no such directory exists. A verdict that
-        # depends on which untracked directories happen to be present is not a verdict.
-        hits, scanned = [], 0
-        listed = subprocess.run(["git", "-C", self.root, "ls-files", "-z"],
-                                capture_output=True, text=True)
-        if listed.returncode == 0:
-            tracked = [n for n in listed.stdout.split("\0") if n]
-        else:
-            # Planted-defect fixture trees are plain directories, not repositories. Fall
-            # back to the walk there so the fixtures still exercise this logic; the tracked
-            # set is what matters in a real checkout, which is where the nested worktrees
-            # that made this check unreliable actually live.
-            tracked = []
-            for dirpath, dirs, files in os.walk(self.root):
-                dirs[:] = [d for d in dirs if d != ".git"]
-                for f in files:
-                    tracked.append(os.path.relpath(os.path.join(dirpath, f), self.root))
-        for name in tracked:
-            scanned += 1
+        inventory = git_owned_live_paths(self.root, runner=runner)
+        if inventory["error"]:
+            self.result("C8", False,
+                        f"cannot enumerate Git-owned scan set: {inventory['error']}")
+            return
+        hits = []
+        for name in inventory["paths"]:
             if os.path.basename(name).lower() in RESERVED_BASENAMES:
                 if os.path.dirname(name):
                     hits.append(name)
+        scanned = len(inventory["paths"])
         if not scanned:
             self.result("C8", False, "zero files in scan set")
             return
         self.result("C8", not hits,
-                    f"reserved basenames outside root over {scanned} files: {hits or 'none'}")
+                    f"reserved basenames outside root over {scanned} "
+                    f"{inventory['surface']} files "
+                    f"(tracked={inventory['tracked']} untracked={inventory['untracked']} "
+                    f"ignored-context={inventory['ignored_context']} "
+                    f"nested-boundary-pruned={inventory['pruned']}): {hits or 'none'}")
 
     # ---- C9 ----------------------------------------------------------------
     def c9_codex_package(self):
@@ -1797,6 +2108,91 @@ def selftest():
                    lambda: any(c == "C6" and "ph-lint" in d for c, d in r3_root.failures))
         os.remove(os.path.join(td, "statusline.sh"))
 
+        # C7 owns every file below each repository skill directory. The installed root may
+        # contain unrelated top-level skills, but no reviewed file may disappear, drift, or
+        # gain a stale installed sibling without making the local comparison red.
+        skill_fixture = os.path.join(td, "skill-payload")
+        source_skills = os.path.join(skill_fixture, "source")
+        installed_skills = os.path.join(skill_fixture, "installed")
+
+        def reset_skill_payload():
+            shutil.rmtree(skill_fixture, ignore_errors=True)
+            for root in (source_skills, installed_skills):
+                os.makedirs(os.path.join(root, "alpha", "references"))
+                open(os.path.join(root, "alpha", "SKILL.md"), "w").write("# alpha\n")
+                open(os.path.join(root, "alpha", "references", "rule.md"), "w").write(
+                    "rule\n")
+
+        reset_skill_payload()
+        expect_red("C7 full-payload control accepts an exact installed skill tree",
+                   lambda: installed_skill_payload_error(
+                       source_skills, installed_skills) == "")
+        empty_source = os.path.join(skill_fixture, "empty-source")
+        os.makedirs(empty_source)
+        expect_red("C7 rejects zero source-owned skill directories",
+                   lambda: "zero source-owned" in installed_skill_payload_error(
+                       empty_source, installed_skills))
+        expect_red("C7 rejects an absent installed skill root",
+                   lambda: "skill root is absent" in installed_skill_payload_error(
+                       source_skills, os.path.join(skill_fixture, "absent")))
+
+        reset_skill_payload()
+        os.symlink("alpha", os.path.join(source_skills, "source-alias"))
+        expect_red("C7 rejects a symlinked source skill entry",
+                   lambda: "source skill entry is symlinked" in
+                   installed_skill_payload_error(source_skills, installed_skills))
+        reset_skill_payload()
+        os.remove(os.path.join(source_skills, "alpha", "SKILL.md"))
+        expect_red("C7 rejects a source skill without SKILL.md",
+                   lambda: "alpha: SKILL.md is absent" in installed_skill_payload_error(
+                       source_skills, installed_skills))
+        reset_skill_payload()
+        os.remove(os.path.join(installed_skills, "alpha", "SKILL.md"))
+        expect_red("C7 rejects an installed skill without SKILL.md",
+                   lambda: "alpha: SKILL.md is absent" in installed_skill_payload_error(
+                       source_skills, installed_skills))
+        reset_skill_payload()
+        os.remove(os.path.join(installed_skills, "alpha", "references", "rule.md"))
+        expect_red("C7 rejects a missing installed support file",
+                   lambda: "missing payload" in installed_skill_payload_error(
+                       source_skills, installed_skills))
+        reset_skill_payload()
+        open(os.path.join(installed_skills, "alpha", "stale.md"), "w").write("stale\n")
+        expect_red("C7 rejects a stale file inside a managed installed skill",
+                   lambda: "stale payload" in installed_skill_payload_error(
+                       source_skills, installed_skills))
+        reset_skill_payload()
+        open(os.path.join(installed_skills, "alpha", "references", "rule.md"), "w").write(
+            "different\n")
+        expect_red("C7 rejects support-file byte drift",
+                   lambda: "drifted payload" in installed_skill_payload_error(
+                       source_skills, installed_skills))
+        reset_skill_payload()
+        os.chmod(os.path.join(installed_skills, "alpha", "SKILL.md"), 0o755)
+        expect_red("C7 rejects executable-class drift",
+                   lambda: "drifted payload" in installed_skill_payload_error(
+                       source_skills, installed_skills))
+        reset_skill_payload()
+        os.makedirs(os.path.join(installed_skills, "unmanaged"))
+        open(os.path.join(installed_skills, "unmanaged", "SKILL.md"), "w").write(
+            "# unmanaged\n")
+        expect_red("C7 ignores unrelated top-level installed skills",
+                   lambda: installed_skill_payload_error(
+                       source_skills, installed_skills) == "")
+        reset_skill_payload()
+        os.symlink("rule.md", os.path.join(
+            installed_skills, "alpha", "references", "alias.md"))
+        expect_red("C7 rejects symlinked payload",
+                   lambda: "non-regular payload" in installed_skill_payload_error(
+                       source_skills, installed_skills))
+        reset_skill_payload()
+        os.remove(os.path.join(installed_skills, "alpha", "references", "rule.md"))
+        c7_payload_run = Run(td, ci=False)
+        c7_payload_run.c7_installed_skill_payload(source_skills, installed_skills)
+        expect_red("C7 production call adopts the full-payload failure",
+                   lambda: any(c == "C7" and "missing payload" in d
+                               for c, d in c7_payload_run.failures))
+
         r4 = Run(td, ci=True)
         r4.c8_reserved_basenames()
         expect_red("C8 goes red on nested claude.md",
@@ -1818,6 +2214,483 @@ def selftest():
         expect_red("C8 goes red on a zero-file scan",
                    lambda: any(c == "C8" and "zero files" in d
                                for c, d in c8_empty_run.failures))
+
+        live_repo = os.path.join(td, "live-context-repo")
+        os.makedirs(live_repo)
+        subprocess.run(["git", "init", "--quiet", live_repo], check=True)
+        open(os.path.join(live_repo, "README.md"), "w").write("root\n")
+        subprocess.run(["git", "-C", live_repo, "add", "README.md"], check=True)
+        subprocess.run(
+            ["git", "-C", live_repo, "-c", "user.name=fixture", "-c",
+             "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "fixture"],
+            check=True)
+        os.makedirs(os.path.join(live_repo, "docs"))
+        open(os.path.join(live_repo, "docs", "AGENTS.md"), "w").write("untracked\n")
+        live_run = Run(live_repo, ci=True)
+        live_run.c8_reserved_basenames()
+        expect_red("C8 Git mode catches an authored untracked nested context file",
+                   lambda: any(c == "C8" and "docs/AGENTS.md" in d
+                               for c, d in live_run.failures))
+
+        def failed_git_inventory(_args, **_kwargs):
+            return subprocess.CompletedProcess(_args, 1, stdout=b"", stderr=b"planted")
+
+        failed_inventory_run = Run(live_repo, ci=True)
+        failed_inventory_run.c8_reserved_basenames(runner=failed_git_inventory)
+        expect_red("C8 fails closed when Git-owned scan enumeration fails",
+                   lambda: any(c == "C8" and "cannot enumerate" in d
+                               for c, d in failed_inventory_run.failures))
+
+        os.remove(os.path.join(live_repo, "docs", "AGENTS.md"))
+        nested_repo = os.path.join(live_repo, "nested-repo")
+        os.makedirs(nested_repo)
+        subprocess.run(["git", "init", "--quiet", nested_repo], check=True)
+        open(os.path.join(nested_repo, "CLAUDE.md"), "w").write("other owner\n")
+        nested_run = Run(live_repo, ci=True)
+        nested_run.c8_reserved_basenames()
+        expect_red("C8 prunes a nested repository boundary",
+                   lambda: not nested_run.failures)
+
+        def failed_exact_root(args, **kwargs):
+            if (args[:2] == ["git", "-C"]
+                    and os.path.realpath(args[2]) == os.path.realpath(nested_repo)
+                    and args[3:] == ["rev-parse", "--show-prefix"]):
+                return subprocess.CompletedProcess(
+                    args, 1, stdout=b"\n", stderr=b"planted")
+            return subprocess.run(args, **kwargs)
+
+        failed_exact_root_run = Run(live_repo, ci=True)
+        failed_exact_root_run.c8_reserved_basenames(runner=failed_exact_root)
+        expect_red("C8 rejects partial exact-root output from a failed Git command",
+                   lambda: any(c == "C8" and "nested-repo/CLAUDE.md" in d
+                               for c, d in failed_exact_root_run.failures))
+
+        indexed_then_nested = os.path.join(live_repo, "indexed-then-nested")
+        os.makedirs(indexed_then_nested)
+        indexed_context = os.path.join(indexed_then_nested, "AGENTS.md")
+        open(indexed_context, "w").write("outer owner\n")
+        subprocess.run(
+            ["git", "-C", live_repo, "add", "indexed-then-nested/AGENTS.md"],
+            check=True)
+        subprocess.run(["git", "init", "--quiet", indexed_then_nested], check=True)
+        indexed_then_nested_run = Run(live_repo, ci=True)
+        indexed_then_nested_run.c8_reserved_basenames()
+        expect_red("C8 retains a live file still owned by the outer Git index",
+                   lambda: any(c == "C8" and "indexed-then-nested/AGENTS.md" in d
+                               for c, d in indexed_then_nested_run.failures))
+        subprocess.run(
+            ["git", "-C", live_repo, "rm", "--cached", "--quiet", "--force",
+             "indexed-then-nested/AGENTS.md"], check=True)
+        shutil.rmtree(indexed_then_nested)
+
+        fake_boundary = os.path.join(live_repo, "fake-boundary")
+        os.makedirs(fake_boundary)
+        open(os.path.join(fake_boundary, ".git"), "w").write("not a repository\n")
+        open(os.path.join(fake_boundary, "AGENTS.md"), "w").write("still owned here\n")
+        fake_boundary_run = Run(live_repo, ci=True)
+        fake_boundary_run.c8_reserved_basenames()
+        expect_red("C8 does not let a fake .git marker prune authored context",
+                   lambda: any(c == "C8" and "fake-boundary/AGENTS.md" in d
+                               for c, d in fake_boundary_run.failures))
+        shutil.rmtree(fake_boundary)
+
+        invalid_directory = os.path.join(live_repo, "invalid-git-directory")
+        os.makedirs(os.path.join(invalid_directory, ".git"))
+        open(os.path.join(invalid_directory, "AGENTS.md"), "w").write(
+            "still owned here\n")
+        invalid_directory_run = Run(live_repo, ci=True)
+        invalid_directory_run.c8_reserved_basenames()
+        expect_red("C8 does not fall through an invalid .git directory to its owner",
+                   lambda: any(c == "C8" and "invalid-git-directory/AGENTS.md" in d
+                               for c, d in invalid_directory_run.failures))
+        shutil.rmtree(invalid_directory)
+
+        redirected_directory = os.path.join(live_repo, "redirected-git-directory")
+        os.makedirs(redirected_directory)
+        subprocess.run(
+            ["git", "init", "--quiet", "--bare",
+             os.path.join(redirected_directory, ".git")], check=True)
+        subprocess.run(
+            ["git", "--git-dir", os.path.join(redirected_directory, ".git"),
+             "config", "core.bare", "false"], check=True)
+        subprocess.run(
+            ["git", "--git-dir", os.path.join(redirected_directory, ".git"),
+             "config", "core.worktree", live_repo], check=True)
+        open(os.path.join(redirected_directory, "GEMINI.md"), "w").write(
+            "still owned here\n")
+        redirected_directory_run = Run(live_repo, ci=True)
+        redirected_directory_run.c8_reserved_basenames()
+        expect_red("C8 rejects a nested gitdir whose worktree is the owner repository",
+                   lambda: any(c == "C8" and "redirected-git-directory/GEMINI.md" in d
+                               for c, d in redirected_directory_run.failures))
+        shutil.rmtree(redirected_directory)
+
+        forged_boundary = os.path.join(live_repo, "forged-boundary")
+        os.makedirs(forged_boundary)
+        open(os.path.join(forged_boundary, ".git"), "w").write("gitdir: ../.git\n")
+        open(os.path.join(forged_boundary, "AGENTS.md"), "w").write("still owned here\n")
+        forged_boundary_run = Run(live_repo, ci=True)
+        forged_boundary_run.c8_reserved_basenames()
+        expect_red("C8 rejects an unregistered .git pointer into the outer repository",
+                   lambda: any(c == "C8" and "forged-boundary/AGENTS.md" in d
+                               for c, d in forged_boundary_run.failures))
+        shutil.rmtree(forged_boundary)
+
+        linked = os.path.join(live_repo, "linked-worktree")
+        subprocess.run(
+            ["git", "-C", live_repo, "worktree", "add", "--quiet", "--detach",
+             linked, "HEAD"], check=True)
+        open(os.path.join(linked, "GEMINI.md"), "w").write("other owner\n")
+        linked_run = Run(live_repo, ci=True)
+        linked_run.c8_reserved_basenames()
+        expect_red("C8 prunes a registered nested worktree boundary",
+                   lambda: not linked_run.failures)
+
+        worktree_list_calls = []
+        def no_worktree_list(args, **kwargs):
+            if args[-4:] == ["worktree", "list", "--porcelain", "-z"]:
+                worktree_list_calls.append(tuple(args))
+                return subprocess.CompletedProcess(
+                    args, 129, stdout=b"", stderr=b"error: unknown switch `z'\n")
+            return subprocess.run(args, **kwargs)
+        linked_portable_run = Run(live_repo, ci=True)
+        linked_portable_run.c8_reserved_basenames(runner=no_worktree_list)
+        expect_red("C8 linked-worktree proof does not require worktree-list -z support",
+                   lambda: not linked_portable_run.failures and not worktree_list_calls)
+        os.remove(os.path.join(linked, "GEMINI.md"))
+
+        linked_trailing = os.path.join(live_repo, "linked-trailing ")
+        subprocess.run(
+            ["git", "-C", live_repo, "worktree", "add", "--quiet", "--detach",
+             linked_trailing, "HEAD"], check=True)
+        open(os.path.join(linked_trailing, "AGENTS.md"), "w").write("other owner\n")
+        linked_trailing_run = Run(live_repo, ci=True)
+        linked_trailing_run.c8_reserved_basenames()
+        expect_red("C8 preserves trailing spaces in registered-worktree paths",
+                   lambda: not linked_trailing_run.failures)
+        os.remove(os.path.join(linked_trailing, "AGENTS.md"))
+
+        linked_newline = os.path.join(live_repo, "linked-newline\n")
+        subprocess.run(
+            ["git", "-C", live_repo, "worktree", "add", "--quiet", "--detach",
+             linked_newline, "HEAD"], check=True)
+        open(os.path.join(linked_newline, "GEMINI.md"), "w").write("other owner\n")
+        linked_newline_run = Run(live_repo, ci=True)
+        linked_newline_run.c8_reserved_basenames()
+        expect_red("C8 preserves trailing newlines in registered-worktree paths",
+                   lambda: not linked_newline_run.failures)
+        os.remove(os.path.join(linked_newline, "GEMINI.md"))
+
+        linked_marker = os.path.join(linked, ".git")
+        linked_admin = _gitdir_from_marker(linked, linked_marker)
+        linked_backlink = os.path.join(linked_admin, "gitdir")
+        linked_backlink_bytes = open(linked_backlink, "rb").read()
+        os.remove(linked_backlink)
+        open(os.path.join(linked, "AGENTS.md"), "w").write("still owned here\n")
+        missing_backlink_run = Run(live_repo, ci=True)
+        missing_backlink_run.c8_reserved_basenames()
+        expect_red("C8 rejects linked metadata without its reciprocal backlink",
+                   lambda: any(c == "C8" and "linked-worktree/AGENTS.md" in d
+                               for c, d in missing_backlink_run.failures))
+        open(linked_backlink, "wb").write(linked_backlink_bytes)
+        os.remove(os.path.join(linked, "AGENTS.md"))
+
+        linked_metadata = (
+            linked_marker,
+            os.path.join(linked_admin, "commondir"),
+            linked_backlink,
+        )
+        linked_metadata_bytes = {
+            path: open(path, "rb").read() for path in linked_metadata
+        }
+        for path, data in linked_metadata_bytes.items():
+            open(path, "wb").write(data[:-1] + b"\r\n")
+        open(os.path.join(linked, "AGENTS.md"), "w").write("other owner\n")
+        crlf_linked_run = Run(live_repo, ci=True)
+        crlf_linked_run.c8_reserved_basenames()
+        expect_red("C8 accepts Git-valid CRLF linked-worktree metadata",
+                   lambda: not crlf_linked_run.failures)
+        for path, data in linked_metadata_bytes.items():
+            open(path, "wb").write(data)
+        os.remove(os.path.join(linked, "AGENTS.md"))
+
+        foreign_repo = os.path.join(td, "foreign-linked-owner")
+        subprocess.run(["git", "init", "--quiet", foreign_repo], check=True)
+        subprocess.run(
+            ["git", "-C", foreign_repo, "-c", "user.name=fixture", "-c",
+             "user.email=fixture@example.invalid", "commit", "--quiet",
+             "--allow-empty", "-m", "fixture"], check=True)
+        foreign_linked = os.path.join(td, "foreign-linked-worktree")
+        subprocess.run(
+            ["git", "-C", foreign_repo, "worktree", "add", "--quiet", "--detach",
+             foreign_linked, "HEAD"], check=True)
+        foreign_admin = _gitdir_from_marker(
+            foreign_linked, os.path.join(foreign_linked, ".git"))
+        borrowed_admin = os.path.join(live_repo, "borrowed-linked-admin")
+        os.makedirs(borrowed_admin)
+        open(os.path.join(borrowed_admin, ".git"), "wb").write(
+            b"gitdir: " + os.fsencode(foreign_admin) + b"\n")
+        open(os.path.join(borrowed_admin, "AGENTS.md"), "w").write(
+            "still owned here\n")
+        borrowed_admin_run = Run(live_repo, ci=True)
+        borrowed_admin_run.c8_reserved_basenames()
+        expect_red("C8 rejects a pointer borrowing another worktree's registered admin",
+                   lambda: any(c == "C8" and "borrowed-linked-admin/AGENTS.md" in d
+                               for c, d in borrowed_admin_run.failures))
+        shutil.rmtree(borrowed_admin)
+        subprocess.run(
+            ["git", "-C", foreign_repo, "worktree", "remove", "--force",
+             foreign_linked], check=True)
+        shutil.rmtree(foreign_repo)
+
+        sibling_repo = os.path.join(live_repo, "sibling-ordinary-repository")
+        subprocess.run(["git", "init", "--quiet", sibling_repo], check=True)
+        borrowed_ordinary = os.path.join(live_repo, "borrowed-ordinary-admin")
+        os.makedirs(borrowed_ordinary)
+        open(os.path.join(borrowed_ordinary, ".git"), "wb").write(
+            b"gitdir: " + os.fsencode(os.path.join(sibling_repo, ".git")) + b"\n")
+        open(os.path.join(borrowed_ordinary, "AGENTS.md"), "w").write(
+            "still owned here\n")
+        borrowed_ordinary_run = Run(live_repo, ci=True)
+        borrowed_ordinary_run.c8_reserved_basenames()
+        expect_red("C8 rejects a pointer borrowing an ordinary repository's admin",
+                   lambda: any(c == "C8" and "borrowed-ordinary-admin/AGENTS.md" in d
+                               for c, d in borrowed_ordinary_run.failures))
+        shutil.rmtree(borrowed_ordinary)
+        shutil.rmtree(sibling_repo)
+
+        standalone_owner_admin = os.path.join(td, "standalone-owner-admin")
+        standalone_owner_tree = os.path.join(td, "standalone-owner-tree")
+        subprocess.run(
+            ["git", "init", "--quiet", "--separate-git-dir",
+             standalone_owner_admin, standalone_owner_tree], check=True)
+        borrowed_standalone = os.path.join(live_repo, "borrowed-standalone-admin")
+        os.makedirs(borrowed_standalone)
+        open(os.path.join(borrowed_standalone, ".git"), "wb").write(
+            b"gitdir: " + os.fsencode(standalone_owner_admin) + b"\n")
+        open(os.path.join(borrowed_standalone, "CLAUDE.md"), "w").write(
+            "still owned here\n")
+        borrowed_standalone_run = Run(live_repo, ci=True)
+        borrowed_standalone_run.c8_reserved_basenames()
+        expect_red("C8 rejects a pointer borrowing an unbound standalone gitdir",
+                   lambda: any(c == "C8" and "borrowed-standalone-admin/CLAUDE.md" in d
+                               for c, d in borrowed_standalone_run.failures))
+        shutil.rmtree(borrowed_standalone)
+        shutil.rmtree(standalone_owner_tree)
+        shutil.rmtree(standalone_owner_admin)
+
+        separate_admin = os.path.join(td, "separate-git-admin")
+        separate_tree = os.path.join(live_repo, "separate-git-tree")
+        subprocess.run(
+            ["git", "init", "--quiet", "--separate-git-dir", separate_admin,
+             separate_tree], check=True)
+        open(os.path.join(separate_tree, "CLAUDE.md"), "w").write("other owner\n")
+        unbound_separate_run = Run(live_repo, ci=True)
+        unbound_separate_run.c8_reserved_basenames()
+        expect_red("C8 rejects an external gitdir with no candidate binding",
+                   lambda: any(c == "C8" and "separate-git-tree/CLAUDE.md" in d
+                               for c, d in unbound_separate_run.failures))
+        subprocess.run(
+            ["git", "--git-dir", separate_admin, "config", "core.worktree",
+             separate_tree], check=True)
+        separate_config_queries = []
+        def record_separate_config(args, **kwargs):
+            if (args[:3] == ["git", "--git-dir", os.path.realpath(separate_admin)]
+                    and args[-2:] == ["--get-all", "core.worktree"]):
+                separate_config_queries.append(args)
+            return subprocess.run(args, **kwargs)
+        bound_separate_run = Run(live_repo, ci=True)
+        bound_separate_run.c8_reserved_basenames(runner=record_separate_config)
+        expect_red("C8 prunes an external gitdir explicitly bound to its worktree",
+                   lambda: not bound_separate_run.failures)
+        expect_red("C8 reads only the local admin-owned core.worktree binding",
+                   lambda: {tuple(args) for args in separate_config_queries} == {(
+                       "git", "--git-dir", os.path.realpath(separate_admin), "config",
+                       "--local", "--path", "--null", "--get-all", "core.worktree",
+                   )})
+        other_separate_tree = os.path.join(td, "other-separate-tree")
+        os.makedirs(other_separate_tree)
+        subprocess.run(
+            ["git", "--git-dir", separate_admin, "config", "core.worktree",
+             other_separate_tree], check=True)
+        wrong_binding_run = Run(live_repo, ci=True)
+        wrong_binding_run.c8_reserved_basenames()
+        expect_red("C8 rejects an external gitdir bound to a different worktree",
+                   lambda: any(c == "C8" and "separate-git-tree/CLAUDE.md" in d
+                               for c, d in wrong_binding_run.failures))
+        shutil.rmtree(other_separate_tree)
+        shutil.rmtree(separate_tree)
+        shutil.rmtree(separate_admin)
+
+        symlink_admin = os.path.join(td, "symlink-git-admin")
+        symlink_tree = os.path.join(live_repo, "symlink-git-marker")
+        subprocess.run(
+            ["git", "init", "--quiet", "--separate-git-dir", symlink_admin,
+             symlink_tree], check=True)
+        subprocess.run(
+            ["git", "--git-dir", symlink_admin, "config", "core.worktree",
+             symlink_tree], check=True)
+        os.remove(os.path.join(symlink_tree, ".git"))
+        os.symlink(symlink_admin, os.path.join(symlink_tree, ".git"))
+        open(os.path.join(symlink_tree, "GEMINI.md"), "w").write(
+            "still owned here\n")
+        symlink_marker_run = Run(live_repo, ci=True)
+        symlink_marker_run.c8_reserved_basenames()
+        expect_red("C8 rejects a symlinked .git marker even when Git accepts it",
+                   lambda: any(c == "C8" and "symlink-git-marker/GEMINI.md" in d
+                               for c, d in symlink_marker_run.failures))
+        shutil.rmtree(symlink_tree)
+        shutil.rmtree(symlink_admin)
+
+        wrong_parent_tree = os.path.join(live_repo, "wrong-admin-parent")
+        subprocess.run(
+            ["git", "-C", live_repo, "worktree", "add", "--quiet", "--detach",
+             wrong_parent_tree, "HEAD"], check=True)
+        wrong_parent_marker = os.path.join(wrong_parent_tree, ".git")
+        wrong_parent_admin = _gitdir_from_marker(
+            wrong_parent_tree, wrong_parent_marker)
+        relocated_admin = os.path.join(live_repo, ".git", "relocated-admin")
+        shutil.move(wrong_parent_admin, relocated_admin)
+        open(wrong_parent_marker, "wb").write(
+            b"gitdir: " + os.fsencode(relocated_admin) + b"\n")
+        open(os.path.join(relocated_admin, "commondir"), "wb").write(b"..\n")
+        open(os.path.join(wrong_parent_tree, "AGENTS.md"), "w").write(
+            "still owned here\n")
+        wrong_parent_run = Run(live_repo, ci=True)
+        wrong_parent_run.c8_reserved_basenames()
+        expect_red("C8 rejects linked metadata outside the common worktrees directory",
+                   lambda: any(c == "C8" and "wrong-admin-parent/AGENTS.md" in d
+                               for c, d in wrong_parent_run.failures))
+        shutil.rmtree(wrong_parent_tree)
+        shutil.rmtree(relocated_admin)
+
+        stale_backlink_tree = os.path.join(live_repo, "stale-backlink")
+        subprocess.run(
+            ["git", "-C", live_repo, "worktree", "add", "--quiet", "--detach",
+             stale_backlink_tree, "HEAD"], check=True)
+        stale_backlink_marker = os.path.join(stale_backlink_tree, ".git")
+        stale_backlink_admin = _gitdir_from_marker(
+            stale_backlink_tree, stale_backlink_marker)
+        open(os.path.join(stale_backlink_admin, "gitdir"), "wb").write(
+            os.fsencode(os.path.join(live_repo, "missing", ".git")) + b"\n")
+        open(os.path.join(stale_backlink_tree, "CLAUDE.md"), "w").write(
+            "still owned here\n")
+        stale_backlink_run = Run(live_repo, ci=True)
+        stale_backlink_run.c8_reserved_basenames()
+        expect_red("C8 rejects linked metadata whose reciprocal backlink is stale",
+                   lambda: any(c == "C8" and "stale-backlink/CLAUDE.md" in d
+                               for c, d in stale_backlink_run.failures))
+        shutil.rmtree(stale_backlink_tree)
+        shutil.rmtree(stale_backlink_admin)
+
+        unterminated_tree = os.path.join(live_repo, "unterminated-marker")
+        subprocess.run(
+            ["git", "-C", live_repo, "worktree", "add", "--quiet", "--detach",
+             unterminated_tree, "HEAD"], check=True)
+        unterminated_marker = os.path.join(unterminated_tree, ".git")
+        unterminated_admin = _gitdir_from_marker(unterminated_tree, unterminated_marker)
+        marker_bytes = open(unterminated_marker, "rb").read()
+        open(unterminated_marker, "wb").write(marker_bytes[:-1])
+        open(os.path.join(unterminated_tree, "GEMINI.md"), "w").write(
+            "still owned here\n")
+        unterminated_run = Run(live_repo, ci=True)
+        unterminated_run.c8_reserved_basenames()
+        expect_red("C8 rejects Git metadata without its required final terminator",
+                   lambda: any(c == "C8" and "unterminated-marker/GEMINI.md" in d
+                               for c, d in unterminated_run.failures))
+        shutil.rmtree(unterminated_tree)
+        shutil.rmtree(unterminated_admin)
+
+        submodule_source = os.path.join(td, "submodule-source")
+        subprocess.run(["git", "init", "--quiet", submodule_source], check=True)
+        subprocess.run(
+            ["git", "-C", submodule_source, "-c", "user.name=fixture", "-c",
+             "user.email=fixture@example.invalid", "commit", "--quiet", "--allow-empty",
+             "-m", "fixture"], check=True)
+        submodule = os.path.join(live_repo, "nested-submodule")
+        subprocess.run(
+            ["git", "-C", live_repo, "-c", "protocol.file.allow=always", "submodule",
+             "add", "--quiet", submodule_source, "nested-submodule"], check=True)
+        submodule_marker = os.path.join(submodule, ".git")
+        submodule_admin = _gitdir_from_marker(submodule, submodule_marker)
+        subprocess.run(
+            ["git", "--git-dir", submodule_admin, "config", "--unset", "core.worktree"],
+            check=True)
+        open(os.path.join(submodule, "AGENTS.md"), "w").write("other owner\n")
+        submodule_run = Run(live_repo, ci=True)
+        submodule_run.c8_reserved_basenames()
+        expect_red("C8 prunes an indexed nested submodule boundary",
+                   lambda: not submodule_run.failures)
+
+        submodule_marker_bytes = open(submodule_marker, "rb").read()
+        os.remove(submodule_marker)
+        broken_submodule_run = Run(live_repo, ci=True)
+        broken_submodule_run.c8_reserved_basenames()
+        expect_red("C8 walks an indexed submodule whose live Git boundary is missing",
+                   lambda: any(c == "C8" and "nested-submodule/AGENTS.md" in d
+                               for c, d in broken_submodule_run.failures))
+        open(submodule_marker, "wb").write(submodule_marker_bytes)
+
+        ignored = os.path.join(live_repo, "ignored")
+        os.makedirs(ignored)
+        open(os.path.join(live_repo, ".gitignore"), "w").write("ignored/\n")
+        open(os.path.join(ignored, "AGENTS.md"), "w").write("ignored but live\n")
+        ignored_run = Run(live_repo, ci=True)
+        ignored_run.c8_reserved_basenames()
+        expect_red("C8 separately reaches an ignored reserved context basename",
+                   lambda: any(c == "C8" and "ignored/AGENTS.md" in d
+                               for c, d in ignored_run.failures))
+
+        fallback_root = os.path.join(td, "fallback-live-context")
+        os.makedirs(fallback_root)
+        open(os.path.join(fallback_root, "README.md"), "w").write("root\n")
+        fallback_fake = os.path.join(fallback_root, "invalid-marker")
+        os.makedirs(fallback_fake)
+        open(os.path.join(fallback_fake, ".git"), "w").write("not a repository\n")
+        open(os.path.join(fallback_fake, "AGENTS.md"), "w").write("still owned here\n")
+        fallback_fake_run = Run(fallback_root, ci=True)
+        fallback_fake_run.c8_reserved_basenames()
+        expect_red("C8 filesystem fallback does not trust a fake .git marker",
+                   lambda: any(c == "C8" and "invalid-marker/AGENTS.md" in d
+                               for c, d in fallback_fake_run.failures))
+
+        shutil.rmtree(fallback_fake)
+        fallback_nested = os.path.join(fallback_root, "nested-repository")
+        subprocess.run(["git", "init", "--quiet", fallback_nested], check=True)
+        open(os.path.join(fallback_nested, "CLAUDE.md"), "w").write("other owner\n")
+        fallback_nested_run = Run(fallback_root, ci=True)
+        fallback_nested_run.c8_reserved_basenames()
+        expect_red("C8 filesystem fallback prunes a real nested repository",
+                   lambda: not fallback_nested_run.failures)
+
+        fallback_separate_admin = os.path.join(td, "fallback-separate-admin")
+        fallback_separate_tree = os.path.join(
+            fallback_root, "separate-git-repository")
+        subprocess.run(
+            ["git", "init", "--quiet", "--separate-git-dir",
+             fallback_separate_admin, fallback_separate_tree], check=True)
+        open(os.path.join(fallback_separate_tree, "GEMINI.md"), "w").write(
+            "other owner\n")
+        fallback_unbound_run = Run(fallback_root, ci=True)
+        fallback_unbound_run.c8_reserved_basenames()
+        expect_red("C8 filesystem fallback rejects an unbound external gitdir",
+                   lambda: any(c == "C8" and "separate-git-repository/GEMINI.md" in d
+                               for c, d in fallback_unbound_run.failures))
+        subprocess.run(
+            ["git", "--git-dir", fallback_separate_admin, "config", "core.worktree",
+             fallback_separate_tree], check=True)
+        fallback_bound_run = Run(fallback_root, ci=True)
+        fallback_bound_run.c8_reserved_basenames()
+        expect_red("C8 filesystem fallback prunes an explicitly bound external gitdir",
+                   lambda: not fallback_bound_run.failures)
+
+        os.makedirs(os.path.join(live_repo, ".github"))
+        open(os.path.join(live_repo, ".github", "CLAUDE.md"), "w").write("visible\n")
+        github_live_run = Run(live_repo, ci=True)
+        github_live_run.c8_reserved_basenames()
+        expect_red("C8 Git mode keeps .github visible",
+                   lambda: any(c == "C8" and ".github/CLAUDE.md" in d
+                               for c, d in github_live_run.failures))
         r5 = Run(td, ci=True)
         r5.c9_codex_package()
         expect_red("C9 goes red on absent plugin package",

@@ -262,8 +262,9 @@ workflow alone does not prove either job is a branch-protection required check. 
 provenance scans and headless model scenarios remain manual because they require a selected
 document/transcript or spend API budget.
 
-A separate pull-request-only `mutation-proof` workflow checks out the exact pull-request head and
-runs six deterministic mutation shards in private trees. Its `if: always()` aggregate job rejects
+A separate `mutation-proof` workflow accepts pull requests, pushes to `main`, and manual dispatches,
+checks out the exact accepted head, and runs six deterministic mutation shards in private trees
+every time. Its `if: always()` aggregate job rejects
 missing, duplicated, overlapping, foreign, or stale fragment IDs, independently recomputes each raw
 suite classification, and compares the aggregate with the tracked mutation receipt and summary. The
 offline gate validates those tracked artifacts and the workflow bytes but does not execute the full

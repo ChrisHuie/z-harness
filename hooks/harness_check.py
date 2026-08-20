@@ -115,6 +115,8 @@ SELFTEST_SUITES = [
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
     ("ci-gate", ["tools/ci-gate.py", "--selftest"], 193),
+    ("write-mutation-receipt",
+     ["tools/write-mutation-receipt.py", "--selftest"], 59),
     ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 65),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
     ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 16),
@@ -166,12 +168,14 @@ DEFAULT_SELFTEST_TIMEOUT = 15
 SELFTEST_TIMEOUT_MARGIN = 0.6
 # Non-aggregated, and why. The discovery above matches any file carrying the STRING
 # "--selftest", which cannot tell a script that exposes one from a script that invokes
-# one. Both entries here are the second kind or the recursive case; anything else that
-# lands in this dict is a suite dodging aggregation.
+# one. The remaining entry is the recursive case; anything else that lands in this dict
+# is a suite dodging aggregation. Invoking other suites is not by itself grounds for an
+# exemption, and the mutation generator held one on that reasoning while its own kill
+# scoring went unmeasured: an under-generating plan moves plan_sha256, which the gate
+# recomputes, but a mis-scored kill leaves every shard agreeing and the re-measurement
+# reproducing the same verdict. It is aggregated above over that scoring.
 SELFTEST_EXEMPTIONS = {
     "hooks/harness_check.py": "recursive meta-suite",
-    "tools/write-mutation-receipt.py": "runs the guards' selftests against mutated source "
-                                       "to measure them; exposes no suite of its own",
 }
 PRODUCTION_CHECKS = (
     ("C1", "c1_selftests"),

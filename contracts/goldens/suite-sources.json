@@ -9,7 +9,7 @@
     "codex-cost": "fc46c95da8babd276e705c9578c5857a6563588b588da540ea4222c2c6ca793c",
     "codex_session_start": "b9dbedba94d623304ef97ca1b13a14b2f7b000cc98f35e016448ed4c85030567",
     "git_grep_engine_guard": "2fa728eb17d041bdf1c4f38fc6416f0bbf90df7d122ba3b1da15b1aa4c254bd0",
-    "harness_check": "a72ef844f256d30735c2c3557b521fb8a1c2f4b2ef82d8bef705cfeec28a4207",
+    "harness_check": "140cabedbd9ca3ff8498aa5cf0535c3d9be433d9bdea66bf1f9443390047d993",
     "harness_report": "eec022de9c2f7dec81c612e751dac472f2f8b695029d627784e7e5d840312cbc",
     "portable-conformance": "8eb48510971d0e4f7371cd7a4d16c41850e8e1324a739b70b71d3b85c5823606",
     "pr-delivery-state": "da5293b7134b159c1b6bb91b67c40193550076c908db8e185ddcb9d82011fe6b",
@@ -17,7 +17,7 @@
     "run-skill-evals": "38115603816e7698926a290d401179c3db2f4f5ffa12b49e2bfe04b3f294a508",
     "spawn_preflight_guard": "b2a0fc907102ab997cd10a7bad6c6cf4f3a5cd4cfd18cf4fc2e7807f81db1a54",
     "verify-review-publication": "bc0ec070954e6834945ff0a355d065ba98f6124b572a2a192fc62af4895486dc",
-    "write-mutation-receipt": "b7f3cf9ac51f1461fbd9aa29b032cc228ea7f83ae6c0762079589a12bc6515e1",
+    "write-mutation-receipt": "76427aaa51e13a025d27fc0a023bc88ab6c78cf0c7821404e0352d072e51f769",
     "zsh_rev_modifier_guard": "a056e1f8375467c6c7a6b878aff858c257b44c10faaeb0fa3bb685d073c0fb9c"
   }
 }

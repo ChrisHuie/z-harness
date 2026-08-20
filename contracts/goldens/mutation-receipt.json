@@ -2,7 +2,7 @@
  "schema_version": 3,
  "generated_by": "tools/write-mutation-receipt.py --aggregate",
  "note": "which guard mutations the shipped suites catch; each result's reason is an observation from the host that generated it, not a cross-platform fact",
- "generator_sha256": "b7f3cf9ac51f1461fbd9aa29b032cc228ea7f83ae6c0762079589a12bc6515e1",
+ "generator_sha256": "76427aaa51e13a025d27fc0a023bc88ab6c78cf0c7821404e0352d072e51f769",
  "source_digests": {
   "hooks/guards/git_grep_engine_guard.py": "2fa728eb17d041bdf1c4f38fc6416f0bbf90df7d122ba3b1da15b1aa4c254bd0",
   "hooks/guards/zsh_rev_modifier_guard.py": "a056e1f8375467c6c7a6b878aff858c257b44c10faaeb0fa3bb685d073c0fb9c",

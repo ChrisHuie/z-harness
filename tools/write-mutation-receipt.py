@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import hashlib
 import json
 import os
@@ -1355,8 +1356,367 @@ def aggregate(paths: list[Path], accept: bool) -> int:
     return 0
 
 
+def selftest() -> int:
+    """Prove the scoring and plan-construction logic without measuring anything.
+
+    A generator that UNDER-generates is already caught: fewer descriptors change
+    ``plan_sha256``, which the gate recomputes from source and compares. A generator that
+    mis-scores a kill is caught by nothing -- every shard would agree, the receipt would be
+    internally consistent, and the CI re-measurement recomputes from the receipt's own
+    contents, so it reproduces the same wrong verdict. These checks are that missing
+    control, so they run no suite, spawn no process and open no socket: suite results are
+    hand-built typed dictionaries and ``mutation_plan`` runs against a fixture guard in a
+    temporary directory with the module's collection tables swapped out.
+    """
+    checks = failures = 0
+
+    def record(name: str, ok: bool, detail: str = "") -> None:
+        nonlocal checks, failures
+        checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} {name}")
+        if not ok and detail:
+            print(f"       {detail}")
+        failures += not ok
+
+    def equal(name, actual, expected) -> None:
+        record(name, actual == expected, f"actual={actual!r} expected={expected!r}")
+
+    def raises(name, exception, message, call) -> None:
+        """Assert the exact type AND text: ``!= ""`` lets a neighbouring failure pass."""
+        try:
+            returned = call()
+        except Exception as exc:
+            record(name, type(exc) is exception and str(exc) == message,
+                   f"raised {type(exc).__name__}({str(exc)!r}), expected "
+                   f"{exception.__name__}({message!r})")
+            return
+        record(name, False,
+               f"returned {returned!r} instead of {exception.__name__}({message!r})")
+
+    # ---- result_kill: the decision the sweep cannot grade for itself ------------------
+    baseline = {"status": "completed", "returncode": 0, "checks": 40, "failures": 0}
+
+    def completed(returncode=0, checks=40, failures=0) -> dict:
+        return {"status": "completed", "returncode": returncode,
+                "checks": checks, "failures": failures}
+
+    equal("a green run at the baseline check count survives",
+          result_kill(completed(), baseline), (False, "survived"))
+    equal("a nonzero exit is scored as a suite failure",
+          result_kill(completed(returncode=1), baseline), (True, "suite-failure"))
+    equal("a failed assertion is scored as a suite failure",
+          result_kill(completed(failures=3), baseline), (True, "suite-failure"))
+    equal("a check count that rose with nothing failing is an unasserted kill",
+          result_kill(completed(checks=41), baseline), (True, "exact-check-count"))
+    equal("a check count that fell with nothing failing is an unasserted kill",
+          result_kill(completed(checks=39), baseline), (True, "exact-check-count"))
+    # The distinction the receipt exists to make: a detection must not be filed as
+    # arithmetic when the count also moved, or a real kill reads as a predetermined one.
+    equal("a failed assertion outranks a moved check count",
+          result_kill(completed(failures=1, checks=39), baseline),
+          (True, "suite-failure"))
+    equal("a nonzero exit outranks a moved check count",
+          result_kill(completed(returncode=2, checks=39), baseline),
+          (True, "suite-failure"))
+    timed_out = {"status": "timeout", "timeout_seconds": 240}
+    unreadable = {"status": "invalid-receipt", "returncode": 1,
+                  "receipt_count": 0, "stderr_tail": ""}
+    equal("a timeout the plan declares is a kill carrying that status as its reason",
+          result_kill(timed_out, baseline, ("timeout",)), (True, "timeout"))
+    equal("an unreadable receipt the plan declares is a kill carrying that status",
+          result_kill(unreadable, baseline, ("invalid-receipt",)),
+          (True, "invalid-receipt"))
+    raises("an undeclared timeout is not a measurement",
+           ValueError,
+           "mutation produced an invalid measurement: "
+           "{'status': 'timeout', 'timeout_seconds': 240}",
+           lambda: result_kill(timed_out, baseline))
+    raises("an allowance for one status does not cover a different one",
+           ValueError,
+           "mutation produced an invalid measurement: {'status': 'invalid-receipt', "
+           "'returncode': 1, 'receipt_count': 0, 'stderr_tail': ''}",
+           lambda: result_kill(unreadable, baseline, ("timeout",)))
+    raises("a result carrying no status is not a measurement",
+           ValueError, "mutation produced an invalid measurement: {}",
+           lambda: result_kill({}, baseline))
+    equal("the unasserted reason is the exact wire value the gate reads",
+          UNASSERTED_KILL_REASON, "exact-check-count")
+    equal("the kill-reason vocabulary is closed to these five values",
+          set(KILL_REASONS),
+          {"suite-failure", "exact-check-count", "survived", "invalid-receipt",
+           "timeout"})
+
+    # ---- needs_merged_run: where an arithmetic kill must not stop the measurement -----
+    equal("the merged suite is not rerun against itself when it survives",
+          needs_merged_run(False, "survived", BASH), False)
+    equal("the merged suite is not rerun against itself on an arithmetic kill",
+          needs_merged_run(True, UNASSERTED_KILL_REASON, BASH), False)
+    equal("the merged suite is not rerun against itself on a detection",
+          needs_merged_run(True, "suite-failure", BASH), False)
+    equal("a survivor in the grep guard still runs the merged suite",
+          needs_merged_run(False, "survived", GREP), True)
+    equal("an arithmetic kill in the grep guard still runs the merged suite",
+          needs_merged_run(True, UNASSERTED_KILL_REASON, GREP), True)
+    equal("a detection in the grep guard stops at the owner suite",
+          needs_merged_run(True, "suite-failure", GREP), False)
+    equal("a declared timeout in the grep guard stops at the owner suite",
+          needs_merged_run(True, "timeout", GREP), False)
+    equal("a survivor in the zsh guard still runs the merged suite",
+          needs_merged_run(False, "survived", ZSH), True)
+    equal("an arithmetic kill in the zsh guard still runs the merged suite",
+          needs_merged_run(True, UNASSERTED_KILL_REASON, ZSH), True)
+    equal("a detection in the zsh guard stops at the owner suite",
+          needs_merged_run(True, "suite-failure", ZSH), False)
+
+    # ---- without_element / with_element: the edit must be the declared one ------------
+    fixture = (
+        "HEAD = 0\n"
+        "COLORS = {'red', 'green', 'blue'}\n"
+        "WRAPPED = frozenset({'keep', 'drop'})\n"
+        "CHARS = 'abc'\n"
+        "TABLE = {'alpha': 1, 'beta': 2}\n"
+        "ONLY = {'lonely'}\n"
+        "SOLO_TABLE = {'lonely': 9}\n"
+        "BASE = {'x'}\n"
+        "UNION = BASE | {'y'}\n"
+        "OPAQUE = BASE | UNRESOLVED\n"
+        "GUARDS = [('first', 0), ('second', 1)]\n"
+        "TAIL = 0\n"
+    )
+    assignments = (
+        "COLORS = {'red', 'green', 'blue'}",
+        "WRAPPED = frozenset({'keep', 'drop'})",
+        "CHARS = 'abc'",
+        "TABLE = {'alpha': 1, 'beta': 2}",
+        "ONLY = {'lonely'}",
+        "SOLO_TABLE = {'lonely': 9}",
+        "UNION = BASE | {'y'}",
+        "GUARDS = [('first', 0), ('second', 1)]",
+    )
+
+    def edited(old: str, new: str) -> str:
+        """Build the expected whole file by literal substitution.
+
+        Deliberately NOT the offset arithmetic production uses: an expected value
+        re-derived from the expression under test asserts only that it is consistent
+        with itself. Rebuilding the whole file also pins that no other line moved.
+        """
+        return fixture.replace(old + "\n", new + "\n", 1)
+
+    record("each fixture assignment occurs once, so the expected edit is unambiguous",
+           all(fixture.count(line + "\n") == 1 for line in assignments))
+    equal("removing a set member rewrites only that assignment",
+          without_element(fixture, "COLORS", "set", "green"),
+          edited("COLORS = {'red', 'green', 'blue'}", "COLORS = {'red', 'blue'}"))
+    equal("removing a member keeps the collection's constructor",
+          without_element(fixture, "WRAPPED", "set", "drop"),
+          edited("WRAPPED = frozenset({'keep', 'drop'})",
+                 "WRAPPED = frozenset({'keep'})"))
+    equal("removing a charset member shortens the literal string",
+          without_element(fixture, "CHARS", "charset", "b"),
+          edited("CHARS = 'abc'", "CHARS = 'ac'"))
+    equal("removing a dict key drops its value with it",
+          without_element(fixture, "TABLE", "dict", "alpha"),
+          edited("TABLE = {'alpha': 1, 'beta': 2}", "TABLE = {'beta': 2}"))
+    equal("emptying a set writes a constructor call, not empty-dict syntax",
+          without_element(fixture, "ONLY", "set", "lonely"),
+          edited("ONLY = {'lonely'}", "ONLY = set()"))
+    equal("emptying a dict writes empty-dict syntax",
+          without_element(fixture, "SOLO_TABLE", "dict", "lonely"),
+          edited("SOLO_TABLE = {'lonely': 9}", "SOLO_TABLE = {}"))
+    equal("a computed set is flattened before the member is removed",
+          without_element(fixture, "UNION", "computed-set", "x"),
+          edited("UNION = BASE | {'y'}", "UNION = {'y'}"))
+    equal("removing a dispatch entry drops its whole (label, predicate) pair",
+          without_element(fixture, "GUARDS", "dispatch", "first"),
+          edited("GUARDS = [('first', 0), ('second', 1)]", "GUARDS = [('second', 1)]"))
+    raises("removing from an absent collection is a lookup failure",
+           LookupError, "MISSING",
+           lambda: without_element(fixture, "MISSING", "set", "x"))
+    raises("an unresolvable computed collection is refused, not silently skipped",
+           ValueError, "cannot resolve computed collection OPAQUE",
+           lambda: without_element(fixture, "OPAQUE", "computed-set", "x"))
+    equal("adding a set member appends it to that assignment",
+          with_element(fixture, "COLORS", "set", "cyan"),
+          edited("COLORS = {'red', 'green', 'blue'}",
+                 "COLORS = {'red', 'green', 'blue', 'cyan'}"))
+    equal("adding a member keeps the collection's constructor",
+          with_element(fixture, "WRAPPED", "set", "extra"),
+          edited("WRAPPED = frozenset({'keep', 'drop'})",
+                 "WRAPPED = frozenset({'keep', 'drop', 'extra'})"))
+    equal("adding a charset member extends the literal string",
+          with_element(fixture, "CHARS", "charset", "d"),
+          edited("CHARS = 'abc'", "CHARS = 'abcd'"))
+    equal("a computed set is flattened before the member is added",
+          with_element(fixture, "UNION", "computed-set", "z"),
+          edited("UNION = BASE | {'y'}", "UNION = {'x', 'y', 'z'}"))
+    raises("adding a member the set already holds is refused",
+           ValueError, "COLORS already contains 'red'",
+           lambda: with_element(fixture, "COLORS", "set", "red"))
+    raises("adding a character the charset already holds is refused",
+           ValueError, "CHARS already contains 'a'",
+           lambda: with_element(fixture, "CHARS", "charset", "a"))
+    raises("an addition to a dict collection is refused rather than skipped",
+           ValueError, "addition is not modelled for collection kind 'dict'",
+           lambda: with_element(fixture, "TABLE", "dict", "gamma"))
+    raises("an addition to a dispatch collection is refused rather than skipped",
+           ValueError, "addition is not modelled for collection kind 'dispatch'",
+           lambda: with_element(fixture, "GUARDS", "dispatch", "third"))
+    raises("adding to an absent collection is a lookup failure",
+           LookupError, "MISSING",
+           lambda: with_element(fixture, "MISSING", "set", "x"))
+    raises("an unresolvable collection cannot take an addition",
+           ValueError, "cannot resolve collection OPAQUE for addition",
+           lambda: with_element(fixture, "OPAQUE", "computed-set", "z"))
+    # An edit that changes nothing runs the suite against pristine source and is recorded
+    # as coverage debt no assertion could retire, so every modelled kind must move bytes.
+    record("every modelled edit leaves the source changed",
+           all(edit != fixture for edit in (
+               without_element(fixture, "COLORS", "set", "green"),
+               without_element(fixture, "WRAPPED", "set", "drop"),
+               without_element(fixture, "CHARS", "charset", "b"),
+               without_element(fixture, "TABLE", "dict", "alpha"),
+               without_element(fixture, "UNION", "computed-set", "x"),
+               without_element(fixture, "GUARDS", "dispatch", "first"),
+               with_element(fixture, "COLORS", "set", "cyan"),
+               with_element(fixture, "CHARS", "charset", "d"),
+               with_element(fixture, "UNION", "computed-set", "z"))))
+
+    # ---- mutation_plan: enumeration and the declared-anchor tripwire ------------------
+    guard_relative = "guards/fixture_guard.py"
+    guard_source = (
+        '"""fixture guard for the plan selftest"""\n'
+        "OPTS = {'--one', '--two'}\n"
+        "CHARS = 'pq'\n"
+        "ENUMWORD = 'aab'\n"
+        "SKIPPED = {'ignored'}\n"
+        "lower_case = {'not-upper'}\n"
+        "\n"
+        "\n"
+        "def decide(command):\n"
+        "    if command:\n"
+        "        return 'ask', 'fixture'\n"
+        "    return 'allow', ''\n"
+    )
+    fixture_site = {
+        "label": "fixture site", "module": guard_relative,
+        "anchor": "    return 'allow', ''",
+        "replacement": "    return 'deny', 'fixture'",
+        "allowed_statuses": (),
+    }
+    fixture_addition = {
+        "label": "fixture addition", "module": guard_relative, "name": "OPTS",
+        "collection_kind": "set", "element": "--three", "allowed_statuses": (),
+    }
+
+    @contextlib.contextmanager
+    def planning_fixture(**overrides):
+        """Point the plan at a private tree; restore the shipped tables on the way out."""
+        with tempfile.TemporaryDirectory(prefix="z-harness-plan-selftest-") as raw:
+            root = Path(raw)
+            (root / "guards").mkdir()
+            (root / guard_relative).write_text(
+                overrides.get("source", guard_source), encoding="utf-8")
+            patched = {
+                "ROOT": root,
+                "GUARDS": (guard_relative,),
+                "CHARSET_COLLECTIONS": {qname(guard_relative, "CHARS")},
+                "SWEEP_EXCLUSIONS": overrides.get(
+                    "exclusions",
+                    {qname(guard_relative, "SKIPPED"): "declared exclusion"}),
+                "SITE_MUTATIONS": overrides.get("sites", (fixture_site,)),
+                "ADDITION_MUTATIONS": overrides.get("additions", (fixture_addition,)),
+            }
+            restore = {name: globals()[name] for name in patched}
+            globals().update(patched)
+            try:
+                yield
+            finally:
+                globals().update(restore)
+
+    def planning(**overrides):
+        def call():
+            with planning_fixture(**overrides):
+                return mutation_plan()
+        return call
+
+    with planning_fixture():
+        plan, exclusions = mutation_plan()
+
+    equal("the plan is exactly one descriptor per member, site and declared addition",
+          sorted((item["kind"], item.get("name", ""), item.get("element", ""))
+                 for item in plan),
+          [("set-addition", "OPTS", "--three"),
+           ("set-element", "CHARS", "p"),
+           ("set-element", "CHARS", "q"),
+           ("set-element", "OPTS", "--one"),
+           ("set-element", "OPTS", "--two"),
+           ("site", "", "")])
+    equal("a charset is planned character by character",
+          sorted(item["collection_kind"] for item in plan
+                 if item.get("name") == "CHARS"),
+          ["charset", "charset"])
+    equal("a declared exclusion and a structurally rejected constant are both reported",
+          exclusions,
+          {"guards/fixture_guard.py::ENUMWORD":
+              "repeated characters identify an enum word, not a membership charset",
+           "guards/fixture_guard.py::SKIPPED": "declared exclusion"})
+    equal("an element mutation may only crash the way the plan declares",
+          [item["allowed_statuses"] for item in plan
+           if item["kind"] == "set-element"],
+          [["invalid-receipt"], ["invalid-receipt"], ["invalid-receipt"],
+           ["invalid-receipt"]])
+    equal("a site descriptor records both halves of the edit by digest",
+          [(item["module"], item["label"], item["anchor_sha256"],
+            item["replacement_sha256"], item["allowed_statuses"])
+           for item in plan if item["kind"] == "site"],
+          [("guards/fixture_guard.py", "fixture site",
+            "d1a18fa4c21b99dedf52fd32f735e85635b7afddf9b96d132ac4117426f7c6ae",
+            "aecfce5ef61236a70a297f392eab1a1f6ba65ac66dcba3c88522777aa3935439",
+            [])])
+    identities = [item["id"] for item in plan]
+    record("every descriptor carries a distinct 64-hex identity",
+           len(identities) == 6 and len(set(identities)) == 6
+           and all(re.fullmatch(r"[0-9a-f]{64}", item) for item in identities),
+           f"identities={identities!r}")
+    record("the plan is ordered by identity so shard assignment is positional",
+           identities == sorted(identities), f"identities={identities!r}")
+    with planning_fixture():
+        replanned, _exclusions = mutation_plan()
+    equal("re-planning identical sources reproduces identical identities",
+          [item["id"] for item in replanned], identities)
+    raises("a declared anchor that matches nothing stops the plan",
+           ValueError,
+           "site anchor 'fixture site' matched 0 times in guards/fixture_guard.py",
+           planning(sites=({**fixture_site, "anchor": "no such anchor"},)))
+    raises("a declared anchor that matches twice stops the plan",
+           ValueError,
+           "site anchor 'fixture site' matched 2 times in guards/fixture_guard.py",
+           planning(sites=({**fixture_site, "anchor": "    return '"},)))
+    raises("an exclusion naming a collection the scan cannot see stops the plan",
+           ValueError,
+           "stale sweep exclusions: ['guards/fixture_guard.py::NOPE']",
+           planning(exclusions={qname(guard_relative, "NOPE"): "gone"}))
+    raises("an addition against a collection the sweep never enumerates stops the plan",
+           ValueError,
+           "addition 'fixture addition' names guards/fixture_guard.py::ABSENT, which "
+           "the element sweep does not enumerate; a declared addition against an "
+           "invisible collection would never run",
+           planning(additions=({**fixture_addition, "name": "ABSENT"},)))
+    raises("a plan with nothing in it stops rather than reporting a clean sweep",
+           ValueError, "mutation plan has duplicate IDs or is empty",
+           planning(source='"""fixture guard with no guarded collections"""\n',
+                    sites=(), additions=(), exclusions={}))
+
+    print(f"\n  {checks} checks, {failures} failure(s)")
+    print(f"SELFTEST-SUMMARY suite=write-mutation-receipt "
+          f"checks={checks} failures={failures}")
+    return 1 if failures else 0
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--selftest", action="store_true")
     parser.add_argument("--list-plan", action="store_true")
     parser.add_argument("--shard-index", type=int)
     parser.add_argument("--shard-count", type=int)
@@ -1369,6 +1729,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    if args.selftest:
+        return selftest()
     try:
         if args.list_plan:
             plan, exclusions = mutation_plan()

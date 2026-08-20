@@ -91,7 +91,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 133
+SELFTEST_FLOOR = 138
 
 AUTHORING_SKILLS = {"craft-prompt", "craft-skill", "craft-context-file", "review-prompt"}
 BODY_CHAR_CAP = 5000          # chars after frontmatter — the builders' instrument
@@ -2688,6 +2688,122 @@ def selftest():
                                for c, d in borrowed_ordinary_run.failures))
         shutil.rmtree(borrowed_ordinary)
         shutil.rmtree(sibling_repo)
+
+        # `borrowed-ordinary-admin` above carries the same `.git`-file-into-an-ordinary-
+        # repository shape, but nothing records that directory in the owner's index, so
+        # `ls-files --stage` returns no record at all and the index-mode comparison behind
+        # it is never reached. Two conjuncts guard that comparison and each needs its own
+        # tree, because a tree that reaches one leaves the other unasserted.
+        #
+        # First: a stale index TYPE. The owner recorded `sub` as a regular file and the
+        # working tree now holds a directory there, so the pathspec yields a `100644`
+        # record AT the queried path. Only the recorded mode separates that from a
+        # submodule, and reading any mode as a gitlink prunes the directory whole.
+        stale_type_owner = os.path.join(td, "stale-index-type-owner")
+        stale_type_sibling = os.path.join(td, "stale-index-type-sibling")
+        os.makedirs(stale_type_owner)
+        for repository in (stale_type_owner, stale_type_sibling):
+            subprocess.run(["git", "init", "--quiet", repository], check=True)
+        open(os.path.join(stale_type_owner, "README.md"), "w").write("root\n")
+        open(os.path.join(stale_type_owner, "sub"), "w").write("a regular file\n")
+        subprocess.run(
+            ["git", "-C", stale_type_owner, "add", "README.md", "sub"], check=True)
+        subprocess.run(
+            ["git", "-C", stale_type_owner, "-c", "user.name=fixture", "-c",
+             "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "fixture"],
+            check=True)
+        os.remove(os.path.join(stale_type_owner, "sub"))
+        os.makedirs(os.path.join(stale_type_owner, "sub"))
+        open(os.path.join(stale_type_owner, "sub", "CLAUDE.md"), "w").write(
+            "still owned here\n")
+        open(os.path.join(stale_type_owner, "sub", ".git"), "wb").write(
+            b"gitdir: " + os.fsencode(os.path.join(stale_type_sibling, ".git")) + b"\n")
+        stale_type_staged = subprocess.run(
+            ["git", "-C", stale_type_owner, "ls-files", "--stage", "-z", "--", "sub"],
+            capture_output=True).stdout
+        stale_type_run = Run(stale_type_owner, ci=True)
+        stale_type_run.c8_reserved_basenames()
+        # Without this the proof above can degrade into agreement: a Git that stopped
+        # producing the record, or a pathspec that stopped matching, leaves an empty
+        # inventory that no mode comparison ever reads and the tree looks discriminating
+        # while asserting nothing.
+        expect_red(
+            "C8 stale-index-type fixture records that path as a regular file, not a "
+            "gitlink",
+            lambda: stale_type_staged.startswith(b"100644 ")
+            and stale_type_staged.rstrip(b"\0").endswith(b"\tsub"),
+        )
+        expect_red(
+            "C8 reads a stale index type as a regular file, not a submodule boundary",
+            lambda: any(c == "C8" and "sub/CLAUDE.md" in d
+                        for c, d in stale_type_run.failures),
+        )
+
+        # The exit status decides here too. A failed index query can still have written
+        # gitlink-shaped bytes, and parsing them prunes the directory on the word of a
+        # command that reported it had failed.
+        def stale_type_partial_stage(args, **kwargs):
+            if "--stage" in args:
+                return subprocess.CompletedProcess(
+                    args, 1, stdout=b"160000 " + b"0" * 40 + b" 0\tsub\0",
+                    stderr=b"planted")
+            return subprocess.run(args, **kwargs)
+
+        stale_type_partial_run = Run(stale_type_owner, ci=True)
+        stale_type_partial_run.c8_reserved_basenames(runner=stale_type_partial_stage)
+        expect_red(
+            "C8 rejects gitlink-shaped output from a failed index query",
+            lambda: any(c == "C8" and "sub/CLAUDE.md" in d
+                        for c, d in stale_type_partial_run.failures),
+        )
+        shutil.rmtree(stale_type_owner)
+        shutil.rmtree(stale_type_sibling)
+
+        # Second: a gitlink recorded BENEATH the queried directory. The pathspec now
+        # yields a genuine `160000` record, so the mode comparison passes and only the
+        # recorded-path comparison is left. An owner holding one submodule under a
+        # directory does not make that directory somebody else's worktree.
+        gitlink_beneath_owner = os.path.join(td, "gitlink-beneath-owner")
+        gitlink_beneath_sibling = os.path.join(td, "gitlink-beneath-sibling")
+        os.makedirs(gitlink_beneath_owner)
+        for repository in (gitlink_beneath_owner, gitlink_beneath_sibling):
+            subprocess.run(["git", "init", "--quiet", repository], check=True)
+        open(os.path.join(gitlink_beneath_owner, "README.md"), "w").write("root\n")
+        subprocess.run(
+            ["git", "-C", gitlink_beneath_owner, "add", "README.md"], check=True)
+        subprocess.run(
+            ["git", "-C", gitlink_beneath_owner, "-c", "user.name=fixture", "-c",
+             "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "fixture"],
+            check=True)
+        beneath_commit = subprocess.run(
+            ["git", "-C", gitlink_beneath_owner, "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True).stdout.strip()
+        subprocess.run(
+            ["git", "-C", gitlink_beneath_owner, "update-index", "--add", "--cacheinfo",
+             f"160000,{beneath_commit},sub/inner"], check=True)
+        os.makedirs(os.path.join(gitlink_beneath_owner, "sub"))
+        open(os.path.join(gitlink_beneath_owner, "sub", "AGENTS.md"), "w").write(
+            "still owned here\n")
+        open(os.path.join(gitlink_beneath_owner, "sub", ".git"), "wb").write(
+            b"gitdir: " + os.fsencode(
+                os.path.join(gitlink_beneath_sibling, ".git")) + b"\n")
+        beneath_staged = subprocess.run(
+            ["git", "-C", gitlink_beneath_owner, "ls-files", "--stage", "-z",
+             "--", "sub"], capture_output=True).stdout
+        gitlink_beneath_run = Run(gitlink_beneath_owner, ci=True)
+        gitlink_beneath_run.c8_reserved_basenames()
+        expect_red(
+            "C8 gitlink-beneath fixture yields a real gitlink record under that pathspec",
+            lambda: beneath_staged.startswith(b"160000 ")
+            and beneath_staged.rstrip(b"\0").endswith(b"\tsub/inner"),
+        )
+        expect_red(
+            "C8 requires the gitlink record to be the queried path, not one beneath it",
+            lambda: any(c == "C8" and "sub/AGENTS.md" in d
+                        for c, d in gitlink_beneath_run.failures),
+        )
+        shutil.rmtree(gitlink_beneath_owner)
+        shutil.rmtree(gitlink_beneath_sibling)
 
         standalone_owner_admin = os.path.join(td, "standalone-owner-admin")
         standalone_owner_tree = os.path.join(td, "standalone-owner-tree")

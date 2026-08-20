@@ -373,6 +373,11 @@ def selftest() -> int:
         consumer reads, so the assertion is made against that rather than an internal
         return value.
         """
+        if not named:
+            raise AssertionError(
+                "denies() needs the problem text to discriminate: an empty needle matches "
+                "every problem and silently restores the exit-code-only assertion that let "
+                "four head-line cases pass against a build with the head-line rule deleted")
         stream = io.StringIO()
         with contextlib.redirect_stdout(stream):
             observed = call()
@@ -437,6 +442,15 @@ def selftest() -> int:
             return Done(0, json.dumps(payload).encode())
         return run
 
+    # The helper below replaced an exit-code-only assertion at 23 call sites. An empty needle
+    # would restore that defect at every one of them without changing a verdict line.
+    empty_needle_refused = False
+    try:
+        denies(lambda: 1, "")
+    except AssertionError:
+        empty_needle_refused = True
+    expect("an empty problem needle is refused rather than matching everything",
+           empty_needle_refused)
     expect("identical bytes have no difference", _difference(b"a\n b", b"a\n b") == "")
     expect("line-ending drift is named", "line endings" in _difference(b"a\r\n", b"a\n"))
     expect("trailing spaces remain significant", _difference(b"a ", b"a") != "")

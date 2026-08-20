@@ -108,6 +108,41 @@ jobs:
           python3 hooks/harness_check.py --ci
           python3 tools/ci-gate.py
 
+  publication:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: 3.13.14
+      - name: frozen publication still matches the live pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # The offline gate compares the manifest to a literal in the gate's own source.
+          # Both are authored records of the same numbers, so agreement between them says
+          # nothing about the artifact GitHub is serving. This step is the only place the
+          # frozen body and title are read back from the published pull request.
+          # github.sha is the MERGE commit on a pull_request event, not the branch head,
+          # and the tool compares its argument against the head the API reports; passing
+          # the merge sha would fail every run for a reason unrelated to publication.
+          # No backslash continuations: this file is pinned byte-for-byte inside a Python
+          # string literal, where a trailing backslash is a line continuation.
+          MANIFEST="contracts/review/pr-$PR_NUMBER/frozen-publication.json"
+          if [ ! -f "$MANIFEST" ]; then
+            echo "no frozen publication registered for PR $PR_NUMBER at $MANIFEST"
+            exit 0
+          fi
+          python3 tools/verify-review-publication.py pr-snapshot --repo "$GITHUB_REPOSITORY" --pr "$PR_NUMBER" --expected-head "$HEAD_SHA" --manifest "$MANIFEST"
+
   portable-conformance:
     runs-on: ubuntu-24.04
     steps:
@@ -1314,6 +1349,11 @@ def review_path_label(path):
 
 
 def review_include_error(review_root=None, required_inventory=None) -> str:
+    """The problem alone. Callers that report a verdict want review_include_scan."""
+    return review_include_scan(review_root, required_inventory)[0]
+
+
+def review_include_scan(review_root=None, required_inventory=None) -> tuple[str, int, int]:
     """Return any outbound review file whose included block drifted from its source.
 
     Every number this branch published wrong was retyped into a GitHub comment from a
@@ -1331,11 +1371,11 @@ def review_include_error(review_root=None, required_inventory=None) -> str:
         REQUIRED_REVIEW_INCLUDES if required_inventory is None else required_inventory)
     if not root.is_dir():
         return (f"{REVIEW_ROOT.name}/ does not exist, so no outbound review text is gated; "
-                "this check asserts nothing without it")
+                "this check asserts nothing without it", 0, 0)
     documents = sorted(root.rglob("*.md"))
     if not documents:
         return (f"no markdown under {root}, so the review-include check scanned nothing, "
-                "which is not a clean verdict")
+                "which is not a clean verdict", 0, 0)
     problems, blocks, observed_inventory = [], 0, {}
     for document in documents:
         try:
@@ -1385,8 +1425,8 @@ def review_include_error(review_root=None, required_inventory=None) -> str:
     if problems:
         return (f"outbound review text drifted from its sources "
                 f"(scanned {len(documents)} files, {blocks} include blocks under "
-                f"{root}): " + "; ".join(problems[:5]))
-    return ""
+                f"{root}): " + "; ".join(problems[:5]), len(documents), blocks)
+    return "", len(documents), blocks
 
 
 def eval_corpus_distribution_error(counts=None, floors=None) -> str:
@@ -1645,8 +1685,10 @@ def gate(
     print(f"  {'FAIL' if summary_problem else 'PASS'} mutation-summary")
     if summary_problem:
         failures.append(summary_problem)
-    review_problem = review_include_error()
-    print(f"  {'FAIL' if review_problem else 'PASS'} review-includes")
+    review_problem, review_documents, review_blocks = review_include_scan()
+    print(f"  {'FAIL' if review_problem else 'PASS'} review-includes "
+          f"over {review_documents} document(s), {review_blocks} include block(s) "
+          f"under {REVIEW_ROOT.name}/")
     if review_problem:
         failures.append(review_problem)
     distribution_problem = eval_corpus_distribution_error()
@@ -2773,10 +2815,19 @@ def selftest() -> int:
         "the frozen PR publication manifest matches its reviewed snapshot",
         review_publication_manifest_error() == "",
     )
+    # Deriving the wrong digest from the real one keeps the control valid whatever the
+    # real digest becomes. A fixed sentinel silently stops discriminating on the day the
+    # manifest happens to carry it.
+    forged_digest = ("1" if EXPECTED_FROZEN_PUBLICATION["body_sha256"][0] == "0"
+                     else "0") + EXPECTED_FROZEN_PUBLICATION["body_sha256"][1:]
+    expect(
+        "the forged-digest control differs from the digest it must reject",
+        forged_digest != EXPECTED_FROZEN_PUBLICATION["body_sha256"],
+    )
     expect(
         "changing a frozen PR body digest turns the manifest check red",
         review_publication_manifest_error(dict(
-            EXPECTED_FROZEN_PUBLICATION, body_sha256="0" * 64)) != "",
+            EXPECTED_FROZEN_PUBLICATION, body_sha256=forged_digest)) != "",
     )
     expect(
         "removing frozen PR publication metadata turns the manifest check red",
@@ -2897,6 +2948,18 @@ def selftest() -> int:
         expect(
             "an include block byte-identical to its source clears",
             review_doc(f"# outbound\n\n{live}") == "",
+        )
+        # The production verdict prints these two counts, so they are a published claim
+        # and need something that can falsify them.
+        document.write_text(f"# outbound\n\n{live}", encoding="utf-8")
+        expect(
+            "the include scan reports one document and the one block it graded",
+            review_include_scan(review)[1:] == (1, 1),
+        )
+        document.write_text(f"# outbound\n\n{live}\n{live}", encoding="utf-8")
+        expect(
+            "a second include block moves the reported block count",
+            review_include_scan(review)[1:] == (1, 2),
         )
         expect(
             "an included copy that drifted from its source is caught",

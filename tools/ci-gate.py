@@ -1486,6 +1486,15 @@ WORKSPACE_DOCTRINE = {
 # A concrete directory belongs to whichever adapter owns that runtime; naming one here hands
 # the other runtimes a rule they cannot satisfy and quietly makes the policy Claude-only.
 SHARED_POLICY_DOCUMENT = "AGENTS.md"
+# A channel claim that no longer matches the installed CLI is worse than no claim: it sends an
+# implementer to build on something that may not exist. Forbidden in the skill BODY, which is
+# what an agent loads first; references/ must stay free to name the retired spelling in order
+# to explain why it was retired.
+DISPATCH_BODY_DOCUMENT = "skills/agent-dispatch/SKILL.md"
+RETIRED_DISPATCH_CLAIMS = (
+    "append-to-subagent-system-prompt",
+    "append-flag pierces every nesting depth",
+)
 RUNTIME_PATHS_FORBIDDEN_IN_SHARED_POLICY = (
     "~/.claude",
     "~/.codex",
@@ -1773,6 +1782,29 @@ def workspace_doctrine_error(source_texts=None, doctrine=None,
     return "", len(source_texts), hits
 
 
+def retired_dispatch_claim_error(body_text=None, retired=None) -> str:
+    """Reject a retired external-tool claim in the dispatch skill body.
+
+    The body is what an agent loads before acting, so a mechanism named there is taken as
+    available. This one named a subagent system-prompt flag that the installed CLI's help does
+    not list, which is the shape that sends an implementer to build on nothing.
+    """
+    retired = RETIRED_DISPATCH_CLAIMS if retired is None else retired
+    if not retired:
+        return "retired dispatch claim set is empty, so this check asserts nothing"
+    if body_text is None:
+        path = ROOT / DISPATCH_BODY_DOCUMENT
+        if not path.is_file():
+            return f"missing dispatch body {DISPATCH_BODY_DOCUMENT}"
+        body_text = path.read_text(encoding="utf-8")
+    normalized = re.sub(r"\s+", " ", body_text).lower()
+    found = [phrase for phrase in retired if phrase.lower() in normalized]
+    if found:
+        return (f"{DISPATCH_BODY_DOCUMENT} asserts retired external-tool channel(s) {found}; "
+                "ground a channel in the installed CLI or state it as unverified")
+    return ""
+
+
 def review_handoff_policy_error(source_texts=None, review_root=None,
                                 extra_texts=None, required_includes=None) -> str:
     """Require append-only head-specific handoffs and reject the retired mutable artifact."""
@@ -1961,6 +1993,12 @@ def gate(
     print(f"  {'FAIL' if summary_problem else 'PASS'} mutation-summary")
     if summary_problem:
         failures.append(summary_problem)
+    retired_claim_problem = retired_dispatch_claim_error()
+    print(f"  {'FAIL' if retired_claim_problem else 'PASS'} dispatch-channel-claims "
+          f"over {len(RETIRED_DISPATCH_CLAIMS)} retired spelling(s) in "
+          f"{DISPATCH_BODY_DOCUMENT}")
+    if retired_claim_problem:
+        failures.append(retired_claim_problem)
     workspace_problem, workspace_documents, workspace_hits = workspace_doctrine_error()
     print(f"  {'FAIL' if workspace_problem else 'PASS'} worker-workspace-doctrine "
           f"over {workspace_documents} document(s), "
@@ -3272,6 +3310,30 @@ def selftest() -> int:
         eval_corpus_distribution_error(
             counts=dict({k: v for k, v in EVAL_SCENARIO_FLOORS.items()},
                         **{"outbound-drafts": 0, "craft-prompt": 6})) != "",
+    )
+    dispatch_body = (ROOT / DISPATCH_BODY_DOCUMENT).read_text(encoding="utf-8")
+    expect(
+        "the dispatch body asserts no retired external-tool channel",
+        retired_dispatch_claim_error(body_text=dispatch_body) == "",
+    )
+    expect(
+        "restoring the retired channel claim turns the dispatch check red",
+        "retired external-tool channel" in retired_dispatch_claim_error(
+            body_text=dispatch_body + "\nThe append-to-subagent-system-prompt flag works.\n"),
+    )
+    expect(
+        "the retired-claim set is scanned case- and whitespace-insensitively",
+        "retired external-tool channel" in retired_dispatch_claim_error(
+            body_text="The Append-To-Subagent-System-Prompt\nflag works."),
+    )
+    expect(
+        "an empty retired-claim set is a failure, not a clean verdict",
+        retired_dispatch_claim_error(body_text=dispatch_body, retired=()) != "",
+    )
+    expect(
+        "references may name the retired spelling to explain the correction",
+        retired_dispatch_claim_error(
+            body_text="nothing retired here") == "",
     )
     workspace_sources = {
         relative: (ROOT / relative).read_text(encoding="utf-8")

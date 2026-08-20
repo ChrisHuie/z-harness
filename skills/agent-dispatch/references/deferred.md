@@ -55,10 +55,24 @@ is a property, not a path — assign an exclusive directory per worker at spawn,
 prompt, and never read a scratch path you did not assign. Observed: eight concurrent workers, 435
 files at one shared root, one file lost mid-run.
 
+
+**R290 — ground an injection channel in the installed CLI, not in a remembered flag name.**
+R285 previously asserted an append-to-subagent-system-prompt flag that pierces every nesting
+depth. `claude --help` at **2.1.234** lists no such flag: the prompt and agent options are
+`--agent`, `--agents`, `--append-system-prompt`, `--system-prompt`,
+`--exclude-dynamic-system-prompt-sections`, `--prompt-suggestions`, and
+`--forward-subagent-text`, and the last forwards output rather than injecting anything. A
+hidden flag is not excluded, so the claim is unverifiable against the artifact rather than
+proven false — which is the same reason not to build on it. What is verified: a `PreToolUse`
+hook returns a decision and cannot write into the child, `settings.json` `env` is session-wide
+and cannot vary per worker, and `--agents` carries a per-agent-type prompt that is constant
+per type. No channel assigns a distinct directory per worker, so the parent assigns it in the
+worker's prompt. A CLI claim is version-bound; re-verify it after an upgrade.
+
 ## MACHINE rows judged non-dispatch
 
 The MACHINE ruling put the machine facts that are dispatch/environment knowledge into the
-body — R285 (append-flag pierces every nesting depth; hooks see the agent type), R277
+body — R285 (hooks see the agent type), R277
 (crash-forensics signature), R284 (process-group kill). These are not:
 
 **R282 (rank B) — a stale exported env from an earlier container generation desyncs from the

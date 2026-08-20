@@ -472,6 +472,14 @@ def selftest() -> int:
         expect("a published body that retains the terminal line feed verifies",
                verify_comment(repo, pr, comment_id, head, author, body,
                               runner_for(retained)) == 0)
+        # Accepting either terminal form must not relax the interior comparison. Without
+        # this case, a retained-form branch that echoed the published bytes verified clean.
+        retained_but_changed = dict(
+            comment, body="X" + body_bytes.decode()[1:])
+        expect("a retained-line-feed body whose interior changed still fails", denies(
+            lambda: verify_comment(repo, pr, comment_id, head, author, body,
+                                   runner_for(retained_but_changed)),
+            "published body differs"))
         expect("a frozen_at_head that names no commit fails", denies(
             lambda: verify_pr_snapshot(
                 repo, pr, head, manifest, runner_for(commit_rc=1)),

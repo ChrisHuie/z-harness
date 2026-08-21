@@ -1743,16 +1743,30 @@ def review_include_error(review_root=None, required_inventory=None) -> str:
 
 
 def review_include_scan(review_root=None, required_inventory=None) -> tuple[str, int, int]:
-    """Return any outbound review file whose included block drifted from its source.
+    """Return any registered review document whose included block drifted from its source.
 
-    Every number this branch published wrong was retyped into a GitHub comment from a
-    failure list, where no gate could see it. Outbound review text lives under
-    contracts/review/ so it is inside a gate at all, and a block marked as included must be
-    byte-identical to the file it names -- so a generated table cannot go stale in the copy
-    a reviewer actually reads.
+    A block marked as included must be byte-identical to the file it names, so a generated
+    table cannot go stale in a document that quotes it.
 
-    A missing directory and an empty one are failures, not clean verdicts: this check
-    asserts that outbound text is gated, and it cannot assert that over nothing.
+    What this does NOT cover, stated because the docstring previously claimed it did: the
+    text a reviewer actually reads. That rationale was written when outbound review text was
+    drafted as tracked files under this directory. The append-only rule moved it to posted
+    comments, and README.md in this directory says the consequence plainly -- nothing in this
+    repository can see a posted comment or live PR body. A number retyped into a comment is
+    still outside every gate here; `tools/verify-review-publication.py` reads one back after
+    the fact, which is a different mechanism and a different guarantee.
+
+    Two arms, both live. The inventory is closed: an include block in a document that does
+    not declare one fails, so with the required inventory empty an include block is currently
+    forbidden outright rather than merely ungraded. A declared block is then compared byte for
+    byte against the file it names. Measured: registered and identical passes, registered and
+    tampered fails on drift, and unregistered fails on the inventory.
+
+    The verdict prints the document and block counts rather than a bare PASS, so a run that
+    graded no blocks cannot read as coverage of blocks.
+
+    A missing directory and an empty one remain failures rather than clean verdicts: the
+    check asserts over a registered inventory, and it cannot assert that over nothing.
     """
     root = REVIEW_ROOT if review_root is None else Path(review_root)
     enforce_inventory = review_root is None if required_inventory is None else True

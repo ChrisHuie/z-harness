@@ -16,8 +16,10 @@ import sys
 import tempfile
 from typing import Callable, List, Optional, Sequence, Tuple
 
+from repository_ownership import git_toplevel_error, run_git
 
-VERSION = "1.1.0"
+
+VERSION = "1.2.0"
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github/workflows/check.yml"
 MUTATION_WORKFLOW = ROOT / ".github/workflows/mutation-proof.yml"
@@ -52,7 +54,7 @@ EVAL_SKILL_FLOOR = 7
 # 165 here and 178 in harness_check -- and a fake that hardcodes its own number tests the
 # literal rather than the contract.
 SUITE_FLOORS = {
-    "harness_check": 177,
+    "harness_check": 186,
     "render-packages": 192,
     "bash_command_guard": 1366,
     "git_grep_engine_guard": 1149,
@@ -841,6 +843,7 @@ DECISION_WRITER = ROOT / "tools/write-decision-golden.py"
 RETAINED_DECISION_COMMANDS = ROOT / "contracts/goldens/retained-guard-commands.json"
 SUITE_SOURCE_GOLDEN = ROOT / "contracts/goldens/suite-sources.json"
 HARNESS_SOURCE = ROOT / "hooks/harness_check.py"
+REPOSITORY_OWNERSHIP_SOURCE = ROOT / "tools/repository_ownership.py"
 DECISION_CORPUS_FLOOR = 975
 DECISION_WRITER_SHA256 = "8c4180468fc05a88c69fafba3a79f2387f5df2d1aa728def1670f5497a442e9d"
 RETAINED_DECISION_SCHEMA_VERSION = 1
@@ -926,6 +929,25 @@ def harness_source_error(golden_data=None, source_bytes=None) -> str:
         return f"cannot verify harness_check source: {exc}"
     if actual != expected:
         return "hooks/harness_check.py differs from its reviewed suite source digest"
+    return ""
+
+
+def repository_ownership_source_error(golden_data=None, source_bytes=None) -> str:
+    """Bind the ownership authority used by multiple scanners to reviewed bytes."""
+    try:
+        if golden_data is None:
+            golden_data = _json_without_duplicate_keys(SUITE_SOURCE_GOLDEN)
+        suites = golden_data.get("suites") if isinstance(golden_data, dict) else None
+        expected = suites.get("repository-ownership") if isinstance(suites, dict) else None
+        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+            return "suite source registry has no valid repository-ownership digest"
+        current = (REPOSITORY_OWNERSHIP_SOURCE.read_bytes()
+                   if source_bytes is None else source_bytes)
+        actual = hashlib.sha256(current).hexdigest()
+    except (OSError, ValueError) as exc:
+        return f"cannot verify repository-ownership source: {exc}"
+    if actual != expected:
+        return "tools/repository_ownership.py differs from its reviewed suite source digest"
     return ""
 
 
@@ -1592,6 +1614,7 @@ HANDOFF_DOCTRINE = {
     ),
     "contracts/review/README.md": (
         "Head-specific handoffs are append-only external comments",
+        "A later handoff requires one or more repeatable `--predecessor-url` values",
         "Do not keep a mutable tracked file as the current handoff",
         "All published PR narrative is append-only.",
         "The pull-request body and title are frozen after initial publication",
@@ -2053,8 +2076,58 @@ def retired_dispatch_claim_error(body_text=None, retired=None) -> str:
     return ""
 
 
+def tracked_markdown_sources(root=ROOT, runner=None):
+    """Return the exact-root tracked Markdown corpus, or one fail-closed error."""
+    root = Path(root)
+    runner = subprocess.run if runner is None else runner
+    root_problem = git_toplevel_error(str(root), runner)
+    if root_problem:
+        return {}, f"cannot identify tracked-markdown repository: {root_problem}"
+    try:
+        listed = run_git(
+            runner,
+            ["git", "-C", str(root), "ls-files", "-z", "--", "*.md"],
+            capture_output=True,
+        )
+    except OSError as exc:
+        return {}, f"cannot enumerate tracked markdown: {exc}"
+    if listed.returncode != 0:
+        detail = bytes(listed.stderr or b"").decode("utf-8", "replace").strip()
+        return {}, (
+            f"cannot enumerate tracked markdown: git ls-files exited {listed.returncode}"
+            f"{': ' + detail[:200] if detail else ''}"
+        )
+    raw = bytes(listed.stdout or b"")
+    if not raw or not raw.endswith(b"\0"):
+        return {}, "cannot enumerate tracked markdown: empty or unterminated Git inventory"
+    names = [os.fsdecode(item) for item in raw[:-1].split(b"\0") if item]
+    if not names:
+        return {}, "cannot enumerate tracked markdown: zero files"
+    sources = {}
+    physical_root = os.path.realpath(root)
+    for name in names:
+        if os.path.isabs(name) or ".." in Path(name).parts:
+            return {}, f"tracked markdown inventory returned unsafe path {name!r}"
+        path = root / name
+        if path.is_symlink() or not path.is_file():
+            return {}, f"tracked markdown is not a regular owned file: {name}"
+        physical = os.path.realpath(path)
+        try:
+            within = os.path.commonpath((physical_root, physical)) == physical_root
+        except ValueError:
+            within = False
+        if not within:
+            return {}, f"tracked markdown escapes the repository: {name}"
+        try:
+            sources[name] = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            return {}, f"cannot read tracked markdown {name}: {exc}"
+    return sources, ""
+
+
 def review_handoff_policy_error(source_texts=None, review_root=None,
-                                extra_texts=None, required_includes=None) -> str:
+                                extra_texts=None, required_includes=None,
+                                markdown_root=ROOT, runner=None) -> str:
     """Require append-only head-specific handoffs and reject the retired mutable artifact."""
     problems = []
     if source_texts is None:
@@ -2078,29 +2151,23 @@ def review_handoff_policy_error(source_texts=None, review_root=None,
     # spelling is not legitimate anywhere here, and the file that outranks every skill --
     # AGENTS.md -- is not among the four, so a scan limited to them left the one document
     # that could reinstate the rule with the most authority entirely unread.
-    scanned = dict(source_texts)
+    scanned = {}
     if extra_texts is None:
         # Tracked files only. A directory walk also reads nested worktrees and any other
         # untracked checkout living inside the tree, which are other branches' bytes and
         # not this commit's claim -- the same mistake that makes C8 red locally and green
         # in CI. `git ls-files` is the scan set the commit is actually accountable for.
-        listed = subprocess.run(
-            ["git", "-C", str(ROOT), "ls-files", "-z", "--", "*.md"],
-            capture_output=True, text=True)
-        if listed.returncode != 0:
-            problems.append("cannot enumerate tracked markdown for the forbidden-rule scan")
-            names = []
+        tracked, tracked_problem = tracked_markdown_sources(markdown_root, runner=runner)
+        if tracked_problem:
+            problems.append(tracked_problem)
         else:
-            names = [name for name in listed.stdout.split("\0") if name]
-        for name in names:
-            if name in scanned:
-                continue
-            try:
-                scanned[name] = (ROOT / name).read_text(encoding="utf-8")
-            except OSError:
-                continue
+            scanned.update(tracked)
     else:
         scanned.update(extra_texts)
+    # The explicit doctrine sources are the authoritative injected test seam. Production
+    # passes the same repository bytes, while a planted source mutation must not be erased by
+    # the tracked inventory loaded above.
+    scanned.update(source_texts)
     for relative, text in sorted(scanned.items()):
         joined = re.sub(r"\s+", " ", text).casefold()
         for phrase in FORBIDDEN_HANDOFF_DOCTRINE:
@@ -2209,6 +2276,10 @@ def gate(
     print(f"  {'FAIL' if harness_source_problem else 'PASS'} harness-source")
     if harness_source_problem:
         failures.append(harness_source_problem)
+    ownership_source_problem = repository_ownership_source_error()
+    print(f"  {'FAIL' if ownership_source_problem else 'PASS'} repository-ownership-source")
+    if ownership_source_problem:
+        failures.append(ownership_source_problem)
     # Reported here rather than in the tracked summary: whether an assertion fires can differ
     # between hosts, so this count belongs in the run that observed it, not in a file two
     # hosts compare byte for byte.
@@ -2849,7 +2920,26 @@ def selftest() -> int:
         harness_source_error(
             source_bytes=HARNESS_SOURCE.read_bytes() + b"# planted mutation\n") != "",
     )
+    expect(
+        "the repository-ownership authority matches its reviewed source digest",
+        repository_ownership_source_error() == "",
+    )
+    expect(
+        "changing repository-ownership bytes invalidates its source digest",
+        repository_ownership_source_error(
+            source_bytes=REPOSITORY_OWNERSHIP_SOURCE.read_bytes()
+            + b"# planted mutation\n") != "",
+    )
     source_registry = _json_without_duplicate_keys(SUITE_SOURCE_GOLDEN)
+    without_ownership = dict(source_registry)
+    without_ownership["suites"] = {
+        name: value for name, value in source_registry["suites"].items()
+        if name != "repository-ownership"
+    }
+    expect(
+        "removing the repository-ownership digest cannot disable its binding",
+        repository_ownership_source_error(golden_data=without_ownership) != "",
+    )
     without_harness = dict(source_registry)
     without_harness["suites"] = {
         name: value for name, value in source_registry["suites"].items()
@@ -3802,14 +3892,16 @@ def selftest() -> int:
                 'a dispatched worker owns its scratch directory',
                 'never read a scratch path you did not assign',
             )),
-        
+
         ),
     )
     # Every phrase, not just the first: the rest were load-bearing in production and untested.
     for relative, required in WORKSPACE_DOCTRINE.items():
         for index, phrase in enumerate(required):
             stripped = dict(workspace_sources)
-            stripped[relative] = stripped[relative].replace(phrase, "", 1)
+            flexible_phrase = re.escape(phrase).replace(r"\ ", r"\s+")
+            stripped[relative] = re.sub(
+                flexible_phrase, "", stripped[relative], count=1)
             expect(
                 f"dropping phrase {index} from {relative} turns the doctrine check red",
                 "missing required workspace rule" in workspace_doctrine_error(
@@ -3930,6 +4022,57 @@ def selftest() -> int:
     expect(
         "review handoff doctrine requires append-only exact-head comments",
         review_handoff_policy_error(source_texts=handoff_sources) == "",
+    )
+    with tempfile.TemporaryDirectory(prefix="z-harness-handoff-decoy-") as raw:
+        decoy = Path(raw)
+        subprocess.run(["git", "init", "--quiet", str(decoy)], check=True)
+        (decoy / "decoy.md").write_text("decoy\n", encoding="utf-8")
+        prior_git_dir = os.environ.get("GIT_DIR")
+        prior_git_work_tree = os.environ.get("GIT_WORK_TREE")
+        os.environ["GIT_DIR"] = str(decoy / ".git")
+        os.environ["GIT_WORK_TREE"] = str(decoy)
+        try:
+            ambient_sources, ambient_problem = tracked_markdown_sources(ROOT)
+        finally:
+            if prior_git_dir is None:
+                os.environ.pop("GIT_DIR", None)
+            else:
+                os.environ["GIT_DIR"] = prior_git_dir
+            if prior_git_work_tree is None:
+                os.environ.pop("GIT_WORK_TREE", None)
+            else:
+                os.environ["GIT_WORK_TREE"] = prior_git_work_tree
+        expect(
+            "ambient Git selectors cannot substitute the handoff-policy scan root",
+            ambient_problem == "" and "AGENTS.md" in ambient_sources
+            and "decoy.md" not in ambient_sources,
+        )
+
+    class _TrackedMarkdownReply:
+        def __init__(self, returncode=0, stdout=b"", stderr=b""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def wrong_markdown_root(_argv, **_kwargs):
+        return _TrackedMarkdownReply(stdout=b"/different/root\n")
+
+    _, wrong_markdown_problem = tracked_markdown_sources(ROOT, runner=wrong_markdown_root)
+    expect(
+        "a Git query naming a different handoff-policy root fails closed",
+        "resolved" in wrong_markdown_problem and "expected" in wrong_markdown_problem,
+    )
+
+    def silent_markdown_inventory(argv, **_kwargs):
+        if "rev-parse" in argv:
+            return _TrackedMarkdownReply(stdout=os.fsencode(ROOT) + b"\n")
+        return _TrackedMarkdownReply(returncode=7)
+
+    _, silent_markdown_problem = tracked_markdown_sources(
+        ROOT, runner=silent_markdown_inventory)
+    expect(
+        "a silent nonzero tracked-markdown inventory fails closed",
+        "git ls-files exited 7" in silent_markdown_problem,
     )
     expect(
         "a required include naming an unregistered document is rejected",

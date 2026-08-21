@@ -117,6 +117,7 @@ same shared policy at both user and project scope.
 | `hooks/bash_command_guard.py` | shared adapter | shared predicates; Codex maps unsupported `ask` results to fail-closed `deny` |
 | `hooks/spawn_preflight_guard.py` | shared adapter | disk-capacity gate plus required fresh scratch reservation; maps unsupported Codex `ask` decisions to fail-closed `deny` |
 | `hooks/askq_timeout_guard.py` | Claude | AskUserQuestion AFK guard; no claimed Codex equivalent |
+| `hooks/announced_work_guard.py` | Claude | Stop hook that blocks a final message which announces work that has not begun; no claimed Codex equivalent |
 | `hooks/codex_session_start.py` | Codex | injects mandatory shared policy, resolved adapter commands, and optional host-local context |
 | `$CODEX_HOME/z-harness/AGENTS.local.md` | local Codex host | optional non-packaged machine instructions appended by the session adapter |
 | `hooks/harness_check.py` | shared | mechanical gate over skills, hooks, context files, and plugin packaging |
@@ -124,6 +125,7 @@ same shared policy at both user and project scope.
 | `tools/cc-cost.py` | Claude | Claude request-deduplicated token accounting |
 | `tools/codex-cost.py` | Codex | per-request token accounting with copied/replayed record dedupe |
 | `tools/claim-provenance.py` | shared | explicitly bound byte-exact quote and successful-read provenance checks for local documents |
+| `tools/repository_ownership.py` | shared | validates nested Git ownership boundaries for inventory and evidence scans |
 | `tools/pr-delivery-state.py` | shared | proves workspace, local HEAD, PR head, and exact-head CI agree before publication claims |
 | ignored `projects/*/memory/` | Claude-local data | host-bound Claude memory remains on the authoring machine and is not packaged for Codex |
 | ignored `harness-audit-*/` | publisher-local record | pre-migration snapshots and machine-derived evidence stay beside the authoring checkout, never in the plugin package |
@@ -138,14 +140,17 @@ python3 hooks/spawn_preflight_guard.py --selftest
 python3 hooks/codex_session_start.py --selftest
 python3 hooks/askq_timeout_guard.py --selftest
 python3 hooks/askq_timeout_guard.py --verify-harness
+python3 hooks/announced_work_guard.py --selftest
 python3 hooks/harness_report.py --selftest
 python3 tools/cc-cost.py --selftest
 python3 tools/codex-cost.py --selftest
 python3 tools/claim-provenance.py --selftest
+python3 tools/repository_ownership.py --selftest
 python3 tools/pr-delivery-state.py --selftest
 python3 tools/run-skill-evals.py --selftest
 python3 tools/run-skill-evals.py --validate
 python3 tools/render-packages.py --selftest
+python3 tools/verify-review-publication.py --selftest
 python3 tools/ci-gate.py --selftest
 python3 tools/ci-gate.py
 ```

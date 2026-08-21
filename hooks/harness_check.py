@@ -52,8 +52,32 @@ import sys
 import tempfile
 import time
 
-VERSION = "3.2.0"
+VERSION = "3.3.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TOOLS_DIR = os.path.join(ROOT, "tools")
+if TOOLS_DIR not in sys.path:
+    sys.path.insert(0, TOOLS_DIR)
+
+from repository_ownership import (  # noqa: E402
+    _GIT_REPOSITORY_ENV,
+    _bound_separate_gitdir,
+    _git_common_dir,
+    _git_path_line,
+    _gitdir_from_marker,
+    _indexed_gitlink,
+    _registered_linked_worktree,
+    git_command_failure,
+    git_toplevel_error as _git_toplevel_error,
+    is_repository_boundary,
+    run_git,
+    same_file as _same_file,
+    sanitized_git_environment,
+)
+
+
+def _is_git_worktree_root(path, runner, owner_root=None):
+    """Compatibility wrapper around the shared ownership authority."""
+    return is_repository_boundary(path, owner_root=owner_root, runner=runner)
 
 # C11 anchor. AGENTS.md bans self-assessment carrying no technical sense and keeps words
 # like `clean` and `verified` usable, because the corpus needs them for a tree or a head.
@@ -91,10 +115,10 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 177
+SELFTEST_FLOOR = 186
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
-CURRENT_PLUGIN_VERSION = "0.3.2"
+CURRENT_PLUGIN_VERSION = "0.3.3"
 
 AUTHORING_SKILLS = {"craft-prompt", "craft-skill", "craft-context-file", "review-prompt"}
 BODY_CHAR_CAP = 5000          # chars after frontmatter — the builders' instrument
@@ -112,18 +136,19 @@ SELFTEST_SUITES = [
     ("harness_report", ["hooks/harness_report.py", "--selftest"], 12),
     ("cc-cost", ["tools/cc-cost.py", "--selftest"], 8),
     ("codex-cost", ["tools/codex-cost.py", "--selftest"], 28),
-    ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 49),
+    ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 52),
+    ("repository-ownership", ["tools/repository_ownership.py", "--selftest"], 15),
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 8),
     ("verify-review-publication",
-     ["tools/verify-review-publication.py", "--selftest"], 61),
+     ["tools/verify-review-publication.py", "--selftest"], 71),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
-    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 306),
+    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 312),
     ("write-mutation-receipt",
      ["tools/write-mutation-receipt.py", "--selftest"], 59),
     ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 65),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
-    ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 77),
+    ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 80),
     ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 1149),
     ("zsh_rev_modifier_guard", ["hooks/guards/zsh_rev_modifier_guard.py", "--selftest"], 487),
 ]
@@ -132,9 +157,9 @@ SELFTEST_SUITES = [
 def expected_selftest_checks(name):
     """Exact execution-derived counts for suites whose former formulas hid probes."""
     fixed = {
-        "ci-gate": 306,
-        "spawn_preflight_guard": 77,
-        "verify-review-publication": 61,
+        "ci-gate": 312,
+        "spawn_preflight_guard": 80,
+        "verify-review-publication": 71,
     }
     if name in fixed:
         return fixed[name]
@@ -317,7 +342,7 @@ def child_faults(stdout, limit=2):
 # Printing the resolved set size is not a floor on it: adding one filename to
 # SCAN_EXCLUSIONS removed a file from the sweep and the verdict stayed green with a
 # smaller number nobody compares. Lower this only in the commit that removes the files.
-C6_SCAN_FLOOR = 162
+C6_SCAN_FLOOR = 163
 
 SCAN_EXCLUSIONS = (
     "hooks/harness_check.py",   # this file names every tripwire; it cannot sweep itself
@@ -336,6 +361,7 @@ ROUTING_SKILLS = ["git-workflow", "pr-review-method", "testing-ci", "agent-dispa
 # the same end state as the deleted hooks block it was written to catch. Bind the script to
 # the event instead.
 REQUIRED_CLAUDE_HANDLERS = [
+    ("Stop", None, "hooks/announced_work_guard.py", ()),
     ("PostToolUse", "AskUserQuestion", "hooks/askq_timeout_guard.py", ()),
     ("PreToolUse", "Bash", "hooks/bash_command_guard.py", ()),
     ("PreToolUse", "Agent|Task", "hooks/spawn_preflight_guard.py",
@@ -496,91 +522,6 @@ def validate_codex_hook_config(hook_config):
     return handler_count, errors
 
 
-def git_command_failure(returncode, stderr, command="git ls-files"):
-    """Describe a nonzero Git exit, naming the code even when the child said nothing.
-
-    The exit status is the failure signal; the child's stderr is only the detail. Reading
-    the signal off `stderr.strip()` instead made every silent nonzero exit — `1` with an
-    empty stream, or a negative code from a signal — indistinguishable from success at the
-    call site, which then skipped its failure handling and worked on an inventory it never
-    got. Naming the code keeps a broken instrument legible when it produced no text.
-    """
-    if isinstance(stderr, (bytes, bytearray)):
-        detail = bytes(stderr).decode("utf-8", "replace").strip()
-    else:
-        detail = (stderr or "").strip()
-    if detail:
-        return f"{command} exited {returncode}: {detail}"
-    return f"{command} exited {returncode} with no diagnostic on stderr"
-
-
-_GIT_REPOSITORY_ENV = frozenset({
-    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_NO_REPLACE_OBJECTS",
-    "GIT_REPLACE_REF_BASE", "GIT_PREFIX", "GIT_INTERNAL_SUPER_PREFIX",
-    "GIT_SHALLOW_FILE",
-    "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-    "GIT_NAMESPACE",
-    # Pathspec magic. The gitignored-context query is the only one carrying `:(icase,glob)`,
-    # and GIT_LITERAL_PATHSPECS turns those into literal filenames that match nothing: the
-    # scan returns clean with exit 0, empty stderr and no diagnostic. `git --literal-pathspecs`
-    # exports the variable to child processes, so a hook running under it scans blind.
-    "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS",
-    "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS",
-})
-
-
-def sanitized_git_environment(source=None):
-    """Remove ambient repository/config selectors from one Git subprocess."""
-    env = dict(os.environ if source is None else source)
-    for key in tuple(env):
-        if (key in _GIT_REPOSITORY_ENV or key == "GIT_CONFIG"
-                or key.startswith("GIT_CONFIG_")):
-            del env[key]
-    return env
-
-
-def run_git(runner, argv, **kwargs):
-    """Run Git without allowing ambient state to substitute another repository."""
-    kwargs["env"] = sanitized_git_environment(kwargs.get("env"))
-    return runner(argv, **kwargs)
-
-
-def _same_file(left, right):
-    """Return whether two path spellings identify the same filesystem object."""
-    try:
-        return os.path.samefile(left, right)
-    except OSError:
-        return False
-
-
-def _git_toplevel_error(root, runner):
-    """Return why Git did not resolve exactly the repository root it was given."""
-    try:
-        done = run_git(
-            runner, ["git", "-C", root, "rev-parse", "--show-toplevel"],
-            capture_output=True, text=False)
-    except OSError as exc:
-        return f"cannot run git rev-parse --show-toplevel: {exc}"
-    if done.returncode != 0:
-        return git_command_failure(
-            done.returncode, done.stderr, "git rev-parse --show-toplevel")
-    raw = bytes(done.stdout)
-    if not raw.endswith(b"\n") or b"\0" in raw:
-        return "git rev-parse --show-toplevel returned a malformed path"
-    value = raw[:-1]
-    if value.endswith(b"\r"):
-        value = value[:-1]
-    reported = os.fsdecode(value)
-    if not _same_file(reported, root):
-        return (
-            "git rev-parse --show-toplevel resolved "
-            f"{reported!r}, expected {os.path.realpath(root)!r}"
-        )
-    return ""
-
-
 def package_paths(root, runner=None):
     """Return (surface, paths, error) for source or installed package contents."""
     runner = subprocess.run if runner is None else runner
@@ -607,7 +548,7 @@ def package_paths(root, runner=None):
         # tree, not content of the package being inventoried. Without the prune its files are
         # compared against the source as though the package shipped them, and the marker file
         # itself was listed as package content.
-        if dirpath != root and os.path.lexists(os.path.join(dirpath, ".git")):
+        if dirpath != root and _is_git_worktree_root(dirpath, runner, root):
             dirs[:] = []
             continue
         # No filename filter for `.git` here: a directory holding one is pruned above, and a
@@ -739,120 +680,6 @@ def installed_skill_payload_error(source_root, installed_root):
     if drifted:
         errors.append(f"drifted payload: {drifted}")
     return "; ".join(errors)
-
-
-def _git_path_line(path, prefix=b""):
-    """Read one Git metadata path, removing only its final line terminator."""
-    try:
-        raw = open(path, "rb").read()
-    except OSError:
-        return None
-    if not raw.startswith(prefix):
-        return None
-    value = raw[len(prefix):]
-    if not value.endswith(b"\n") or b"\0" in value:
-        return None
-    value = value[:-1]
-    if value.endswith(b"\r"):
-        value = value[:-1]
-    return os.fsdecode(value)
-
-
-def _gitdir_from_marker(path, marker):
-    if os.path.isdir(marker):
-        return os.path.realpath(marker)
-    if not os.path.isfile(marker):
-        return None
-    pointer = _git_path_line(marker, b"gitdir: ")
-    if pointer is None:
-        return None
-    return os.path.realpath(
-        pointer if os.path.isabs(pointer) else os.path.join(path, pointer))
-
-
-def _git_common_dir(admin):
-    pointer = _git_path_line(os.path.join(admin, "commondir"))
-    if pointer is None:
-        return admin
-    return os.path.realpath(
-        pointer if os.path.isabs(pointer) else os.path.join(admin, pointer))
-
-
-def _indexed_gitlink(path, owner_root, runner):
-    if owner_root is None:
-        return False
-    relative = os.path.relpath(path, owner_root).replace(os.sep, "/")
-    if relative == ".." or relative.startswith("../"):
-        return False
-    staged = run_git(
-        runner,
-        ["git", "-C", owner_root, "ls-files", "--stage", "-z", "--", relative],
-        capture_output=True, text=False)
-    if staged.returncode != 0:
-        return False
-    for record in bytes(staged.stdout).split(b"\0"):
-        metadata, separator, recorded_path = record.partition(b"\t")
-        if (separator and metadata.startswith(b"160000 ")
-                and recorded_path.decode("utf-8", "surrogateescape") == relative):
-            return True
-    return False
-
-
-def _registered_linked_worktree(path, marker):
-    """Prove a linked worktree from Git's reciprocal registration metadata."""
-    admin = _gitdir_from_marker(path, marker)
-    if admin is None:
-        return False
-    common_pointer = _git_path_line(os.path.join(admin, "commondir"))
-    if common_pointer is None:
-        return False
-    common = _git_common_dir(admin)
-    if not _same_file(os.path.dirname(admin), os.path.join(common, "worktrees")):
-        return False
-    backlink = _git_path_line(os.path.join(admin, "gitdir"))
-    if backlink is None:
-        return False
-    backlink = os.path.realpath(
-        backlink if os.path.isabs(backlink) else os.path.join(admin, backlink))
-    return _same_file(backlink, marker)
-
-
-def _bound_separate_gitdir(path, marker, runner):
-    """Accept an external gitdir only when its own config binds this worktree."""
-    admin = _gitdir_from_marker(path, marker)
-    if admin is None or not os.path.isdir(admin):
-        return False
-    # A linked-worktree admin is owned by its reciprocal registration. It cannot
-    # become an independent separate gitdir merely because another marker points at it.
-    if (os.path.lexists(os.path.join(admin, "commondir"))
-            or os.path.lexists(os.path.join(admin, "gitdir"))):
-        return False
-    configured = run_git(
-        runner,
-        ["git", "--git-dir", admin, "config", "--local", "--path", "--null",
-         "--get-all", "core.worktree"], capture_output=True, text=False)
-    raw = bytes(configured.stdout)
-    if configured.returncode != 0 or not raw.endswith(b"\0") or raw.count(b"\0") != 1:
-        return False
-    worktree = os.fsdecode(raw[:-1])
-    if not os.path.isabs(worktree):
-        worktree = os.path.join(admin, worktree)
-    return _same_file(worktree, path)
-
-
-def _is_git_worktree_root(path, runner, owner_root=None):
-    marker = os.path.join(path, ".git")
-    if not os.path.lexists(marker) or os.path.islink(marker):
-        return False
-    if _git_toplevel_error(path, runner):
-        return False
-    if os.path.isdir(marker):
-        return True
-    if not os.path.isfile(marker):
-        return False
-    return (_indexed_gitlink(path, owner_root, runner)
-            or _registered_linked_worktree(path, marker)
-            or _bound_separate_gitdir(path, marker, runner))
 
 
 def _below_nested_git_boundary(root, relative, runner):
@@ -1201,31 +1028,55 @@ class Run:
     # ---- C3 ----------------------------------------------------------------
     def c3_reference_resolution(self):
         skills_dir = os.path.join(self.root, "skills")
+        inventory = git_owned_live_paths(self.root)
+        if inventory["error"]:
+            self.result("C3", False,
+                        f"cannot enumerate repository-owned references: {inventory['error']}")
+            return
+        root_real = os.path.realpath(self.root)
+        owned = set()
+        for relative in inventory["paths"]:
+            full = os.path.join(self.root, relative)
+            if os.path.islink(full) or not os.path.isfile(full):
+                continue
+            resolved_path = os.path.realpath(full)
+            try:
+                inside = os.path.commonpath([root_real, resolved_path]) == root_real
+            except ValueError:
+                inside = False
+            if inside:
+                owned.add(os.path.normpath(relative).replace(os.sep, "/"))
+
+        reference_files = sorted(
+            relative for relative in owned
+            if re.fullmatch(r"skills/[^/]+/references/.+\.(?:md|yaml)", relative)
+        )
         resolved = 0
         for skill in sorted(os.listdir(skills_dir)):
             body_path = os.path.join(skills_dir, skill, "SKILL.md")
             if not os.path.isfile(body_path):
                 continue
             body = open(body_path, encoding="utf-8").read()
-            refdir = os.path.join(skills_dir, skill, "references")
-            cited = set(re.findall(r"references/([\w<>.\-]+\.(?:md|yaml))", body))
+            prefix = f"skills/{skill}/references/"
+            cited = set(re.findall(
+                r"references/([\w<>./\-]+\.(?:md|yaml))", body))
             literal = {c for c in cited if "<" not in c}
             template_res = [re.compile("^" + re.sub(r"<[^>]*>", r"[\\w.\\-]+", re.escape(c)) + "$")
                             for c in cited if "<" in c]
             # direction 1: cited -> exists
             for c in sorted(literal):
-                p = os.path.join(refdir, c)
                 resolved += 1
-                self.result("C3", os.path.isfile(p), f"{skill}: cites references/{c}")
+                self.result("C3", prefix + c in owned,
+                            f"{skill}: cites references/{c}")
             # direction 2: exists -> cited (literal or template family)
-            if os.path.isdir(refdir):
-                for f in sorted(os.listdir(refdir)):
-                    if not os.path.isfile(os.path.join(refdir, f)):
-                        continue
-                    ok = f in literal or any(t.match(f) for t in template_res)
-                    resolved += 1
-                    self.result("C3", ok, f"{skill}: references/{f} "
-                                          f"{'reachable' if ok else 'NAMED NOWHERE in SKILL.md'}")
+            for relative in reference_files:
+                if not relative.startswith(prefix):
+                    continue
+                name = relative[len(prefix):]
+                ok = name in literal or any(t.match(name) for t in template_res)
+                resolved += 1
+                self.result("C3", ok, f"{skill}: references/{name} "
+                                      f"{'reachable' if ok else 'NAMED NOWHERE in SKILL.md'}")
         # direction 3: a citation inside a reference document must resolve, or be declared
         # external. C3 read only SKILL.md, so a reference file could cite a document existing
         # nowhere and nothing looked -- which is how two skills came to cite a registry that
@@ -1235,61 +1086,68 @@ class Run:
         # time this was written. Left in, a citation to a file deleted from this repository
         # still resolves against a stale copy, and the check certifies a reference that is
         # gone. A directory holding `.git` is a different repository, not content of this one.
-        present = set()
-        for base, dirs, files in os.walk(self.root):
-            if base != self.root and os.path.lexists(os.path.join(base, ".git")):
-                dirs[:] = []
-                continue
-            dirs[:] = [d for d in dirs if d != ".git"]
-            for f in files:
-                full = os.path.join(base, f)
-                present.add(os.path.relpath(full, self.root))
-                present.add(f)
         scanned_docs = 0
         scanned_citations = 0
-        for skill in sorted(os.listdir(skills_dir)):
-            refdir = os.path.join(skills_dir, skill, "references")
-            if not os.path.isdir(refdir):
+        cited_anywhere = set()
+
+        def citation_candidates(document, skill, target):
+            """Resolve locally first; use repository fallback only when unambiguous."""
+            normalized_target = target.replace("\\", "/")
+            exact = []
+            for candidate in (
+                os.path.normpath(os.path.join(os.path.dirname(document), normalized_target)),
+                os.path.normpath(os.path.join(f"skills/{skill}", normalized_target)),
+                os.path.normpath(normalized_target),
+            ):
+                candidate = candidate.replace(os.sep, "/")
+                if candidate in owned and candidate not in exact:
+                    exact.append(candidate)
+            if exact:
+                return exact
+            fallback = []
+            for candidate in owned:
+                if not (candidate == normalized_target
+                        or candidate.endswith("/" + normalized_target)):
+                    continue
+                if ("/" not in normalized_target and candidate.startswith("skills/")
+                        and not candidate.startswith(f"skills/{skill}/")):
+                    continue
+                fallback.append(candidate)
+            return sorted(fallback)
+
+        for document in reference_files:
+            if not document.endswith(".md"):
                 continue
-            for name in sorted(os.listdir(refdir)):
-                if not name.endswith(".md"):
+            parts = document.split("/")
+            skill = parts[1]
+            label = document[len("skills/"):]
+            scanned_docs += 1
+            try:
+                text = open(os.path.join(self.root, document), encoding="utf-8").read()
+            except OSError as exc:
+                self.result("C3", False, f"{label}: unreadable ({exc})")
+                continue
+            targets = sorted({m.group(1) for m in REFERENCE_CITATION.finditer(text)})
+            cited_anywhere.update(targets)
+            for target in targets:
+                if target in EXTERNAL_REFERENCE_CITATIONS:
                     continue
-                scanned_docs += 1
-                try:
-                    text = open(os.path.join(refdir, name), encoding="utf-8").read()
-                except OSError as exc:
-                    self.result("C3", False, f"{skill}/references/{name}: unreadable ({exc})")
-                    continue
-                for target in sorted({m.group(1) for m in REFERENCE_CITATION.finditer(text)}):
-                    if target in EXTERNAL_REFERENCE_CITATIONS:
-                        continue
-                    # A citation may name a path relative to any directory above it, so a
-                    # suffix match is the resolution rule; exact-relpath alone reports a real
-                    # file as missing whenever the citation omits a leading component.
-                    scanned_citations += 1
-                    hit = target in present or any(
-                        p.endswith("/" + target) for p in present)
-                    resolved += 1
-                    self.result("C3", hit, f"{skill}/references/{name}: cites {target}"
-                                           f"{'' if hit else ' -- resolves to no file'}")
+                scanned_citations += 1
+                candidates = citation_candidates(document, skill, target)
+                resolved += 1
+                if len(candidates) == 1:
+                    self.result("C3", True,
+                                f"{label}: cites {target} -> {candidates[0]}")
+                elif not candidates:
+                    self.result("C3", False,
+                                f"{label}: cites {target} -- resolves to no owned file")
+                else:
+                    self.result("C3", False,
+                                f"{label}: cites {target} -- ambiguous: {candidates[:4]}")
 
         # An exemption that no document uses is dead weight that can silence a real defect
         # later without anyone re-reading it. Every declared external name must be cited by
         # something, or the declaration is removed rather than kept as a standing allowance.
-        cited_anywhere = set()
-        for skill in sorted(os.listdir(skills_dir)):
-            refdir = os.path.join(skills_dir, skill, "references")
-            if not os.path.isdir(refdir):
-                continue
-            for name in sorted(os.listdir(refdir)):
-                if not name.endswith(".md"):
-                    continue
-                try:
-                    body = open(os.path.join(refdir, name), encoding="utf-8").read()
-                except OSError:
-                    continue
-                cited_anywhere.update(
-                    m.group(1) for m in REFERENCE_CITATION.finditer(body))
         # Only against this repository: the allowlist describes these documents, so a planted
         # fixture tree cannot answer the question. And these do not count toward `resolved`,
         # which means authored reference relationships -- counting them defeated the
@@ -1906,12 +1764,22 @@ def selftest():
             "\n\nSee `NO-SUCH-REGISTRY.md`, `probe.py`, "
             "`beta/references/present.md`, `NO-SUCH-SUFFIXED.md:12`, and "
             "`ONLY-IN-NESTED.md` for the rest.\n")
+        os.makedirs(os.path.join(sk, "alpha", "references", "nested"))
+        open(os.path.join(sk, "alpha", "SKILL.md"), "a").write(
+            "\nRead references/nested/deep.md\n")
+        open(os.path.join(sk, "alpha", "references", "nested", "deep.md"), "w").write(
+            "See `NESTED-MISSING.md` and `ONLY-BETA.md`.\n")
+        open(os.path.join(sk, "beta", "ONLY-BETA.md"), "w").write("wrong sibling\n")
+        os.symlink(os.devnull,
+                   os.path.join(sk, "beta", "references", "escaped.md"))
+        open(os.path.join(sk, "beta", "references", "present.md"), "a").write(
+            "See `escaped.md`.\n")
         # A nested checkout holding a file by the same name must not satisfy a citation. It is
         # a different repository's copy, and letting it resolve certifies a reference this
         # tree no longer has.
         nested_repo = os.path.join(td, "nested-checkout")
         os.makedirs(nested_repo)
-        open(os.path.join(nested_repo, ".git"), "w").write("gitdir: elsewhere\n")
+        subprocess.run(["git", "init", "--quiet", nested_repo], check=True)
         open(os.path.join(nested_repo, "ONLY-IN-NESTED.md"), "w").write("copy")
         # C6 red: stale pattern planted
         os.makedirs(os.path.join(td, "hooks"))
@@ -2344,9 +2212,53 @@ def selftest():
         os.makedirs(os.path.join(registration_root, "hooks"), exist_ok=True)
         for skill in ROUTING_SKILLS:
             os.makedirs(os.path.join(registration_root, "skills", skill), exist_ok=True)
-        for rel in ("hooks/askq_timeout_guard.py", "hooks/bash_command_guard.py",
-                    "hooks/spawn_preflight_guard.py", "hooks/codex_session_start.py"):
+        for rel in ("hooks/announced_work_guard.py", "hooks/askq_timeout_guard.py",
+                    "hooks/bash_command_guard.py", "hooks/spawn_preflight_guard.py",
+                    "hooks/codex_session_start.py"):
             open(os.path.join(registration_root, rel), "w").write("# fixture\n")
+
+        missing_stop_registration = json.load(open(os.path.join(ROOT, "settings.json")))
+        del missing_stop_registration["hooks"]["Stop"]
+        open(os.path.join(registration_root, "settings.json"), "w").write(
+            json.dumps(missing_stop_registration))
+        open(os.path.join(registration_root, "hooks/hooks.json"), "w").write(
+            open(os.path.join(ROOT, "hooks/hooks.json")).read())
+        missing_stop = Run(registration_root, ci=True)
+        missing_stop.c7_anchors()
+        expect_red(
+            "C7 rejects a missing Claude Stop registration for announced work",
+            lambda: any(c == "C7" and "settings.json Stop" in d
+                        and "announced_work_guard.py" in d and "0 match(es)" in d
+                        for c, d in missing_stop.failures),
+        )
+
+        wrong_stop_registration = json.load(open(os.path.join(ROOT, "settings.json")))
+        wrong_stop_registration["hooks"]["Stop"][0]["hooks"][0]["command"] = "true"
+        open(os.path.join(registration_root, "settings.json"), "w").write(
+            json.dumps(wrong_stop_registration))
+        wrong_stop = Run(registration_root, ci=True)
+        wrong_stop.c7_anchors()
+        expect_red(
+            "C7 rejects a Claude Stop registration that runs another command",
+            lambda: any(c == "C7" and "settings.json Stop" in d
+                        and "announced_work_guard.py" in d and "0 match(es)" in d
+                        for c, d in wrong_stop.failures),
+        )
+
+        duplicate_stop_registration = json.load(open(os.path.join(ROOT, "settings.json")))
+        duplicate_stop_registration["hooks"]["Stop"].append(
+            json.loads(json.dumps(duplicate_stop_registration["hooks"]["Stop"][0])))
+        open(os.path.join(registration_root, "settings.json"), "w").write(
+            json.dumps(duplicate_stop_registration))
+        duplicate_stop = Run(registration_root, ci=True)
+        duplicate_stop.c7_anchors()
+        expect_red(
+            "C7 rejects duplicate Claude Stop registrations for announced work",
+            lambda: any(c == "C7" and "settings.json Stop" in d
+                        and "announced_work_guard.py" in d and "2 match(es)" in d
+                        for c, d in duplicate_stop.failures),
+        )
+
         claude_registration = json.load(open(os.path.join(ROOT, "settings.json")))
         for entry in claude_registration["hooks"]["PreToolUse"]:
             if entry.get("matcher") == "Agent|Task":
@@ -2384,6 +2296,26 @@ def selftest():
             lambda: any(c == "C7" and "required Codex handler" in d
                         and "--require-scratch" in d and "0 match(es)" in d
                         for c, d in missing_codex_activation.failures),
+        )
+
+        portable_spawn_dir = os.path.join(td, "portable-spawn")
+        portable_cwd = os.path.join(td, "portable-cwd")
+        os.makedirs(portable_spawn_dir)
+        os.makedirs(portable_cwd)
+        portable_spawn = os.path.join(portable_spawn_dir, "spawn_preflight_guard.py")
+        shutil.copy2(os.path.join(ROOT, "hooks", "spawn_preflight_guard.py"), portable_spawn)
+        portable_env = dict(os.environ)
+        portable_env.pop("PYTHONPATH", None)
+        portable_result = subprocess.run(
+            [sys.executable, "-B", portable_spawn, "--selftest"],
+            cwd=portable_cwd, env=portable_env, capture_output=True, text=True,
+            timeout=30,
+        )
+        expect_red(
+            "the spawn selftest runs from a copied hook outside the checkout",
+            lambda: portable_result.returncode == 0
+            and "SELFTEST-SUMMARY suite=spawn_preflight_guard checks=80 failures=0"
+            in portable_result.stdout,
         )
 
         r = Run(td, ci=True)
@@ -2430,8 +2362,12 @@ def selftest():
         open(os.path.join(pkg_root, "pkg", "real.md"), "w").write("x")
         vendored = os.path.join(pkg_root, "vendored")
         os.makedirs(vendored)
-        open(os.path.join(vendored, ".git"), "w").write("gitdir: elsewhere\n")
+        subprocess.run(["git", "init", "--quiet", vendored], check=True)
         open(os.path.join(vendored, "foreign.md"), "w").write("x")
+        invalid_marker = os.path.join(pkg_root, "invalid-marker")
+        os.makedirs(invalid_marker)
+        open(os.path.join(invalid_marker, ".git"), "w").write("not a repository\n")
+        open(os.path.join(invalid_marker, "stale.md"), "w").write("NOT INSTALLED\n")
         # ...and a symlinked file, whose bytes live outside the package entirely.
         pkg_outside = os.path.join(td, "outside-the-package")
         os.makedirs(pkg_outside)
@@ -2443,11 +2379,27 @@ def selftest():
                    lambda: _pkg_surface == "installed"
                    and "pkg/real.md" in _pkg_paths
                    and not any(p.startswith("vendored/") for p in _pkg_paths))
+        expect_red("the installed inventory keeps files behind an invalid .git marker",
+                   lambda: "invalid-marker/stale.md" in _pkg_paths)
+        invalid_marker_run = Run(pkg_root, ci=True)
+        invalid_marker_run.c6_stale_patterns(scan_floor=1)
+        expect_red("C6 adopts invalid-marker files as outer-owned package content",
+                   lambda: any(c == "C6" and "invalid-marker/stale.md" in d
+                               for c, d in invalid_marker_run.failures))
         expect_red("the installed inventory excludes a symlinked file",
                    lambda: "linked-file.md" not in _pkg_paths)
 
         expect_red("C3 does not resolve a citation against a nested checkout",
                    lambda: any(c == "C3" and "ONLY-IN-NESTED.md" in d for c, d in r.failures))
+        expect_red("C3 recursively scans nested reference documents",
+                   lambda: any(c == "C3" and "NESTED-MISSING.md" in d
+                               for c, d in r.failures))
+        expect_red("C3 does not satisfy a bare citation from another skill",
+                   lambda: any(c == "C3" and "ONLY-BETA.md" in d
+                               for c, d in r.failures))
+        expect_red("C3 does not resolve through an out-of-root symlink",
+                   lambda: any(c == "C3" and "escaped.md" in d
+                               for c, d in r.failures))
         expect_red("C3 goes red on a citation carrying a line suffix",
                    lambda: any(c == "C3" and "NO-SUCH-SUFFIXED.md" in d for c, d in r.failures))
         expect_red("C3 resolves a citation naming a real file by a partial path",

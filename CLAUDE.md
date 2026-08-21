@@ -41,6 +41,10 @@ The AskUserQuestion AFK control is Claude-specific. After every Claude Code upgr
 python3 ~/.claude/hooks/askq_timeout_guard.py --verify-harness
 ```
 
+The registered Claude `Stop` hook runs `announced_work_guard.py`. It blocks a final message whose
+tail announces imminent work without evidence that the work began. Codex has no equivalent
+registration in this package, so this is a Claude-only enforcement claim.
+
 Use `python3 ~/.claude/hooks/harness_report.py --since 7d` for Claude skill-delivery evidence and
 `python3 ~/.claude/tools/cc-cost.py --since 7d` for Claude token accounting. Claude project memory
 lives under `~/.claude/projects/<project>/memory/`; the index is injected into that project.

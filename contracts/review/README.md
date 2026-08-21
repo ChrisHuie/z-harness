@@ -53,7 +53,8 @@ validates the external comment, and it is a command rather than an instruction:
 ```
 tools/verify-review-publication.py comment \
   --repo <owner/name> --pr <number> --comment-id <id> \
-  --expected-head <40-hex-sha> --expected-author <login> --body-file <draft>
+  --expected-head <40-hex-sha> --expected-author <login> --body-file <draft> \
+  --predecessor-url <canonical-earlier-comment-url>
 
 tools/verify-review-publication.py pr-snapshot \
   --repo <owner/name> --pr <number> --expected-head <40-hex-sha> \
@@ -62,10 +63,14 @@ tools/verify-review-publication.py pr-snapshot \
 
 Both modes require the requested repository, pull request, exact current head, and canonical URL.
 Comment mode additionally binds raw UTF-8 body bytes, the expected author, comment identity, and
-unedited timestamps. Snapshot mode binds the live body and title bytes to the frozen manifest; the
-PR API exposes no body-edit identity or timestamp, so the receipt proves current equality, not the
-history before the snapshot. Exit 1 is a publication mismatch and exit 2 is local I/O, transport,
-or JSON failure. Nothing else in this repository can see a posted comment or live PR body, so a
+unedited timestamps. A later handoff requires one or more repeatable `--predecessor-url` values;
+each canonical URL must occur exactly once in the submitted body and must resolve to an older,
+unedited comment by the expected author on the same pull request. Only the first handoff uses the
+mutually exclusive `--initial-publication` flag. Snapshot mode binds the live body and title bytes
+to the frozen manifest; the PR API exposes no body-edit identity or timestamp, so the receipt
+proves current equality, not the history before the snapshot. Exit 1 is a publication mismatch and
+exit 2 is local I/O, transport, or JSON failure. Nothing else in this repository can see a posted
+comment or live PR body, so a
 publication that is never read back carries no mechanical evidence, whatever the gate says about
 its source.
 

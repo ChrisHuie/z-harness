@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""announced_work_guard — Stop gate on ending a turn with work announced, not done.
+"""announced_work_guard — Claude Stop gate on ending with work announced, not done.
 
 The failure it mechanizes, measured rather than imagined. In one long session
 (2026-08-12, 314 turns) seven turns ended on a present-tense claim of work in

@@ -27,7 +27,9 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "3.0.0"
+from repository_ownership import boundary_between, is_repository_boundary
+
+VERSION = "3.1.0"
 MIN_QUOTE_CHARS = 24
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "fixtures", "claim-provenance")
@@ -126,7 +128,7 @@ def _root(root):
     return resolved, None
 
 
-def resolve_citation(path, root):
+def resolve_citation(path, root, runner=None):
     """Resolve one citation without discarding directory identity.
 
     Qualified paths resolve only at that path. A bare basename is accepted only when it
@@ -145,7 +147,7 @@ def resolve_citation(path, root):
     if located and not os.path.exists(os.path.join(root, path)):
         head = located.group(1)
         head_resolves, _, _ = (
-            (None, None, None) if head == path else resolve_citation(head, root))
+            (None, None, None) if head == path else resolve_citation(head, root, runner))
         if head_resolves:
             return None, "malformed", (
                 f"cited token {path!r} names a file and a location within it; a citation "
@@ -160,6 +162,11 @@ def resolve_citation(path, root):
             return None, "outside", f"cited path escapes --root: {path}"
         if not os.path.isfile(candidate):
             return None, "missing", f"cited path not found under --root: {path}"
+        boundary = boundary_between(root_real, candidate, runner)
+        if boundary:
+            return None, "boundary", (
+                f"cited path belongs to nested repository at "
+                f"{os.path.relpath(boundary, root_real)}: {path}")
         return candidate, "resolved", None
 
     matches = []
@@ -169,7 +176,8 @@ def resolve_citation(path, root):
         # makes every basename it shares with this tree ambiguous -- a dozen linked worktrees
         # under an ignored directory made `ci-gate.py` unresolvable here -- and lets a
         # citation resolve against a copy this repository does not contain.
-        if dirpath != root_real and os.path.lexists(os.path.join(dirpath, ".git")):
+        if (dirpath != root_real
+                and is_repository_boundary(dirpath, root_real, runner)):
             dirs[:] = []
             continue
         dirs[:] = [d for d in dirs if d != ".git"]
@@ -685,8 +693,7 @@ def selftest():
         # may not have.
         _nested = os.path.join(tmp, "nested-checkout")
         os.makedirs(_nested)
-        with open(os.path.join(_nested, ".git"), "w", encoding="utf-8") as fh:
-            fh.write("gitdir: elsewhere\n")
+        subprocess.run(["git", "init", "--quiet", _nested], check=True)
         with open(os.path.join(_nested, "order.json"), "w", encoding="utf-8") as fh:
             fh.write("copy")
         with open(os.path.join(_nested, "only-nested.json"), "w", encoding="utf-8") as fh:
@@ -695,6 +702,21 @@ def selftest():
                resolve_citation("order.json", tmp)[1] == "resolved")
         record("a file only inside a nested checkout does not resolve",
                resolve_citation("only-nested.json", tmp)[1] != "resolved")
+
+        _invalid = os.path.join(tmp, "invalid-marker")
+        os.makedirs(_invalid)
+        with open(os.path.join(_invalid, ".git"), "w", encoding="utf-8") as fh:
+            fh.write("not a repository\n")
+        with open(os.path.join(_invalid, "order.json"), "w", encoding="utf-8") as fh:
+            fh.write("outer-owned duplicate")
+        with open(os.path.join(_invalid, "only-invalid.json"), "w", encoding="utf-8") as fh:
+            fh.write("outer-owned evidence")
+        record("an invalid .git marker cannot hide a duplicate basename",
+               resolve_citation("order.json", tmp)[1] == "ambiguous")
+        record("a qualified citation through an invalid marker remains outer-owned",
+               resolve_citation("invalid-marker/only-invalid.json", tmp)[1] == "resolved")
+        record("a qualified citation into a genuine nested repository is refused",
+               resolve_citation("nested-checkout/only-nested.json", tmp)[1] == "boundary")
 
         # ...and must NOT cover a token whose file half does not exist. Calling that a
         # location would replace a true "not found" with a claim that the file is there.

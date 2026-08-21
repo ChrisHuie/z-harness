@@ -93,6 +93,7 @@ Claude Code live tree.
 | shell guard | `PreToolUse` matcher `Bash`; uncertain patterns may `ask` | `PreToolUse` matcher `Bash`; `ask` maps to `deny` | same predicates, runtime-specific confirmation handling |
 | spawn guard | `Agent|Task`; required fresh scratch plus capacity `ask` or `deny` | `Agent` alias over `spawn_agent`; required fresh scratch; Codex lacks PreToolUse `ask` | both installed registrations require atomic collision-exclusive reservation; warn/unknown maps to deny in Codex |
 | question timeout | AskUserQuestion exposes `afkTimeoutMs` | no equivalent contract used here | Claude-only; no parity claim |
+| announced-work stop | Claude `Stop` provides `last_assistant_message`; the shipped registration runs `announced_work_guard.py` | no Codex registration or equivalent envelope asserted | Claude-only; source tests do not imply runtime parity |
 | project memory | Claude injects its host-local project `MEMORY.md` | no project memory is packaged; optional Codex-home context only | host-bound data stays runtime-local; no false parity claim |
 | subagents | Agent/Task and Claude worktree mechanics | native Codex subagents and SubagentStart hook | shared installed policy and required spawn guard; runtime orchestration differs |
 | worker scratch | one session scratchpad path, inherited by every subagent | no agent scratchpad; hook resolves the complete Git worktree from `cwd` | name one fresh absent path per worker; the hook atomically reserves it mode 0700 in both runtimes |
@@ -125,8 +126,9 @@ shims and `~/.codex/sessions/` holds date-partitioned rollout transcripts; neith
 and `cwd` defaults to the project root. A worker with no assigned directory therefore writes into the
 checkout rather than beside it, which is the pressure the shared mutation-worker rule already names.
 The parent assigns one by adding `Scratch: <absolute path>` to the spawn prompt; the PreToolUse hook
-resolves the full Git worktree, rejects a relative, pre-existing, inside, or above path, and atomically
-creates the fresh directory before allowing the spawn. Two calls naming one path cannot both pass.
+resolves the full Git worktree, rejects a relative, pre-existing, symlink-component, inside, or
+above path, and atomically creates the fresh directory before allowing the spawn. Two calls naming
+one path cannot both pass.
 Workers still share a uid, so this is collision isolation rather than a security sandbox. The Codex
 surface facts in this paragraph are read from the installed artifact at `@openai/codex@0.144.4`; no
 Codex fan-out was run on a host, so it carries no parity claim.
@@ -177,6 +179,9 @@ Configured events:
 - `PreToolUse` on `Bash` calls the shared `bash_command_guard.py`.
 - `PreToolUse` on the `Agent` alias calls `spawn_preflight_guard.py --runtime codex
   --require-scratch`.
+
+Claude's separate `settings.json` also registers `announced_work_guard.py` on `Stop`. Codex has no
+registration for that Claude envelope, so the repository makes no cross-runtime enforcement claim.
 
 Codex and Claude accept the same `hookSpecificOutput.permissionDecision: "deny"` shape for a Bash
 PreToolUse block. Codex does not currently support `permissionDecision: "ask"` at this event. Both
@@ -261,11 +266,14 @@ Run focused adapter and evidence selftests:
 python3 hooks/codex_session_start.py --selftest
 python3 hooks/bash_command_guard.py --selftest
 python3 hooks/spawn_preflight_guard.py --selftest
+python3 hooks/announced_work_guard.py --selftest
 python3 tools/codex-cost.py --selftest
 python3 tools/claim-provenance.py --selftest
+python3 tools/repository_ownership.py --selftest
 python3 tools/pr-delivery-state.py --selftest
 python3 tools/run-skill-evals.py --selftest
 python3 tools/render-packages.py --selftest
+python3 tools/verify-review-publication.py --selftest
 python3 tools/ci-gate.py --selftest
 ```
 

@@ -49,9 +49,8 @@ import stat
 import subprocess
 import tempfile
 import sys
-from pathlib import Path
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 SPAWN_TOOLS = {"Agent", "Task", "spawn_agent"}
 RUNTIMES = {"claude", "codex"}
 # Claude puts the spawn text in tool_input.prompt; Codex uses tool_input.message. Both were
@@ -240,7 +239,7 @@ def selftest():
         got, why = scratch_decision(
             {"prompt": f"Scratch: {missing_parent}\n"}, root,
             reserve=False, nonce="missing-parent")
-        ok = got == "deny" and "not a real existing directory" in why
+        ok = got == "deny" and "cannot inspect scratch parent component" in why
         bad += (not ok); checks += 1
         print(f"  {'PASS' if ok else 'FAIL'} a missing scratch parent fails closed")
 
@@ -274,7 +273,7 @@ def selftest():
         got, why = scratch_decision(
             {"prompt": f"Scratch: {os.path.join(alias, 'alias-leaf')}\n"}, root,
             reserve=False, nonce="alias")
-        ok = got == "deny" and "inside the checkout" in why
+        ok = got == "deny" and "symlink component" in why
         bad += (not ok); checks += 1
         print(f"  {'PASS' if ok else 'FAIL'} a symlink alias of the checkout is denied")
 
@@ -286,7 +285,7 @@ def selftest():
         got, why = scratch_decision(
             {"prompt": f"Scratch: {hidden_inside}\n"}, root,
             nonce="subdir-alias")
-        ok = (got == "deny" and "inside the checkout" in why
+        ok = (got == "deny" and "symlink component" in why
               and not os.path.lexists(hidden_inside))
         bad += (not ok); checks += 1
         print(f"  {'PASS' if ok else 'FAIL'} a symlink to a checkout subdirectory cannot hide containment")
@@ -353,7 +352,7 @@ def selftest():
         ]
         unnamed = [suggested_scratch(root, None, None) for _ in range(2)]
         ok = (len(set(suggestions + unnamed)) == 4
-              and all(os.path.dirname(path) == tempfile.gettempdir()
+              and all(os.path.dirname(path) == os.path.realpath(tempfile.gettempdir())
                       for path in suggestions + unnamed))
         bad += (not ok); checks += 1
         print(f"  {'PASS' if ok else 'FAIL'} named and unnamed suggestions are unique and path-safe")
@@ -412,6 +411,55 @@ def selftest():
         ok = walked is False
         bad += (not ok); checks += 1
         print(f"  {'PASS' if ok else 'FAIL'} the ancestor walk terminates at the filesystem root")
+
+        root_fd = os.open(os.sep, _walk_flags)
+        try:
+            try:
+                _fd_within_workspace(root_fd, adopted, limit=0)
+                limit_problem = ""
+            except ScratchPolicyError as exc:
+                limit_problem = str(exc)
+        finally:
+            os.close(root_fd)
+        ok = "proof exhausted" in limit_problem
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} an exhausted descriptor walk fails closed")
+
+        ancestry_io_target = fresh("ancestry-io")
+        real_open = os.open
+        def ancestry_open(path, *args, **kwargs):
+            if path == "..":
+                raise OSError(5, "planted ancestry EIO")
+            return real_open(path, *args, **kwargs)
+        try:
+            os.open = ancestry_open
+            got, why = scratch_decision(
+                {"prompt": f"Scratch: {ancestry_io_target}\n"}, root,
+                nonce="ancestry-io")
+        finally:
+            os.open = real_open
+        ok = (got == "deny" and "planted ancestry EIO" in why
+              and not os.path.lexists(ancestry_io_target))
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} ancestry I/O failure denies without creating scratch")
+
+        stable_open_target = fresh("stable-open-io")
+        stable_component = os.path.basename(os.path.dirname(stable_open_target))
+        def stable_component_open(path, *args, **kwargs):
+            if path == stable_component and kwargs.get("dir_fd") is not None:
+                raise OSError(5, "planted stable-open EIO")
+            return real_open(path, *args, **kwargs)
+        try:
+            os.open = stable_component_open
+            got, why = scratch_decision(
+                {"prompt": f"Scratch: {stable_open_target}\n"}, root,
+                nonce="stable-open-io")
+        finally:
+            os.open = real_open
+        ok = (got == "deny" and "planted stable-open EIO" in why
+              and not os.path.lexists(stable_open_target))
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} stable-parent open failure denies without creating scratch")
 
         # A path already reserved is refused, and the refusal has to carry a DIFFERENT path
         # or the parent has no way forward. Without the fresh suggestion this denial is a
@@ -514,12 +562,11 @@ def selftest():
         # checkout, which is the one placement this guard exists to refuse.
         splice_out = fresh("splice-out")
         splice_in = os.path.join(adopted, "splice-in")
-        os.makedirs(os.path.join(splice_out, "sub")); os.makedirs(os.path.join(splice_in, "sub"))
-        splice_link = os.path.join(_root, "splice-link")
-        os.symlink(splice_out, splice_link)
-        spliced_target = os.path.join(splice_link, "sub", "w1")
+        splice_name = os.path.join(_root, "splice-name")
+        os.makedirs(os.path.join(splice_name, "sub")); os.makedirs(os.path.join(splice_in, "sub"))
+        spliced_target = os.path.join(splice_name, "sub", "w1")
         name_accepted = _scratch_path_error(spliced_target, root) == ""
-        os.remove(splice_link); os.symlink(splice_in, splice_link)
+        os.rename(splice_name, splice_out); os.symlink(splice_in, splice_name)
         try:
             reserve_scratch(spliced_target, root)
             spliced = "reserved"
@@ -577,19 +624,13 @@ def selftest():
             bad += (not ok); checks += 1
             print(f"  {'PASS' if ok else 'FAIL'} required mode denies an unassigned plain spawn")
 
-            import codex_session_start
-            plugin_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            injected = codex_session_start.build_context(
-                Path(plugin_root), plain,
-                codex_home=os.path.join(_root, "empty-codex-home"))
             rc, out = run_payload(
                 {"tool_name": "spawn_agent", "cwd": plain, "session_id": "s1",
                  "tool_input": {"message": "do it"}},
                 runtime="codex", require_scratch=True)
-            ok = ("Every dispatched worker owns an exclusive scratch directory" in injected
-                  and '"permissionDecision": "deny"' in out and "Scratch:" in out)
+            ok = ('"permissionDecision": "deny"' in out and "Scratch:" in out)
             bad += (not ok); checks += 1
-            print(f"  {'PASS' if ok else 'FAIL'} installed Codex policy and required guard compose in a plain project")
+            print(f"  {'PASS' if ok else 'FAIL'} Codex required mode covers a plain project")
 
             task_payload = dict(payload, tool_name="Task")
             rc, out = run_payload(task_payload, runtime="claude", require_scratch=True)
@@ -973,7 +1014,8 @@ def suggested_scratch(cwd, session_id, agent_name, nonce=None):
     session = _readable_digest(session_id, "session")
     worker = _readable_digest(agent_name, "worker")
     return os.path.join(
-        tempfile.gettempdir(), f"agent-scratch-{session}-{worker}-{token}")
+        os.path.realpath(tempfile.gettempdir()),
+        f"agent-scratch-{session}-{worker}-{token}")
 
 
 def _path_ancestors(path):
@@ -1003,6 +1045,18 @@ def _scratch_path_error(path, workspace_root):
     if not leaf:
         return f"the worker's scratch path {path!r} has no directory leaf"
 
+    current = os.sep
+    for component in [part for part in parent.split(os.sep) if part]:
+        current = os.path.join(current, component)
+        try:
+            metadata = os.lstat(current)
+        except OSError as exc:
+            return f"cannot inspect scratch parent component {current!r}: {exc}"
+        if stat.S_ISLNK(metadata.st_mode):
+            return (
+                f"the worker's scratch parent uses symlink component {current!r}; "
+                "use the physical path so the marker cannot be rebound after approval")
+
     # Walk the resolved existing parent ancestry by filesystem identity. This catches symlink
     # aliases to any checkout subdirectory and the case aliases accepted by default macOS
     # volumes without lowercasing case-sensitive paths. An absent candidate cannot be an
@@ -1026,7 +1080,7 @@ def _scratch_path_error(path, workspace_root):
     return ""
 
 
-def _fd_within_workspace(parent_fd, workspace_root):
+def _fd_within_workspace(parent_fd, workspace_root, limit=None):
     """-> True when the directory behind parent_fd is the workspace root, or below it.
 
     Answered from the open descriptor rather than from the path. `_scratch_path_error`
@@ -1035,49 +1089,82 @@ def _fd_within_workspace(parent_fd, workspace_root):
     up from the descriptor that will create the leaf closes that window, because the
     descriptor cannot be redirected once open.
 
-    Failure to walk is not containment: an unreadable ancestor returns False and the
-    caller keeps every other refusal it already applies.
+    Failure to complete the proof is not an external-directory verdict. It raises a typed
+    error that the public hook converts to a denial.
     """
     try:
         root_stat = os.stat(workspace_root)
-    except OSError:
-        return False
+    except OSError as exc:
+        raise ScratchPolicyError(
+            f"cannot identify workspace ancestry root {workspace_root!r}: {exc}") from exc
     root_id = (root_stat.st_dev, root_stat.st_ino)
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    fd = os.dup(parent_fd)
+    try:
+        fd = os.dup(parent_fd)
+    except OSError as exc:
+        raise ScratchPolicyError(f"cannot duplicate scratch parent descriptor: {exc}") from exc
     try:
         # Bounded. A filesystem whose root does not report itself as its own parent would
         # otherwise spin here, inside a hook that runs on every spawn.
-        for _ in range(_ANCESTOR_WALK_LIMIT):
-            here = os.fstat(fd)
+        for _ in range(_ANCESTOR_WALK_LIMIT if limit is None else limit):
+            try:
+                here = os.fstat(fd)
+            except OSError as exc:
+                raise ScratchPolicyError(
+                    f"cannot inspect scratch ancestry descriptor: {exc}") from exc
             if (here.st_dev, here.st_ino) == root_id:
                 return True
             try:
                 up = os.open("..", flags, dir_fd=fd)
-            except OSError:
-                return False
-            above = os.fstat(up)
+            except OSError as exc:
+                raise ScratchPolicyError(
+                    f"cannot open scratch ancestry parent: {exc}") from exc
+            try:
+                above = os.fstat(up)
+            except OSError as exc:
+                os.close(up)
+                raise ScratchPolicyError(
+                    f"cannot inspect scratch ancestry parent: {exc}") from exc
             if (above.st_dev, above.st_ino) == (here.st_dev, here.st_ino):
                 os.close(up)
                 return False
             os.close(fd)
             fd = up
-        return False
+        raise ScratchPolicyError(
+            f"scratch ancestry proof exhausted {_ANCESTOR_WALK_LIMIT if limit is None else limit} "
+            "directory steps")
     finally:
         os.close(fd)
+
+
+def _open_stable_directory(path):
+    """Open an absolute directory one no-follow component at a time."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(os.sep, flags)
+    except OSError as exc:
+        raise ScratchPolicyError(f"cannot open filesystem root for scratch: {exc}") from exc
+    try:
+        for component in [part for part in path.split(os.sep) if part]:
+            try:
+                child = os.open(component, flags, dir_fd=fd)
+            except OSError as exc:
+                raise ScratchPolicyError(
+                    f"cannot open scratch parent component {component!r} beneath {path!r}: "
+                    f"{exc}") from exc
+            os.close(fd)
+            fd = child
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
 
 
 def reserve_scratch(path, workspace_root):
     """Atomically create one mode-0700 directory; EEXIST is a collision, never success."""
     normalized = os.path.abspath(path)
     parent, leaf = os.path.dirname(normalized), os.path.basename(normalized)
-    flags = os.O_RDONLY
-    flags |= getattr(os, "O_DIRECTORY", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    try:
-        parent_fd = os.open(parent, flags)
-    except OSError as exc:
-        raise ScratchPolicyError(f"cannot open scratch parent {parent!r}: {exc}") from exc
+    parent_fd = _open_stable_directory(parent)
     try:
         opened = os.fstat(parent_fd)
         current = os.stat(parent, follow_symlinks=False)

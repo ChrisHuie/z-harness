@@ -4,7 +4,8 @@
 The repository gate can validate a draft's inputs but cannot see what GitHub received.
 This tool reads complete REST objects back and binds both modes to the requested repository,
 pull request and current head. Comment mode compares raw UTF-8 body bytes and additionally
-binds the author, comment identity and unedited timestamps. Snapshot mode compares the live
+binds the author, comment identity, unedited timestamps, and append-only predecessor records.
+Snapshot mode compares the live
 pull-request body and title to a reviewed frozen digest; it does not rewrite either surface.
 
 Local source files use one canonical form: strict UTF-8, no carriage returns, and exactly
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+from datetime import datetime
 import hashlib
 import io
 import json
@@ -29,9 +31,11 @@ import tempfile
 from pathlib import Path
 
 
-VERSION = "3.1"
+VERSION = "3.2"
 RECEIPT = "REVIEW-PUBLICATION-SUMMARY"
 HEAD_LINE = re.compile(rb"^Head: `([0-9a-f]{40})`$", re.MULTILINE)
+COMMENT_URL = re.compile(
+    r"^https://github\.com/([^/]+/[^/]+)/pull/([1-9][0-9]*)#issuecomment-([1-9][0-9]*)$")
 SNAPSHOT_SCHEMA_VERSION = 1
 SNAPSHOT_KIND = "pull-request-frozen-publication"
 SNAPSHOT_NOTE = (
@@ -205,6 +209,96 @@ def _comment_metadata_error(
     return ""
 
 
+def _github_time(value, label):
+    if not isinstance(value, str):
+        raise PublicationError(f"publication metadata is missing {label}")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise PublicationError(f"publication metadata has invalid {label}: {value!r}") from exc
+    if parsed.utcoffset() is None:
+        raise PublicationError(f"publication metadata has timezone-free {label}: {value!r}")
+    return parsed
+
+
+def _predecessor_contract(
+        current: dict, submitted: bytes, repo: str, pr: int, expected_author: str,
+        initial_publication: bool, predecessor_urls, runner=None):
+    """Return (problem, closed predecessor records) for one append-only handoff."""
+    urls = tuple(predecessor_urls or ())
+    if initial_publication:
+        if urls:
+            return "an initial publication cannot name predecessor comments", []
+        return "", []
+    if not urls:
+        return "a later publication must name at least one predecessor comment", []
+    if len(set(urls)) != len(urls):
+        return "predecessor comment URLs are not unique", []
+    try:
+        current_created = _github_time(current.get("created_at"), "created_at")
+    except PublicationError as exc:
+        return str(exc), []
+    records = []
+    for url in urls:
+        matched = COMMENT_URL.fullmatch(url)
+        if not matched:
+            return f"predecessor comment URL is not canonical: {url!r}", records
+        linked_repo, linked_pr, linked_id = matched.groups()
+        if linked_repo != repo or int(linked_pr) != pr:
+            return f"predecessor comment URL is outside {repo} pull request {pr}: {url!r}", records
+        predecessor_id = int(linked_id)
+        if predecessor_id == current.get("id"):
+            return "a comment cannot name itself as its predecessor", records
+        if submitted.count(url.encode("utf-8")) != 1:
+            return f"submitted handoff must link predecessor exactly once: {url}", records
+        predecessor = _api_object(
+            repo, f"issues/comments/{predecessor_id}", "predecessor comment", runner)
+        predecessor_user = _object(predecessor.get("user"))
+        expected_issue = f"https://api.github.com/repos/{repo}/issues/{pr}"
+        required = {
+            "id": predecessor.get("id"),
+            "issue_url": predecessor.get("issue_url"),
+            "html_url": predecessor.get("html_url"),
+            "created_at": predecessor.get("created_at"),
+            "updated_at": predecessor.get("updated_at"),
+            "user.login": predecessor_user.get("login"),
+            "body": predecessor.get("body"),
+        }
+        try:
+            for label, value in required.items():
+                _required(value, f"predecessor {label}")
+            predecessor_created = _github_time(
+                predecessor.get("created_at"), "predecessor created_at")
+        except PublicationError as exc:
+            return str(exc), records
+        if predecessor.get("id") != predecessor_id:
+            return (f"predecessor comment id is {predecessor.get('id')!r}, "
+                    f"expected {predecessor_id}"), records
+        if predecessor.get("issue_url") != expected_issue:
+            return "predecessor comment belongs to another pull request", records
+        if predecessor.get("html_url") != url:
+            return f"predecessor comment URL is {predecessor.get('html_url')!r}, expected {url!r}", records
+        if predecessor_user.get("login") != expected_author:
+            return (f"predecessor comment author is {predecessor_user.get('login')!r}, "
+                    f"expected {expected_author!r}"), records
+        if predecessor.get("created_at") != predecessor.get("updated_at"):
+            return "predecessor comment was edited", records
+        if predecessor_created >= current_created:
+            return "predecessor comment is not older than the current publication", records
+        predecessor_body = _text_bytes(predecessor.get("body"), "predecessor comment")
+        if len(HEAD_LINE.findall(predecessor_body)) != 1:
+            return "predecessor comment does not contain exactly one full Head line", records
+        records.append({
+            "id": predecessor_id,
+            "url": url,
+            "author": predecessor_user.get("login"),
+            "created_at": predecessor.get("created_at"),
+            "updated_at": predecessor.get("updated_at"),
+            "edited": False,
+        })
+    return "", records
+
+
 def _snapshot_error(snapshot: dict, repo: str, pr: int, body: bytes,
                     title: bytes) -> str:
     if set(snapshot) != SNAPSHOT_FIELDS:
@@ -281,7 +375,8 @@ def _receipt(kind: str, repo: str, pr: int, expected_head: str, published: bytes
 
 
 def verify_comment(repo: str, pr: int, comment_id: int, expected_head: str,
-                   expected_author: str, body_path: Path, runner=None) -> int:
+                   expected_author: str, body_path: Path, runner=None, *,
+                   initial_publication=True, predecessor_urls=()) -> int:
     try:
         submitted = _source_bytes(body_path)
         comment = _api_object(repo, f"issues/comments/{comment_id}", "comment", runner)
@@ -291,6 +386,11 @@ def verify_comment(repo: str, pr: int, comment_id: int, expected_head: str,
             comment, repo, pr, comment_id, expected_author, expected_head, submitted)
         if not problem:
             problem = _difference(published, expected)
+        predecessors = []
+        if not problem:
+            problem, predecessors = _predecessor_contract(
+                comment, submitted, repo, pr, expected_author,
+                initial_publication, predecessor_urls, runner)
         pull = _api_object(repo, f"pulls/{pr}", "pull request", runner)
         if not problem:
             problem = _pr_metadata_error(pull, repo, pr, expected_head)
@@ -307,6 +407,7 @@ def verify_comment(repo: str, pr: int, comment_id: int, expected_head: str,
         edited=comment.get("created_at") != comment.get("updated_at"),
         submitted_bytes=len(submitted), submitted_sha256=_sha256(submitted),
         terminal_line_feed=terminal_line_feed,
+        initial_publication=initial_publication, predecessors=predecessors,
     )
     return 1 if problem else 0
 
@@ -420,7 +521,7 @@ def selftest() -> int:
         "issue_url": f"https://api.github.com/repos/{repo}/issues/{pr}",
         "html_url": f"https://github.com/{repo}/pull/{pr}#issuecomment-{comment_id}",
         "user": {"login": author, "id": 42}, "author_association": "OWNER",
-        "created_at": "2026-08-19T00:00:00Z", "updated_at": "2026-08-19T00:00:00Z",
+        "created_at": "2026-08-19T00:01:00Z", "updated_at": "2026-08-19T00:01:00Z",
     }
     title = "Probe title"
     pull = {
@@ -443,7 +544,8 @@ def selftest() -> int:
     comment_receipt_fields = frozenset({
         "author", "author_association", "author_id", "comment_id", "comment_url",
         "created_at", "edited", "expected_bytes", "expected_head",
-        "expected_sha256", "kind", "pr", "problem", "published_bytes",
+        "expected_sha256", "initial_publication", "kind", "pr", "predecessors",
+        "problem", "published_bytes",
         "published_sha256", "repo", "submitted_bytes", "submitted_sha256",
         "terminal_line_feed", "updated_at", "verified",
     })
@@ -470,6 +572,8 @@ def selftest() -> int:
             "submitted_bytes": len(body_bytes),
             "submitted_sha256": _sha256(body_bytes),
             "terminal_line_feed": terminal,
+            "initial_publication": True,
+            "predecessors": [],
         }
 
     snapshot_receipt_fields = frozenset({
@@ -505,12 +609,16 @@ def selftest() -> int:
     transport_calls = []
 
     def runner_for(comment_data=comment, pull_data=pull, commit_data=None,
-                   commit_rc=0):
+                   commit_rc=0, predecessor_data=None):
         def run(argv, **kwargs):
             transport_calls.append((tuple(argv), dict(kwargs)))
             endpoint = argv[-1]
             if "issues/comments" in endpoint:
-                payload = comment_data
+                if (predecessor_data is not None
+                        and endpoint.endswith(f"/{predecessor_data.get('id')}")):
+                    payload = predecessor_data
+                else:
+                    payload = comment_data
             elif "/commits/" in endpoint:
                 if commit_rc:
                     return Done(commit_rc, b"", b"gh: Not Found (HTTP 404)")
@@ -542,6 +650,83 @@ def selftest() -> int:
         manifest.write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf-8")
         expect("matching comment publication verifies", verify_comment(
             repo, pr, comment_id, head, author, body, runner_for()) == 0)
+
+        predecessor_id = 122
+        predecessor_url = (
+            f"https://github.com/{repo}/pull/{pr}#issuecomment-{predecessor_id}")
+        predecessor = {
+            "id": predecessor_id,
+            "body": f"Head: `{'b' * 40}`\n\nEarlier handoff.",
+            "issue_url": f"https://api.github.com/repos/{repo}/issues/{pr}",
+            "html_url": predecessor_url,
+            "user": {"login": author, "id": 42},
+            "author_association": "OWNER",
+            "created_at": "2026-08-19T00:00:00Z",
+            "updated_at": "2026-08-19T00:00:00Z",
+        }
+        later_bytes = (
+            f"Head: `{head}`\n\nSupersedes {predecessor_url}.\n").encode()
+        later_comment = dict(comment, body=later_bytes[:-1].decode())
+        body.write_bytes(later_bytes)
+        later_code, later_receipt = captured_receipt(lambda: verify_comment(
+            repo, pr, comment_id, head, author, body,
+            runner_for(later_comment, predecessor_data=predecessor),
+            initial_publication=False, predecessor_urls=(predecessor_url,)))
+        expect(
+            "a later handoff verifies one canonical older unedited predecessor link",
+            later_code == 0 and comment_receipt_is_closed(later_receipt)
+            and later_receipt.get("initial_publication") is False
+            and later_receipt.get("predecessors") == [{
+                "id": predecessor_id, "url": predecessor_url, "author": author,
+                "created_at": predecessor["created_at"],
+                "updated_at": predecessor["updated_at"], "edited": False,
+            }],
+        )
+        body.write_bytes(body_bytes)
+        expect(
+            "a later handoff without a predecessor is rejected",
+            denies(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body, runner_for(),
+                initial_publication=False), "must name at least one predecessor"),
+        )
+        expect(
+            "an initial handoff cannot smuggle a predecessor list",
+            denies(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body, runner_for(),
+                initial_publication=True, predecessor_urls=(predecessor_url,)),
+                "initial publication cannot name predecessor"),
+        )
+        expect(
+            "a predecessor URL absent from the submitted handoff is rejected",
+            denies(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body,
+                runner_for(predecessor_data=predecessor),
+                initial_publication=False, predecessor_urls=(predecessor_url,)),
+                "must link predecessor exactly once"),
+        )
+        body.write_bytes(later_bytes)
+        edited_predecessor = dict(
+            predecessor, updated_at="2026-08-19T00:00:30Z")
+        expect(
+            "an edited predecessor comment is rejected",
+            denies(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body,
+                runner_for(later_comment, predecessor_data=edited_predecessor),
+                initial_publication=False, predecessor_urls=(predecessor_url,)),
+                "predecessor comment was edited"),
+        )
+        not_older = dict(
+            predecessor, created_at="2026-08-19T00:02:00Z",
+            updated_at="2026-08-19T00:02:00Z")
+        expect(
+            "a predecessor newer than the current handoff is rejected",
+            denies(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body,
+                runner_for(later_comment, predecessor_data=not_older),
+                initial_publication=False, predecessor_urls=(predecessor_url,)),
+                "not older than the current publication"),
+        )
+        body.write_bytes(body_bytes)
         manifest_raw = manifest.read_bytes()
         matching_snapshot_code, matching_snapshot = captured_receipt(
             lambda: verify_pr_snapshot(repo, pr, head, manifest, runner_for()))
@@ -708,7 +893,7 @@ def selftest() -> int:
             ("wrong comment identity fails", "comment id is", dict(comment, id=999)),
             ("wrong canonical comment URL fails", "comment URL is", dict(comment, html_url=f"https://github.com/{repo}/pull/9#issuecomment-123")),
             ("wrong comment author fails", "comment author is", dict(comment, user={"login": "other", "id": 42})),
-            ("edited comment metadata fails", "comment was edited", dict(comment, updated_at="2026-08-19T00:01:00Z")),
+            ("edited comment metadata fails", "comment was edited", dict(comment, updated_at="2026-08-19T00:02:00Z")),
         ):
             expect(label, denies(lambda: verify_comment(
                 repo, pr, comment_id, head, author, body, runner_for(changed_comment)),
@@ -865,6 +1050,47 @@ def selftest() -> int:
                 for argv, kwargs in transport_calls),
     )
 
+    comment_cli = [
+        "comment", "--repo", repo, "--pr", str(pr), "--comment-id", str(comment_id),
+        "--expected-head", head, "--expected-author", author,
+        "--body-file", "/tmp/handoff.md",
+    ]
+    initial_args = parse_args(comment_cli + ["--initial-publication"])
+    expect(
+        "the comment CLI explicitly marks the initial publication",
+        initial_args.initial_publication is True and initial_args.predecessor_url == [],
+    )
+    later_args = parse_args(comment_cli + [
+        "--predecessor-url", "https://github.com/o/r/pull/8#issuecomment-1",
+        "--predecessor-url", "https://github.com/o/r/pull/8#issuecomment-2",
+    ])
+    expect(
+        "the comment CLI preserves every repeatable predecessor URL",
+        later_args.initial_publication is False
+        and later_args.predecessor_url == [
+            "https://github.com/o/r/pull/8#issuecomment-1",
+            "https://github.com/o/r/pull/8#issuecomment-2",
+        ],
+    )
+    missing_predecessor_rejected = False
+    both_modes_rejected = False
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            parse_args(comment_cli)
+        except SystemExit as exc:
+            missing_predecessor_rejected = exc.code == 2
+        try:
+            parse_args(comment_cli + [
+                "--initial-publication", "--predecessor-url",
+                "https://github.com/o/r/pull/8#issuecomment-1",
+            ])
+        except SystemExit as exc:
+            both_modes_rejected = exc.code == 2
+    expect("the comment CLI rejects an implicit publication mode",
+           missing_predecessor_rejected)
+    expect("the comment CLI rejects contradictory publication modes",
+           both_modes_rejected)
+
     print(f"SELFTEST-SUMMARY suite=verify-review-publication checks={checks} failures={failures}")
     return 1 if failures else 0
 
@@ -886,6 +1112,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     comment.add_argument("--expected-head", required=True, type=_head)
     comment.add_argument("--expected-author", required=True)
     comment.add_argument("--body-file", required=True, type=Path)
+    predecessor = comment.add_mutually_exclusive_group(required=True)
+    predecessor.add_argument("--initial-publication", action="store_true")
+    predecessor.add_argument("--predecessor-url", action="append", default=[])
     pr_snapshot = subparsers.add_parser("pr-snapshot")
     pr_snapshot.add_argument("--repo", required=True)
     pr_snapshot.add_argument("--pr", required=True, type=int)
@@ -903,7 +1132,9 @@ def main(argv: list[str] | None = None) -> int:
         return selftest()
     if args.mode == "comment":
         return verify_comment(args.repo, args.pr, args.comment_id, args.expected_head,
-                              args.expected_author, args.body_file)
+                              args.expected_author, args.body_file,
+                              initial_publication=args.initial_publication,
+                              predecessor_urls=args.predecessor_url)
     return verify_pr_snapshot(
         args.repo, args.pr, args.expected_head, args.manifest)
 

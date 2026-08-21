@@ -52,7 +52,7 @@ EVAL_SKILL_FLOOR = 7
 # 165 here and 178 in harness_check -- and a fake that hardcodes its own number tests the
 # literal rather than the contract.
 SUITE_FLOORS = {
-    "harness_check": 160,
+    "harness_check": 161,
     "render-packages": 192,
     "bash_command_guard": 1366,
     "git_grep_engine_guard": 1149,
@@ -2184,6 +2184,22 @@ def selftest() -> int:
             EXPECTED_WORKFLOW.replace(
                 "  pull_request:\n",
                 "  pull_request:\n    paths: [README.md]\n", 1)),
+    )
+    # The filtered-trigger case above covers only the `any(...)` arm. An ABSENT trigger is a
+    # different branch and was the sole defence against it, with no case: neutralising it let a
+    # workflow whose pull_request trigger had been deleted return clean.
+    expect(
+        "publication workflow rejects an absent pull-request trigger",
+        "no unfiltered pull_request trigger" in publication_workflow_error(
+            EXPECTED_WORKFLOW.replace("  pull_request:\n", "", 1)),
+    )
+    # A duplicated job satisfies every downstream check, because the block lookup takes the
+    # first match and never inspects the second -- which may carry `contents: write`.
+    expect(
+        "publication workflow rejects a duplicated job",
+        publication_workflow_error(EXPECTED_WORKFLOW.replace(
+            publication_block, publication_block + publication_block, 1))
+        == "publication workflow job is absent or duplicated",
     )
     for label, old, new, diagnosis in (
         ("job condition", "    if: github.event_name == 'pull_request'\n",

@@ -91,7 +91,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 160
+SELFTEST_FLOOR = 161
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.1"
@@ -114,10 +114,10 @@ SELFTEST_SUITES = [
     ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 42),
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 8),
     ("verify-review-publication",
-     ["tools/verify-review-publication.py", "--selftest"], 57),
+     ["tools/verify-review-publication.py", "--selftest"], 59),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
-    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 276),
+    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 278),
     ("write-mutation-receipt",
      ["tools/write-mutation-receipt.py", "--selftest"], 59),
     ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 65),
@@ -491,6 +491,12 @@ _GIT_REPOSITORY_ENV = frozenset({
     "GIT_SHALLOW_FILE",
     "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
     "GIT_NAMESPACE",
+    # Pathspec magic. The gitignored-context query is the only one carrying `:(icase,glob)`,
+    # and GIT_LITERAL_PATHSPECS turns those into literal filenames that match nothing: the
+    # scan returns clean with exit 0, empty stderr and no diagnostic. `git --literal-pathspecs`
+    # exports the variable to child processes, so a hook running under it scans blind.
+    "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS",
+    "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS",
 })
 
 
@@ -2302,9 +2308,26 @@ def selftest():
             c6_names_an_unlaunchable_git,
         )
 
+        # A LITERAL roster, never *_GIT_REPOSITORY_ENV: an input built from the constant
+        # under test follows it, so deleting a member removed it from both the input and the
+        # expectation and the proof stayed green.
+        reviewed_repository_selectors = (
+            "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_NO_REPLACE_OBJECTS",
+            "GIT_REPLACE_REF_BASE", "GIT_PREFIX", "GIT_INTERNAL_SUPER_PREFIX",
+            "GIT_SHALLOW_FILE", "GIT_CEILING_DIRECTORIES",
+            "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_NAMESPACE",
+            "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS",
+            "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS",
+        )
+        expect_red(
+            "the scrubbed selector set covers exactly the reviewed roster",
+            lambda: _GIT_REPOSITORY_ENV == frozenset(reviewed_repository_selectors),
+        )
         hostile_git_env = {
             key: "planted" for key in (
-                *_GIT_REPOSITORY_ENV, "GIT_CONFIG", "GIT_CONFIG_COUNT",
+                *reviewed_repository_selectors, "GIT_CONFIG", "GIT_CONFIG_COUNT",
                 "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_PARAMETERS",
                 "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM",
             )

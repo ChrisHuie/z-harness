@@ -670,6 +670,12 @@ def selftest() -> int:
         changed_title_code, changed_title_receipt = captured_receipt(
             lambda: verify_pr_snapshot(
                 repo, pr, head, manifest, runner_for(pull_data=changed_title)))
+        # Same shape: pin the title branch's own diagnosis, or a message mutation scoped to
+        # `title` alone passes while the body arm carries the case.
+        expect("a same-length frozen title digest change fails", denies(
+            lambda: verify_pr_snapshot(
+                repo, pr, head, manifest, runner_for(pull_data=changed_title)),
+            'published title digest is', 1))
         changed_title_problem = _snapshot_error(
             snapshot, repo, pr, body_bytes, changed_title["title"].encode())
         expect(
@@ -732,6 +738,12 @@ def selftest() -> int:
         wrong_number_code, wrong_number_receipt = captured_receipt(
             lambda: verify_pr_snapshot(
                 repo, pr, head, manifest, runner_for(pull_data=wrong_number_pull)))
+        # The receipt-equality check below derives its expectation from production, so it
+        # cannot say WHICH guard fired. This literal is what makes the branch's content
+        # assertable; without it, renaming the message to name the wrong surface survives.
+        expect("wrong pull-request number fails", denies(lambda: verify_pr_snapshot(
+            repo, pr, head, manifest, runner_for(pull_data=wrong_number_pull)),
+            'pull request number is', 1))
         wrong_number_problem = _pr_metadata_error(wrong_number_pull, repo, pr, head)
         expect(
             "a pull-request metadata failure emits the exact closed snapshot receipt",

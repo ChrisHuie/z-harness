@@ -1221,6 +1221,8 @@ class Run:
                 full = os.path.join(base, f)
                 present.add(os.path.relpath(full, self.root))
                 present.add(f)
+        scanned_docs = 0
+        scanned_citations = 0
         for skill in sorted(os.listdir(skills_dir)):
             refdir = os.path.join(skills_dir, skill, "references")
             if not os.path.isdir(refdir):
@@ -1228,6 +1230,7 @@ class Run:
             for name in sorted(os.listdir(refdir)):
                 if not name.endswith(".md"):
                     continue
+                scanned_docs += 1
                 try:
                     text = open(os.path.join(refdir, name), encoding="utf-8").read()
                 except OSError as exc:
@@ -1239,11 +1242,23 @@ class Run:
                     # A citation may name a path relative to any directory above it, so a
                     # suffix match is the resolution rule; exact-relpath alone reports a real
                     # file as missing whenever the citation omits a leading component.
+                    scanned_citations += 1
                     hit = target in present or any(
                         p.endswith("/" + target) for p in present)
                     resolved += 1
                     self.result("C3", hit, f"{skill}/references/{name}: cites {target}"
                                            f"{'' if hit else ' -- resolves to no file'}")
+
+        # The scan set is part of the claim. This matcher models a backticked token only, so
+        # a bare filename in prose is a mention rather than a citation and is deliberately out
+        # of scope; measured over this tree, every unbackticked non-resolving token is a
+        # mention carrying no line number. Say so in the verdict rather than letting a clean
+        # run imply that every spelling was examined.
+        self.result(
+            "C3", scanned_docs == 0 or scanned_citations > 0,
+            f"citation resolution over {scanned_docs} reference document(s), "
+            f"{scanned_citations} backticked citation(s); unbackticked prose mentions "
+            f"are out of scope")
 
         if resolved == 0:
             self.result("C3", False, "zero authored reference relationships")

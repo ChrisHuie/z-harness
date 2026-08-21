@@ -32,8 +32,8 @@ itself. Promote this the moment a null is being carried across tiers.*
 Relaunching the same lanes by hand reproduces the fan-out and drops the selection and
 consolidation discipline that lives in the wrapper, and can silently skip a lane. A
 harness's value is in the parts that are not agents. *Nearest always-on coverage:
-CLAUDE.md:34 "Named a tool? Run exactly that and stop." The registry notes R189 is the
-sharper mechanism; if CLAUDE.md:34 is ever trimmed, promote this.*
+`AGENTS.md`, "Named a tool? Run exactly that and stop." The registry notes R189 is the
+sharper mechanism; if that sentence is ever trimmed, promote this.*
 
 **R288 — power-validate a prioritiser BEFORE dispatching on it, not after.** The body's
 power-validation rule covers believing a *null*; a *ranking* you act on needs the same proof

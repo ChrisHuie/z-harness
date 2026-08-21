@@ -465,6 +465,25 @@ def selftest():
 
         # The empty-leaf branch is reachable only when the path resolves to the filesystem
         # root: os.path.abspath strips a trailing separator, so "/tmp/x/" still has a leaf.
+        # An ambient GIT_DIR/GIT_WORK_TREE must not decide which worktree this is. Removing
+        # the scrub does not open a hole -- the reported root then fails the marker-root
+        # comparison and the spawn is refused -- so what the scrub actually buys is that a
+        # developer carrying those variables is served rather than refused.
+        _prior_git_dir = os.environ.get("GIT_DIR")
+        os.environ["GIT_DIR"] = os.path.join(plain, "not-a-repo")
+        try:
+            ambient_root = protected_workspace_root(nested)
+        except ScratchPolicyError:
+            ambient_root = None
+        finally:
+            if _prior_git_dir is None:
+                os.environ.pop("GIT_DIR", None)
+            else:
+                os.environ["GIT_DIR"] = _prior_git_dir
+        ok = ambient_root == os.path.realpath(adopted)
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} an ambient GIT_DIR does not decide the workspace root")
+
         ok = "has no directory leaf" in _scratch_path_error(os.sep, root)
         bad += (not ok); checks += 1
         print(f"  {'PASS' if ok else 'FAIL'} a scratch path that is the filesystem root is refused")

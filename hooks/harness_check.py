@@ -122,7 +122,7 @@ SELFTEST_SUITES = [
      ["tools/write-mutation-receipt.py", "--selftest"], 59),
     ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 65),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
-    ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 76),
+    ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 77),
     ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 1149),
     ("zsh_rev_modifier_guard", ["hooks/guards/zsh_rev_modifier_guard.py", "--selftest"], 487),
 ]
@@ -132,7 +132,7 @@ def expected_selftest_checks(name):
     """Exact execution-derived counts for suites whose former formulas hid probes."""
     fixed = {
         "ci-gate": 305,
-        "spawn_preflight_guard": 76,
+        "spawn_preflight_guard": 77,
         "verify-review-publication": 61,
     }
     if name in fixed:

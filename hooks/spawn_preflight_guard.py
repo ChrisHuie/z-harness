@@ -275,6 +275,19 @@ def selftest():
         bad += (not ok); checks += 1
         print(f"  {'PASS' if ok else 'FAIL'} a symlink alias of the checkout is denied")
 
+        inside_subdir = os.path.join(adopted, "inside", "existing")
+        os.makedirs(inside_subdir)
+        subdir_alias = os.path.join(_root, "subdir-alias")
+        os.symlink(os.path.join(adopted, "inside"), subdir_alias)
+        hidden_inside = os.path.join(subdir_alias, "existing", "worker")
+        got, why = scratch_decision(
+            {"prompt": f"Scratch: {hidden_inside}\n"}, root,
+            nonce="subdir-alias")
+        ok = (got == "deny" and "inside the checkout" in why
+              and not os.path.lexists(hidden_inside))
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} a symlink to a checkout subdirectory cannot hide containment")
+
         real_samefile = os.path.samefile
         def identity_eio(_left, _right):
             raise OSError(5, "planted identity EIO")
@@ -702,10 +715,11 @@ def _scratch_path_error(path, workspace_root):
     if not leaf:
         return f"the worker's scratch path {path!r} has no directory leaf"
 
-    # Compare each existing spelling by filesystem identity. This catches symlink aliases and
-    # the case aliases accepted by default macOS volumes without lowercasing case-sensitive
-    # paths. An absent candidate cannot be an ancestor of the already-existing workspace.
-    for ancestor in _path_ancestors(parent):
+    # Walk the resolved existing parent ancestry by filesystem identity. This catches symlink
+    # aliases to any checkout subdirectory and the case aliases accepted by default macOS
+    # volumes without lowercasing case-sensitive paths. An absent candidate cannot be an
+    # ancestor of the already-existing workspace.
+    for ancestor in _path_ancestors(os.path.realpath(parent)):
         if _same_file(ancestor, workspace_root):
             return (
                 f"the worker's scratch path {path!r} is inside the checkout "

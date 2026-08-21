@@ -2176,7 +2176,12 @@ def selftest() -> int:
         expect(
             "coordinated publication-job and workflow-oracle deletion still turns red",
             workflow_error(workflow_without_publication) is None
-            and publication_workflow_error(workflow_without_publication) != "",
+            # The exact diagnosis, not merely non-empty. This is the only case asserting the
+            # oracle is independent of the byte tripwire, and `!= ""` over fourteen non-empty
+            # return paths let the branch it names be neutralised while three fallbacks kept
+            # the assertion true.
+            and publication_workflow_error(workflow_without_publication)
+            == "publication workflow job is absent or duplicated",
         )
     finally:
         globals()["EXPECTED_WORKFLOW"] = original_expected_workflow

@@ -490,6 +490,10 @@ def selftest():
 
         # An unmodelled exception must become a denial. Unhandled, the process exits 1, and
         # this host continues the tool call on any exit other than 2 -- so a crash is an allow.
+        def _unmodelled_reserve(path, workspace_root):
+            """Raise a type neither OSError nor ValueError covers."""
+            raise NotImplementedError("mkdir: dir_fd unavailable on this platform")
+
         real_reserve = reserve_scratch
         globals()["reserve_scratch"] = _unmodelled_reserve
         try:
@@ -1061,11 +1065,6 @@ def _fd_within_workspace(parent_fd, workspace_root):
         return False
     finally:
         os.close(fd)
-
-
-def _unmodelled_reserve(path, workspace_root):
-    """Selftest stub: raise a type neither OSError nor ValueError covers."""
-    raise NotImplementedError("mkdir: dir_fd unavailable on this platform")
 
 
 def reserve_scratch(path, workspace_root):

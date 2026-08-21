@@ -1352,34 +1352,45 @@ class Run:
                     malformed_codex_handlers += 1
                     continue
                 for hook in hooks:
-                    if not isinstance(hook, dict):
+                    try:
+                        if not isinstance(hook, dict):
+                            malformed_codex_handlers += 1
+                            inventory.append({
+                                "event": event, "matcher": entry.get("matcher"),
+                                "rel": None, "argv": [], "type": None,
+                                "timeout": None, "async": None,
+                            })
+                            continue
+                        command = hook.get("command", "")
+                        match = (re.search(
+                            r"\$\{PLUGIN_ROOT\}/([\w./\-]+\.(?:py|sh))", command)
+                            if isinstance(command, str) else None)
+                        rel = match.group(1) if match else None
+                        try:
+                            argv = (shlex.split(command)
+                                    if isinstance(command, str) else [])
+                        except (TypeError, ValueError):
+                            argv = []
+                        if rel is None or not argv:
+                            malformed_codex_handlers += 1
+                        inventory.append({
+                            "event": event,
+                            "matcher": entry.get("matcher"),
+                            "rel": rel,
+                            "argv": argv,
+                            "type": hook.get("type"),
+                            "timeout": hook.get("timeout"),
+                            "async": hook.get("async", False),
+                        })
+                    except (AttributeError, TypeError, ValueError):
+                        # Keep C7's fixed-cardinality receipt even when a malformed
+                        # handler defeats an individual traversal predicate.
                         malformed_codex_handlers += 1
                         inventory.append({
                             "event": event, "matcher": entry.get("matcher"),
                             "rel": None, "argv": [], "type": None,
                             "timeout": None, "async": None,
                         })
-                        continue
-                    command = hook.get("command", "")
-                    match = (re.search(
-                        r"\$\{PLUGIN_ROOT\}/([\w./\-]+\.(?:py|sh))", command)
-                        if isinstance(command, str) else None)
-                    rel = match.group(1) if match else None
-                    try:
-                        argv = shlex.split(command) if isinstance(command, str) else []
-                    except (TypeError, ValueError):
-                        argv = []
-                    if rel is None or not argv:
-                        malformed_codex_handlers += 1
-                    inventory.append({
-                        "event": event,
-                        "matcher": entry.get("matcher"),
-                        "rel": rel,
-                        "argv": argv,
-                        "type": hook.get("type"),
-                        "timeout": hook.get("timeout"),
-                        "async": hook.get("async", False),
-                    })
         for event, matcher, rel, required_args in REQUIRED_CODEX_HANDLERS:
             candidates = [item for item in inventory
                           if item["event"] == event and item["matcher"] == matcher
@@ -2484,11 +2495,7 @@ def selftest():
         open(os.path.join(registration_root, "hooks/hooks.json"), "w").write(
             json.dumps(malformed_codex_registration))
         malformed_codex = Run(registration_root, ci=True)
-        try:
-            malformed_codex.c7_anchors()
-        except Exception as exc:
-            malformed_codex.failures.append(
-                ("C7", f"malformed Codex handler traversal raised {exc!r}"))
+        malformed_codex.c7_anchors()
         expect_red(
             "C7 rejects a malformed Codex handler instead of crashing or filtering it out",
             lambda: any(c == "C7" and "Codex handler inventory is closed" in d

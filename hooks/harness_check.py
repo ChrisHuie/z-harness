@@ -91,7 +91,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 175
+SELFTEST_FLOOR = 176
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.2"
@@ -603,6 +603,16 @@ def package_paths(root, runner=None):
         return "source", [line for line in tracked.stdout.splitlines() if line], None
     paths = []
     for dirpath, dirs, files in os.walk(root):
+        # A directory carrying its own `.git` is a separate repository vendored inside this
+        # tree, not content of the package being inventoried. Without the prune its files are
+        # compared against the source as though the package shipped them, and the marker file
+        # itself was listed as package content.
+        if dirpath != root and os.path.lexists(os.path.join(dirpath, ".git")):
+            dirs[:] = []
+            continue
+        # No filename filter for `.git` here: a directory holding one is pruned above, and a
+        # root holding one never reaches this walk because package_paths takes the tracked
+        # branch instead. The two conditions coincide, so the filter could not fire.
         dirs[:] = [d for d in dirs if d != ".git"]
         for filename in files:
             paths.append(os.path.relpath(os.path.join(dirpath, filename), root))
@@ -2403,6 +2413,23 @@ def selftest():
         expect_red("C3 goes red on an exemption no document cites",
                    lambda: any(c == "C3" and "DECLARED BUT CITED NOWHERE" in d
                                for c, d in dead_ext_run.failures))
+
+        # The installed-surface inventory has the same exposure: a package directory that is
+        # not itself a repository can contain one, and its files were counted as package
+        # content. Not reachable from this machine, where the installation carries its own
+        # .git and takes the tracked path, so the case builds the tree the walk is for.
+        pkg_root = os.path.join(td, "installed-pkg")
+        os.makedirs(os.path.join(pkg_root, "pkg"))
+        open(os.path.join(pkg_root, "pkg", "real.md"), "w").write("x")
+        vendored = os.path.join(pkg_root, "vendored")
+        os.makedirs(vendored)
+        open(os.path.join(vendored, ".git"), "w").write("gitdir: elsewhere\n")
+        open(os.path.join(vendored, "foreign.md"), "w").write("x")
+        _pkg_surface, _pkg_paths, _ = package_paths(pkg_root)
+        expect_red("the installed inventory excludes a vendored repository",
+                   lambda: _pkg_surface == "installed"
+                   and "pkg/real.md" in _pkg_paths
+                   and not any(p.startswith("vendored/") for p in _pkg_paths))
 
         expect_red("C3 does not resolve a citation against a nested checkout",
                    lambda: any(c == "C3" and "ONLY-IN-NESTED.md" in d for c, d in r.failures))

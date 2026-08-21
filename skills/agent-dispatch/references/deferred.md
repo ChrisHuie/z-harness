@@ -41,8 +41,9 @@ and gets it far less often, because a ranking produces work rather than silence 
 looks suspicious. Score it against a hand-labelled sample before it decides anything.
 Observed: a five-file ranking measured **26% recall** only after three agents were already
 dispatched against it, and the file it deprioritised produced both of that round's
-refutations. *Displaced because the `agent-dispatch` body is at its 5000-char cap with 7
-characters spare; this belongs beside the null rule and there is no room for it there.*
+refutations. *Displaced because the `agent-dispatch` body sits at its cap; `hooks/harness_check.py`
+carries `BODY_CHAR_CAP` and the live margin is whatever that check reports, so a literal here
+goes stale the next time the body is edited.*
 
 **R289 — a dispatched worker owns its scratch directory, or the fan-out corrupts its own
 evidence.** Concurrent workers reach for the same obvious filenames — `probe.py`, `mutate.py`,
@@ -52,8 +53,9 @@ which is a wrong number rather than an error. What a runtime provides differs: o
 subagent the same session scratchpad, another hands none and leaves `cwd` on the repository, which
 turns the same pressure toward the checkout the mutation-worker rule already protects. So the rule
 is a property, not a path — assign an exclusive directory per worker at spawn, name it in the
-prompt, and never read a scratch path you did not assign. Observed: eight concurrent workers, 435
-files at one shared root, one file lost mid-run.
+prompt, and never read a scratch path you did not assign. Observed on a fan-out over this branch:
+several hundred files at one shared root and one file lost mid-run. `ls -1 <root> | wc -l`
+regenerates the count; a literal here drifts with the session that produced it.
 
 
 **R290 — ground an injection channel in the installed CLI, not in a remembered flag name.**

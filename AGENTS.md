@@ -71,7 +71,8 @@ batch at 3–4 concurrent agents and wait for the batch. Infrastructure failure 
 fail. Decide the reclaim order before the volume is full; otherwise point `TMPDIR` at a volume
 with room.
 
-Let workers inherit the current model unless the task explicitly requires a different one. Give
+Let workers inherit the current model unless the task explicitly requires a different one.
+
 Every dispatched worker owns an exclusive scratch directory, assigned at spawn, that is never the
 checkout. Concurrent workers sharing one writable directory overwrite each other under the obvious
 names, and the loss is silent: the loser reads the winner's bytes and reports a confident wrong

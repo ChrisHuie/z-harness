@@ -1495,6 +1495,20 @@ RETIRED_DISPATCH_CLAIMS = (
     "append-to-subagent-system-prompt",
     "append-flag pierces every nesting depth",
 )
+# A required-phrase check is monotone: a document can carry the phrase and revoke it in the next
+# sentence. The negation set is the non-monotone dual, so the rule cannot be withdrawn in prose
+# while the gate stays green.
+FORBIDDEN_WORKSPACE_NEGATIONS = (
+    "workers share one directory",
+    "share one scratch directory",
+    "rule withdrawn",
+    "do not assign per-worker scratch",
+    "a shared scratch directory is fine",
+)
+# The spawn guard carries its own copy of the activation sentence. Nothing else binds it, and a
+# reword of the shared policy that this gate accepts would leave the guard matching nothing and
+# enforcing nothing, silently.
+SPAWN_GUARD_SOURCE = "hooks/spawn_preflight_guard.py"
 RUNTIME_PATHS_FORBIDDEN_IN_SHARED_POLICY = (
     "~/.claude",
     "~/.codex",
@@ -1727,8 +1741,24 @@ def review_publication_manifest_error(data=None) -> str:
     return ""
 
 
+def spawn_guard_marker(source=None):
+    """The activation sentence the spawn guard actually matches on, or None.
+
+    Read from the guard's source rather than duplicated here: a third authored copy is what let
+    the marker drift out of the shared policy with every suite green.
+    """
+    try:
+        text = (ROOT / SPAWN_GUARD_SOURCE).read_text(encoding="utf-8") if source is None \
+            else source
+    except OSError:
+        return None
+    found = re.search(r'^WORKSPACE_RULE_MARKER\s*=\s*"([^"]+)"', text, re.MULTILINE)
+    return found.group(1) if found else None
+
+
 def workspace_doctrine_error(source_texts=None, doctrine=None,
-                             forbidden_paths=None) -> tuple[str, int, int]:
+                             forbidden_paths=None, negations=None,
+                             guard_source=None) -> tuple[str, int, int]:
     """(problem, documents scanned, forbidden-path hits) for the worker-workspace rule.
 
     Two halves, because a required-phrase check is monotone: adding text never removes a
@@ -1742,6 +1772,9 @@ def workspace_doctrine_error(source_texts=None, doctrine=None,
     doctrine = WORKSPACE_DOCTRINE if doctrine is None else doctrine
     forbidden_paths = (RUNTIME_PATHS_FORBIDDEN_IN_SHARED_POLICY
                        if forbidden_paths is None else forbidden_paths)
+    negations = FORBIDDEN_WORKSPACE_NEGATIONS if negations is None else negations
+    if not negations:
+        return ("workspace negation set is empty, so the rule can be revoked in prose", 0, 0)
     if not doctrine:
         return ("workspace doctrine table is empty, so this check asserts nothing", 0, 0)
     if not forbidden_paths:
@@ -1766,9 +1799,16 @@ def workspace_doctrine_error(source_texts=None, doctrine=None,
             if phrase not in normalized:
                 problems.append(
                     f"{relative} is missing required workspace rule {phrase!r}")
+    # The shared policy must be IN the scan set. Reading it as optional made a clean verdict
+    # indistinguishable from never having checked: both reported hits=0 with no problem.
     shared = source_texts.get(SHARED_POLICY_DOCUMENT)
     hits = 0
-    if shared is not None:
+    if shared is None:
+        problems.append(
+            f"the shared policy {SHARED_POLICY_DOCUMENT} is absent from the scanned set, so the "
+            "runtime-path and negation arms asserted nothing")
+    else:
+        normalized_shared = re.sub(r"\s+", " ", shared).lower()
         for path_text in forbidden_paths:
             if path_text in shared:
                 hits += 1
@@ -1776,10 +1816,35 @@ def workspace_doctrine_error(source_texts=None, doctrine=None,
                     f"{SHARED_POLICY_DOCUMENT} names the runtime-specific path "
                     f"{path_text!r}; the shared policy states the property and the adapter "
                     "names the path")
+        for negation in negations:
+            if negation in normalized_shared:
+                hits += 1
+                problems.append(
+                    f"{SHARED_POLICY_DOCUMENT} carries the retired spelling {negation!r}, which "
+                    "revokes the rule the required phrases assert")
+        marker = spawn_guard_marker(guard_source)
+        if marker is None:
+            problems.append(
+                f"cannot read the activation marker from {SPAWN_GUARD_SOURCE}, so the spawn "
+                "guard's copy is unbound")
+        elif marker not in re.sub(r"\s+", " ", shared):
+            problems.append(
+                f"the spawn guard's activation marker {marker!r} is absent from "
+                f"{SHARED_POLICY_DOCUMENT}, so the guard matches nothing and enforces nothing")
     if problems:
         return ("worker-workspace doctrine: " + "; ".join(problems[:5]),
                 len(source_texts), hits)
     return "", len(source_texts), hits
+
+
+def _missing_dispatch_body_probe() -> str:
+    """Exercise the missing-body arm without moving the module constant."""
+    saved = globals()["DISPATCH_BODY_DOCUMENT"]
+    globals()["DISPATCH_BODY_DOCUMENT"] = "no/such/dispatch/body.md"
+    try:
+        return retired_dispatch_claim_error()
+    finally:
+        globals()["DISPATCH_BODY_DOCUMENT"] = saved
 
 
 def retired_dispatch_claim_error(body_text=None, retired=None) -> str:
@@ -3312,66 +3377,172 @@ def selftest() -> int:
                         **{"outbound-drafts": 0, "craft-prompt": 6})) != "",
     )
     dispatch_body = (ROOT / DISPATCH_BODY_DOCUMENT).read_text(encoding="utf-8")
+    # The scan target is part of the claim. Deriving the fixture from the constant let the
+    # check be aimed at any clean file with the suite still green.
+    expect(
+        "the dispatch-body scan targets the skill body an agent loads first",
+        DISPATCH_BODY_DOCUMENT == "skills/agent-dispatch/SKILL.md"
+        and (ROOT / DISPATCH_BODY_DOCUMENT).is_file(),
+    )
     expect(
         "the dispatch body asserts no retired external-tool channel",
         retired_dispatch_claim_error(body_text=dispatch_body) == "",
     )
+    # Every retired spelling, not just the first.
+    for spelling in RETIRED_DISPATCH_CLAIMS:
+        expect(
+            f"restoring the retired claim {spelling!r} turns the dispatch check red",
+            "retired external-tool channel" in retired_dispatch_claim_error(
+                body_text=dispatch_body + f"\nThe {spelling} works.\n"),
+        )
     expect(
-        "restoring the retired channel claim turns the dispatch check red",
+        "the retired-claim scan is case-insensitive",
         "retired external-tool channel" in retired_dispatch_claim_error(
-            body_text=dispatch_body + "\nThe append-to-subagent-system-prompt flag works.\n"),
+            body_text="The Append-To-Subagent-System-Prompt flag works."),
+    )
+    # A phrase containing spaces, so a reflow across lines is what the case actually tests.
+    expect(
+        "the retired-claim scan survives a line break inside the phrase",
+        "retired external-tool channel" in retired_dispatch_claim_error(
+            body_text="the append-flag pierces every\nnesting depth, it was claimed."),
     )
     expect(
-        "the retired-claim set is scanned case- and whitespace-insensitively",
-        "retired external-tool channel" in retired_dispatch_claim_error(
-            body_text="The Append-To-Subagent-System-Prompt\nflag works."),
+        "the references file does carry the retired spelling, and the body check still passes",
+        retired_dispatch_claim_error(
+            body_text=(ROOT / "skills/agent-dispatch/references/deferred.md").read_text(
+                encoding="utf-8")) != ""
+        and retired_dispatch_claim_error() == "",
     )
     expect(
         "an empty retired-claim set is a failure, not a clean verdict",
         retired_dispatch_claim_error(body_text=dispatch_body, retired=()) != "",
     )
     expect(
-        "references may name the retired spelling to explain the correction",
-        retired_dispatch_claim_error(
-            body_text="nothing retired here") == "",
+        "a dispatch body that does not exist is a failure",
+        "missing dispatch body" in _missing_dispatch_body_probe(),
     )
+
     workspace_sources = {
         relative: (ROOT / relative).read_text(encoding="utf-8")
         for relative in WORKSPACE_DOCTRINE
     }
+    guard_text = (ROOT / SPAWN_GUARD_SOURCE).read_text(encoding="utf-8")
     expect(
         "worker-workspace doctrine is stated in every file that must carry it",
         workspace_doctrine_error(source_texts=workspace_sources)[0] == "",
     )
-    for relative, required in WORKSPACE_DOCTRINE.items():
-        stripped = dict(workspace_sources)
-        stripped[relative] = stripped[relative].replace(required[0], "", 1)
-        expect(
-            f"dropping the workspace rule from {relative} turns the doctrine check red",
-            "missing required workspace rule" in workspace_doctrine_error(
-                source_texts=stripped)[0],
-        )
-    # The portability arm: the shared policy may state the property and never a path.
-    leaked = dict(workspace_sources)
-    leaked[SHARED_POLICY_DOCUMENT] += "\nWorkers write under ~/.claude/scratch.\n"
+    # The table's MEMBERSHIP is part of the claim. Dropping an entry only moves the check
+    # count, and ci-gate's own selftest has no registered floor, so nothing would redden.
+    # A loop over a set cannot see the set shrink: dropping a member drops its own test and
+    # only the check count moves. Membership is pinned separately for every closed set here.
     expect(
-        "a runtime-specific path in the shared policy turns the doctrine check red",
-        "names the runtime-specific path" in workspace_doctrine_error(
-            source_texts=leaked)[0],
+        "the forbidden runtime-path set covers exactly the reviewed runtimes",
+        RUNTIME_PATHS_FORBIDDEN_IN_SHARED_POLICY == (
+            "~/.claude", "~/.codex", "/private/tmp/claude",
+            ".claude/skills", ".codex/tmp"),
     )
     expect(
-        "the shared policy carries no runtime-specific path today",
+        "the retired dispatch-claim set covers exactly the reviewed spellings",
+        RETIRED_DISPATCH_CLAIMS == (
+            "append-to-subagent-system-prompt",
+            "append-flag pierces every nesting depth"),
+    )
+    expect(
+        "the workspace negation set covers exactly the reviewed revocations",
+        FORBIDDEN_WORKSPACE_NEGATIONS == (
+            "workers share one directory", "share one scratch directory",
+            "rule withdrawn", "do not assign per-worker scratch",
+            "a shared scratch directory is fine"),
+    )
+    expect(
+        "the doctrine table covers exactly the documents that must carry the rule",
+        tuple(sorted(WORKSPACE_DOCTRINE)) == (
+            "AGENTS.md", "CLAUDE.md", "docs/openai-agents.md",
+            "skills/agent-dispatch/references/deferred.md"),
+    )
+    # Every phrase, not just the first: the rest were load-bearing in production and untested.
+    for relative, required in WORKSPACE_DOCTRINE.items():
+        for index, phrase in enumerate(required):
+            stripped = dict(workspace_sources)
+            stripped[relative] = stripped[relative].replace(phrase, "", 1)
+            expect(
+                f"dropping phrase {index} from {relative} turns the doctrine check red",
+                "missing required workspace rule" in workspace_doctrine_error(
+                    source_texts=stripped)[0],
+            )
+    # Every forbidden path, not just the first: shrinking a forbidden set loosens it, and a
+    # deletion sweep cannot see that direction.
+    for path_text in RUNTIME_PATHS_FORBIDDEN_IN_SHARED_POLICY:
+        leaked = dict(workspace_sources)
+        leaked[SHARED_POLICY_DOCUMENT] += f"\nWorkers write under {path_text}/scratch.\n"
+        expect(
+            f"a leaked {path_text} in the shared policy turns the doctrine check red",
+            "names the runtime-specific path" in workspace_doctrine_error(
+                source_texts=leaked)[0],
+        )
+    # The monotone hole: a document can carry every required phrase and revoke the rule.
+    for negation in FORBIDDEN_WORKSPACE_NEGATIONS:
+        revoked = dict(workspace_sources)
+        revoked[SHARED_POLICY_DOCUMENT] += f"\nRevision: {negation}.\n"
+        expect(
+            f"the shared policy revoking the rule with {negation!r} turns the check red",
+            "revokes the rule" in workspace_doctrine_error(source_texts=revoked)[0],
+        )
+    # A revocation that survives a reflow is the realistic one; single-line fixtures leave the
+    # whitespace normalisation unexercised.
+    reflowed = dict(workspace_sources)
+    reflowed[SHARED_POLICY_DOCUMENT] += "\nRevision: workers share\none directory now.\n"
+    expect(
+        "a revocation broken across lines still turns the check red",
+        "revokes the rule" in workspace_doctrine_error(source_texts=reflowed)[0],
+    )
+    expect(
+        "the shared policy carries no runtime-specific path or negation today",
         workspace_doctrine_error(source_texts=workspace_sources)[2] == 0,
+    )
+    # The shared policy must be inside the scan set: absent, the runtime-path and negation arms
+    # assert nothing while reporting a clean verdict.
+    expect(
+        "dropping the shared policy from the scanned set is a failure, not a clean verdict",
+        "absent from the scanned set" in workspace_doctrine_error(
+            source_texts={k: v for k, v in workspace_sources.items()
+                          if k != SHARED_POLICY_DOCUMENT},
+            doctrine={k: v for k, v in WORKSPACE_DOCTRINE.items()
+                      if k != SHARED_POLICY_DOCUMENT})[0],
+    )
+    # The spawn guard's activation marker is a third copy of the policy sentence. Bind it here
+    # or a reword of the shared policy silently turns the live guard off.
+    expect(
+        "the spawn guard's activation marker is read from its own source",
+        spawn_guard_marker(guard_text) == (
+            "Every dispatched worker owns an exclusive scratch directory"),
+    )
+    expect(
+        "an activation marker absent from the shared policy turns the check red",
+        "matches nothing and enforces nothing" in workspace_doctrine_error(
+            source_texts=workspace_sources,
+            guard_source='WORKSPACE_RULE_MARKER = "a sentence the policy does not carry"\n')[0],
+    )
+    expect(
+        "an unreadable activation marker is a failure, not a clean verdict",
+        "so the spawn guard's copy is unbound" in workspace_doctrine_error(
+            source_texts=workspace_sources, guard_source="no assignment here\n")[0],
+    )
+    expect(
+        "a doctrine source that does not exist is a failure",
+        "missing workspace doctrine source" in workspace_doctrine_error(
+            doctrine={"no/such/doctrine.md": ("x",)})[0],
     )
     expect(
         "an empty workspace doctrine table is a failure, not a clean verdict",
         workspace_doctrine_error(source_texts=workspace_sources, doctrine={})[0] != "",
     )
     expect(
-        "an empty runtime-path forbidden set is a failure, not a clean verdict",
+        "an empty negation set is a failure, not a clean verdict",
         workspace_doctrine_error(
-            source_texts=workspace_sources, forbidden_paths=())[0] != "",
+            source_texts=workspace_sources, negations=())[0] != "",
     )
+
     expect(
         "review handoff doctrine requires append-only exact-head comments",
         review_handoff_policy_error(source_texts=handoff_sources) == "",
@@ -3734,6 +3905,28 @@ def selftest() -> int:
         )
     finally:
         globals()["publication_workflow_error"] = original_publication_workflow
+    # Both new checks were wired into gate() without a plant, so deleting the call or the
+    # append left the suite green while the gate printed FAIL and exited 0.
+    original_workspace_doctrine = workspace_doctrine_error
+    globals()["workspace_doctrine_error"] = (
+        lambda *a, **k: ("planted workspace-doctrine failure", 4, 0))
+    try:
+        expect(
+            "production gate adopts the worker-workspace doctrine result",
+            gate(fake_runner, emit_child_output=False) != 0,
+        )
+    finally:
+        globals()["workspace_doctrine_error"] = original_workspace_doctrine
+    original_retired_claim = retired_dispatch_claim_error
+    globals()["retired_dispatch_claim_error"] = (
+        lambda *a, **k: "planted retired-claim failure")
+    try:
+        expect(
+            "production gate adopts the retired dispatch-claim result",
+            gate(fake_runner, emit_child_output=False) != 0,
+        )
+    finally:
+        globals()["retired_dispatch_claim_error"] = original_retired_claim
     def invalid_child_runner(argv: Sequence[str]) -> Result:
         result = fake_runner(argv)
         if "harness_check.py --ci" in " ".join(argv):

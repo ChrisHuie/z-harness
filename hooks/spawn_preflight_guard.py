@@ -314,6 +314,20 @@ def selftest():
         bad += (not ok); checks += 1
         print(f"  {'PASS' if ok else 'FAIL'} filesystem identity errors fail closed")
 
+        real_reserve = reserve_scratch
+        def reserve_value_error(_path):
+            raise ValueError("planted reserve ValueError")
+        try:
+            globals()["reserve_scratch"] = reserve_value_error
+            got, why = scratch_decision(
+                {"prompt": f"Scratch: {fresh('reserve-value-error')}\n"}, root,
+                nonce="reserve-value-error")
+        finally:
+            globals()["reserve_scratch"] = real_reserve
+        ok = got == "deny" and "planted reserve ValueError" in why
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} reservation value errors fail closed")
+
         case_alias_supported = False
         case_alias_ok = True
         if sys.platform == "darwin":
@@ -423,6 +437,22 @@ def selftest():
             ok = rc == 0 and '"permissionDecision": "deny"' in out and "usable cwd" in out
             bad += (not ok); checks += 1
             print(f"  {'PASS' if ok else 'FAIL'} required mode fails closed on missing cwd")
+
+            nul_payload = {
+                "tool_name": "Agent", "cwd": plain, "session_id": "s1",
+                "tool_input": {"prompt": f"Scratch: {fresh('nul')}\0leaf\n"},
+            }
+            rc, out = run_payload(
+                nul_payload, runtime="claude", require_scratch=True)
+            try:
+                receipt = json.loads(out)
+                specific = receipt["hookSpecificOutput"]
+            except (KeyError, TypeError, json.JSONDecodeError):
+                specific = {}
+            ok = (rc == 0 and specific.get("permissionDecision") == "deny"
+                  and "NUL byte" in specific.get("permissionDecisionReason", ""))
+            bad += (not ok); checks += 1
+            print(f"  {'PASS' if ok else 'FAIL'} an embedded NUL returns a named deny decision")
         finally:
             if old_pct is None:
                 del os.environ["SPAWN_GUARD_DF_PCT"]
@@ -722,6 +752,12 @@ def _scratch_path_error(path, workspace_root):
     """Return why `path` cannot be atomically reserved as fresh external scratch."""
     if not os.path.isabs(path):
         return f"the worker's scratch path {path!r} is not absolute"
+    if "\0" in path:
+        return f"the worker's scratch path {path!r} contains a NUL byte"
+    try:
+        os.fsencode(path)
+    except (UnicodeError, ValueError) as exc:
+        return f"the worker's scratch path {path!r} cannot be represented: {exc}"
     if any(part in {".", ".."} for part in path.split(os.sep)):
         return f"the worker's scratch path {path!r} contains dot path components"
     normalized = os.path.abspath(path)
@@ -823,7 +859,7 @@ def scratch_decision(
             return "deny", f"{problem}. {fix}"
         if reserve:
             reserve_scratch(path)
-    except ScratchPolicyError as exc:
+    except (OSError, ValueError) as exc:
         return "deny", f"scratch reservation failed closed: {exc}. {fix}"
     return ("allow", "")
 

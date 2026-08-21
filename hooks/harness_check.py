@@ -2484,7 +2484,11 @@ def selftest():
         open(os.path.join(registration_root, "hooks/hooks.json"), "w").write(
             json.dumps(malformed_codex_registration))
         malformed_codex = Run(registration_root, ci=True)
-        malformed_codex.c7_anchors()
+        try:
+            malformed_codex.c7_anchors()
+        except Exception as exc:
+            malformed_codex.failures.append(
+                ("C7", f"malformed Codex handler traversal raised {exc!r}"))
         expect_red(
             "C7 rejects a malformed Codex handler instead of crashing or filtering it out",
             lambda: any(c == "C7" and "Codex handler inventory is closed" in d

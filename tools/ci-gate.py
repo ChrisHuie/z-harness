@@ -397,6 +397,18 @@ def publication_workflow_error(data: str) -> str:
     ]
     if top_fields != ["name: harness-check", "on:", "permissions:", "jobs:"]:
         return "publication workflow top-level fields permit an unreviewed environment"
+    # The key list alone left the block's CONTENT unread, so contents:read could become
+    # contents:write with this function still returning clean. The publication job overrides
+    # workflow-level permissions with its own block, but check and portable-conformance
+    # inherit, so a widened token reaches them silently.
+    workflow_permissions = _yaml_mapping_block(data, "permissions:")
+    granted = [
+        line.strip()
+        for line in workflow_permissions.splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if granted != ["contents: read"]:
+        return "publication workflow top-level permissions are not exactly contents:read"
     trigger = _yaml_mapping_block(data, "on:")
     pull_request = _yaml_mapping_block(trigger, "  pull_request:") if trigger else ""
     if not pull_request:
@@ -407,6 +419,19 @@ def publication_workflow_error(data: str) -> str:
     publication = _yaml_mapping_block(data, "  publication:")
     if not publication:
         return "publication workflow job is absent or duplicated"
+    # The jobs mapping was append-open: a sibling job carrying its own write permissions was
+    # invisible here. The byte tripwire caught it, but being independent of the byte tripwire is
+    # this function's purpose. Ordered after the lookup above so a duplicated publication: keeps
+    # its own diagnosis instead of being answered by the inventory.
+    jobs = _yaml_mapping_block(data, "jobs:")
+    job_names = [
+        line.strip()
+        for line in jobs.splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+        and len(line) - len(line.lstrip(" ")) == 2
+    ]
+    if job_names != ["check:", "publication:", "portable-conformance:"]:
+        return "publication workflow job inventory is not exactly closed"
     job_fields = [
         line.strip()
         for line in publication.splitlines()[1:]
@@ -2215,6 +2240,58 @@ def selftest() -> int:
             publication_block, publication_block + publication_block, 1))
         == "publication workflow job is absent or duplicated",
     )
+    # The jobs mapping was append-open. A sibling job is invisible to every closed list this
+    # function builds, because they cover top-level keys, needle counts, and lists inside the
+    # publication block -- never the mapping itself.
+    for position, mutated_workflow in (
+            ("appended after", EXPECTED_WORKFLOW
+             + "  exfil:\n    runs-on: ubuntu-24.04\n"
+               "    permissions:\n      contents: write\n"
+               "    steps:\n      - run: echo arbitrary\n"),
+            ("inserted before", EXPECTED_WORKFLOW.replace(
+                "  publication:\n",
+                "  exfil:\n    runs-on: ubuntu-24.04\n"
+                "    steps:\n      - run: echo arbitrary\n  publication:\n", 1)),
+    ):
+        expect(
+            f"publication workflow rejects a sibling job {position} publication",
+            publication_workflow_error(mutated_workflow)
+            == "publication workflow job inventory is not exactly closed",
+        )
+    # Top-level permissions had their KEY pinned and their CONTENT unread. The publication job
+    # overrides them, but check and portable-conformance inherit, so a widened token reaches
+    # those two silently.
+    for label, replacement in (
+            ("widened to write", "permissions:\n  contents: write\n"),
+            ("granted an extra scope",
+             "permissions:\n  contents: read\n  pull-requests: write\n"),
+    ):
+        expect(
+            f"publication workflow rejects top-level permissions {label}",
+            EXPECTED_WORKFLOW.count("permissions:\n  contents: read\n") == 1
+            and publication_workflow_error(EXPECTED_WORKFLOW.replace(
+                "permissions:\n  contents: read\n", replacement, 1))
+            == "publication workflow top-level permissions are not exactly contents:read",
+        )
+    # These two needles were unreachable from every existing case, because their sibling cases
+    # expect the `job fields` diagnosis, which a list equality produces first. Trailing
+    # whitespace is the shape that reaches them: `job_fields` strips, so the line still matches
+    # the closed contract, while the needle is an exact substring and no longer does.
+    # Scoped to the publication block, because that is what the needle loop searches and
+    # `runs-on: ubuntu-24.04` occurs in sibling jobs too -- mutating the workflow's first
+    # occurrence would change a different job and prove nothing about this loop.
+    for label, line in (
+            ("pull-request job condition", "    if: github.event_name == 'pull_request'\n"),
+            ("runner", "    runs-on: ubuntu-24.04\n"),
+    ):
+        spaced_block = publication_block.replace(line, line.rstrip("\n") + " \n", 1)
+        expect(
+            f"publication workflow catches trailing whitespace on the {label} line",
+            publication_block.count(line) == 1 and spaced_block != publication_block
+            and publication_workflow_error(EXPECTED_WORKFLOW.replace(
+                publication_block, spaced_block, 1))
+            == f"publication workflow {label} is absent or duplicated",
+        )
     for label, old, new, diagnosis in (
         ("job condition", "    if: github.event_name == 'pull_request'\n",
          "    if: always()\n", "job fields"),

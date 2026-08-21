@@ -15,6 +15,14 @@ source. Edits to the user-level `CLAUDE.md` reach the next session or compaction
 context; edits to an existing installed skill hot-reload, while a new skill directory needs a new
 session.
 
+There is no installer, so the order of that synchronization is yours to get right.
+Copy hook sources before `settings.json`, never the reverse.
+A registration that passes a flag the installed hook does not
+recognise is refused with exit 2, and a `PreToolUse` exit 2 blocks the call, so settings landing
+first denies every `Agent` and `Task` spawn on the machine until the sources catch up. The refusal
+names the guard's version and this ordering. The reverse order degrades safely: an older
+registration simply omits a flag the newer hook accepts.
+
 Claude's spawn tools are `Agent` and `Task`. Background agents must send their report with
 `SendMessage`; never read an agent's `.output` symlink because it is the full JSONL transcript.
 Worktree isolation may branch from `main`, so pass the target SHA and make the worker verify it.

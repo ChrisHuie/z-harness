@@ -1614,6 +1614,9 @@ WORKSPACE_DOCTRINE = {
         "atomically reserves the fresh directory mode 0700",
     ),
     "CLAUDE.md": (
+        # No installer enforces the order, so the ordering itself is the artifact. Deleting
+        # this leaves a partial sync producing a total spawn outage with nothing explaining it.
+        "Copy hook sources before",
         "every subagent inherits that exact path",
         "the shared root is not a workspace",
         "defines no `$CLAUDE_SCRATCHPAD` producer",
@@ -3769,6 +3772,7 @@ def selftest() -> int:
                 'atomically reserves the fresh directory mode 0700',
             )),
             ('CLAUDE.md', (
+                'Copy hook sources before',
                 'every subagent inherits that exact path',
                 'the shared root is not a workspace',
                 'defines no `$CLAUDE_SCRATCHPAD` producer',

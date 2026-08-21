@@ -288,6 +288,18 @@ def selftest():
         bad += (not ok); checks += 1
         print(f"  {'PASS' if ok else 'FAIL'} a symlink to a checkout subdirectory cannot hide containment")
 
+        dotdot_inside = os.path.join(subdir_alias, "..", "worker-dotdot")
+        dotdot_resolved = os.path.realpath(dotdot_inside)
+        dotdot_normalized = os.path.abspath(dotdot_inside)
+        got, why = scratch_decision(
+            {"prompt": f"Scratch: {dotdot_inside}\n"}, root,
+            nonce="dotdot-alias")
+        ok = (got == "deny" and "dot path components" in why
+              and not os.path.lexists(dotdot_resolved)
+              and not os.path.lexists(dotdot_normalized))
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} dot components cannot change the reserved directory")
+
         real_samefile = os.path.samefile
         def identity_eio(_left, _right):
             raise OSError(5, "planted identity EIO")
@@ -710,6 +722,8 @@ def _scratch_path_error(path, workspace_root):
     """Return why `path` cannot be atomically reserved as fresh external scratch."""
     if not os.path.isabs(path):
         return f"the worker's scratch path {path!r} is not absolute"
+    if any(part in {".", ".."} for part in path.split(os.sep)):
+        return f"the worker's scratch path {path!r} contains dot path components"
     normalized = os.path.abspath(path)
     parent, leaf = os.path.dirname(normalized), os.path.basename(normalized)
     if not leaf:

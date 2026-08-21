@@ -66,6 +66,9 @@ class EnvelopeError(ValueError):
     """The matched PreToolUse envelope cannot be judged safely."""
 
 
+_ANCESTOR_WALK_LIMIT = 256
+
+
 class ScratchPolicyError(ValueError):
     """The required scratch assignment could not be validated or reserved safely."""
 
@@ -315,7 +318,7 @@ def selftest():
         print(f"  {'PASS' if ok else 'FAIL'} filesystem identity errors fail closed")
 
         real_reserve = reserve_scratch
-        def reserve_value_error(_path):
+        def reserve_value_error(_path, _workspace_root):
             raise ValueError("planted reserve ValueError")
         try:
             globals()["reserve_scratch"] = reserve_value_error
@@ -369,7 +372,7 @@ def selftest():
         def reserve_once():
             barrier.wait()
             try:
-                reserve_scratch(simultaneous)
+                reserve_scratch(simultaneous, root)
                 outcomes.append("allow")
             except ScratchPolicyError:
                 outcomes.append("deny")
@@ -380,6 +383,58 @@ def selftest():
         bad += (not ok); checks += 1
         print(f"  {'PASS' if ok else 'FAIL'} two concurrent reservations yield one winner")
 
+        # Containment answered from the descriptor, not from the name. The two unit cases
+        # pin both directions; the splice below is the reason the helper exists.
+        _walk_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        inside_probe = os.path.join(adopted, "inside-probe")
+        outside_probe = fresh("outside-probe")
+        os.makedirs(inside_probe); os.makedirs(outside_probe)
+        for label, probe, want in (("inside the checkout", inside_probe, True),
+                                   ("outside the checkout", outside_probe, False)):
+            probe_fd = os.open(probe, _walk_flags)
+            try:
+                ok = _fd_within_workspace(probe_fd, root) is want
+            finally:
+                os.close(probe_fd)
+            bad += (not ok); checks += 1
+            print(f"  {'PASS' if ok else 'FAIL'} the ancestor walk reports a descriptor {label}")
+
+        # The walk has two independent terminators -- the parent-is-itself test and the
+        # depth bound -- and each masks the other, so neither can be killed on its own.
+        # Removing BOTH hangs the suite rather than reddening it. This case pins the
+        # observable property they jointly produce: a walk that reaches the filesystem
+        # root answers, rather than spinning inside a hook that runs on every spawn.
+        root_fd = os.open(os.sep, _walk_flags)
+        try:
+            walked = _fd_within_workspace(root_fd, adopted)
+        finally:
+            os.close(root_fd)
+        ok = walked is False
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} the ancestor walk terminates at the filesystem root")
+
+        # The splice: a name that PASSES the path check, then an ancestor swap, then the
+        # reservation. Deterministic rather than raced, because a flaky case proves nothing.
+        # Without the descriptor walk the swap is invisible and the directory lands in the
+        # checkout, which is the one placement this guard exists to refuse.
+        splice_out = fresh("splice-out")
+        splice_in = os.path.join(adopted, "splice-in")
+        os.makedirs(os.path.join(splice_out, "sub")); os.makedirs(os.path.join(splice_in, "sub"))
+        splice_link = os.path.join(_root, "splice-link")
+        os.symlink(splice_out, splice_link)
+        spliced_target = os.path.join(splice_link, "sub", "w1")
+        name_accepted = _scratch_path_error(spliced_target, root) == ""
+        os.remove(splice_link); os.symlink(splice_in, splice_link)
+        try:
+            reserve_scratch(spliced_target, root)
+            spliced = "reserved"
+        except ScratchPolicyError:
+            spliced = "refused"
+        landed_inside = os.path.isdir(os.path.join(splice_in, "sub", "w1"))
+        ok = name_accepted and spliced == "refused" and not landed_inside
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} an ancestor swapped after the path check cannot place scratch in the checkout")
+
         for label, want, ti in (
             ("a Claude name is read", "w1", {"name": "w1"}),
             ("a Codex task_name is read", "w2", {"task_name": "w2"}),
@@ -388,6 +443,34 @@ def selftest():
             ok = worker_name(ti) == want
             bad += (not ok); checks += 1
             print(f"  {'PASS' if ok else 'FAIL'} {label}")
+
+        # A registration may pass a flag a older guard build does not know. That must stay a
+        # refusal -- accepting it would leave require_scratch False and silently disable the
+        # workspace check -- and the refusal has to name the ordering remedy, because the
+        # bare "unknown argument" reads as a typo rather than a half-finished install.
+        # stdin carries a payload the guard would ALLOW. If an unrecognised flag were to fall
+        # through instead of refusing, that payload would be processed and the run would exit 0,
+        # so the case separates "refused" from "printed a message and refused for some other
+        # reason" -- the diagnostic is written before the return and cannot carry the assertion
+        # on its own.
+        import io as _io
+        _err = _io.StringIO()
+        _saved_err, _saved_in = sys.stderr, sys.stdin
+        sys.stderr = _err
+        sys.stdin = _io.StringIO(json.dumps(
+            {"tool_name": "Agent", "cwd": nested, "session_id": "s1",
+             "tool_input": {"name": "w1", "prompt": "do it"}}))
+        try:
+            unknown_rc = main(["spawn_preflight_guard.py", "--flag-from-a-newer-registration"])
+        finally:
+            sys.stderr, sys.stdin = _saved_err, _saved_in
+        unknown_text = _err.getvalue()
+        ok = unknown_rc == 2 and "partially synchronised installation" in unknown_text
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} an unrecognised registration flag refuses and names the ordering")
+        ok = unknown_rc == 2 and VERSION in unknown_text
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} the refusal reports which guard build rejected the flag")
 
         payload = {"tool_name": "Agent", "cwd": nested, "session_id": "s1",
                    "tool_input": {"name": "w1", "prompt": "do it"}}
@@ -473,7 +556,7 @@ def selftest():
             print(f"  {'PASS' if ok else 'FAIL'} an unrepresentable path returns a named deny decision")
 
             real_reserve = reserve_scratch
-            def reserve_os_error(_path):
+            def reserve_os_error(_path, _workspace_root):
                 raise OSError(5, "planted reserve OSError")
             try:
                 globals()["reserve_scratch"] = reserve_os_error
@@ -831,7 +914,48 @@ def _scratch_path_error(path, workspace_root):
     return ""
 
 
-def reserve_scratch(path):
+def _fd_within_workspace(parent_fd, workspace_root):
+    """-> True when the directory behind parent_fd is the workspace root, or below it.
+
+    Answered from the open descriptor rather than from the path. `_scratch_path_error`
+    proves containment by resolving names, and a rename or symlink swap between that
+    proof and the mkdir moves the answer without changing any name it inspected. Walking
+    up from the descriptor that will create the leaf closes that window, because the
+    descriptor cannot be redirected once open.
+
+    Failure to walk is not containment: an unreadable ancestor returns False and the
+    caller keeps every other refusal it already applies.
+    """
+    try:
+        root_stat = os.stat(workspace_root)
+    except OSError:
+        return False
+    root_id = (root_stat.st_dev, root_stat.st_ino)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    fd = os.dup(parent_fd)
+    try:
+        # Bounded. A filesystem whose root does not report itself as its own parent would
+        # otherwise spin here, inside a hook that runs on every spawn.
+        for _ in range(_ANCESTOR_WALK_LIMIT):
+            here = os.fstat(fd)
+            if (here.st_dev, here.st_ino) == root_id:
+                return True
+            try:
+                up = os.open("..", flags, dir_fd=fd)
+            except OSError:
+                return False
+            above = os.fstat(up)
+            if (above.st_dev, above.st_ino) == (here.st_dev, here.st_ino):
+                os.close(up)
+                return False
+            os.close(fd)
+            fd = up
+        return False
+    finally:
+        os.close(fd)
+
+
+def reserve_scratch(path, workspace_root):
     """Atomically create one mode-0700 directory; EEXIST is a collision, never success."""
     normalized = os.path.abspath(path)
     parent, leaf = os.path.dirname(normalized), os.path.basename(normalized)
@@ -847,6 +971,10 @@ def reserve_scratch(path):
         current = os.stat(parent, follow_symlinks=False)
         if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
             raise ScratchPolicyError(f"scratch parent changed while being reserved: {parent!r}")
+        if _fd_within_workspace(parent_fd, workspace_root):
+            raise ScratchPolicyError(
+                f"the scratch parent {parent!r} resolved inside the checkout at "
+                f"{workspace_root!r} at the moment the directory would be created")
         try:
             os.mkdir(leaf, 0o700, dir_fd=parent_fd)
         except OSError as exc:
@@ -901,7 +1029,7 @@ def scratch_decision(
         if problem:
             return "deny", f"{problem}. {fix}"
         if reserve:
-            reserve_scratch(path)
+            reserve_scratch(path, workspace_root)
     except (OSError, ValueError) as exc:
         return "deny", f"scratch reservation failed closed: {exc}. {fix}"
     return ("allow", "")
@@ -941,7 +1069,17 @@ def main(argv):
             return 0
         if args[0] == "--selftest":
             return selftest()
-        sys.stderr.write(f"unknown argument: {args[0]!r}\nrun --help\n")
+        # Fail closed, and name the likeliest cause. Accepting an unrecognised flag would
+        # be worse: a typo such as --requre-scratch would leave require_scratch False and
+        # silently disable the workspace check. A registration passing a flag this build
+        # does not know means the guard source is older than the registration that calls
+        # it, so the remedy is an ordering one.
+        sys.stderr.write(
+            f"unknown argument: {args[0]!r}\n"
+            f"this build is spawn_preflight_guard {VERSION}; a registration passing a flag "
+            f"it does not recognise indicates a partially synchronised installation. "
+            f"Install the guard source before the registration that calls it.\n"
+            f"run --help\n")
         return 2
     raw, error = read_hook_input(sys.stdin)
     if raw is None:

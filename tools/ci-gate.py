@@ -1899,7 +1899,12 @@ def spawn_guard_activation_error(source=None):
         "if require_scratch:",
         "protected_workspace_root(payload.get(\"cwd\"))",
         'reserve=decision != "deny"',
-        "reserve_scratch(path)",
+        # The workspace root travels into the reservation. Pinned in this shape because the
+        # path-based containment proof and the mkdir are separated by a window an ancestor
+        # rename can move; the descriptor walk inside reserve_scratch is what closes it, and
+        # it cannot run without this argument.
+        "reserve_scratch(path, workspace_root)",
+        "_fd_within_workspace(parent_fd, workspace_root)",
     )
     missing = [fragment for fragment in required if fragment not in text]
     if missing:

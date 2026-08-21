@@ -165,6 +165,14 @@ def resolve_citation(path, root):
     matches = []
     outside = []
     for dirpath, dirs, files in os.walk(root_real, followlinks=False):
+        # A directory carrying its own `.git` is a separate checkout. Descending into one
+        # makes every basename it shares with this tree ambiguous -- a dozen linked worktrees
+        # under an ignored directory made `ci-gate.py` unresolvable here -- and lets a
+        # citation resolve against a copy this repository does not contain.
+        if dirpath != root_real and os.path.lexists(os.path.join(dirpath, ".git")):
+            dirs[:] = []
+            continue
+        dirs[:] = [d for d in dirs if d != ".git"]
         dirs.sort()
         if portable not in files:
             continue
@@ -672,6 +680,22 @@ def selftest():
                _suffix_detail is not None
                and "names a file and a location" in _suffix_detail
                and "not found" not in _suffix_detail)
+        # A nested checkout must not make a basename ambiguous, nor satisfy a citation. The
+        # copy belongs to another repository; resolving against it certifies a file this tree
+        # may not have.
+        _nested = os.path.join(tmp, "nested-checkout")
+        os.makedirs(_nested)
+        with open(os.path.join(_nested, ".git"), "w", encoding="utf-8") as fh:
+            fh.write("gitdir: elsewhere\n")
+        with open(os.path.join(_nested, "order.json"), "w", encoding="utf-8") as fh:
+            fh.write("copy")
+        with open(os.path.join(_nested, "only-nested.json"), "w", encoding="utf-8") as fh:
+            fh.write("copy")
+        record("a duplicate inside a nested checkout does not make a basename ambiguous",
+               resolve_citation("order.json", tmp)[1] == "resolved")
+        record("a file only inside a nested checkout does not resolve",
+               resolve_citation("only-nested.json", tmp)[1] != "resolved")
+
         # ...and must NOT cover a token whose file half does not exist. Calling that a
         # location would replace a true "not found" with a claim that the file is there.
         _, _absent_state, _absent_detail = resolve_citation("schemas/nope.json:1", tmp)

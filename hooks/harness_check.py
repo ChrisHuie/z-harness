@@ -91,7 +91,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 174
+SELFTEST_FLOOR = 175
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.2"
@@ -112,7 +112,7 @@ SELFTEST_SUITES = [
     ("harness_report", ["hooks/harness_report.py", "--selftest"], 12),
     ("cc-cost", ["tools/cc-cost.py", "--selftest"], 8),
     ("codex-cost", ["tools/codex-cost.py", "--selftest"], 28),
-    ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 47),
+    ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 49),
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 8),
     ("verify-review-publication",
      ["tools/verify-review-publication.py", "--selftest"], 61),
@@ -1213,10 +1213,17 @@ class Run:
         # external. C3 read only SKILL.md, so a reference file could cite a document existing
         # nowhere and nothing looked -- which is how two skills came to cite a registry that
         # was never in this repository.
+        # Prune nested checkouts. Every linked worktree carries its own `.git`, and this tree
+        # keeps a dozen of them under an ignored directory -- 2235 of 2433 walked paths at the
+        # time this was written. Left in, a citation to a file deleted from this repository
+        # still resolves against a stale copy, and the check certifies a reference that is
+        # gone. A directory holding `.git` is a different repository, not content of this one.
         present = set()
-        for base, _dirs, files in os.walk(self.root):
-            if ".git" in base.split(os.sep):
+        for base, dirs, files in os.walk(self.root):
+            if base != self.root and os.path.lexists(os.path.join(base, ".git")):
+                dirs[:] = []
                 continue
+            dirs[:] = [d for d in dirs if d != ".git"]
             for f in files:
                 full = os.path.join(base, f)
                 present.add(os.path.relpath(full, self.root))
@@ -1880,7 +1887,15 @@ def selftest():
         # a document that plainly exists.
         open(os.path.join(sk, "beta/references/present.md"), "a").write(
             "\n\nSee `NO-SUCH-REGISTRY.md`, `probe.py`, "
-            "`beta/references/present.md`, and `NO-SUCH-SUFFIXED.md:12` for the rest.\n")
+            "`beta/references/present.md`, `NO-SUCH-SUFFIXED.md:12`, and "
+            "`ONLY-IN-NESTED.md` for the rest.\n")
+        # A nested checkout holding a file by the same name must not satisfy a citation. It is
+        # a different repository's copy, and letting it resolve certifies a reference this
+        # tree no longer has.
+        nested_repo = os.path.join(td, "nested-checkout")
+        os.makedirs(nested_repo)
+        open(os.path.join(nested_repo, ".git"), "w").write("gitdir: elsewhere\n")
+        open(os.path.join(nested_repo, "ONLY-IN-NESTED.md"), "w").write("copy")
         # C6 red: stale pattern planted
         os.makedirs(os.path.join(td, "hooks"))
         open(os.path.join(td, "hooks/stale.md"), "w").write("this guard is NOT INSTALLED")
@@ -2389,6 +2404,8 @@ def selftest():
                    lambda: any(c == "C3" and "DECLARED BUT CITED NOWHERE" in d
                                for c, d in dead_ext_run.failures))
 
+        expect_red("C3 does not resolve a citation against a nested checkout",
+                   lambda: any(c == "C3" and "ONLY-IN-NESTED.md" in d for c, d in r.failures))
         expect_red("C3 goes red on a citation carrying a line suffix",
                    lambda: any(c == "C3" and "NO-SUCH-SUFFIXED.md" in d for c, d in r.failures))
         expect_red("C3 resolves a citation naming a real file by a partial path",

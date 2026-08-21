@@ -91,7 +91,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 176
+SELFTEST_FLOOR = 177
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.2"
@@ -615,7 +615,14 @@ def package_paths(root, runner=None):
         # branch instead. The two conditions coincide, so the filter could not fire.
         dirs[:] = [d for d in dirs if d != ".git"]
         for filename in files:
-            paths.append(os.path.relpath(os.path.join(dirpath, filename), root))
+            # A symlinked file is not package content: its bytes live outside the tree being
+            # inventoried, and every consumer of this list reads the path. os.walk already
+            # declines to descend a symlinked directory, so this is the same rule for the
+            # file case. Nothing tracked in this repository is a symlink.
+            full = os.path.join(dirpath, filename)
+            if os.path.islink(full):
+                continue
+            paths.append(os.path.relpath(full, root))
     return "installed", paths, None
 
 
@@ -2425,11 +2432,19 @@ def selftest():
         os.makedirs(vendored)
         open(os.path.join(vendored, ".git"), "w").write("gitdir: elsewhere\n")
         open(os.path.join(vendored, "foreign.md"), "w").write("x")
+        # ...and a symlinked file, whose bytes live outside the package entirely.
+        pkg_outside = os.path.join(td, "outside-the-package")
+        os.makedirs(pkg_outside)
+        open(os.path.join(pkg_outside, "loose.md"), "w").write("x")
+        os.symlink(os.path.join(pkg_outside, "loose.md"),
+                   os.path.join(pkg_root, "linked-file.md"))
         _pkg_surface, _pkg_paths, _ = package_paths(pkg_root)
         expect_red("the installed inventory excludes a vendored repository",
                    lambda: _pkg_surface == "installed"
                    and "pkg/real.md" in _pkg_paths
                    and not any(p.startswith("vendored/") for p in _pkg_paths))
+        expect_red("the installed inventory excludes a symlinked file",
+                   lambda: "linked-file.md" not in _pkg_paths)
 
         expect_red("C3 does not resolve a citation against a nested checkout",
                    lambda: any(c == "C3" and "ONLY-IN-NESTED.md" in d for c, d in r.failures))

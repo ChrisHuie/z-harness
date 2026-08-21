@@ -31,7 +31,7 @@ import tempfile
 from pathlib import Path
 
 
-VERSION = "3.3"
+VERSION = "3.4"
 RECEIPT = "REVIEW-PUBLICATION-SUMMARY"
 HEAD_LINE = re.compile(rb"^Head: `([0-9a-f]{40})`$", re.MULTILINE)
 COMMENT_URL = re.compile(
@@ -257,39 +257,76 @@ def _github_time(value, label):
     return parsed
 
 
-def _initial_publication_error(
-        current: dict, repo: str, pr: int, expected_author: str, runner=None) -> str:
-    """Prove that no older same-author handoff exists on the pull request."""
+def _handoff_inventory(
+        current: dict, repo: str, pr: int, expected_author: str, runner=None):
+    """Return the latest prior same-author handoff from the complete PR inventory."""
     comments = _api_paginated_array(
         repo, f"issues/{pr}/comments?per_page=100", "pull request comments", runner)
     try:
         current_created = _github_time(current.get("created_at"), "created_at")
     except PublicationError as exc:
-        return str(exc)
+        return str(exc), None
+    current_id = current.get("id")
+    current_user_id = _object(current.get("user")).get("id")
     current_matches = 0
+    prior = []
     for item in comments:
         if not isinstance(item, dict):
             raise TransportError("pull request comments contains a non-object item")
-        if item.get("id") == current.get("id"):
+        if item.get("id") == current_id:
             current_matches += 1
+            compared_fields = (
+                "body", "html_url", "issue_url", "created_at", "updated_at")
+            item_user = _object(item.get("user"))
+            current_user = _object(current.get("user"))
+            if (any(item.get(field) != current.get(field) for field in compared_fields)
+                    or item_user.get("login") != current_user.get("login")
+                    or item_user.get("id") != current_user.get("id")):
+                return (
+                    "current publication differs between its comment object and the "
+                    "complete pull-request comment inventory", None)
             continue
-        if _object(item.get("user")).get("login") != expected_author:
+        item_user = _object(item.get("user"))
+        item_user_id = item_user.get("id")
+        same_login = item_user.get("login") == expected_author
+        same_identity = item_user_id == current_user_id
+        if not same_login and not same_identity:
             continue
         body = _text_bytes(item.get("body"), "pull request comment")
         if len(HEAD_LINE.findall(body)) != 1:
             continue
+        if same_login and not same_identity:
+            return (
+                "same-login handoff comment has a different numeric author identity: "
+                f"{item_user_id!r} != {current_user_id!r}", None)
+        item_id = item.get("id")
+        if not isinstance(item_id, int) or isinstance(item_id, bool) or item_id < 1:
+            return "handoff comment inventory contains an invalid comment id", None
         try:
             created = _github_time(item.get("created_at"), "earlier handoff created_at")
         except PublicationError as exc:
-            return str(exc)
-        if created < current_created:
-            return (
-                "initial publication has an older same-author handoff comment: "
-                f"{item.get('html_url') or item.get('id')!r}")
+            return str(exc), None
+        if (created, item_id) < (current_created, current_id):
+            prior.append(((created, item_id), item))
     if current_matches != 1:
         return (
             "initial publication comment was not listed exactly once in the complete "
-            f"pull-request comment inventory: {current_matches}")
+            f"pull-request comment inventory: {current_matches}", None)
+    latest = max(prior, key=lambda record: record[0])[1] if prior else None
+    return "", latest
+
+
+def _initial_publication_error(
+        current: dict, repo: str, pr: int, expected_author: str, runner=None) -> str:
+    """Prove that no prior same-author handoff exists on the pull request."""
+    problem, latest = _handoff_inventory(
+        current, repo, pr, expected_author, runner)
+    if problem:
+        return problem
+    if latest is not None:
+        return (
+            "initial publication has an older same-author handoff comment: "
+            f"{latest.get('html_url') or latest.get('id')!r}")
     return ""
 
 
@@ -311,19 +348,35 @@ def _predecessor_contract(
         current_created = _github_time(current.get("created_at"), "created_at")
     except PublicationError as exc:
         return str(exc), []
-    records = []
+    parsed_urls = []
     for url in urls:
         matched = COMMENT_URL.fullmatch(url)
         if not matched:
-            return f"predecessor comment URL is not canonical: {url!r}", records
+            return f"predecessor comment URL is not canonical: {url!r}", []
         linked_repo, linked_pr, linked_id = matched.groups()
         if linked_repo != repo or int(linked_pr) != pr:
-            return f"predecessor comment URL is outside {repo} pull request {pr}: {url!r}", records
+            return f"predecessor comment URL is outside {repo} pull request {pr}: {url!r}", []
         predecessor_id = int(linked_id)
         if predecessor_id == current.get("id"):
-            return "a comment cannot name itself as its predecessor", records
+            return "a comment cannot name itself as its predecessor", []
         if submitted.count(url.encode("utf-8")) != 1:
-            return f"submitted handoff must link predecessor exactly once: {url}", records
+            return f"submitted handoff must link predecessor exactly once: {url}", []
+        parsed_urls.append((url, predecessor_id))
+    inventory_problem, latest = _handoff_inventory(
+        current, repo, pr, expected_author, runner)
+    if inventory_problem:
+        return inventory_problem, []
+    if latest is None:
+        return "a later publication has no prior handoff in the complete comment inventory", []
+    latest_url = (
+        f"https://github.com/{repo}/pull/{pr}#issuecomment-{latest.get('id')}")
+    if latest_url not in urls:
+        return (
+            "later publication does not link the latest prior handoff comment: "
+            f"{latest_url}"), []
+    current_author_id = _object(current.get("user")).get("id")
+    records = []
+    for url, predecessor_id in parsed_urls:
         predecessor = _api_object(
             repo, f"issues/comments/{predecessor_id}", "predecessor comment", runner)
         predecessor_user = _object(predecessor.get("user"))
@@ -335,6 +388,7 @@ def _predecessor_contract(
             "created_at": predecessor.get("created_at"),
             "updated_at": predecessor.get("updated_at"),
             "user.login": predecessor_user.get("login"),
+            "user.id": predecessor_user.get("id"),
             "body": predecessor.get("body"),
         }
         try:
@@ -351,12 +405,14 @@ def _predecessor_contract(
             return "predecessor comment belongs to another pull request", records
         if predecessor.get("html_url") != url:
             return f"predecessor comment URL is {predecessor.get('html_url')!r}, expected {url!r}", records
-        if predecessor_user.get("login") != expected_author:
-            return (f"predecessor comment author is {predecessor_user.get('login')!r}, "
-                    f"expected {expected_author!r}"), records
+        if predecessor_user.get("id") != current_author_id:
+            return (
+                "predecessor comment numeric author identity is "
+                f"{predecessor_user.get('id')!r}, expected {current_author_id!r}"), records
         if predecessor.get("created_at") != predecessor.get("updated_at"):
             return "predecessor comment was edited", records
-        if predecessor_created >= current_created:
+        if ((predecessor_created, predecessor_id)
+                >= (current_created, current.get("id"))):
             return "predecessor comment is not older than the current publication", records
         predecessor_body = _text_bytes(predecessor.get("body"), "predecessor comment")
         if len(HEAD_LINE.findall(predecessor_body)) != 1:
@@ -365,6 +421,7 @@ def _predecessor_contract(
             "id": predecessor_id,
             "url": url,
             "author": predecessor_user.get("login"),
+            "author_id": predecessor_user.get("id"),
             "created_at": predecessor.get("created_at"),
             "updated_at": predecessor.get("updated_at"),
             "edited": False,
@@ -688,12 +745,13 @@ def selftest() -> int:
             endpoint = argv[-1]
             if f"issues/{pr}/comments?" in endpoint:
                 pages = (issue_comment_pages if issue_comment_pages is not None
-                         else [[comment_data]])
+                         else [[comment_data] + (
+                             [predecessor_data] if predecessor_data is not None else [])])
                 payload = (pages if "--paginate" in argv and "--slurp" in argv
                            else pages[:1])
             elif "issues/comments" in endpoint:
                 if (predecessor_data is not None
-                        and not endpoint.endswith(f"/{comment_id}")):
+                        and not endpoint.endswith(f"/{comment_data.get('id')}")):
                     payload = predecessor_data
                 else:
                     payload = comment_data
@@ -756,6 +814,7 @@ def selftest() -> int:
             and later_receipt.get("initial_publication") is False
             and later_receipt.get("predecessors") == [{
                 "id": predecessor_id, "url": predecessor_url, "author": author,
+                "author_id": 42,
                 "created_at": predecessor["created_at"],
                 "updated_at": predecessor["updated_at"], "edited": False,
             }],
@@ -770,6 +829,69 @@ def selftest() -> int:
                     issue_comment_pages=[[later_comment], [predecessor]]),
                 initial_publication=True),
                 "initial publication has an older same-author handoff"),
+        )
+        equal_time_predecessor = dict(
+            predecessor, created_at=later_comment["created_at"],
+            updated_at=later_comment["created_at"])
+        expect(
+            "a same-second lower-id handoff prevents a later comment declaring itself initial",
+            denies(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body,
+                runner_for(
+                    later_comment,
+                    issue_comment_pages=[[later_comment], [equal_time_predecessor]]),
+                initial_publication=True),
+                "initial publication has an older same-author handoff"),
+        )
+        expect(
+            "a same-second lower-id handoff is a valid immediate predecessor",
+            verify_comment(
+                repo, pr, comment_id, head, author, body,
+                runner_for(
+                    later_comment, predecessor_data=equal_time_predecessor,
+                    issue_comment_pages=[[later_comment, equal_time_predecessor]]),
+                initial_publication=False,
+                predecessor_urls=(predecessor_url,)) == 0,
+        )
+        newest_id = 123
+        newest_url = f"https://github.com/{repo}/pull/{pr}#issuecomment-{newest_id}"
+        newest = dict(
+            predecessor, id=newest_id, html_url=newest_url,
+            body=f"Head: `{'c' * 40}`\n\nNewer handoff.",
+            created_at="2026-08-19T00:01:00Z",
+            updated_at="2026-08-19T00:01:00Z")
+        current_id = 124
+        current_bytes = (
+            f"Head: `{head}`\n\nIncorrectly skips to {predecessor_url}.\n").encode()
+        current_comment = dict(
+            comment, id=current_id,
+            html_url=f"https://github.com/{repo}/pull/{pr}#issuecomment-{current_id}",
+            body=current_bytes[:-1].decode(),
+            created_at="2026-08-19T00:02:00Z",
+            updated_at="2026-08-19T00:02:00Z")
+        body.write_bytes(current_bytes)
+        expect(
+            "a later handoff cannot omit the latest prior handoff from its links",
+            denies(lambda: verify_comment(
+                repo, pr, current_id, head, author, body,
+                runner_for(
+                    current_comment, predecessor_data=predecessor,
+                    issue_comment_pages=[[current_comment, predecessor, newest]]),
+                initial_publication=False, predecessor_urls=(predecessor_url,)),
+                "does not link the latest prior handoff"),
+        )
+        body.write_bytes(later_bytes)
+        different_id_predecessor = dict(
+            predecessor, user={"login": author, "id": 99})
+        expect(
+            "a predecessor login cannot stand in for a different numeric author identity",
+            denies(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body,
+                runner_for(
+                    later_comment, predecessor_data=different_id_predecessor,
+                    issue_comment_pages=[[later_comment, predecessor]]),
+                initial_publication=False, predecessor_urls=(predecessor_url,)),
+                "predecessor comment numeric author identity"),
         )
         body.write_bytes(body_bytes)
         expect(
@@ -811,7 +933,9 @@ def selftest() -> int:
             "a predecessor newer than the current handoff is rejected",
             denies(lambda: verify_comment(
                 repo, pr, comment_id, head, author, body,
-                runner_for(later_comment, predecessor_data=not_older),
+                runner_for(
+                    later_comment, predecessor_data=not_older,
+                    issue_comment_pages=[[later_comment, predecessor]]),
                 initial_publication=False, predecessor_urls=(predecessor_url,)),
                 "not older than the current publication"),
         )
@@ -881,7 +1005,9 @@ def selftest() -> int:
             "the fetched predecessor id must match the requested comment id",
             denies(lambda: verify_comment(
                 repo, pr, comment_id, head, author, body,
-                runner_for(later_comment, predecessor_data=dict(predecessor, id=999)),
+                runner_for(
+                    later_comment, predecessor_data=dict(predecessor, id=999),
+                    issue_comment_pages=[[later_comment, predecessor]]),
                 initial_publication=False, predecessor_urls=(predecessor_url,)),
                 "predecessor comment id"),
         )
@@ -904,21 +1030,29 @@ def selftest() -> int:
                 initial_publication=False, predecessor_urls=(predecessor_url,)),
                 "predecessor comment URL is"),
         )
+        renamed_predecessor = dict(
+            predecessor, user={"login": "earlier-login", "id": 42})
+        renamed_code, renamed_receipt = captured_receipt(lambda: verify_comment(
+            repo, pr, comment_id, head, author, body,
+            runner_for(
+                later_comment, predecessor_data=renamed_predecessor,
+                issue_comment_pages=[[later_comment, renamed_predecessor]]),
+            initial_publication=False, predecessor_urls=(predecessor_url,)))
         expect(
-            "the fetched predecessor author must match the current handoff author",
-            denies(lambda: verify_comment(
-                repo, pr, comment_id, head, author, body,
-                runner_for(later_comment, predecessor_data=dict(
-                    predecessor, user={"login": "someone-else", "id": 77})),
-                initial_publication=False, predecessor_urls=(predecessor_url,)),
-                "predecessor comment author"),
+            "numeric identity keeps a renamed predecessor in the same handoff lineage",
+            renamed_code == 0
+            and renamed_receipt.get("predecessors", [{}])[0].get("author")
+            == "earlier-login"
+            and renamed_receipt.get("predecessors", [{}])[0].get("author_id") == 42,
         )
         expect(
             "the predecessor must contain exactly one full Head line",
             denies(lambda: verify_comment(
                 repo, pr, comment_id, head, author, body,
-                runner_for(later_comment, predecessor_data=dict(
-                    predecessor, body="Earlier handoff without a head.")),
+                runner_for(
+                    later_comment, predecessor_data=dict(
+                        predecessor, body="Earlier handoff without a head."),
+                    issue_comment_pages=[[later_comment, predecessor]]),
                 initial_publication=False, predecessor_urls=(predecessor_url,)),
                 "does not contain exactly one full Head line"),
         )
@@ -937,9 +1071,11 @@ def selftest() -> int:
             "the predecessor timestamp must carry a timezone",
             denies(lambda: verify_comment(
                 repo, pr, comment_id, head, author, body,
-                runner_for(later_comment, predecessor_data=dict(
-                    predecessor, created_at="2026-08-19T00:00:00",
-                    updated_at="2026-08-19T00:00:00")),
+                runner_for(
+                    later_comment, predecessor_data=dict(
+                        predecessor, created_at="2026-08-19T00:00:00",
+                        updated_at="2026-08-19T00:00:00"),
+                    issue_comment_pages=[[later_comment, predecessor]]),
                 initial_publication=False, predecessor_urls=(predecessor_url,)),
                 "timezone-free predecessor created_at"),
         )

@@ -65,9 +65,12 @@ Both modes require the requested repository, pull request, exact current head, a
 Comment mode additionally binds raw UTF-8 body bytes, the expected author, comment identity, and
 unedited timestamps. A later handoff requires one or more repeatable `--predecessor-url` values;
 each canonical URL must occur exactly once in the submitted body and must resolve to an older,
-unedited comment by the expected author on the same pull request. Only the first handoff uses the
-mutually exclusive `--initial-publication` flag; that mode paginates the pull request's complete
-issue-comment inventory and rejects an older same-author comment carrying one full `Head` line.
+unedited comment by the same numeric author identity on the same pull request. The complete
+issue-comment inventory must contain the current comment exactly once, and a later handoff must
+link its latest prior same-author handoff; additional predecessor links remain permitted. Comment
+time plus numeric comment ID orders handoffs that GitHub records in the same second. Only the first
+handoff uses the mutually exclusive `--initial-publication` flag; that mode rejects any prior
+same-author comment carrying one full `Head` line.
 Snapshot mode binds the live body and title bytes
 to the frozen manifest; the PR API exposes no body-edit identity or timestamp, so the receipt
 proves current equality, not the history before the snapshot. Exit 1 is a publication mismatch and

@@ -1468,6 +1468,9 @@ WORKSPACE_DOCTRINE = {
     "AGENTS.md": (
         "Every dispatched worker owns an exclusive scratch directory",
         "The parent never reads a scratch path it did not assign.",
+        # The gate enforces a literal marker; a convention the doctrine never states is one
+        # an agent can only discover by being denied.
+        "`Scratch: <absolute path>`",
     ),
     "CLAUDE.md": (
         "every subagent inherits that exact path",

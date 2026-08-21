@@ -77,7 +77,9 @@ Every dispatched worker owns an exclusive scratch directory, assigned at spawn, 
 checkout. Concurrent workers sharing one writable directory overwrite each other under the obvious
 names, and the loss is silent: the loser reads the winner's bytes and reports a confident wrong
 number. The parent never reads a scratch path it did not assign. Runtimes differ in what they hand a
-worker, so the adapter names the concrete path and this rule fixes the property.
+worker, so the adapter names the concrete path and this rule fixes the property. Express the
+assignment as one line in the worker's prompt reading `Scratch: <absolute path>`; the spawn guard
+requires exactly one, refuses a relative path, and refuses any path inside or above the checkout.
 
 Give every worker a Step 0 read list of absolute paths. Mutation workers use isolated worktrees or
 in-memory copies, never a shared checkout. Commit the baseline first so a worker's revert cannot

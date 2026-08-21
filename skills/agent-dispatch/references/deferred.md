@@ -52,8 +52,9 @@ dangerous one does not, because the loser reads the winner's bytes and measures 
 which is a wrong number rather than an error. What a runtime provides differs: one hands every
 subagent the same session scratchpad, another hands none and leaves `cwd` on the repository, which
 turns the same pressure toward the checkout the mutation-worker rule already protects. So the rule
-is a property, not a path — assign an exclusive directory per worker at spawn, name it in the
-prompt, and never read a scratch path you did not assign. Observed on a fan-out over this branch:
+is a property, not a path — assign an exclusive directory per worker at spawn, name it in
+the prompt as one line reading `Scratch: <absolute path>`, and
+never read a scratch path you did not assign. Observed on a fan-out over this branch:
 several hundred files at one shared root and one file lost mid-run. `ls -1 <root> | wc -l`
 regenerates the count; a literal here drifts with the session that produced it.
 

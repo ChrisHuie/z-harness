@@ -413,6 +413,78 @@ def selftest():
         bad += (not ok); checks += 1
         print(f"  {'PASS' if ok else 'FAIL'} the ancestor walk terminates at the filesystem root")
 
+        # A path already reserved is refused, and the refusal has to carry a DIFFERENT path
+        # or the parent has no way forward. Without the fresh suggestion this denial is a
+        # dead end rather than a retry.
+        taken = fresh("already-taken")
+        first_decision, _ = scratch_decision(
+            {"prompt": f"x\nScratch: {taken}\n"}, root, session_id="s1", agent_name="w1")
+        second_decision, second_reason = scratch_decision(
+            {"prompt": f"x\nScratch: {taken}\n"}, root, session_id="s1", agent_name="w1")
+        suggested_again = re.search(r"Scratch: (\S+)", second_reason)
+        ok = (first_decision == "allow" and second_decision == "deny"
+              and suggested_again is not None and suggested_again.group(1) != taken)
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} a taken path is refused with a different path to retry on")
+
+        # Four rejection conditions in the workspace-root and path helpers had no case: each
+        # is reachable from a real input, and each was removable with this suite green.
+        try:
+            protected_workspace_root(os.path.join(adopted, "README-not-a-dir"))
+            cwd_problem = ""
+        except ScratchPolicyError as exc:
+            cwd_problem = str(exc)
+        ok = "not an existing directory" in cwd_problem
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} a cwd that is not a directory is refused by name")
+
+        class _GitReply:
+            def __init__(self, returncode, stdout):
+                self.returncode, self.stdout, self.stderr = returncode, stdout, b"detail"
+
+        try:
+            protected_workspace_root(
+                nested, lambda *a, **k: _GitReply(128, b""))
+            git_problem = ""
+        except ScratchPolicyError as exc:
+            git_problem = str(exc)
+        ok = "exited 128" in git_problem
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} a failed worktree-root query is refused by its exit status")
+
+        # Git on a CRLF-configured host terminates the path with CR before LF. Stripping it is
+        # what makes the reported root compare equal; without it every spawn there is refused.
+        try:
+            crlf_root = protected_workspace_root(
+                nested, lambda *a, **k: _GitReply(0, os.fsencode(adopted) + b"\r\n"))
+        except ScratchPolicyError:
+            crlf_root = None
+        ok = crlf_root == os.path.realpath(adopted)
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} a carriage-returned worktree root still resolves")
+
+        # The empty-leaf branch is reachable only when the path resolves to the filesystem
+        # root: os.path.abspath strips a trailing separator, so "/tmp/x/" still has a leaf.
+        ok = "has no directory leaf" in _scratch_path_error(os.sep, root)
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} a scratch path that is the filesystem root is refused")
+
+        # An unmodelled exception must become a denial. Unhandled, the process exits 1, and
+        # this host continues the tool call on any exit other than 2 -- so a crash is an allow.
+        real_reserve = reserve_scratch
+        globals()["reserve_scratch"] = _unmodelled_reserve
+        try:
+            unmodelled_payload = {
+                "tool_name": "Agent", "cwd": nested, "session_id": "s1",
+                "tool_input": {"name": "w1", "prompt": f"x\nScratch: {fresh('unmodelled')}\n"}}
+            rc_u, out_u = run_payload(
+                unmodelled_payload, runtime="claude", require_scratch=True)
+        finally:
+            globals()["reserve_scratch"] = real_reserve
+        ok = rc_u == 0 and '"permissionDecision": "deny"' in out_u and "unmodelled" in out_u
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} an unmodelled reservation error denies instead of exiting open")
+
         # The splice: a name that PASSES the path check, then an ancestor swap, then the
         # reservation. Deterministic rather than raced, because a flaky case proves nothing.
         # Without the descriptor walk the swap is invisible and the directory lands in the
@@ -745,10 +817,27 @@ def hook_mode(raw, runtime="claude", require_scratch=False):
                 tool_input, workspace_root,
                 session_id=payload.get("session_id"),
                 agent_name=worker_name(tool_input),
+                # Reserve on ask as well as allow. PreToolUse never learns whether the user
+                # confirmed, so a reservation taken here can never be reclaimed by this hook;
+                # the alternative is to reserve only on allow, which would leave every
+                # ask-band spawn without collision exclusivity in exactly the band where a
+                # collision is most damaging. The cost of reserving early is that a declined
+                # ask leaves a directory under the system temp root and denies that one path
+                # on retry. That is recoverable: the refusal carries a fresh path, and a case
+                # below pins that it differs from the one already taken.
                 reserve=decision != "deny")
         except ScratchPolicyError as exc:
             workspace_decision = "deny"
             workspace_reason = f"scratch policy could not be evaluated safely: {exc}"
+        except Exception as exc:
+            # Anything unmodelled -- a platform without dir_fd raises NotImplementedError,
+            # which is neither OSError nor ValueError. Letting it escape ends the process at
+            # exit 1, and this host's PreToolUse contract continues the tool call on any exit
+            # other than 2, so an unhandled error here is an allow. Fail closed instead.
+            workspace_decision = "deny"
+            workspace_reason = (
+                f"scratch policy raised an unmodelled {type(exc).__name__}: {exc}; "
+                "z-harness fails closed rather than spawning unchecked")
         if workspace_decision == "deny":
             reason = (workspace_reason if decision == "allow"
                       else f"{reason} {workspace_reason}")
@@ -955,6 +1044,11 @@ def _fd_within_workspace(parent_fd, workspace_root):
         os.close(fd)
 
 
+def _unmodelled_reserve(path, workspace_root):
+    """Selftest stub: raise a type neither OSError nor ValueError covers."""
+    raise NotImplementedError("mkdir: dir_fd unavailable on this platform")
+
+
 def reserve_scratch(path, workspace_root):
     """Atomically create one mode-0700 directory; EEXIST is a collision, never success."""
     normalized = os.path.abspath(path)
@@ -1019,8 +1113,9 @@ def scratch_decision(
     found = SCRATCH_LINE.findall(prompt)
     if len(found) != 1:
         return ("deny",
-                f"this project requires every dispatched worker to own an exclusive scratch "
-                f"directory, and the spawn prompt has {len(found)} 'Scratch:' lines, expected "
+                f"this installation's spawn-hook registration requires every dispatched "
+                f"worker to own an exclusive scratch directory, and the spawn prompt has "
+                f"{len(found)} 'Scratch:' lines, expected "
                 f"1. Concurrent workers sharing one directory overwrite each other silently "
                 f"and the loser measures the wrong thing. {fix}")
     path = found[0]

@@ -1619,6 +1619,9 @@ WORKSPACE_DOCTRINE = {
         "defines no `$CLAUDE_SCRATCHPAD` producer",
     ),
     "docs/openai-agents.md": (
+        # The sentence carrying the current activation mechanism. Unpinned, it could be
+        # deleted and the retired mechanism described in its place with the gate green.
+        "Scratch enforcement is activated by the",
         "Codex hands a subagent no scratch directory.",
         "name one fresh absent path per worker",
         "neither shipped runtime uses that weaker mode",
@@ -1651,6 +1654,11 @@ FORBIDDEN_WORKSPACE_NEGATIONS = (
     "rule withdrawn",
     "do not assign per-worker scratch",
     "a shared scratch directory is fine",
+    # The retired activation mechanism. The code-side scan already refuses its return to the
+    # guard, but the prose side did not: restoring these sentences to the shared policy left
+    # the whole gate green, so doctrine could revert without a single check moving.
+    "a tree without it passes silently",
+    "a project opts in by carrying the rule",
 )
 # The installed registrations activate scratch enforcement explicitly. Repository prose is not
 # an authority bit that the constrained checkout may turn off.
@@ -3740,32 +3748,43 @@ def selftest() -> int:
     expect(
         "the workspace negation set covers exactly the reviewed revocations",
         FORBIDDEN_WORKSPACE_NEGATIONS == (
-            "workers share one directory", "share one scratch directory",
-            "rule withdrawn", "do not assign per-worker scratch",
-            "a shared scratch directory is fine"),
+            'workers share one directory',
+            'share one scratch directory',
+            'rule withdrawn',
+            'do not assign per-worker scratch',
+            'a shared scratch directory is fine',
+            'a tree without it passes silently',
+            'a project opts in by carrying the rule',
+        ),
     )
     # Keys AND values. The phrase loop below iterates this table, so dropping a phrase drops
     # its own test and only the check count moves; the keys alone do not see that.
     expect(
         "the doctrine table covers exactly the documents and phrases that must carry the rule",
         tuple(sorted(WORKSPACE_DOCTRINE.items())) == (
-            ("AGENTS.md", (
-                "Every dispatched worker owns an exclusive scratch directory",
-                "The parent never reads a scratch path it did not assign.",
-                "`Scratch: <absolute path>`",
-                "atomically reserves the fresh directory mode 0700")),
-            ("CLAUDE.md", (
-                "every subagent inherits that exact path",
-                "the shared root is not a workspace",
-                "defines no `$CLAUDE_SCRATCHPAD` producer")),
-            ("docs/openai-agents.md", (
-                "Codex hands a subagent no scratch directory.",
-                "name one fresh absent path per worker",
-                "neither shipped runtime uses that weaker mode",
-                "Two calls naming one path cannot both pass.")),
-            ("skills/agent-dispatch/references/deferred.md", (
-                "a dispatched worker owns its scratch directory",
-                "never read a scratch path you did not assign")),
+            ('AGENTS.md', (
+                'Every dispatched worker owns an exclusive scratch directory',
+                'The parent never reads a scratch path it did not assign.',
+                '`Scratch: <absolute path>`',
+                'atomically reserves the fresh directory mode 0700',
+            )),
+            ('CLAUDE.md', (
+                'every subagent inherits that exact path',
+                'the shared root is not a workspace',
+                'defines no `$CLAUDE_SCRATCHPAD` producer',
+            )),
+            ('docs/openai-agents.md', (
+                'Scratch enforcement is activated by the',
+                'Codex hands a subagent no scratch directory.',
+                'name one fresh absent path per worker',
+                'neither shipped runtime uses that weaker mode',
+                'Two calls naming one path cannot both pass.',
+            )),
+            ('skills/agent-dispatch/references/deferred.md', (
+                'a dispatched worker owns its scratch directory',
+                'never read a scratch path you did not assign',
+            )),
+        
         ),
     )
     # Every phrase, not just the first: the rest were load-bearing in production and untested.

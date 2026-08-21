@@ -255,10 +255,7 @@ def _frozen_head_error(repo: str, snapshot: dict, runner=None) -> str:
     a CI checkout is shallow by default and would report a real commit as missing.
     """
     sha = snapshot.get("frozen_at_head")
-    try:
-        commit = _api_object(repo, f"commits/{sha}", "frozen head commit", runner)
-    except TransportError as exc:
-        return f"frozen_at_head {sha} is not a commit in {repo}: {exc}"
+    commit = _api_object(repo, f"commits/{sha}", "frozen head commit", runner)
     if commit.get("sha") != sha:
         return f"frozen_at_head resolved to {commit.get('sha')!r}, expected {sha!r}"
     return ""
@@ -593,6 +590,25 @@ def selftest() -> int:
             and stripped_success == expected_comment_receipt(
                 body_bytes[:-1], body_bytes[:-1], True, "", "stripped"),
         )
+        spaced_source = body_bytes[:-1] + b" \n"
+        body.write_bytes(spaced_source)
+        spaced_stripped = dict(comment, body=spaced_source[:-1].decode())
+        expect(
+            "stripped publication removes only the one canonical terminal line feed",
+            verify_comment(repo, pr, comment_id, head, author, body,
+                           runner_for(spaced_stripped)) == 0,
+        )
+        overstripped = dict(comment, body=spaced_source.rstrip().decode())
+        expect(
+            "stripping significant trailing space is a mismatch, not an accepted form",
+            denies(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body, runner_for(overstripped)),
+                "published body differs", 1)
+            and receipt_field(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body, runner_for(overstripped)),
+                "terminal_line_feed") == "mismatch",
+        )
+        body.write_bytes(body_bytes)
         expect("a retained-line-feed body whose interior changed still fails", denies(
             lambda: verify_comment(repo, pr, comment_id, head, author, body,
                                    runner_for(retained_but_changed)),
@@ -623,10 +639,10 @@ def selftest() -> int:
                 _difference(stripped_but_changed["body"].encode(), body_bytes),
                 "mismatch"),
         )
-        expect("a frozen_at_head that names no commit fails", denies(
+        expect("an unreachable frozen_at_head commit is a transport failure", denies(
             lambda: verify_pr_snapshot(
                 repo, pr, head, manifest, runner_for(commit_rc=1)),
-            "is not a commit in"))
+            "cannot read frozen head commit", 2))
         expect("a frozen_at_head that resolves to another commit fails", denies(
             lambda: verify_pr_snapshot(
                 repo, pr, head, manifest, runner_for(commit_data={"sha": "c" * 40})),

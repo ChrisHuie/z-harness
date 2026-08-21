@@ -71,7 +71,9 @@ its source.
 
 Comment receipts classify `terminal_line_feed` as `retained`, `stripped`, or `mismatch`. The first
 two values are emitted only when the complete published bytes equal one accepted source form;
-failed comparisons use `mismatch` and retain the canonical submitted byte count and digest.
+byte-comparison failures use `mismatch` and retain the canonical submitted byte count and digest.
+A metadata failure may still report `retained` or `stripped` when the body bytes matched that form;
+the separate `verified` and `problem` fields carry the overall publication verdict.
 
 A correction never rewrites published text. Build a new comment that states the correction,
 links the superseded publication, and binds the evidence to the new exact head.

@@ -52,7 +52,7 @@ EVAL_SKILL_FLOOR = 7
 # 165 here and 178 in harness_check -- and a fake that hardcodes its own number tests the
 # literal rather than the contract.
 SUITE_FLOORS = {
-    "harness_check": 163,
+    "harness_check": 164,
     "render-packages": 192,
     "bash_command_guard": 1366,
     "git_grep_engine_guard": 1149,
@@ -139,7 +139,7 @@ jobs:
           MANIFEST="contracts/review/pr-$PR_NUMBER/frozen-publication.json"
           if [ ! -f "$MANIFEST" ]; then
             echo "no frozen publication registered for PR $PR_NUMBER at $MANIFEST"
-            exit 0
+            exit 1
           fi
           python3 tools/verify-review-publication.py pr-snapshot --repo "$GITHUB_REPOSITORY" --pr "$PR_NUMBER" --expected-head "$HEAD_SHA" --manifest "$MANIFEST"
 
@@ -387,8 +387,119 @@ def _yaml_mapping_block(data: str, header: str) -> str:
     return "".join(lines[start:end])
 
 
+def _yaml_fields(block: str, indentation: int) -> list[str]:
+    """Return non-comment fields at one exact indentation inside a closed block."""
+    return [
+        line.strip()
+        for line in block.splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+        and len(line) - len(line.lstrip(" ")) == indentation
+    ]
+
+
+def _yaml_step_headers(block: str) -> list[str]:
+    return [
+        line.strip()
+        for line in block.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+        and len(line) - len(line.lstrip(" ")) == 6
+        and (line.strip() == "-" or line.strip().startswith("- "))
+    ]
+
+
+def _yaml_run_commands(step: str) -> tuple[str, ...]:
+    run_block = _yaml_mapping_block(step, "        run: |")
+    return tuple(
+        line.strip()
+        for line in run_block.splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+    )
+
+
+def sibling_workflow_jobs_error(data: str) -> str:
+    """Independently close the check and portable-conformance job authority."""
+    checkout = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+    setup = "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97"
+
+    check = _yaml_mapping_block(data, "  check:")
+    if not check:
+        return "check workflow job is absent or duplicated"
+    if _yaml_fields(check, 4) != ["strategy:", "runs-on: ${{ matrix.os }}", "steps:"]:
+        return "check workflow job fields are not exactly the closed contract"
+    strategy = _yaml_mapping_block(check, "    strategy:")
+    if _yaml_fields(strategy, 6) != ["fail-fast: false", "matrix:"]:
+        return "check workflow strategy is not exactly fail-fast with one matrix"
+    matrix = _yaml_mapping_block(strategy, "      matrix:")
+    if _yaml_fields(matrix, 8) != ["os: [ubuntu-24.04, macos-15]"]:
+        return "check workflow OS matrix is not exactly the two reviewed runners"
+    if _yaml_step_headers(check) != [
+            f"- uses: {checkout}", f"- uses: {setup}",
+            "- name: install zsh where the runner image omits it",
+            "- name: source-bound bootstrap and complete offline gate"]:
+        return "check workflow step inventory is not exactly ordered and closed"
+
+    checkout_step = _yaml_mapping_block(check, f"      - uses: {checkout}")
+    checkout_with = _yaml_mapping_block(checkout_step, "        with:")
+    if (_yaml_fields(checkout_step, 8) != ["with:"]
+            or _yaml_fields(checkout_with, 10) != [
+                "persist-credentials: false", "fetch-depth: 0"]):
+        return "check workflow checkout step is not exactly full-history and non-persisting"
+    setup_step = _yaml_mapping_block(check, f"      - uses: {setup}")
+    setup_with = _yaml_mapping_block(setup_step, "        with:")
+    if (_yaml_fields(setup_step, 8) != ["with:"]
+            or _yaml_fields(setup_with, 10) != ["python-version: 3.13.14"]):
+        return "check workflow setup-python step is not exactly unconditional"
+    zsh_step = _yaml_mapping_block(
+        check, "      - name: install zsh where the runner image omits it")
+    if _yaml_fields(zsh_step, 8) != [
+            "if: runner.os == 'Linux'", "timeout-minutes: 10", "run: |"]:
+        return "check workflow zsh step fields are not exactly Linux-only and bounded"
+    if _yaml_run_commands(zsh_step) != (
+            'APT_OPTS="-o Acquire::Retries=2 -o Acquire::http::Timeout=15"',
+            "for attempt in 1 2 3; do",
+            "sudo timeout 120 apt-get update $APT_OPTS || true",
+            "sudo apt-get install -y zsh && break",
+            'echo "apt attempt $attempt did not yield zsh; retrying"',
+            "sleep 10", "done", "zsh --version"):
+        return "check workflow zsh command sequence is not exactly bounded and asserted"
+    gate_step = _yaml_mapping_block(
+        check, "      - name: source-bound bootstrap and complete offline gate")
+    if (_yaml_fields(gate_step, 8) != ["run: |"]
+            or _yaml_run_commands(gate_step) != (
+                "python3 hooks/harness_check.py --ci",
+                "python3 tools/ci-gate.py")):
+        return "check workflow gate command sequence is not exactly source-bound and complete"
+
+    portable = _yaml_mapping_block(data, "  portable-conformance:")
+    if not portable:
+        return "portable-conformance workflow job is absent or duplicated"
+    if _yaml_fields(portable, 4) != ["runs-on: ubuntu-24.04", "steps:"]:
+        return "portable-conformance workflow job fields are not exactly the closed contract"
+    if _yaml_step_headers(portable) != [
+            f"- uses: {checkout}", f"- uses: {setup}",
+            "- name: pinned upstream conformance"]:
+        return "portable-conformance step inventory is not exactly ordered and closed"
+    portable_checkout = _yaml_mapping_block(portable, f"      - uses: {checkout}")
+    portable_checkout_with = _yaml_mapping_block(portable_checkout, "        with:")
+    if (_yaml_fields(portable_checkout, 8) != ["with:"]
+            or _yaml_fields(portable_checkout_with, 10) != [
+                "persist-credentials: false"]):
+        return "portable-conformance checkout step is not exactly non-persisting"
+    portable_setup = _yaml_mapping_block(portable, f"      - uses: {setup}")
+    portable_setup_with = _yaml_mapping_block(portable_setup, "        with:")
+    if (_yaml_fields(portable_setup, 8) != ["with:"]
+            or _yaml_fields(portable_setup_with, 10) != ["python-version: 3.13.14"]):
+        return "portable-conformance setup-python step is not exactly unconditional"
+    portable_run = _yaml_mapping_block(
+        portable, "      - name: pinned upstream conformance")
+    if _yaml_fields(portable_run, 8) != [
+            "run: python3 tools/portable-conformance.py"]:
+        return "portable-conformance command is not exactly the reviewed executable"
+    return ""
+
+
 def publication_workflow_error(data: str) -> str:
-    """Independently require the live pull-request publication read-back job."""
+    """Independently close all workflow jobs and the live publication read-back."""
     top_fields = [
         line.strip()
         for line in data.splitlines()
@@ -410,11 +521,17 @@ def publication_workflow_error(data: str) -> str:
     if granted != ["contents: read"]:
         return "publication workflow top-level permissions are not exactly contents:read"
     trigger = _yaml_mapping_block(data, "on:")
+    if _yaml_fields(trigger, 2) != ["push:", "pull_request:"]:
+        return "publication workflow trigger inventory is not exactly push-main and pull-request"
+    push = _yaml_mapping_block(trigger, "  push:")
+    if _yaml_fields(push, 4) != ["branches: [main]"]:
+        return "publication workflow push trigger is not exactly main"
     pull_request = _yaml_mapping_block(trigger, "  pull_request:") if trigger else ""
-    if not pull_request:
-        return "publication workflow has no unfiltered pull_request trigger"
     if any(line.strip() for line in pull_request.splitlines()[1:]):
         return "publication workflow pull_request trigger is filtered"
+    sibling_problem = sibling_workflow_jobs_error(data)
+    if sibling_problem:
+        return sibling_problem
 
     publication = _yaml_mapping_block(data, "  publication:")
     if not publication:
@@ -459,7 +576,7 @@ def publication_workflow_error(data: str) -> str:
         ('          MANIFEST="contracts/review/pr-$PR_NUMBER/frozen-publication.json"\n',
          "PR-scoped publication manifest"),
         ('          if [ ! -f "$MANIFEST" ]; then\n', "unregistered-PR manifest branch"),
-        ('            exit 0\n', "unregistered-PR manifest exit"),
+        ('            exit 1\n', "unregistered-PR manifest exit"),
         ("python3 tools/verify-review-publication.py ", "publication verifier executable"),
         ("tools/verify-review-publication.py pr-snapshot", "snapshot verifier mode"),
         ('--repo "$GITHUB_REPOSITORY"', "repository argument"),
@@ -561,7 +678,7 @@ def publication_workflow_error(data: str) -> str:
         'MANIFEST="contracts/review/pr-$PR_NUMBER/frozen-publication.json"',
         'if [ ! -f "$MANIFEST" ]; then',
         'echo "no frozen publication registered for PR $PR_NUMBER at $MANIFEST"',
-        "exit 0",
+        "exit 1",
         "fi",
         "python3 tools/verify-review-publication.py pr-snapshot "
         '--repo "$GITHUB_REPOSITORY" --pr "$PR_NUMBER" '
@@ -2036,7 +2153,7 @@ def gate(
     publication_workflow_problem = publication_workflow_error(workflow)
     print(
         f"  {'FAIL' if publication_workflow_problem else 'PASS'} "
-        "publication-workflow-contract"
+        "workflow-authority-contract"
     )
     if publication_workflow_problem:
         failures.append(publication_workflow_problem)
@@ -2203,6 +2320,47 @@ def selftest() -> int:
         problem = publication_workflow_error(mutated)
         return diagnosis in problem
 
+    def coordinated_job_mutation(old, new, diagnosis):
+        """Move the byte oracle with a changed workflow; semantic authority must still red."""
+        if EXPECTED_WORKFLOW.count(old) != 1:
+            return False
+        mutated = EXPECTED_WORKFLOW.replace(old, new, 1)
+        original = EXPECTED_WORKFLOW
+        globals()["EXPECTED_WORKFLOW"] = mutated
+        try:
+            return workflow_error(mutated) is None and diagnosis in publication_workflow_error(
+                mutated)
+        finally:
+            globals()["EXPECTED_WORKFLOW"] = original
+
+    for label, old, new, diagnosis in (
+        ("push trigger",
+         "    branches: [main]\n",
+         "    branches: [other]\n",
+         "push trigger is not exactly main"),
+        ("check write authority",
+         "  check:\n    strategy:\n",
+         "  check:\n    permissions:\n      contents: write\n    strategy:\n",
+         "check workflow job fields"),
+        ("check gate command",
+         "          python3 tools/ci-gate.py\n",
+         "          echo skipped-ci-gate\n",
+         "check workflow gate command sequence"),
+        ("portable-conformance write authority",
+         "  portable-conformance:\n    runs-on: ubuntu-24.04\n",
+         "  portable-conformance:\n    permissions:\n      contents: write\n"
+         "    runs-on: ubuntu-24.04\n",
+         "portable-conformance workflow job fields"),
+        ("portable-conformance command",
+         "        run: python3 tools/portable-conformance.py\n",
+         "        run: echo skipped-conformance\n",
+         "portable-conformance command"),
+    ):
+        expect(
+            f"coordinated workflow bytes cannot hide changed {label}",
+            coordinated_job_mutation(old, new, diagnosis),
+        )
+
     publication_block = _yaml_mapping_block(EXPECTED_WORKFLOW, "  publication:")
     workflow_without_publication = EXPECTED_WORKFLOW.replace(publication_block, "", 1)
     original_expected_workflow = EXPECTED_WORKFLOW
@@ -2228,12 +2386,9 @@ def selftest() -> int:
                 "  pull_request:\n",
                 "  pull_request:\n    paths: [README.md]\n", 1)),
     )
-    # The filtered-trigger case above covers only the `any(...)` arm. An ABSENT trigger is a
-    # different branch and was the sole defence against it, with no case: neutralising it let a
-    # workflow whose pull_request trigger had been deleted return clean.
     expect(
         "publication workflow rejects an absent pull-request trigger",
-        "no unfiltered pull_request trigger" in publication_workflow_error(
+        "trigger inventory" in publication_workflow_error(
             EXPECTED_WORKFLOW.replace("  pull_request:\n", "", 1)),
     )
     # A duplicated job satisfies every downstream check, because the block lookup takes the
@@ -2345,11 +2500,14 @@ def selftest() -> int:
     expect(
         "publication workflow retains the unregistered-PR manifest branch",
         publication_semantic_mutation(
-            '          if [ ! -f "$MANIFEST" ]; then\n'
-            '            echo "no frozen publication registered for PR $PR_NUMBER at $MANIFEST"\n'
-            '            exit 0\n'
-            '          fi\n',
-            "", "unregistered-PR manifest"),
+            '          if [ ! -f "$MANIFEST" ]; then\n',
+            "", "unregistered-PR manifest branch"),
+    )
+    expect(
+        "publication workflow fails when a pull request has no frozen manifest",
+        publication_semantic_mutation(
+            '            exit 1\n',
+            '            exit 0\n', "unregistered-PR manifest exit"),
     )
     expect(
         "publication workflow rejects an early success exit before the verifier",

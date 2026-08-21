@@ -79,7 +79,7 @@ jobs:
           MANIFEST="contracts/review/pr-$PR_NUMBER/frozen-publication.json"
           if [ ! -f "$MANIFEST" ]; then
             echo "no frozen publication registered for PR $PR_NUMBER at $MANIFEST"
-            exit 0
+            exit 1
           fi
           python3 tools/verify-review-publication.py pr-snapshot --repo "$GITHUB_REPOSITORY" --pr "$PR_NUMBER" --expected-head "$HEAD_SHA" --manifest "$MANIFEST"
 

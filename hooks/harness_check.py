@@ -91,7 +91,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 163
+SELFTEST_FLOOR = 164
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.2"
@@ -114,10 +114,10 @@ SELFTEST_SUITES = [
     ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 42),
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 8),
     ("verify-review-publication",
-     ["tools/verify-review-publication.py", "--selftest"], 59),
+     ["tools/verify-review-publication.py", "--selftest"], 61),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
-    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 296),
+    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 302),
     ("write-mutation-receipt",
      ["tools/write-mutation-receipt.py", "--selftest"], 59),
     ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 65),
@@ -131,9 +131,9 @@ SELFTEST_SUITES = [
 def expected_selftest_checks(name):
     """Exact execution-derived counts for suites whose former formulas hid probes."""
     fixed = {
-        "ci-gate": 296,
+        "ci-gate": 302,
         "spawn_preflight_guard": 57,
-        "verify-review-publication": 59,
+        "verify-review-publication": 61,
     }
     if name in fixed:
         return fixed[name]
@@ -2323,12 +2323,22 @@ def selftest():
                 subprocess.run = real_subprocess_run
 
         def silent_git_scan(args, **kwargs):
-            if list(args[:1]) == ["git"]:
+            if (list(args[:2]) == ["git", "-C"]
+                    and os.path.realpath(args[2]) == os.path.realpath(scan_repo)
+                    and list(args[3:]) == ["rev-parse", "--show-toplevel"]):
+                return subprocess.CompletedProcess(
+                    args, 0, stdout=os.fsencode(scan_repo) + b"\n", stderr=b"")
+            if list(args[:1]) == ["git"] and "ls-files" in args:
                 return subprocess.CompletedProcess(args, 3, stdout="", stderr="")
             return real_subprocess_run(args, **kwargs)
 
         def unlaunchable_git_scan(args, **kwargs):
-            if list(args[:1]) == ["git"]:
+            if (list(args[:2]) == ["git", "-C"]
+                    and os.path.realpath(args[2]) == os.path.realpath(scan_repo)
+                    and list(args[3:]) == ["rev-parse", "--show-toplevel"]):
+                return subprocess.CompletedProcess(
+                    args, 0, stdout=os.fsencode(scan_repo) + b"\n", stderr=b"")
+            if list(args[:1]) == ["git"] and "ls-files" in args:
                 raise FileNotFoundError(2, "No such file or directory", "git")
             return real_subprocess_run(args, **kwargs)
 
@@ -2355,9 +2365,9 @@ def selftest():
                 run.c6_stale_patterns(scan_floor=1)
                 return error, run
             error, run = with_patched_run(unlaunchable_git_scan, probe)
-            return ("cannot run git rev-parse --show-toplevel" in (error or "")
+            return ("cannot run git ls-files" in (error or "")
                     and any(c == "C6" and "cannot enumerate scan set" in d
-                            and "cannot run git rev-parse --show-toplevel" in d
+                            and "cannot run git ls-files" in d
                             for c, d in run.failures))
 
         expect_red(
@@ -2670,8 +2680,22 @@ def selftest():
                          and bool(case_alias_inventory["paths"]))),
         )
 
-        def failed_git_inventory(_args, **_kwargs):
-            return subprocess.CompletedProcess(_args, 1, stdout=b"", stderr=b"planted")
+        def git_inventory_result(
+                args, returncode, stderr=b"", launch_error=None, kwargs=None):
+            if (list(args[:2]) == ["git", "-C"]
+                    and os.path.realpath(args[2]) == os.path.realpath(live_repo)
+                    and list(args[3:]) == ["rev-parse", "--show-toplevel"]):
+                return subprocess.CompletedProcess(
+                    args, 0, stdout=os.fsencode(live_repo) + b"\n", stderr=b"")
+            if "ls-files" in args:
+                if launch_error is not None:
+                    raise launch_error
+                return subprocess.CompletedProcess(
+                    args, returncode, stdout=b"", stderr=stderr)
+            return subprocess.run(args, **(kwargs or {}))
+
+        def failed_git_inventory(args, **_kwargs):
+            return git_inventory_result(args, 1, b"planted", kwargs=_kwargs)
 
         failed_inventory_run = Run(live_repo, ci=True)
         failed_inventory_run.c8_reserved_basenames(runner=failed_git_inventory)
@@ -2684,14 +2708,17 @@ def selftest():
         # inventory stayed empty, indexing it ended the process on a traceback, and no
         # HARNESS-SUMMARY line was printed at all -- a broken instrument reading as
         # neither a pass nor a named failure.
-        def silent_git_inventory(_args, **_kwargs):
-            return subprocess.CompletedProcess(_args, 1, stdout=b"", stderr=b"")
+        def silent_git_inventory(args, **_kwargs):
+            return git_inventory_result(args, 1, kwargs=_kwargs)
 
-        def whitespace_git_inventory(_args, **_kwargs):
-            return subprocess.CompletedProcess(_args, -9, stdout=b"", stderr=b"  \n\t ")
+        def whitespace_git_inventory(args, **_kwargs):
+            return git_inventory_result(args, -9, b"  \n\t ", kwargs=_kwargs)
 
-        def unlaunchable_git_inventory(_args, **_kwargs):
-            raise FileNotFoundError(2, "No such file or directory", "git")
+        def unlaunchable_git_inventory(args, **_kwargs):
+            return git_inventory_result(
+                args, 0,
+                launch_error=FileNotFoundError(2, "No such file or directory", "git"),
+                kwargs=_kwargs)
 
         def c8_names_a_silent_git_exit():
             run = Run(live_repo, ci=True)
@@ -2720,7 +2747,7 @@ def selftest():
             run = Run(live_repo, ci=True)
             run.c8_reserved_basenames(runner=unlaunchable_git_inventory)
             return any(c == "C8" and "cannot enumerate" in d
-                       and "cannot run git rev-parse --show-toplevel" in d
+                       and "cannot run git ls-files" in d
                        for c, d in run.failures)
 
         expect_red(
@@ -3334,6 +3361,11 @@ def selftest():
         subprocess.run(
             ["git", "--git-dir", separate_admin, "config", "core.worktree",
              other_separate_tree], check=True)
+        expect_red(
+            "the separate-gitdir comparison itself rejects a different bound worktree",
+            lambda: not _bound_separate_gitdir(
+                separate_tree, os.path.join(separate_tree, ".git"), subprocess.run),
+        )
         wrong_binding_run = Run(live_repo, ci=True)
         wrong_binding_run.c8_reserved_basenames()
         expect_red("C8 rejects an external gitdir bound to a different worktree",

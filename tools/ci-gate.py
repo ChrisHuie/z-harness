@@ -54,7 +54,7 @@ EVAL_SKILL_FLOOR = 7
 # 165 here and 178 in harness_check -- and a fake that hardcodes its own number tests the
 # literal rather than the contract.
 SUITE_FLOORS = {
-    "harness_check": 186,
+    "harness_check": 195,
     "render-packages": 192,
     "bash_command_guard": 1366,
     "git_grep_engine_guard": 1149,
@@ -3756,6 +3756,18 @@ def selftest() -> int:
         for relative in HANDOFF_DOCTRINE
     }
     expect(
+        "the handoff doctrine has the complete reviewed membership",
+        tuple(HANDOFF_DOCTRINE) == (
+            "AGENTS.md",
+            "skills/outbound-drafts/SKILL.md",
+            "skills/pr-review-method/SKILL.md",
+            "skills/pr-review-method/references/deferred.md",
+            "contracts/review/README.md",
+        )
+        and tuple(len(HANDOFF_DOCTRINE[key]) for key in HANDOFF_DOCTRINE)
+        == (3, 4, 2, 1, 5),
+    )
+    expect(
         "every skill's own eval corpus meets its floor",
         eval_corpus_distribution_error() == "",
     )
@@ -4073,6 +4085,26 @@ def selftest() -> int:
     expect(
         "a silent nonzero tracked-markdown inventory fails closed",
         "git ls-files exited 7" in silent_markdown_problem,
+    )
+    def empty_markdown_inventory(argv, **_kwargs):
+        if "rev-parse" in argv:
+            return _TrackedMarkdownReply(stdout=os.fsencode(ROOT) + b"\n")
+        return _TrackedMarkdownReply(stdout=b"")
+    _, empty_markdown_problem = tracked_markdown_sources(
+        ROOT, runner=empty_markdown_inventory)
+    expect(
+        "a successful empty tracked-markdown inventory fails closed",
+        "empty or unterminated" in empty_markdown_problem,
+    )
+    def nul_only_markdown_inventory(argv, **_kwargs):
+        if "rev-parse" in argv:
+            return _TrackedMarkdownReply(stdout=os.fsencode(ROOT) + b"\n")
+        return _TrackedMarkdownReply(stdout=b"\0")
+    _, nul_only_markdown_problem = tracked_markdown_sources(
+        ROOT, runner=nul_only_markdown_inventory)
+    expect(
+        "a NUL-only tracked-markdown inventory fails closed as zero files",
+        "zero files" in nul_only_markdown_problem,
     )
     expect(
         "a required include naming an unregistered document is rejected",
@@ -4412,6 +4444,16 @@ def selftest() -> int:
         )
     finally:
         globals()["review_handoff_policy_error"] = original_handoff_policy
+    original_ownership_source = repository_ownership_source_error
+    globals()["repository_ownership_source_error"] = (
+        lambda *a, **k: "planted repository-ownership source failure")
+    try:
+        expect(
+            "production gate adopts the repository-ownership source binding",
+            gate(fake_runner, emit_child_output=False) != 0,
+        )
+    finally:
+        globals()["repository_ownership_source_error"] = original_ownership_source
     original_publication_manifest = review_publication_manifest_error
     globals()["review_publication_manifest_error"] = (
         lambda: "planted frozen-publication failure")

@@ -66,6 +66,7 @@ from repository_ownership import (  # noqa: E402
     _gitdir_from_marker,
     _indexed_gitlink,
     _registered_linked_worktree,
+    RepositoryOwnershipError,
     git_command_failure,
     git_toplevel_error as _git_toplevel_error,
     is_repository_boundary,
@@ -115,7 +116,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 186
+SELFTEST_FLOOR = 195
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -136,19 +137,19 @@ SELFTEST_SUITES = [
     ("harness_report", ["hooks/harness_report.py", "--selftest"], 12),
     ("cc-cost", ["tools/cc-cost.py", "--selftest"], 8),
     ("codex-cost", ["tools/codex-cost.py", "--selftest"], 28),
-    ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 52),
-    ("repository-ownership", ["tools/repository_ownership.py", "--selftest"], 15),
+    ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 53),
+    ("repository-ownership", ["tools/repository_ownership.py", "--selftest"], 16),
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 8),
     ("verify-review-publication",
-     ["tools/verify-review-publication.py", "--selftest"], 71),
+     ["tools/verify-review-publication.py", "--selftest"], 83),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
-    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 312),
+    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 316),
     ("write-mutation-receipt",
      ["tools/write-mutation-receipt.py", "--selftest"], 59),
     ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 65),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
-    ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 80),
+    ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 87),
     ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 1149),
     ("zsh_rev_modifier_guard", ["hooks/guards/zsh_rev_modifier_guard.py", "--selftest"], 487),
 ]
@@ -157,9 +158,9 @@ SELFTEST_SUITES = [
 def expected_selftest_checks(name):
     """Exact execution-derived counts for suites whose former formulas hid probes."""
     fixed = {
-        "ci-gate": 312,
-        "spawn_preflight_guard": 80,
-        "verify-review-publication": 71,
+        "ci-gate": 316,
+        "spawn_preflight_guard": 87,
+        "verify-review-publication": 83,
     }
     if name in fixed:
         return fixed[name]
@@ -532,7 +533,8 @@ def package_paths(root, runner=None):
         try:
             tracked = run_git(
                 runner,
-                ["git", "-C", root, "ls-files"], capture_output=True, text=True,
+                ["git", "-C", root, "ls-files", "-z"],
+                capture_output=True, text=False,
             )
         except OSError as exc:
             # Git absent from PATH raised FileNotFoundError out through every caller, so
@@ -541,16 +543,26 @@ def package_paths(root, runner=None):
             return "source", [], f"cannot run git ls-files: {exc}"
         if tracked.returncode != 0:
             return "source", [], git_command_failure(tracked.returncode, tracked.stderr)
-        return "source", [line for line in tracked.stdout.splitlines() if line], None
+        raw = bytes(tracked.stdout or b"")
+        if raw and not raw.endswith(b"\0"):
+            return "source", [], "git ls-files returned an unterminated NUL inventory"
+        paths = [item.decode("utf-8", "surrogateescape")
+                 for item in raw.split(b"\0") if item]
+        return "source", paths, None
     paths = []
     for dirpath, dirs, files in os.walk(root):
         # A directory carrying its own `.git` is a separate repository vendored inside this
         # tree, not content of the package being inventoried. Without the prune its files are
         # compared against the source as though the package shipped them, and the marker file
         # itself was listed as package content.
-        if dirpath != root and _is_git_worktree_root(dirpath, runner, root):
-            dirs[:] = []
-            continue
+        if dirpath != root:
+            try:
+                boundary = _is_git_worktree_root(dirpath, runner, root)
+            except RepositoryOwnershipError as exc:
+                return "installed", [], f"cannot resolve Git ownership: {exc}"
+            if boundary:
+                dirs[:] = []
+                continue
         # No filename filter for `.git` here: a directory holding one is pruned above, and a
         # root holding one never reaches this walk because package_paths takes the tracked
         # branch instead. The two conditions coincide, so the filter could not fire.
@@ -832,7 +844,7 @@ def git_owned_live_paths(root, runner=None):
             paths, group_pruned = _expand_git_inventory_group(root, group, runner)
             expanded.append(paths)
             pruned += group_pruned
-    except OSError as exc:
+    except (OSError, RepositoryOwnershipError) as exc:
         # Ownership resolution shells out to `git` per candidate boundary, so the binary
         # can still go away after enumeration succeeded.
         return _git_inventory_failure(f"cannot resolve Git ownership: {exc}", surface)
@@ -1049,7 +1061,7 @@ class Run:
 
         reference_files = sorted(
             relative for relative in owned
-            if re.fullmatch(r"skills/[^/]+/references/.+\.(?:md|yaml)", relative)
+            if re.fullmatch(r"skills/[^/]+/references/.+", relative)
         )
         resolved = 0
         for skill in sorted(os.listdir(skills_dir)):
@@ -1258,34 +1270,42 @@ class Run:
             p = os.path.join(self.root, "skills", skill)
             self.result("C7", os.path.isdir(p), f"routing-table skill exists: {skill}")
         st = json.load(open(os.path.join(self.root, "settings.json")))
-        # Deleting the hooks block unregistered every Claude guard and produced zero checks
-        # and zero failures -- a silent pass over an empty scan set, which this file's own
-        # exit-code contract calls an error. The Codex side is bound by
-        # REQUIRED_CODEX_HANDLERS; this is its Claude counterpart.
+        # Emit one fixed-cardinality verdict per required handler. Counting the handlers
+        # discovered in settings made a deletion shrink the selector, so the mutation was
+        # caught but could not prove the same suite ran. Exact argv also rejects shell
+        # wrappers such as ``VAR=off ...`` and ``... || true`` that name the script while
+        # disabling or masking it.
+        actual_claude_handlers = [
+            (event, entry.get("matcher"), handler)
+            for event, entries in st.get("hooks", {}).items()
+            for entry in entries if isinstance(entry, dict)
+            for handler in entry.get("hooks", []) if isinstance(handler, dict)
+        ]
+        def command_argv(handler):
+            try:
+                return shlex.split(handler.get("command", ""))
+            except (TypeError, ValueError):
+                return []
         for event, matcher, script, required_args in REQUIRED_CLAUDE_HANDLERS:
+            expected_argv = ["python3", f"~/.claude/{script}", *required_args]
             matches = [
-                h for entry in st.get("hooks", {}).get(event, [])
-                if entry.get("matcher") == matcher
-                for h in entry.get("hooks", [])
-                if script in h.get("command", "")
-                and all(arg in shlex.split(h.get("command", ""))
-                        for arg in required_args)
+                handler for actual_event, actual_matcher, handler
+                in actual_claude_handlers
+                if actual_event == event and actual_matcher == matcher
+                and handler.get("type") == "command"
+                and handler.get("timeout") == 5
+                and command_argv(handler) == expected_argv
+                and os.path.isfile(os.path.join(self.root, script))
             ]
             self.result("C7", len(matches) == 1,
                         f"settings.json {event} matcher={matcher!r} -> {script}: "
-                        f"args={list(required_args)!r}: {len(matches)} match(es)")
-        for event, entries in st.get("hooks", {}).items():
-            for entry in entries:
-                for h in entry.get("hooks", []):
-                    cmd = h.get("command", "")
-                    m = re.search(r"~/[\w./\-]+\.(?:py|sh)", cmd)
-                    if not m:
-                        continue
-                    rel = m.group(0).replace("~/.claude/", "")
-                    p = os.path.join(self.root, rel)
-                    self.result("C7", os.path.isfile(p), f"settings {event} -> {rel}")
-                    self.result("C7", "timeout" in h,
-                                f"settings {event} {rel}: timeout set")
+                        f"argv={expected_argv!r} timeout=5: {len(matches)} match(es)")
+        self.result(
+            "C7", len(actual_claude_handlers) == len(REQUIRED_CLAUDE_HANDLERS),
+            "settings.json Claude handler inventory is closed: "
+            f"{len(actual_claude_handlers)} handler(s), "
+            f"expected {len(REQUIRED_CLAUDE_HANDLERS)}",
+        )
         codex_hooks_path = os.path.join(self.root, "hooks", "hooks.json")
         try:
             codex_hooks = json.load(open(codex_hooks_path))
@@ -1753,6 +1773,7 @@ def selftest():
         # C3 red: cited file absent in alpha; orphan file in beta
         open(os.path.join(sk, "beta/references/present.md"), "w").write("ok")
         open(os.path.join(sk, "beta/references/orphan.md"), "w").write("named nowhere")
+        open(os.path.join(sk, "beta/references/orphan.txt"), "w").write("named nowhere")
         # C3 direction 3: a reference document citing a document that exists nowhere, beside
         # one citing a declared-external name. Both in the same file, so a check that simply
         # refuses every citation would fail the second and be visible as over-refusal.
@@ -1766,9 +1787,18 @@ def selftest():
             "`ONLY-IN-NESTED.md` for the rest.\n")
         os.makedirs(os.path.join(sk, "alpha", "references", "nested"))
         open(os.path.join(sk, "alpha", "SKILL.md"), "a").write(
-            "\nRead references/nested/deep.md\n")
+            "\nRead references/nested/deep.md and references/nested/local.md\n")
         open(os.path.join(sk, "alpha", "references", "nested", "deep.md"), "w").write(
-            "See `NESTED-MISSING.md` and `ONLY-BETA.md`.\n")
+            "See `NESTED-MISSING.md`, `ONLY-BETA.md`, `local.md`, and "
+            "`references/shared.md`.\n")
+        open(os.path.join(sk, "alpha", "references", "nested", "local.md"), "w").write(
+            "document-local\n")
+        open(os.path.join(sk, "beta", "references", "local.md"), "w").write(
+            "sibling fallback must not win\n")
+        open(os.path.join(sk, "alpha", "references", "shared.md"), "w").write(
+            "skill-local\n")
+        os.makedirs(os.path.join(td, "references"))
+        open(os.path.join(td, "references", "shared.md"), "w").write("repo-root\n")
         open(os.path.join(sk, "beta", "ONLY-BETA.md"), "w").write("wrong sibling\n")
         os.symlink(os.devnull,
                    os.path.join(sk, "beta", "references", "escaped.md"))
@@ -2217,6 +2247,15 @@ def selftest():
                     "hooks/codex_session_start.py"):
             open(os.path.join(registration_root, rel), "w").write("# fixture\n")
 
+        exact_registration = json.load(open(os.path.join(ROOT, "settings.json")))
+        open(os.path.join(registration_root, "settings.json"), "w").write(
+            json.dumps(exact_registration))
+        open(os.path.join(registration_root, "hooks/hooks.json"), "w").write(
+            open(os.path.join(ROOT, "hooks/hooks.json")).read())
+        exact_registration_run = Run(registration_root, ci=True)
+        exact_registration_run.c7_anchors()
+        exact_registration_checks = exact_registration_run.checks
+
         missing_stop_registration = json.load(open(os.path.join(ROOT, "settings.json")))
         del missing_stop_registration["hooks"]["Stop"]
         open(os.path.join(registration_root, "settings.json"), "w").write(
@@ -2256,7 +2295,40 @@ def selftest():
             "C7 rejects duplicate Claude Stop registrations for announced work",
             lambda: any(c == "C7" and "settings.json Stop" in d
                         and "announced_work_guard.py" in d and "2 match(es)" in d
-                        for c, d in duplicate_stop.failures),
+                for c, d in duplicate_stop.failures),
+        )
+
+        disabled_stop_registration = json.load(open(os.path.join(ROOT, "settings.json")))
+        disabled_stop_registration["hooks"]["Stop"][0]["hooks"][0]["command"] = (
+            "ANNOUNCED_WORK_GUARD=off python3 "
+            "~/.claude/hooks/announced_work_guard.py")
+        open(os.path.join(registration_root, "settings.json"), "w").write(
+            json.dumps(disabled_stop_registration))
+        disabled_stop = Run(registration_root, ci=True)
+        disabled_stop.c7_anchors()
+        expect_red(
+            "C7 rejects a Claude Stop registration disabled by an environment prefix",
+            lambda: any(c == "C7" and "settings.json Stop" in d
+                        and "announced_work_guard.py" in d and "0 match(es)" in d
+                        for c, d in disabled_stop.failures),
+        )
+
+        masked_stop_registration = json.load(open(os.path.join(ROOT, "settings.json")))
+        masked_stop_registration["hooks"]["Stop"][0]["hooks"][0]["command"] += " || true"
+        open(os.path.join(registration_root, "settings.json"), "w").write(
+            json.dumps(masked_stop_registration))
+        masked_stop = Run(registration_root, ci=True)
+        masked_stop.c7_anchors()
+        expect_red(
+            "C7 rejects a Claude Stop registration whose failure is shell-masked",
+            lambda: any(c == "C7" and "settings.json Stop" in d
+                        and "announced_work_guard.py" in d and "0 match(es)" in d
+                        for c, d in masked_stop.failures),
+        )
+        expect_red(
+            "C7 registration mutations preserve the exact selector cardinality",
+            lambda: all(run.checks == exact_registration_checks for run in (
+                missing_stop, wrong_stop, duplicate_stop, disabled_stop, masked_stop)),
         )
 
         claude_registration = json.load(open(os.path.join(ROOT, "settings.json")))
@@ -2314,7 +2386,7 @@ def selftest():
         expect_red(
             "the spawn selftest runs from a copied hook outside the checkout",
             lambda: portable_result.returncode == 0
-            and "SELFTEST-SUMMARY suite=spawn_preflight_guard checks=80 failures=0"
+            and "SELFTEST-SUMMARY suite=spawn_preflight_guard checks=87 failures=0"
             in portable_result.stdout,
         )
 
@@ -2389,10 +2461,62 @@ def selftest():
         expect_red("the installed inventory excludes a symlinked file",
                    lambda: "linked-file.md" not in _pkg_paths)
 
+        late_pkg_root = os.path.join(td, "late-ownership-package")
+        late_pkg_candidate = os.path.join(late_pkg_root, "separate")
+        late_pkg_admin = os.path.join(td, "late-ownership-admin")
+        os.makedirs(late_pkg_root)
+        subprocess.run(
+            ["git", "init", "--quiet", "--separate-git-dir", late_pkg_admin,
+             late_pkg_candidate], check=True)
+        subprocess.run(
+            ["git", "--git-dir", late_pkg_admin, "config", "core.worktree",
+             late_pkg_candidate], check=True)
+        late_package_calls = 0
+        def late_package_runner(argv, **kwargs):
+            nonlocal late_package_calls
+            late_package_calls += 1
+            if late_package_calls == 1:
+                return subprocess.run(argv, **kwargs)
+            raise OSError(5, "planted package ownership EIO")
+        _, _, late_package_error = package_paths(
+            late_pkg_root, runner=late_package_runner)
+        expect_red(
+            "the package inventory names a late ownership-probe I/O failure",
+            lambda: "planted package ownership EIO" in (late_package_error or ""),
+        )
+
+        newline_repo = os.path.join(td, "newline-source")
+        os.makedirs(newline_repo)
+        subprocess.run(["git", "init", "--quiet", newline_repo], check=True)
+        newline_name = "hidden\nclaim.md"
+        open(os.path.join(newline_repo, newline_name), "w").write("NOT INSTALLED\n")
+        subprocess.run(["git", "-C", newline_repo, "add", "--", newline_name], check=True)
+        _newline_surface, newline_paths, newline_error = package_paths(newline_repo)
+        expect_red(
+            "the source inventory preserves a tracked filename containing a newline",
+            lambda: newline_error is None and newline_name in newline_paths,
+        )
+        newline_run = Run(newline_repo, ci=True)
+        newline_run.c6_stale_patterns(scan_floor=1)
+        expect_red(
+            "C6 scans a tracked filename containing a newline",
+            lambda: any(c == "C6" and newline_name in d
+                        for c, d in newline_run.failures),
+        )
+
         expect_red("C3 does not resolve a citation against a nested checkout",
                    lambda: any(c == "C3" and "ONLY-IN-NESTED.md" in d for c, d in r.failures))
         expect_red("C3 recursively scans nested reference documents",
                    lambda: any(c == "C3" and "NESTED-MISSING.md" in d
+                               for c, d in r.failures))
+        expect_red("C3 inventories non-Markdown reference payloads",
+                   lambda: any(c == "C3" and "orphan.txt" in d
+                               for c, d in r.failures))
+        expect_red("C3 prefers the reference document's local target",
+                   lambda: not any(c == "C3" and "cites local.md --" in d
+                                   for c, d in r.failures))
+        expect_red("C3 rejects multiple exact citation candidates as ambiguous",
+                   lambda: any(c == "C3" and "cites references/shared.md -- ambiguous" in d
                                for c, d in r.failures))
         expect_red("C3 does not satisfy a bare citation from another skill",
                    lambda: any(c == "C3" and "ONLY-BETA.md" in d
@@ -2976,11 +3100,12 @@ def selftest():
         def c8_names_a_git_lost_while_resolving_ownership():
             run = Run(live_repo, ci=True)
             run.c8_reserved_basenames(runner=git_lost_during_resolution)
-            return any(c == "C8" and "nested-repo/CLAUDE.md" in d
+            return any(c == "C8" and "cannot resolve Git ownership" in d
+                       and "No such file or directory" in d
                        for c, d in run.failures)
 
         expect_red(
-            "C8 retains a candidate whose ownership probe cannot launch Git",
+            "C8 fails closed when a boundary ownership probe cannot launch Git",
             c8_names_a_git_lost_while_resolving_ownership,
         )
 

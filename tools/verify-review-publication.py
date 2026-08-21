@@ -615,7 +615,7 @@ def selftest() -> int:
             endpoint = argv[-1]
             if "issues/comments" in endpoint:
                 if (predecessor_data is not None
-                        and endpoint.endswith(f"/{predecessor_data.get('id')}")):
+                        and not endpoint.endswith(f"/{comment_id}")):
                     payload = predecessor_data
                 else:
                     payload = comment_data
@@ -725,6 +725,134 @@ def selftest() -> int:
                 runner_for(later_comment, predecessor_data=not_older),
                 initial_publication=False, predecessor_urls=(predecessor_url,)),
                 "not older than the current publication"),
+        )
+        expect(
+            "duplicate predecessor CLI values are rejected",
+            denies(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body,
+                runner_for(later_comment, predecessor_data=predecessor),
+                initial_publication=False,
+                predecessor_urls=(predecessor_url, predecessor_url)),
+                "predecessor comment URLs are not unique"),
+        )
+        repeated_link_bytes = later_bytes + (
+            f"Repeated link: {predecessor_url}.\n").encode()
+        body.write_bytes(repeated_link_bytes)
+        expect(
+            "a predecessor URL repeated in the submitted handoff is rejected",
+            denies(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body,
+                runner_for(dict(later_comment, body=repeated_link_bytes[:-1].decode()),
+                           predecessor_data=predecessor),
+                initial_publication=False, predecessor_urls=(predecessor_url,)),
+                "must link predecessor exactly once"),
+        )
+        noncanonical_url = predecessor_url + "/extra"
+        noncanonical_bytes = (
+            f"Head: `{head}`\n\nSupersedes {noncanonical_url}.\n").encode()
+        body.write_bytes(noncanonical_bytes)
+        expect(
+            "a predecessor URL with a canonical prefix and trailing suffix is rejected",
+            denies(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body,
+                runner_for(
+                    dict(later_comment, body=noncanonical_bytes[:-1].decode()),
+                    predecessor_data=dict(predecessor, html_url=noncanonical_url)),
+                initial_publication=False, predecessor_urls=(noncanonical_url,)),
+                "predecessor comment URL is not canonical"),
+        )
+        outside_url = (
+            f"https://github.com/Other/repo/pull/99#issuecomment-{predecessor_id}")
+        outside_bytes = f"Head: `{head}`\n\nSupersedes {outside_url}.\n".encode()
+        body.write_bytes(outside_bytes)
+        expect(
+            "a predecessor URL naming another repository or pull request is rejected",
+            denies(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body,
+                runner_for(dict(later_comment, body=outside_bytes[:-1].decode()),
+                           predecessor_data=dict(
+                               predecessor, html_url=outside_url,
+                               issue_url="https://api.github.com/repos/Other/repo/issues/99")),
+                initial_publication=False, predecessor_urls=(outside_url,)),
+                "is outside"),
+        )
+        self_url = comment["html_url"]
+        self_bytes = f"Head: `{head}`\n\nSupersedes {self_url}.\n".encode()
+        body.write_bytes(self_bytes)
+        expect(
+            "a handoff cannot name its own comment as predecessor",
+            denies(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body,
+                runner_for(dict(later_comment, body=self_bytes[:-1].decode())),
+                initial_publication=False, predecessor_urls=(self_url,)),
+                "cannot name itself"),
+        )
+        body.write_bytes(later_bytes)
+        expect(
+            "the fetched predecessor id must match the requested comment id",
+            denies(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body,
+                runner_for(later_comment, predecessor_data=dict(predecessor, id=999)),
+                initial_publication=False, predecessor_urls=(predecessor_url,)),
+                "predecessor comment id"),
+        )
+        expect(
+            "the fetched predecessor must belong to the same pull request",
+            denies(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body,
+                runner_for(later_comment, predecessor_data=dict(
+                    predecessor,
+                    issue_url=f"https://api.github.com/repos/{repo}/issues/{pr + 1}")),
+                initial_publication=False, predecessor_urls=(predecessor_url,)),
+                "belongs to another pull request"),
+        )
+        expect(
+            "the fetched predecessor canonical URL must match the submitted URL",
+            denies(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body,
+                runner_for(later_comment, predecessor_data=dict(
+                    predecessor, html_url=predecessor_url + "/wrong")),
+                initial_publication=False, predecessor_urls=(predecessor_url,)),
+                "predecessor comment URL is"),
+        )
+        expect(
+            "the fetched predecessor author must match the current handoff author",
+            denies(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body,
+                runner_for(later_comment, predecessor_data=dict(
+                    predecessor, user={"login": "someone-else", "id": 77})),
+                initial_publication=False, predecessor_urls=(predecessor_url,)),
+                "predecessor comment author"),
+        )
+        expect(
+            "the predecessor must contain exactly one full Head line",
+            denies(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body,
+                runner_for(later_comment, predecessor_data=dict(
+                    predecessor, body="Earlier handoff without a head.")),
+                initial_publication=False, predecessor_urls=(predecessor_url,)),
+                "does not contain exactly one full Head line"),
+        )
+        expect(
+            "the current handoff timestamp must carry a timezone",
+            denies(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body,
+                runner_for(dict(
+                    later_comment, created_at="2026-08-19T00:01:00",
+                    updated_at="2026-08-19T00:01:00"),
+                           predecessor_data=predecessor),
+                initial_publication=False, predecessor_urls=(predecessor_url,)),
+                "timezone-free created_at"),
+        )
+        expect(
+            "the predecessor timestamp must carry a timezone",
+            denies(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body,
+                runner_for(later_comment, predecessor_data=dict(
+                    predecessor, created_at="2026-08-19T00:00:00",
+                    updated_at="2026-08-19T00:00:00")),
+                initial_publication=False, predecessor_urls=(predecessor_url,)),
+                "timezone-free predecessor created_at"),
         )
         body.write_bytes(body_bytes)
         manifest_raw = manifest.read_bytes()

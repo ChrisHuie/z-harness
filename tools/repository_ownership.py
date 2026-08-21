@@ -15,7 +15,11 @@ import subprocess
 import tempfile
 
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
+
+
+class RepositoryOwnershipError(RuntimeError):
+    """A repository boundary could not be proved or disproved reliably."""
 
 
 def git_command_failure(returncode, stderr, command="git ls-files"):
@@ -192,15 +196,22 @@ def is_repository_boundary(path, owner_root=None, runner=None):
     marker = os.path.join(path, ".git")
     if not os.path.lexists(marker) or os.path.islink(marker):
         return False
-    if git_toplevel_error(path, runner):
+    toplevel_problem = git_toplevel_error(path, runner)
+    if toplevel_problem.startswith("cannot run git rev-parse"):
+        raise RepositoryOwnershipError(toplevel_problem)
+    if toplevel_problem:
         return False
     if os.path.isdir(marker):
         return True
     if not os.path.isfile(marker):
         return False
-    return (_indexed_gitlink(path, owner_root, runner)
-            or _registered_linked_worktree(path, marker)
-            or _bound_separate_gitdir(path, marker, runner))
+    try:
+        return (_indexed_gitlink(path, owner_root, runner)
+                or _registered_linked_worktree(path, marker)
+                or _bound_separate_gitdir(path, marker, runner))
+    except OSError as exc:
+        raise RepositoryOwnershipError(
+            f"cannot resolve Git ownership for {path!r}: {exc}") from exc
 
 
 def boundary_between(root, candidate, runner=None):
@@ -324,6 +335,21 @@ def selftest():
             check=True)
         expect("a separately-bound gitdir is an ownership boundary",
                is_repository_boundary(separate, owner))
+
+        calls = 0
+        def late_git_failure(argv, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return subprocess.run(argv, **kwargs)
+            raise OSError(5, "planted late ownership EIO")
+        late_problem = ""
+        try:
+            is_repository_boundary(separate, owner, late_git_failure)
+        except RepositoryOwnershipError as exc:
+            late_problem = str(exc)
+        expect("a late ownership-probe I/O failure is named and fails closed",
+               "planted late ownership EIO" in late_problem)
 
         recorded = []
         def recording_runner(argv, **kwargs):

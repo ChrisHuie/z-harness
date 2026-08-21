@@ -461,6 +461,149 @@ def selftest():
         bad += (not ok); checks += 1
         print(f"  {'PASS' if ok else 'FAIL'} stable-parent open failure denies without creating scratch")
 
+        # Each descriptor proof failure is an independent fail-closed link. A single
+        # ``open('..')`` test did not exercise stat, dup, or either fstat arm, so replacing
+        # any of those arms with ``return False`` left the suite green and converted an
+        # unknown ancestry into permission to create.
+        descriptor_probe_fd = os.open(outside_probe, _walk_flags)
+        real_stat, real_dup, real_fstat = os.stat, os.dup, os.fstat
+        descriptor_cases = []
+        try:
+            def root_stat_eio(path, *args, **kwargs):
+                if path == root and not kwargs.get("dir_fd"):
+                    raise OSError(5, "planted workspace-stat EIO")
+                return real_stat(path, *args, **kwargs)
+            os.stat = root_stat_eio
+            try:
+                _fd_within_workspace(descriptor_probe_fd, root)
+                problem = ""
+            except ScratchPolicyError as exc:
+                problem = str(exc)
+            descriptor_cases.append(("workspace root stat", "workspace-stat EIO" in problem))
+            os.stat = real_stat
+
+            def descriptor_dup_eio(_fd):
+                raise OSError(5, "planted descriptor-dup EIO")
+            os.dup = descriptor_dup_eio
+            try:
+                _fd_within_workspace(descriptor_probe_fd, root)
+                problem = ""
+            except ScratchPolicyError as exc:
+                problem = str(exc)
+            descriptor_cases.append(("descriptor duplication", "descriptor-dup EIO" in problem))
+            os.dup = real_dup
+
+            def current_fstat_eio(_fd):
+                raise OSError(5, "planted current-fstat EIO")
+            os.fstat = current_fstat_eio
+            try:
+                _fd_within_workspace(descriptor_probe_fd, root)
+                problem = ""
+            except ScratchPolicyError as exc:
+                problem = str(exc)
+            descriptor_cases.append(("current descriptor stat", "current-fstat EIO" in problem))
+            os.fstat = real_fstat
+
+            fstat_calls = 0
+            def parent_fstat_eio(fd):
+                nonlocal fstat_calls
+                fstat_calls += 1
+                if fstat_calls == 2:
+                    raise OSError(5, "planted parent-fstat EIO")
+                return real_fstat(fd)
+            os.fstat = parent_fstat_eio
+            try:
+                _fd_within_workspace(descriptor_probe_fd, root)
+                problem = ""
+            except ScratchPolicyError as exc:
+                problem = str(exc)
+            descriptor_cases.append(("parent descriptor stat", "parent-fstat EIO" in problem))
+        finally:
+            os.stat, os.dup, os.fstat = real_stat, real_dup, real_fstat
+            os.close(descriptor_probe_fd)
+        for label, ok in descriptor_cases:
+            bad += (not ok); checks += 1
+            print(f"  {'PASS' if ok else 'FAIL'} {label} failure denies the ancestry proof")
+
+        # Rebind an accepted external name to another external directory. Descriptor
+        # containment alone still answers "outside", so only component O_NOFOLLOW prevents
+        # the reservation from following the new symlink.
+        nofollow_name = fresh("nofollow-name")
+        nofollow_moved = fresh("nofollow-moved")
+        nofollow_target = fresh("nofollow-target")
+        os.makedirs(os.path.join(nofollow_name, "sub"))
+        os.makedirs(os.path.join(nofollow_target, "sub"))
+        nofollow_path = os.path.join(nofollow_name, "sub", "worker")
+        nofollow_precheck = _scratch_path_error(nofollow_path, root)
+        os.rename(nofollow_name, nofollow_moved)
+        os.symlink(nofollow_target, nofollow_name)
+        try:
+            reserve_scratch(nofollow_path, root)
+            nofollow_problem = ""
+        except ScratchPolicyError as exc:
+            nofollow_problem = str(exc)
+        ok = (nofollow_precheck == "" and nofollow_problem
+              and not os.path.lexists(os.path.join(nofollow_target, "sub", "worker")))
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} component no-follow blocks an external symlink rebind")
+
+        # The opened descriptor and the path must still identify the same parent before the
+        # create. Replacing the name after it is opened must be detected, not silently create
+        # under the renamed-away directory.
+        identity_parent = fresh("identity-parent")
+        identity_moved = fresh("identity-moved")
+        os.mkdir(identity_parent)
+        identity_path = os.path.join(identity_parent, "worker")
+        real_stable_open = _open_stable_directory
+        def identity_rebind_open(path):
+            fd = real_stable_open(path)
+            os.rename(identity_parent, identity_moved)
+            os.mkdir(identity_parent)
+            return fd
+        globals()["_open_stable_directory"] = identity_rebind_open
+        try:
+            try:
+                reserve_scratch(identity_path, root)
+                identity_problem = ""
+            except ScratchPolicyError as exc:
+                identity_problem = str(exc)
+        finally:
+            globals()["_open_stable_directory"] = real_stable_open
+        ok = ("parent changed" in identity_problem
+              and not os.path.lexists(os.path.join(identity_moved, "worker"))
+              and not os.path.lexists(identity_path))
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} opened-parent identity drift denies before mkdir")
+
+        # Finally rebind after the descriptor ancestry proof. Descriptor-relative mkdir
+        # creates only under the opened parent; the post-create identity check then removes
+        # that orphan and denies because the worker's named path no longer identifies it.
+        mkdir_parent = fresh("mkdir-parent")
+        mkdir_moved = fresh("mkdir-moved")
+        mkdir_inside = os.path.join(adopted, "mkdir-inside")
+        os.mkdir(mkdir_parent); os.mkdir(mkdir_inside)
+        mkdir_path = os.path.join(mkdir_parent, "worker")
+        real_fd_within = _fd_within_workspace
+        def postproof_rebind(parent_fd, workspace_root, limit=None):
+            answer = real_fd_within(parent_fd, workspace_root, limit)
+            os.rename(mkdir_parent, mkdir_moved)
+            os.symlink(mkdir_inside, mkdir_parent)
+            return answer
+        globals()["_fd_within_workspace"] = postproof_rebind
+        try:
+            try:
+                reserve_scratch(mkdir_path, root)
+                mkdir_problem = ""
+            except ScratchPolicyError as exc:
+                mkdir_problem = str(exc)
+        finally:
+            globals()["_fd_within_workspace"] = real_fd_within
+        ok = (mkdir_problem
+              and not os.path.lexists(os.path.join(mkdir_moved, "worker"))
+              and not os.path.lexists(os.path.join(mkdir_inside, "worker")))
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} descriptor-relative mkdir cannot land after a post-proof rebind")
+
         # A path already reserved is refused, and the refusal has to carry a DIFFERENT path
         # or the parent has no way forward. Without the fresh suggestion this denial is a
         # dead end rather than a retry.
@@ -1174,15 +1317,34 @@ def reserve_scratch(path, workspace_root):
             raise ScratchPolicyError(
                 f"the scratch parent {parent!r} resolved inside the checkout at "
                 f"{workspace_root!r} at the moment the directory would be created")
+        created_here = False
         try:
             os.mkdir(leaf, 0o700, dir_fd=parent_fd)
+            created_here = True
+            created = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+            named = os.stat(normalized, follow_symlinks=False)
+            if ((created.st_dev, created.st_ino) != (named.st_dev, named.st_ino)):
+                raise ScratchPolicyError(
+                    f"scratch path changed while being reserved: {normalized!r}")
+            if not stat.S_ISDIR(created.st_mode):
+                raise ScratchPolicyError(
+                    f"reserved scratch is not a directory: {normalized!r}")
+            os.chmod(leaf, 0o700, dir_fd=parent_fd, follow_symlinks=False)
         except OSError as exc:
+            if created_here:
+                try:
+                    os.rmdir(leaf, dir_fd=parent_fd)
+                except OSError:
+                    pass
             raise ScratchPolicyError(
                 f"cannot reserve fresh scratch directory {normalized!r}: {exc}") from exc
-        created = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
-        if not stat.S_ISDIR(created.st_mode):
-            raise ScratchPolicyError(f"reserved scratch is not a directory: {normalized!r}")
-        os.chmod(leaf, 0o700, dir_fd=parent_fd, follow_symlinks=False)
+        except ScratchPolicyError:
+            if created_here:
+                try:
+                    os.rmdir(leaf, dir_fd=parent_fd)
+                except OSError:
+                    pass
+            raise
     finally:
         os.close(parent_fd)
 

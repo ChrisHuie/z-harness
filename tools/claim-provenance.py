@@ -27,7 +27,11 @@ import subprocess
 import sys
 import tempfile
 
-from repository_ownership import boundary_between, is_repository_boundary
+from repository_ownership import (
+    RepositoryOwnershipError,
+    boundary_between,
+    is_repository_boundary,
+)
 
 VERSION = "3.1.0"
 MIN_QUOTE_CHARS = 24
@@ -162,7 +166,10 @@ def resolve_citation(path, root, runner=None):
             return None, "outside", f"cited path escapes --root: {path}"
         if not os.path.isfile(candidate):
             return None, "missing", f"cited path not found under --root: {path}"
-        boundary = boundary_between(root_real, candidate, runner)
+        try:
+            boundary = boundary_between(root_real, candidate, runner)
+        except RepositoryOwnershipError as exc:
+            return None, "io", f"cannot resolve Git ownership for cited path: {exc}"
         if boundary:
             return None, "boundary", (
                 f"cited path belongs to nested repository at "
@@ -176,10 +183,14 @@ def resolve_citation(path, root, runner=None):
         # makes every basename it shares with this tree ambiguous -- a dozen linked worktrees
         # under an ignored directory made `ci-gate.py` unresolvable here -- and lets a
         # citation resolve against a copy this repository does not contain.
-        if (dirpath != root_real
-                and is_repository_boundary(dirpath, root_real, runner)):
-            dirs[:] = []
-            continue
+        if dirpath != root_real:
+            try:
+                boundary = is_repository_boundary(dirpath, root_real, runner)
+            except RepositoryOwnershipError as exc:
+                return None, "io", f"cannot resolve Git ownership for cited path: {exc}"
+            if boundary:
+                dirs[:] = []
+                continue
         dirs[:] = [d for d in dirs if d != ".git"]
         dirs.sort()
         if portable not in files:
@@ -717,6 +728,28 @@ def selftest():
                resolve_citation("invalid-marker/only-invalid.json", tmp)[1] == "resolved")
         record("a qualified citation into a genuine nested repository is refused",
                resolve_citation("nested-checkout/only-nested.json", tmp)[1] == "boundary")
+
+        _separate = os.path.join(tmp, "separate-checkout")
+        _separate_admin = os.path.join(tmp, "separate-admin")
+        subprocess.run(
+            ["git", "init", "--quiet", "--separate-git-dir", _separate_admin,
+             _separate], check=True)
+        subprocess.run(
+            ["git", "--git-dir", _separate_admin, "config", "core.worktree",
+             _separate], check=True)
+        with open(os.path.join(_separate, "late.json"), "w", encoding="utf-8") as fh:
+            fh.write("evidence")
+        _late_calls = 0
+        def late_ownership_runner(argv, **kwargs):
+            nonlocal _late_calls
+            _late_calls += 1
+            if _late_calls == 1:
+                return subprocess.run(argv, **kwargs)
+            raise OSError(5, "planted late ownership EIO")
+        _, _late_state, _late_detail = resolve_citation(
+            "separate-checkout/late.json", tmp, late_ownership_runner)
+        record("a late ownership I/O failure becomes a named citation verdict",
+               _late_state == "io" and "planted late ownership EIO" in _late_detail)
 
         # ...and must NOT cover a token whose file half does not exist. Calling that a
         # location would replace a true "not found" with a claim that the file is there.

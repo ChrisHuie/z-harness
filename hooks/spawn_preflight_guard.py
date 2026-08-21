@@ -453,6 +453,49 @@ def selftest():
                   and "NUL byte" in specific.get("permissionDecisionReason", ""))
             bad += (not ok); checks += 1
             print(f"  {'PASS' if ok else 'FAIL'} an embedded NUL returns a named deny decision")
+
+            surrogate_payload = {
+                "tool_name": "Agent", "cwd": plain, "session_id": "s1",
+                "tool_input": {
+                    "prompt": f"Scratch: {fresh('surrogate')}\ud800\n"},
+            }
+            rc, out = run_payload(
+                surrogate_payload, runtime="claude", require_scratch=True)
+            try:
+                receipt = json.loads(out)
+                specific = receipt["hookSpecificOutput"]
+            except (KeyError, TypeError, json.JSONDecodeError):
+                specific = {}
+            ok = (rc == 0 and specific.get("permissionDecision") == "deny"
+                  and "cannot be represented" in
+                  specific.get("permissionDecisionReason", ""))
+            bad += (not ok); checks += 1
+            print(f"  {'PASS' if ok else 'FAIL'} an unrepresentable path returns a named deny decision")
+
+            real_reserve = reserve_scratch
+            def reserve_os_error(_path):
+                raise OSError(5, "planted reserve OSError")
+            try:
+                globals()["reserve_scratch"] = reserve_os_error
+                raw_oserror_payload = {
+                    "tool_name": "Agent", "cwd": plain, "session_id": "s1",
+                    "tool_input": {
+                        "prompt": f"Scratch: {fresh('reserve-oserror')}\n"},
+                }
+                rc, out = run_payload(
+                    raw_oserror_payload, runtime="claude", require_scratch=True)
+            finally:
+                globals()["reserve_scratch"] = real_reserve
+            try:
+                receipt = json.loads(out)
+                specific = receipt["hookSpecificOutput"]
+            except (KeyError, TypeError, json.JSONDecodeError):
+                specific = {}
+            ok = (rc == 0 and specific.get("permissionDecision") == "deny"
+                  and "planted reserve OSError" in
+                  specific.get("permissionDecisionReason", ""))
+            bad += (not ok); checks += 1
+            print(f"  {'PASS' if ok else 'FAIL'} a raw reservation OSError returns a named deny decision")
         finally:
             if old_pct is None:
                 del os.environ["SPAWN_GUARD_DF_PCT"]

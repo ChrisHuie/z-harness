@@ -91,7 +91,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 172
+SELFTEST_FLOOR = 174
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.2"
@@ -1249,6 +1249,34 @@ class Run:
                     self.result("C3", hit, f"{skill}/references/{name}: cites {target}"
                                            f"{'' if hit else ' -- resolves to no file'}")
 
+        # An exemption that no document uses is dead weight that can silence a real defect
+        # later without anyone re-reading it. Every declared external name must be cited by
+        # something, or the declaration is removed rather than kept as a standing allowance.
+        cited_anywhere = set()
+        for skill in sorted(os.listdir(skills_dir)):
+            refdir = os.path.join(skills_dir, skill, "references")
+            if not os.path.isdir(refdir):
+                continue
+            for name in sorted(os.listdir(refdir)):
+                if not name.endswith(".md"):
+                    continue
+                try:
+                    body = open(os.path.join(refdir, name), encoding="utf-8").read()
+                except OSError:
+                    continue
+                cited_anywhere.update(
+                    m.group(1) for m in REFERENCE_CITATION.finditer(body))
+        # Only against this repository: the allowlist describes these documents, so a planted
+        # fixture tree cannot answer the question. And these do not count toward `resolved`,
+        # which means authored reference relationships -- counting them defeated the
+        # zero-reference guard below, because six exemptions made an empty scan look populated.
+        if os.path.realpath(self.root) == os.path.realpath(ROOT):
+            for declared in sorted(EXTERNAL_REFERENCE_CITATIONS):
+                reached = declared in cited_anywhere
+                self.result("C3", reached,
+                            f"external citation {declared} is "
+                            f"{'used' if reached else 'DECLARED BUT CITED NOWHERE'}")
+
         # The scan set is part of the claim. This matcher models a backticked token only, so
         # a bare filename in prose is a mention rather than a citation and is deliberately out
         # of scope; measured over this tree, every unbackticked non-resolving token is a
@@ -2340,6 +2368,27 @@ def selftest():
                                for c, d in r.failures))
         expect_red("C3 stays green on a declared-external citation",
                    lambda: not any(c == "C3" and "probe.py" in d for c, d in r.failures))
+        # The exemption list only asserts against this repository, so this case drives the
+        # real root with a planted dead entry rather than the fixture tree.
+        _real_ext = EXTERNAL_REFERENCE_CITATIONS
+        globals()["EXTERNAL_REFERENCE_CITATIONS"] = dict(
+            _real_ext, **{"NEVER-CITED-BY-ANY-DOCUMENT.md": "planted dead exemption"})
+        try:
+            dead_ext_run = Run(ROOT, ci=True)
+            dead_ext_run.c3_reference_resolution()
+        finally:
+            globals()["EXTERNAL_REFERENCE_CITATIONS"] = _real_ext
+        # ...and the same list must stay silent against a tree it does not describe. Without
+        # the root scoping every fixture Run reports six exemptions as uncited, which is noise
+        # attributed to whatever fixture happened to be under test.
+        expect_red("C3 reports no exemption failure against a tree it does not describe",
+                   lambda: not any(c == "C3" and "DECLARED BUT CITED NOWHERE" in d
+                                   for c, d in r.failures))
+
+        expect_red("C3 goes red on an exemption no document cites",
+                   lambda: any(c == "C3" and "DECLARED BUT CITED NOWHERE" in d
+                               for c, d in dead_ext_run.failures))
+
         expect_red("C3 goes red on a citation carrying a line suffix",
                    lambda: any(c == "C3" and "NO-SUCH-SUFFIXED.md" in d for c, d in r.failures))
         expect_red("C3 resolves a citation naming a real file by a partial path",

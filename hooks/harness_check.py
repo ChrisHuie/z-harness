@@ -144,12 +144,12 @@ SELFTEST_SUITES = [
      ["tools/verify-review-publication.py", "--selftest"], 83),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
-    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 316),
+    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 317),
     ("write-mutation-receipt",
      ["tools/write-mutation-receipt.py", "--selftest"], 59),
     ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 65),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
-    ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 87),
+    ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 88),
     ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 1149),
     ("zsh_rev_modifier_guard", ["hooks/guards/zsh_rev_modifier_guard.py", "--selftest"], 487),
 ]
@@ -158,8 +158,8 @@ SELFTEST_SUITES = [
 def expected_selftest_checks(name):
     """Exact execution-derived counts for suites whose former formulas hid probes."""
     fixed = {
-        "ci-gate": 316,
-        "spawn_preflight_guard": 87,
+        "ci-gate": 317,
+        "spawn_preflight_guard": 88,
         "verify-review-publication": 83,
     }
     if name in fixed:
@@ -1786,13 +1786,17 @@ def selftest():
             "`beta/references/present.md`, `NO-SUCH-SUFFIXED.md:12`, and "
             "`ONLY-IN-NESTED.md` for the rest.\n")
         os.makedirs(os.path.join(sk, "alpha", "references", "nested"))
+        os.makedirs(os.path.join(sk, "alpha", "references", "other"))
         open(os.path.join(sk, "alpha", "SKILL.md"), "a").write(
-            "\nRead references/nested/deep.md and references/nested/local.md\n")
+            "\nRead references/nested/deep.md, references/nested/local.md, "
+            "and references/other/local.md\n")
         open(os.path.join(sk, "alpha", "references", "nested", "deep.md"), "w").write(
             "See `NESTED-MISSING.md`, `ONLY-BETA.md`, `local.md`, and "
             "`references/shared.md`.\n")
         open(os.path.join(sk, "alpha", "references", "nested", "local.md"), "w").write(
             "document-local\n")
+        open(os.path.join(sk, "alpha", "references", "other", "local.md"), "w").write(
+            "same-skill suffix fallback must remain ambiguous\n")
         open(os.path.join(sk, "beta", "references", "local.md"), "w").write(
             "sibling fallback must not win\n")
         open(os.path.join(sk, "alpha", "references", "shared.md"), "w").write(
@@ -2386,7 +2390,7 @@ def selftest():
         expect_red(
             "the spawn selftest runs from a copied hook outside the checkout",
             lambda: portable_result.returncode == 0
-            and "SELFTEST-SUMMARY suite=spawn_preflight_guard checks=87 failures=0"
+            and "SELFTEST-SUMMARY suite=spawn_preflight_guard checks=88 failures=0"
             in portable_result.stdout,
         )
 

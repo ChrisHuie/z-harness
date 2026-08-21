@@ -604,6 +604,36 @@ def selftest():
         bad += (not ok); checks += 1
         print(f"  {'PASS' if ok else 'FAIL'} descriptor-relative mkdir cannot land after a post-proof rebind")
 
+        # Keep the rebound name valid and point it at a different pre-existing worker.
+        # That reaches the created-vs-named inode comparison rather than the adjacent
+        # ``os.stat`` error arm, and proves typed-error cleanup removes only the directory
+        # created through the retained descriptor.
+        mismatch_parent = fresh("mismatch-parent")
+        mismatch_moved = fresh("mismatch-moved")
+        mismatch_target = fresh("mismatch-target")
+        os.mkdir(mismatch_parent); os.mkdir(mismatch_target)
+        os.mkdir(os.path.join(mismatch_target, "worker"))
+        mismatch_path = os.path.join(mismatch_parent, "worker")
+        def postproof_identity_mismatch(parent_fd, workspace_root, limit=None):
+            answer = real_fd_within(parent_fd, workspace_root, limit)
+            os.rename(mismatch_parent, mismatch_moved)
+            os.symlink(mismatch_target, mismatch_parent)
+            return answer
+        globals()["_fd_within_workspace"] = postproof_identity_mismatch
+        try:
+            try:
+                reserve_scratch(mismatch_path, root)
+                mismatch_problem = ""
+            except ScratchPolicyError as exc:
+                mismatch_problem = str(exc)
+        finally:
+            globals()["_fd_within_workspace"] = real_fd_within
+        ok = ("scratch path changed" in mismatch_problem
+              and not os.path.lexists(os.path.join(mismatch_moved, "worker"))
+              and os.path.isdir(os.path.join(mismatch_target, "worker")))
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} inode mismatch denies and removes only the descriptor-created directory")
+
         # A path already reserved is refused, and the refusal has to carry a DIFFERENT path
         # or the parent has no way forward. Without the fresh suggestion this denial is a
         # dead end rather than a retry.

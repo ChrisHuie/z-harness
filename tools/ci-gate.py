@@ -4096,6 +4096,19 @@ def selftest() -> int:
         "a successful empty tracked-markdown inventory fails closed",
         "empty or unterminated" in empty_markdown_problem,
     )
+    def unterminated_markdown_inventory(argv, **_kwargs):
+        if "rev-parse" in argv:
+            return _TrackedMarkdownReply(stdout=os.fsencode(ROOT) + b"\n")
+        # Without the required final NUL, blindly dropping the last byte turns this into
+        # the valid tracked path README.md and makes a malformed transport look complete.
+        return _TrackedMarkdownReply(stdout=b"README.mdX")
+    unterminated_sources, unterminated_markdown_problem = tracked_markdown_sources(
+        ROOT, runner=unterminated_markdown_inventory)
+    expect(
+        "a nonempty unterminated tracked-markdown inventory fails before truncation",
+        not unterminated_sources
+        and "empty or unterminated" in unterminated_markdown_problem,
+    )
     def nul_only_markdown_inventory(argv, **_kwargs):
         if "rev-parse" in argv:
             return _TrackedMarkdownReply(stdout=os.fsencode(ROOT) + b"\n")

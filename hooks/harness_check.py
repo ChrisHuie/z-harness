@@ -1353,14 +1353,6 @@ class Run:
                     continue
                 for hook in hooks:
                     try:
-                        if not isinstance(hook, dict):
-                            malformed_codex_handlers += 1
-                            inventory.append({
-                                "event": event, "matcher": entry.get("matcher"),
-                                "rel": None, "argv": [], "type": None,
-                                "timeout": None, "async": None,
-                            })
-                            continue
                         command = hook.get("command", "")
                         match = (re.search(
                             r"\$\{PLUGIN_ROOT\}/([\w./\-]+\.(?:py|sh))", command)

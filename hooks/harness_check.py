@@ -116,7 +116,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 197
+SELFTEST_FLOOR = 200
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -141,7 +141,7 @@ SELFTEST_SUITES = [
     ("repository-ownership", ["tools/repository_ownership.py", "--selftest"], 17),
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 8),
     ("verify-review-publication",
-     ["tools/verify-review-publication.py", "--selftest"], 88),
+     ["tools/verify-review-publication.py", "--selftest"], 93),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
     ("ci-gate", ["tools/ci-gate.py", "--selftest"], 317),
@@ -160,7 +160,7 @@ def expected_selftest_checks(name):
     fixed = {
         "ci-gate": 317,
         "spawn_preflight_guard": 88,
-        "verify-review-publication": 88,
+        "verify-review-publication": 93,
     }
     if name in fixed:
         return fixed[name]
@@ -1334,38 +1334,76 @@ class Run:
             self.result("C7", False, f"Codex hooks config parses: {exc}")
             codex_hooks = {}
         inventory = []
-        for event, entries in codex_hooks.get("hooks", {}).items():
+        malformed_codex_handlers = 0
+        codex_events = codex_hooks.get("hooks", {}) if isinstance(codex_hooks, dict) else {}
+        if not isinstance(codex_events, dict):
+            malformed_codex_handlers += 1
+            codex_events = {}
+        for event, entries in codex_events.items():
+            if not isinstance(entries, list):
+                malformed_codex_handlers += 1
+                continue
             for entry in entries:
-                for hook in entry.get("hooks", []):
-                    command = hook.get("command", "")
-                    match = re.search(r"\$\{PLUGIN_ROOT\}/([\w./\-]+\.(?:py|sh))", command)
-                    if not match:
-                        self.result("C7", False,
-                                    f"Codex {event}: command has no PLUGIN_ROOT script anchor")
+                if not isinstance(entry, dict):
+                    malformed_codex_handlers += 1
+                    continue
+                hooks = entry.get("hooks", [])
+                if not isinstance(hooks, list):
+                    malformed_codex_handlers += 1
+                    continue
+                for hook in hooks:
+                    if not isinstance(hook, dict):
+                        malformed_codex_handlers += 1
+                        inventory.append({
+                            "event": event, "matcher": entry.get("matcher"),
+                            "rel": None, "argv": [], "type": None,
+                            "timeout": None, "async": None,
+                        })
                         continue
-                    rel = match.group(1)
+                    command = hook.get("command", "")
+                    match = (re.search(
+                        r"\$\{PLUGIN_ROOT\}/([\w./\-]+\.(?:py|sh))", command)
+                        if isinstance(command, str) else None)
+                    rel = match.group(1) if match else None
                     try:
-                        argv = shlex.split(command)
-                    except ValueError:
+                        argv = shlex.split(command) if isinstance(command, str) else []
+                    except (TypeError, ValueError):
                         argv = []
+                    if rel is None or not argv:
+                        malformed_codex_handlers += 1
                     inventory.append({
                         "event": event,
                         "matcher": entry.get("matcher"),
                         "rel": rel,
                         "argv": argv,
+                        "type": hook.get("type"),
+                        "timeout": hook.get("timeout"),
+                        "async": hook.get("async", False),
                     })
-                    self.result("C7", os.path.isfile(os.path.join(self.root, rel)),
-                                f"Codex {event} -> {rel}")
-                    self.result("C7", "timeout" in hook,
-                                f"Codex {event} {rel}: timeout set")
         for event, matcher, rel, required_args in REQUIRED_CODEX_HANDLERS:
-            matches = [item for item in inventory
-                       if item["event"] == event and item["matcher"] == matcher
-                       and item["rel"] == rel
-                       and all(arg in item["argv"] for arg in required_args)]
-            self.result("C7", len(matches) == 1,
+            candidates = [item for item in inventory
+                          if item["event"] == event and item["matcher"] == matcher
+                          and item["rel"] == rel]
+            expected_argv = ["python3", f"${{PLUGIN_ROOT}}/{rel}", *required_args]
+            exact = [item for item in candidates if item["argv"] == expected_argv]
+            execution = [item for item in exact
+                         if item["type"] == "command" and item["timeout"] == 5
+                         and item["async"] is False]
+            self.result("C7", len(exact) == 1,
                         f"required Codex handler {event} matcher={matcher!r} -> {rel} "
-                        f"args={list(required_args)!r}: {len(matches)} match(es)")
+                        f"argv={expected_argv!r}: {len(exact)} match(es)")
+            self.result("C7", len(execution) == 1,
+                        f"Codex {event} {rel}: type=command timeout=5 async=false: "
+                        f"{len(execution)} match(es)")
+            self.result("C7", os.path.isfile(os.path.join(self.root, rel)),
+                        f"Codex {event} -> {rel}")
+        self.result(
+            "C7", (len(inventory) == len(REQUIRED_CODEX_HANDLERS)
+                   and malformed_codex_handlers == 0),
+            "Codex handler inventory is closed: "
+            f"{len(inventory)} handler(s), expected {len(REQUIRED_CODEX_HANDLERS)}; "
+            f"malformed={malformed_codex_handlers}",
+        )
         if not self.ci:
             fp = os.path.expanduser("~/.claude/harness-audit-20260801/FINDINGS.md")
             self.result("C7", os.path.isfile(fp),
@@ -2417,6 +2455,41 @@ def selftest():
             lambda: any(c == "C7" and "required Codex handler" in d
                         and "--require-scratch" in d and "0 match(es)" in d
                         for c, d in missing_codex_activation.failures),
+        )
+
+        masked_codex_registration = json.load(open(os.path.join(ROOT, "hooks/hooks.json")))
+        for entries in masked_codex_registration["hooks"].values():
+            for entry in entries:
+                for handler in entry.get("hooks", []):
+                    if "spawn_preflight_guard.py" in handler.get("command", ""):
+                        handler["command"] += " || true"
+        open(os.path.join(registration_root, "hooks/hooks.json"), "w").write(
+            json.dumps(masked_codex_registration))
+        masked_codex = Run(registration_root, ci=True)
+        masked_codex.c7_anchors()
+        expect_red(
+            "C7 rejects a Codex handler whose failure is shell-masked",
+            lambda: any(c == "C7" and "required Codex handler" in d
+                        and "spawn_preflight_guard.py" in d and "0 match(es)" in d
+                        for c, d in masked_codex.failures),
+        )
+
+        malformed_codex_registration = json.load(open(os.path.join(ROOT, "hooks/hooks.json")))
+        malformed_codex_registration["hooks"]["PreToolUse"][0]["hooks"].append(
+            "not an object")
+        open(os.path.join(registration_root, "hooks/hooks.json"), "w").write(
+            json.dumps(malformed_codex_registration))
+        malformed_codex = Run(registration_root, ci=True)
+        malformed_codex.c7_anchors()
+        expect_red(
+            "C7 rejects a malformed Codex handler instead of crashing or filtering it out",
+            lambda: any(c == "C7" and "Codex handler inventory is closed" in d
+                        and "malformed=1" in d for c, d in malformed_codex.failures),
+        )
+        expect_red(
+            "Codex C7 registration mutations preserve selector cardinality",
+            lambda: all(run.checks == exact_registration_checks for run in (
+                missing_codex_activation, masked_codex, malformed_codex)),
         )
 
         portable_spawn_dir = os.path.join(td, "portable-spawn")

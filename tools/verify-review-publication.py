@@ -184,6 +184,12 @@ def _required(value, label: str):
     return value
 
 
+def _positive_int(value, label: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise PublicationError(f"publication metadata has invalid {label}: {value!r}")
+    return value
+
+
 def _object(value):
     return value if isinstance(value, dict) else {}
 
@@ -220,6 +226,8 @@ def _comment_metadata_error(
     try:
         for label, value in required.items():
             _required(value, label)
+        _positive_int(data.get("id"), "id")
+        _positive_int(user.get("id"), "user.id")
     except PublicationError as exc:
         return str(exc)
     if data["id"] != comment_id:
@@ -259,21 +267,33 @@ def _github_time(value, label):
 
 def _handoff_inventory(
         current: dict, repo: str, pr: int, expected_author: str, runner=None):
-    """Return the latest prior same-author handoff from the complete PR inventory."""
+    """Return the latest prior handoff and closed comment map from the PR inventory."""
     comments = _api_paginated_array(
         repo, f"issues/{pr}/comments?per_page=100", "pull request comments", runner)
     try:
         current_created = _github_time(current.get("created_at"), "created_at")
     except PublicationError as exc:
-        return str(exc), None
-    current_id = current.get("id")
-    current_user_id = _object(current.get("user")).get("id")
+        return str(exc), None, {}
+    try:
+        current_id = _positive_int(current.get("id"), "id")
+        current_user_id = _positive_int(
+            _object(current.get("user")).get("id"), "user.id")
+    except PublicationError as exc:
+        return str(exc), None, {}
     current_matches = 0
     prior = []
+    by_id = {}
     for item in comments:
         if not isinstance(item, dict):
             raise TransportError("pull request comments contains a non-object item")
-        if item.get("id") == current_id:
+        try:
+            item_id = _positive_int(item.get("id"), "handoff comment id")
+        except PublicationError as exc:
+            return str(exc), None, {}
+        if item_id in by_id:
+            return f"pull-request comment inventory repeats comment id {item_id}", None, {}
+        by_id[item_id] = item
+        if item_id == current_id:
             current_matches += 1
             compared_fields = (
                 "body", "html_url", "issue_url", "created_at", "updated_at")
@@ -284,7 +304,7 @@ def _handoff_inventory(
                     or item_user.get("id") != current_user.get("id")):
                 return (
                     "current publication differs between its comment object and the "
-                    "complete pull-request comment inventory", None)
+                    "complete pull-request comment inventory", None, {})
             continue
         item_user = _object(item.get("user"))
         item_user_id = item_user.get("id")
@@ -298,28 +318,25 @@ def _handoff_inventory(
         if same_login and not same_identity:
             return (
                 "same-login handoff comment has a different numeric author identity: "
-                f"{item_user_id!r} != {current_user_id!r}", None)
-        item_id = item.get("id")
-        if not isinstance(item_id, int) or isinstance(item_id, bool) or item_id < 1:
-            return "handoff comment inventory contains an invalid comment id", None
+                f"{item_user_id!r} != {current_user_id!r}", None, {})
         try:
             created = _github_time(item.get("created_at"), "earlier handoff created_at")
         except PublicationError as exc:
-            return str(exc), None
+            return str(exc), None, {}
         if (created, item_id) < (current_created, current_id):
             prior.append(((created, item_id), item))
     if current_matches != 1:
         return (
             "initial publication comment was not listed exactly once in the complete "
-            f"pull-request comment inventory: {current_matches}", None)
+            f"pull-request comment inventory: {current_matches}", None, {})
     latest = max(prior, key=lambda record: record[0])[1] if prior else None
-    return "", latest
+    return "", latest, by_id
 
 
 def _initial_publication_error(
         current: dict, repo: str, pr: int, expected_author: str, runner=None) -> str:
     """Prove that no prior same-author handoff exists on the pull request."""
-    problem, latest = _handoff_inventory(
+    problem, latest, _inventory = _handoff_inventory(
         current, repo, pr, expected_author, runner)
     if problem:
         return problem
@@ -362,7 +379,7 @@ def _predecessor_contract(
         if submitted.count(url.encode("utf-8")) != 1:
             return f"submitted handoff must link predecessor exactly once: {url}", []
         parsed_urls.append((url, predecessor_id))
-    inventory_problem, latest = _handoff_inventory(
+    inventory_problem, latest, inventory = _handoff_inventory(
         current, repo, pr, expected_author, runner)
     if inventory_problem:
         return inventory_problem, []
@@ -394,6 +411,8 @@ def _predecessor_contract(
         try:
             for label, value in required.items():
                 _required(value, f"predecessor {label}")
+            _positive_int(predecessor.get("id"), "predecessor id")
+            _positive_int(predecessor_user.get("id"), "predecessor user.id")
             predecessor_created = _github_time(
                 predecessor.get("created_at"), "predecessor created_at")
         except PublicationError as exc:
@@ -417,6 +436,19 @@ def _predecessor_contract(
         predecessor_body = _text_bytes(predecessor.get("body"), "predecessor comment")
         if len(HEAD_LINE.findall(predecessor_body)) != 1:
             return "predecessor comment does not contain exactly one full Head line", records
+        inventory_predecessor = inventory.get(predecessor_id)
+        if inventory_predecessor is None:
+            return "predecessor comment is absent from the complete comment inventory", records
+        compared_fields = (
+            "id", "body", "issue_url", "html_url", "created_at", "updated_at")
+        inventory_user = _object(inventory_predecessor.get("user"))
+        if (any(inventory_predecessor.get(field) != predecessor.get(field)
+                for field in compared_fields)
+                or inventory_user.get("login") != predecessor_user.get("login")
+                or inventory_user.get("id") != predecessor_user.get("id")):
+            return (
+                "predecessor comment differs between its direct object and the complete "
+                "pull-request comment inventory"), records
         records.append({
             "id": predecessor_id,
             "url": url,
@@ -893,6 +925,18 @@ def selftest() -> int:
                 initial_publication=False, predecessor_urls=(predecessor_url,)),
                 "predecessor comment numeric author identity"),
         )
+        expect(
+            "a string predecessor user id is not a numeric author identity",
+            denies(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body,
+                runner_for(
+                    later_comment,
+                    predecessor_data=dict(
+                        predecessor, user={"login": author, "id": "42"}),
+                    issue_comment_pages=[[later_comment, predecessor]]),
+                initial_publication=False, predecessor_urls=(predecessor_url,)),
+                "invalid predecessor user.id"),
+        )
         body.write_bytes(body_bytes)
         expect(
             "a later handoff without a predecessor is rejected",
@@ -925,6 +969,19 @@ def selftest() -> int:
                 runner_for(later_comment, predecessor_data=edited_predecessor),
                 initial_publication=False, predecessor_urls=(predecessor_url,)),
                 "predecessor comment was edited"),
+        )
+        inventory_edited_predecessor = dict(
+            predecessor, updated_at="2026-08-19T00:00:30Z")
+        expect(
+            "a predecessor direct object cannot contradict the inventory used for lineage",
+            denies(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body,
+                runner_for(
+                    later_comment, predecessor_data=predecessor,
+                    issue_comment_pages=[[
+                        later_comment, inventory_edited_predecessor]]),
+                initial_publication=False, predecessor_urls=(predecessor_url,)),
+                "predecessor comment differs between its direct object"),
         )
         not_older = dict(
             predecessor, created_at="2026-08-19T00:02:00Z",
@@ -1010,6 +1067,17 @@ def selftest() -> int:
                     issue_comment_pages=[[later_comment, predecessor]]),
                 initial_publication=False, predecessor_urls=(predecessor_url,)),
                 "predecessor comment id"),
+        )
+        expect(
+            "a float predecessor id cannot impersonate the requested integer id",
+            denies(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body,
+                runner_for(
+                    later_comment,
+                    predecessor_data=dict(predecessor, id=float(predecessor_id)),
+                    issue_comment_pages=[[later_comment, predecessor]]),
+                initial_publication=False, predecessor_urls=(predecessor_url,)),
+                "invalid predecessor id"),
         )
         expect(
             "the fetched predecessor must belong to the same pull request",
@@ -1251,6 +1319,20 @@ def selftest() -> int:
             expect(label, denies(lambda: verify_comment(
                 repo, pr, comment_id, head, author, body, runner_for(changed_comment)),
                 named))
+        expect(
+            "a float comment id cannot impersonate the requested integer id",
+            denies(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body,
+                runner_for(dict(comment, id=float(comment_id)))),
+                "invalid id"),
+        )
+        expect(
+            "a string current user id is not a numeric author identity",
+            denies(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body,
+                runner_for(dict(comment, user={"login": author, "id": "42"}))),
+                "invalid user.id"),
+        )
         wrong_author = dict(comment, user={"login": "other", "id": 42})
         wrong_author_code, wrong_author_receipt = captured_receipt(
             lambda: verify_comment(

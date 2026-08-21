@@ -70,7 +70,9 @@ issue-comment inventory must contain the current comment exactly once, and a lat
 link its latest prior same-author handoff; additional predecessor links remain permitted. Comment
 time plus numeric comment ID orders handoffs that GitHub records in the same second. Only the first
 handoff uses the mutually exclusive `--initial-publication` flag; that mode rejects any prior
-same-author comment carrying one full `Head` line.
+same-author comment carrying one full `Head` line. Comment and user IDs must be positive JSON
+integers, and each directly fetched predecessor must match the identity, body, URLs, and timestamps
+of the inventory entry used to order the lineage.
 Snapshot mode binds the live body and title bytes
 to the frozen manifest; the PR API exposes no body-edit identity or timestamp, so the receipt
 proves current equality, not the history before the snapshot. Exit 1 is a publication mismatch and

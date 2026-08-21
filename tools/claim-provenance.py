@@ -141,11 +141,15 @@ def resolve_citation(path, root):
     # repository. It is refused rather than stripped: stripping resolves the file and then
     # verifies nothing about the line, so a [source: `doc.md:1`] binding would pass against a
     # quote living on line 4 -- a binding that reads more precise while checking less.
-    suffixed = re.fullmatch(r"(.+?):(\d+)", path)
-    if suffixed and not os.path.exists(os.path.join(root, path)):
-        return None, "malformed", (
-            f"cited token {path!r} names a file and a line; a citation names a file, and "
-            f"the line is not verified here. Cite {suffixed.group(1)!r} instead")
+    located = re.match(r"(.+?)\s*[:#](?=\S)", path)
+    if located and not os.path.exists(os.path.join(root, path)):
+        head = located.group(1)
+        head_resolves, _, _ = (
+            (None, None, None) if head == path else resolve_citation(head, root))
+        if head_resolves:
+            return None, "malformed", (
+                f"cited token {path!r} names a file and a location within it; a citation "
+                f"names a file, and the location is not verified here. Cite {head!r} instead")
     portable = path.replace("\\", os.sep)
     qualified = os.path.isabs(portable) or os.sep in portable
     if qualified:
@@ -664,10 +668,22 @@ def selftest():
         _, _suffix_state, _suffix_detail = resolve_citation("schemas/order.json:1", tmp)
         record("a file-and-line citation is refused",
                _suffix_state != "resolved")
-        record("the refusal names the line suffix rather than a missing path",
+        record("the refusal names the location suffix rather than a missing path",
                _suffix_detail is not None
-               and "names a file and a line" in _suffix_detail
+               and "names a file and a location" in _suffix_detail
                and "not found" not in _suffix_detail)
+        # ...and must NOT cover a token whose file half does not exist. Calling that a
+        # location would replace a true "not found" with a claim that the file is there.
+        _, _absent_state, _absent_detail = resolve_citation("schemas/nope.json:1", tmp)
+        record("a location suffix on a file that does not exist still reports not found",
+               _absent_state != "resolved"
+               and "names a file and a location" not in (_absent_detail or "")
+               and "not found" in (_absent_detail or ""))
+        # The same diagnosis must cover the other location spellings, not only :line.
+        record("a column, a range, and an anchor all get the location diagnosis",
+               all("names a file and a location" in (resolve_citation(
+                       f"schemas/order.json{suffix}", tmp)[2] or "")
+                   for suffix in (":1:2", ":1-4", "#L1")))
         record("the unsuffixed form of the same citation still resolves",
                resolve_citation("schemas/order.json", tmp)[1] == "resolved")
 

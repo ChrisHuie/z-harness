@@ -112,7 +112,7 @@ SELFTEST_SUITES = [
     ("harness_report", ["hooks/harness_report.py", "--selftest"], 12),
     ("cc-cost", ["tools/cc-cost.py", "--selftest"], 8),
     ("codex-cost", ["tools/codex-cost.py", "--selftest"], 28),
-    ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 45),
+    ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 47),
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 8),
     ("verify-review-publication",
      ["tools/verify-review-publication.py", "--selftest"], 61),

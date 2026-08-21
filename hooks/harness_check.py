@@ -91,7 +91,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 168
+SELFTEST_FLOOR = 171
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.2"
@@ -184,6 +184,24 @@ SELFTEST_TIMEOUT_MARGIN = 0.6
 # scoring went unmeasured: an under-generating plan moves plan_sha256, which the gate
 # recomputes, but a mis-scored kill leaves every shard agreeing and the re-measurement
 # reproducing the same verdict. It is aggregated above over that scoring.
+# Citations in reference documents that name something this repository does not contain.
+# Each is a runtime artifact or an illustrative filename, so requiring it to resolve would be
+# wrong rather than merely noisy. Declared, because no structural test separates them from a
+# citation that should resolve: `agents/openai.yaml` carries a path separator and is external,
+# `PRINCIPLE-REGISTRY.md` carries none and is not. Adding a name here claims the artifact lives
+# outside this repository, and the diff is where that claim gets reviewed.
+EXTERNAL_REFERENCE_CITATIONS = {
+    "probe.py": "illustrative worker filename in a collision anecdote",
+    "mutate.py": "illustrative worker filename in a collision anecdote",
+    "base.py": "illustrative worker filename in a collision anecdote",
+    "agents/openai.yaml": "Codex configuration in the user environment",
+    "AGENTS.override.md": "Codex convention outside this repository",
+    "policy-blocks/persistence.md": "external prompt-library path",
+}
+REFERENCE_CITATION = re.compile(
+    r"`([A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:py|md|json|ya?ml|sh|txt))`")
+
+
 SELFTEST_EXEMPTIONS = {
     "hooks/harness_check.py": "recursive meta-suite",
 }
@@ -1187,6 +1205,42 @@ class Run:
                     resolved += 1
                     self.result("C3", ok, f"{skill}: references/{f} "
                                           f"{'reachable' if ok else 'NAMED NOWHERE in SKILL.md'}")
+        # direction 3: a citation inside a reference document must resolve, or be declared
+        # external. C3 read only SKILL.md, so a reference file could cite a document existing
+        # nowhere and nothing looked -- which is how two skills came to cite a registry that
+        # was never in this repository.
+        present = set()
+        for base, _dirs, files in os.walk(self.root):
+            if ".git" in base.split(os.sep):
+                continue
+            for f in files:
+                full = os.path.join(base, f)
+                present.add(os.path.relpath(full, self.root))
+                present.add(f)
+        for skill in sorted(os.listdir(skills_dir)):
+            refdir = os.path.join(skills_dir, skill, "references")
+            if not os.path.isdir(refdir):
+                continue
+            for name in sorted(os.listdir(refdir)):
+                if not name.endswith(".md"):
+                    continue
+                try:
+                    text = open(os.path.join(refdir, name), encoding="utf-8").read()
+                except OSError as exc:
+                    self.result("C3", False, f"{skill}/references/{name}: unreadable ({exc})")
+                    continue
+                for target in sorted({m.group(1) for m in REFERENCE_CITATION.finditer(text)}):
+                    if target in EXTERNAL_REFERENCE_CITATIONS:
+                        continue
+                    # A citation may name a path relative to any directory above it, so a
+                    # suffix match is the resolution rule; exact-relpath alone reports a real
+                    # file as missing whenever the citation omits a leading component.
+                    hit = target in present or any(
+                        p.endswith("/" + target) for p in present)
+                    resolved += 1
+                    self.result("C3", hit, f"{skill}/references/{name}: cites {target}"
+                                           f"{'' if hit else ' -- resolves to no file'}")
+
         if resolved == 0:
             self.result("C3", False, "zero authored reference relationships")
 
@@ -1770,6 +1824,16 @@ def selftest():
         # C3 red: cited file absent in alpha; orphan file in beta
         open(os.path.join(sk, "beta/references/present.md"), "w").write("ok")
         open(os.path.join(sk, "beta/references/orphan.md"), "w").write("named nowhere")
+        # C3 direction 3: a reference document citing a document that exists nowhere, beside
+        # one citing a declared-external name. Both in the same file, so a check that simply
+        # refuses every citation would fail the second and be visible as over-refusal.
+        # `beta/references/present.md` names a real file by a partial path, which only
+        # resolves through the suffix rule. Without it a citation that omits a leading
+        # component is reported as missing, which is how this check first false-positived on
+        # a document that plainly exists.
+        open(os.path.join(sk, "beta/references/present.md"), "a").write(
+            "\n\nSee `NO-SUCH-REGISTRY.md`, `probe.py`, and "
+            "`beta/references/present.md` for the rest.\n")
         # C6 red: stale pattern planted
         os.makedirs(os.path.join(td, "hooks"))
         open(os.path.join(td, "hooks/stale.md"), "w").write("this guard is NOT INSTALLED")
@@ -2252,6 +2316,14 @@ def selftest():
                    lambda: any(c == "C3" and "alpha" in d for c, d in r.failures))
         expect_red("C3 goes red on orphan file",
                    lambda: any(c == "C3" and "orphan.md" in d for c, d in r.failures))
+        expect_red("C3 goes red on a reference document citing a file that does not exist",
+                   lambda: any(c == "C3" and "NO-SUCH-REGISTRY.md" in d
+                               for c, d in r.failures))
+        expect_red("C3 stays green on a declared-external citation",
+                   lambda: not any(c == "C3" and "probe.py" in d for c, d in r.failures))
+        expect_red("C3 resolves a citation naming a real file by a partial path",
+                   lambda: not any(c == "C3" and "beta/references/present.md -- resolves" in d
+                                   for c, d in r.failures))
         empty_c3 = os.path.join(td, "empty-c3")
         os.makedirs(os.path.join(empty_c3, "skills"))
         c3_empty_run = Run(empty_c3, ci=True)

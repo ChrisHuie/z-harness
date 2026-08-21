@@ -127,9 +127,9 @@ never-commented request.
 
 ---
 
-## Also displaced, rank B/C — full text in the registry, not reproduced here
+## Also displaced, rank B/C — identifiers only, full text not carried here
 
-`PRINCIPLE-REGISTRY.md` §2: R057 vendor gap misfiled as config · R058 type-as-proxy branch ·
+R057 vendor gap misfiled as config · R058 type-as-proxy branch ·
 R059 same form, different envelope · R060 hand-built error ships a fake success · R061 grade
 against the repo's stated bar · R062 pre-apply your own catalog to your own change · R063
 append-only handoff comments, one exact head per comment · R064 re-derive the rationale, not

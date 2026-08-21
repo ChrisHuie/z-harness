@@ -91,7 +91,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 161
+SELFTEST_FLOOR = 165
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.1"
@@ -3285,6 +3285,58 @@ def selftest():
         shutil.rmtree(other_separate_tree)
         shutil.rmtree(separate_tree)
         shutil.rmtree(separate_admin)
+
+        # The core.worktree reply is validated by three operands and none was asserted:
+        # replacing the whole condition with `if False:` left this suite green, because on
+        # every existing fixture the downstream comparison rejected the path anyway. These
+        # drive the helper directly so each operand is the only thing standing between the
+        # reply and acceptance. The operands do two different jobs -- the first rejects a
+        # failed query, the other two reject a malformed reply that would otherwise reach
+        # os.path.samefile with an embedded NUL, which raises ValueError where _same_file
+        # catches only OSError.
+        reply_admin = os.path.join(td, "reply-git-admin")
+        reply_tree = os.path.join(td, "reply-git-tree")
+        os.makedirs(reply_admin)
+        os.makedirs(reply_tree)
+        reply_marker = os.path.join(reply_tree, ".git")
+        with open(reply_marker, "w", encoding="utf-8") as fh:
+            fh.write(f"gitdir: {reply_admin}\n")
+        encoded_reply_tree = os.fsencode(reply_tree)
+
+        class _ConfigReply:
+            def __init__(self, returncode, stdout):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = b""
+
+        def reply_runner(returncode, stdout):
+            return lambda args, **kwargs: _ConfigReply(returncode, stdout)
+
+        # The control comes first: without a reply this fixture ACCEPTS, so "rejected" below
+        # means the operand did it, not that the fixture can never be accepted.
+        expect_red(
+            "C8 accepts a separate gitdir whose config binds this worktree",
+            lambda: _bound_separate_gitdir(
+                reply_tree, reply_marker,
+                reply_runner(0, encoded_reply_tree + b"\0")) is True)
+        expect_red(
+            "C8 rejects a core.worktree reply whose query failed",
+            lambda: _bound_separate_gitdir(
+                reply_tree, reply_marker,
+                reply_runner(1, encoded_reply_tree + b"\0")) is False)
+        expect_red(
+            "C8 rejects an unterminated core.worktree reply rather than raising",
+            lambda: _bound_separate_gitdir(
+                reply_tree, reply_marker,
+                reply_runner(0, encoded_reply_tree + b"\0X")) is False)
+        expect_red(
+            "C8 rejects a two-value core.worktree reply rather than raising",
+            lambda: _bound_separate_gitdir(
+                reply_tree, reply_marker,
+                reply_runner(0, encoded_reply_tree + b"\0"
+                             + encoded_reply_tree + b"\0")) is False)
+        shutil.rmtree(reply_tree)
+        shutil.rmtree(reply_admin)
 
         symlink_admin = os.path.join(td, "symlink-git-admin")
         symlink_tree = os.path.join(live_repo, "symlink-git-marker")

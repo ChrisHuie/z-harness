@@ -91,7 +91,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 171
+SELFTEST_FLOOR = 172
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.2"
@@ -112,7 +112,7 @@ SELFTEST_SUITES = [
     ("harness_report", ["hooks/harness_report.py", "--selftest"], 12),
     ("cc-cost", ["tools/cc-cost.py", "--selftest"], 8),
     ("codex-cost", ["tools/codex-cost.py", "--selftest"], 28),
-    ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 42),
+    ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 45),
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 8),
     ("verify-review-publication",
      ["tools/verify-review-publication.py", "--selftest"], 61),
@@ -199,8 +199,11 @@ EXTERNAL_REFERENCE_CITATIONS = {
     "AGENTS.override.md": "Codex convention outside this repository",
     "policy-blocks/persistence.md": "external prompt-library path",
 }
+# The line suffix is optional and captured separately. Requiring the backtick to follow the
+# extension made `doc.md:12` invisible to this check, so a citation could carry a line number
+# and evade resolution entirely -- the path half is what resolves either way.
 REFERENCE_CITATION = re.compile(
-    r"`([A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:py|md|json|ya?ml|sh|txt))`")
+    r"`([A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:py|md|json|ya?ml|sh|txt))(?::\d+)?`")
 
 
 SELFTEST_EXEMPTIONS = {
@@ -1833,8 +1836,8 @@ def selftest():
         # component is reported as missing, which is how this check first false-positived on
         # a document that plainly exists.
         open(os.path.join(sk, "beta/references/present.md"), "a").write(
-            "\n\nSee `NO-SUCH-REGISTRY.md`, `probe.py`, and "
-            "`beta/references/present.md` for the rest.\n")
+            "\n\nSee `NO-SUCH-REGISTRY.md`, `probe.py`, "
+            "`beta/references/present.md`, and `NO-SUCH-SUFFIXED.md:12` for the rest.\n")
         # C6 red: stale pattern planted
         os.makedirs(os.path.join(td, "hooks"))
         open(os.path.join(td, "hooks/stale.md"), "w").write("this guard is NOT INSTALLED")
@@ -2322,6 +2325,8 @@ def selftest():
                                for c, d in r.failures))
         expect_red("C3 stays green on a declared-external citation",
                    lambda: not any(c == "C3" and "probe.py" in d for c, d in r.failures))
+        expect_red("C3 goes red on a citation carrying a line suffix",
+                   lambda: any(c == "C3" and "NO-SUCH-SUFFIXED.md" in d for c, d in r.failures))
         expect_red("C3 resolves a citation naming a real file by a partial path",
                    lambda: not any(c == "C3" and "beta/references/present.md -- resolves" in d
                                    for c, d in r.failures))

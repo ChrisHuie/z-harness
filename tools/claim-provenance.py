@@ -136,6 +136,16 @@ def resolve_citation(path, root):
     root_real, error = _root(root)
     if error:
         return None, "io", error
+    # A trailing :line makes the token a location, not a file, and the path half may well
+    # exist. Reporting it as a path that was not found is a false statement about the
+    # repository. It is refused rather than stripped: stripping resolves the file and then
+    # verifies nothing about the line, so a [source: `doc.md:1`] binding would pass against a
+    # quote living on line 4 -- a binding that reads more precise while checking less.
+    suffixed = re.fullmatch(r"(.+?):(\d+)", path)
+    if suffixed and not os.path.exists(os.path.join(root, path)):
+        return None, "malformed", (
+            f"cited token {path!r} names a file and a line; a citation names a file, and "
+            f"the line is not verified here. Cite {suffixed.group(1)!r} instead")
     portable = path.replace("\\", os.sep)
     qualified = os.path.isabs(portable) or os.sep in portable
     if qualified:
@@ -646,6 +656,20 @@ def selftest():
         source = "A binding reporting contract protects ordered evidence"
         with open(os.path.join(schemas, "order.json"), "w", encoding="utf-8") as fh:
             fh.write(source)
+
+        # A file-and-line token is refused with a diagnosis naming the reason. It previously
+        # reported the path as not found, which is false whenever the file half exists, and
+        # accepting it by stripping the suffix would verify the file while claiming a line.
+        _suffix_target = os.path.join(schemas, "order.json")
+        _, _suffix_state, _suffix_detail = resolve_citation("schemas/order.json:1", tmp)
+        record("a file-and-line citation is refused",
+               _suffix_state != "resolved")
+        record("the refusal names the line suffix rather than a missing path",
+               _suffix_detail is not None
+               and "names a file and a line" in _suffix_detail
+               and "not found" not in _suffix_detail)
+        record("the unsuffixed form of the same citation still resolves",
+               resolve_citation("schemas/order.json", tmp)[1] == "resolved")
 
         def document(name, text):
             path = os.path.join(tmp, name)

@@ -66,7 +66,9 @@ Comment mode additionally binds raw UTF-8 body bytes, the expected author, comme
 unedited timestamps. A later handoff requires one or more repeatable `--predecessor-url` values;
 each canonical URL must occur exactly once in the submitted body and must resolve to an older,
 unedited comment by the expected author on the same pull request. Only the first handoff uses the
-mutually exclusive `--initial-publication` flag. Snapshot mode binds the live body and title bytes
+mutually exclusive `--initial-publication` flag; that mode paginates the pull request's complete
+issue-comment inventory and rejects an older same-author comment carrying one full `Head` line.
+Snapshot mode binds the live body and title bytes
 to the frozen manifest; the PR API exposes no body-edit identity or timestamp, so the receipt
 proves current equality, not the history before the snapshot. Exit 1 is a publication mismatch and
 exit 2 is local I/O, transport, or JSON failure. Nothing else in this repository can see a posted

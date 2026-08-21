@@ -190,6 +190,29 @@ def _bound_separate_gitdir(path, marker, runner):
     return same_file(worktree, path)
 
 
+def _plausible_repository_marker(path, marker, owner_root):
+    """Return whether marker has repository metadata that makes probe failure unknown.
+
+    A malformed lexical marker stays outer-owned and must be scanned. Once a marker names
+    a distinct Git administration directory with a HEAD, however, a nonzero Git probe no
+    longer proves that no boundary exists. Treating that operational failure as ``False``
+    lets a genuine nested repository disappear into the outer scan set.
+    """
+    if os.path.isdir(marker):
+        return os.path.isfile(os.path.join(marker, "HEAD"))
+    if not os.path.isfile(marker):
+        return False
+    admin = _gitdir_from_marker(path, marker)
+    if admin is None or not os.path.isfile(os.path.join(admin, "HEAD")):
+        return False
+    if owner_root is None:
+        return True
+    owner_marker = os.path.join(owner_root, ".git")
+    owner_admin = (_gitdir_from_marker(owner_root, owner_marker)
+                   if os.path.isfile(owner_marker) else owner_marker)
+    return owner_admin is None or not same_file(admin, owner_admin)
+
+
 def is_repository_boundary(path, owner_root=None, runner=None):
     """Return true only for a proven independent Git worktree at ``path``."""
     runner = subprocess.run if runner is None else runner
@@ -197,7 +220,9 @@ def is_repository_boundary(path, owner_root=None, runner=None):
     if not os.path.lexists(marker) or os.path.islink(marker):
         return False
     toplevel_problem = git_toplevel_error(path, runner)
-    if toplevel_problem.startswith("cannot run git rev-parse"):
+    if (toplevel_problem.startswith("cannot run git rev-parse")
+            or (toplevel_problem.startswith("git rev-parse --show-toplevel exited")
+                and _plausible_repository_marker(path, marker, owner_root))):
         raise RepositoryOwnershipError(toplevel_problem)
     if toplevel_problem:
         return False
@@ -304,6 +329,16 @@ def selftest():
         subprocess.run(["git", "init", "--quiet", nested], check=True)
         expect("an ordinary nested repository is a boundary",
                is_repository_boundary(nested, owner))
+        plausible_problem = ""
+        try:
+            is_repository_boundary(
+                nested, owner,
+                lambda *_a, **_k: Done(
+                    128, b"", b"fatal: detected dubious ownership in repository\n"))
+        except RepositoryOwnershipError as exc:
+            plausible_problem = str(exc)
+        expect("a normal Git failure on a plausible nested repository fails closed",
+               "dubious ownership" in plausible_problem)
         nested_file = os.path.join(nested, "evidence.md")
         with open(nested_file, "w", encoding="utf-8") as fh:
             fh.write("evidence\n")

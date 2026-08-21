@@ -31,7 +31,7 @@ import tempfile
 from pathlib import Path
 
 
-VERSION = "3.2"
+VERSION = "3.3"
 RECEIPT = "REVIEW-PUBLICATION-SUMMARY"
 HEAD_LINE = re.compile(rb"^Head: `([0-9a-f]{40})`$", re.MULTILINE)
 COMMENT_URL = re.compile(
@@ -84,6 +84,42 @@ def _api_object(repo: str, endpoint: str, label: str, runner=None) -> dict:
         diagnostic = bytes(done.stderr or b"no diagnostic").decode("utf-8", "replace")
         raise TransportError(f"cannot read {label} in {repo}: {diagnostic.strip()[:200]}")
     return _json_object(bytes(done.stdout), label)
+
+
+def _json_array(raw: bytes, label: str) -> list:
+    def reject_duplicates(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise TransportError(f"{label} repeats JSON key {key!r}")
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=reject_duplicates)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TransportError(f"cannot decode {label} JSON: {exc}") from exc
+    if not isinstance(value, list):
+        raise TransportError(f"{label} response is not a JSON array")
+    return value
+
+
+def _api_paginated_array(repo: str, endpoint: str, label: str, runner=None) -> list:
+    """Read every REST page as one closed list using gh's slurped pagination mode."""
+    runner = subprocess.run if runner is None else runner
+    done = runner(
+        ["gh", "api", "--paginate", "--slurp", f"repos/{repo}/{endpoint}"],
+        capture_output=True, text=False, timeout=60)
+    if done.returncode != 0:
+        diagnostic = bytes(done.stderr or b"no diagnostic").decode("utf-8", "replace")
+        raise TransportError(f"cannot read {label} in {repo}: {diagnostic.strip()[:200]}")
+    pages = _json_array(bytes(done.stdout), label)
+    items = []
+    for index, page in enumerate(pages):
+        if not isinstance(page, list):
+            raise TransportError(f"{label} page {index} is not a JSON array")
+        items.extend(page)
+    return items
 
 
 def _source_bytes(path: Path) -> bytes:
@@ -221,6 +257,42 @@ def _github_time(value, label):
     return parsed
 
 
+def _initial_publication_error(
+        current: dict, repo: str, pr: int, expected_author: str, runner=None) -> str:
+    """Prove that no older same-author handoff exists on the pull request."""
+    comments = _api_paginated_array(
+        repo, f"issues/{pr}/comments?per_page=100", "pull request comments", runner)
+    try:
+        current_created = _github_time(current.get("created_at"), "created_at")
+    except PublicationError as exc:
+        return str(exc)
+    current_matches = 0
+    for item in comments:
+        if not isinstance(item, dict):
+            raise TransportError("pull request comments contains a non-object item")
+        if item.get("id") == current.get("id"):
+            current_matches += 1
+            continue
+        if _object(item.get("user")).get("login") != expected_author:
+            continue
+        body = _text_bytes(item.get("body"), "pull request comment")
+        if len(HEAD_LINE.findall(body)) != 1:
+            continue
+        try:
+            created = _github_time(item.get("created_at"), "earlier handoff created_at")
+        except PublicationError as exc:
+            return str(exc)
+        if created < current_created:
+            return (
+                "initial publication has an older same-author handoff comment: "
+                f"{item.get('html_url') or item.get('id')!r}")
+    if current_matches != 1:
+        return (
+            "initial publication comment was not listed exactly once in the complete "
+            f"pull-request comment inventory: {current_matches}")
+    return ""
+
+
 def _predecessor_contract(
         current: dict, submitted: bytes, repo: str, pr: int, expected_author: str,
         initial_publication: bool, predecessor_urls, runner=None):
@@ -229,7 +301,8 @@ def _predecessor_contract(
     if initial_publication:
         if urls:
             return "an initial publication cannot name predecessor comments", []
-        return "", []
+        return _initial_publication_error(
+            current, repo, pr, expected_author, runner), []
     if not urls:
         return "a later publication must name at least one predecessor comment", []
     if len(set(urls)) != len(urls):
@@ -609,11 +682,16 @@ def selftest() -> int:
     transport_calls = []
 
     def runner_for(comment_data=comment, pull_data=pull, commit_data=None,
-                   commit_rc=0, predecessor_data=None):
+                   commit_rc=0, predecessor_data=None, issue_comment_pages=None):
         def run(argv, **kwargs):
             transport_calls.append((tuple(argv), dict(kwargs)))
             endpoint = argv[-1]
-            if "issues/comments" in endpoint:
+            if f"issues/{pr}/comments?" in endpoint:
+                pages = (issue_comment_pages if issue_comment_pages is not None
+                         else [[comment_data]])
+                payload = (pages if "--paginate" in argv and "--slurp" in argv
+                           else pages[:1])
+            elif "issues/comments" in endpoint:
                 if (predecessor_data is not None
                         and not endpoint.endswith(f"/{comment_id}")):
                     payload = predecessor_data
@@ -681,6 +759,17 @@ def selftest() -> int:
                 "created_at": predecessor["created_at"],
                 "updated_at": predecessor["updated_at"], "edited": False,
             }],
+        )
+        body.write_bytes(later_bytes)
+        expect(
+            "a later handoff cannot restart the lineage by declaring itself initial",
+            denies(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body,
+                runner_for(
+                    later_comment,
+                    issue_comment_pages=[[later_comment], [predecessor]]),
+                initial_publication=True),
+                "initial publication has an older same-author handoff"),
         )
         body.write_bytes(body_bytes)
         expect(

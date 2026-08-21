@@ -116,7 +116,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 195
+SELFTEST_FLOOR = 197
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -138,10 +138,10 @@ SELFTEST_SUITES = [
     ("cc-cost", ["tools/cc-cost.py", "--selftest"], 8),
     ("codex-cost", ["tools/codex-cost.py", "--selftest"], 28),
     ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 53),
-    ("repository-ownership", ["tools/repository_ownership.py", "--selftest"], 16),
+    ("repository-ownership", ["tools/repository_ownership.py", "--selftest"], 17),
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 8),
     ("verify-review-publication",
-     ["tools/verify-review-publication.py", "--selftest"], 83),
+     ["tools/verify-review-publication.py", "--selftest"], 84),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
     ("ci-gate", ["tools/ci-gate.py", "--selftest"], 317),
@@ -160,7 +160,7 @@ def expected_selftest_checks(name):
     fixed = {
         "ci-gate": 317,
         "spawn_preflight_guard": 88,
-        "verify-review-publication": 83,
+        "verify-review-publication": 84,
     }
     if name in fixed:
         return fixed[name]
@@ -1275,12 +1275,30 @@ class Run:
         # caught but could not prove the same suite ran. Exact argv also rejects shell
         # wrappers such as ``VAR=off ...`` and ``... || true`` that name the script while
         # disabling or masking it.
-        actual_claude_handlers = [
-            (event, entry.get("matcher"), handler)
-            for event, entries in st.get("hooks", {}).items()
-            for entry in entries if isinstance(entry, dict)
-            for handler in entry.get("hooks", []) if isinstance(handler, dict)
-        ]
+        actual_claude_handlers = []
+        malformed_claude_handlers = 0
+        hook_events = st.get("hooks", {})
+        if not isinstance(hook_events, dict):
+            hook_events = {}
+            malformed_claude_handlers += 1
+        for event, entries in hook_events.items():
+            if not isinstance(entries, list):
+                malformed_claude_handlers += 1
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    malformed_claude_handlers += 1
+                    continue
+                handlers = entry.get("hooks", [])
+                if not isinstance(handlers, list):
+                    malformed_claude_handlers += 1
+                    continue
+                for handler in handlers:
+                    if not isinstance(handler, dict):
+                        malformed_claude_handlers += 1
+                        continue
+                    actual_claude_handlers.append(
+                        (event, entry.get("matcher"), handler))
         def command_argv(handler):
             try:
                 return shlex.split(handler.get("command", ""))
@@ -1294,6 +1312,7 @@ class Run:
                 if actual_event == event and actual_matcher == matcher
                 and handler.get("type") == "command"
                 and handler.get("timeout") == 5
+                and handler.get("async", False) is False
                 and command_argv(handler) == expected_argv
                 and os.path.isfile(os.path.join(self.root, script))
             ]
@@ -1301,10 +1320,12 @@ class Run:
                         f"settings.json {event} matcher={matcher!r} -> {script}: "
                         f"argv={expected_argv!r} timeout=5: {len(matches)} match(es)")
         self.result(
-            "C7", len(actual_claude_handlers) == len(REQUIRED_CLAUDE_HANDLERS),
+            "C7", (len(actual_claude_handlers) == len(REQUIRED_CLAUDE_HANDLERS)
+                   and malformed_claude_handlers == 0),
             "settings.json Claude handler inventory is closed: "
             f"{len(actual_claude_handlers)} handler(s), "
-            f"expected {len(REQUIRED_CLAUDE_HANDLERS)}",
+            f"expected {len(REQUIRED_CLAUDE_HANDLERS)}; "
+            f"malformed={malformed_claude_handlers}",
         )
         codex_hooks_path = os.path.join(self.root, "hooks", "hooks.json")
         try:
@@ -2329,10 +2350,34 @@ def selftest():
                         and "announced_work_guard.py" in d and "0 match(es)" in d
                         for c, d in masked_stop.failures),
         )
+        async_stop_registration = json.load(open(os.path.join(ROOT, "settings.json")))
+        async_stop_registration["hooks"]["Stop"][0]["hooks"][0]["async"] = True
+        open(os.path.join(registration_root, "settings.json"), "w").write(
+            json.dumps(async_stop_registration))
+        async_stop = Run(registration_root, ci=True)
+        async_stop.c7_anchors()
+        expect_red(
+            "C7 rejects an asynchronous Claude Stop registration that cannot block",
+            lambda: any(c == "C7" and "settings.json Stop" in d
+                        and "announced_work_guard.py" in d and "0 match(es)" in d
+                        for c, d in async_stop.failures),
+        )
+        malformed_stop_registration = json.load(open(os.path.join(ROOT, "settings.json")))
+        malformed_stop_registration["hooks"]["Stop"][0]["hooks"].append("not an object")
+        open(os.path.join(registration_root, "settings.json"), "w").write(
+            json.dumps(malformed_stop_registration))
+        malformed_stop = Run(registration_root, ci=True)
+        malformed_stop.c7_anchors()
+        expect_red(
+            "C7 rejects a malformed Claude handler instead of filtering it out",
+            lambda: any(c == "C7" and "handler inventory is closed" in d
+                        and "malformed=1" in d for c, d in malformed_stop.failures),
+        )
         expect_red(
             "C7 registration mutations preserve the exact selector cardinality",
             lambda: all(run.checks == exact_registration_checks for run in (
-                missing_stop, wrong_stop, duplicate_stop, disabled_stop, masked_stop)),
+                missing_stop, wrong_stop, duplicate_stop, disabled_stop, masked_stop,
+                async_stop, malformed_stop)),
         )
 
         claude_registration = json.load(open(os.path.join(ROOT, "settings.json")))
@@ -3123,9 +3168,11 @@ def selftest():
 
         failed_exact_root_run = Run(live_repo, ci=True)
         failed_exact_root_run.c8_reserved_basenames(runner=failed_exact_root)
-        expect_red("C8 rejects partial exact-root output from a failed Git command",
-                   lambda: any(c == "C8" and "nested-repo/CLAUDE.md" in d
-                               for c, d in failed_exact_root_run.failures))
+        expect_red(
+            "C8 fails closed on partial output from a failed plausible-boundary Git command",
+            lambda: any(c == "C8" and "cannot resolve Git ownership" in d
+                        and "exited 1" in d for c, d in failed_exact_root_run.failures),
+        )
 
         indexed_then_nested = os.path.join(live_repo, "indexed-then-nested")
         os.makedirs(indexed_then_nested)

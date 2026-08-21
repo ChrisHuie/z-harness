@@ -204,7 +204,11 @@ def judge(payload):
         return None                     # documented loop guard; never re-block
     text = message_text(payload).strip()
     if not text:
-        return None                     # nothing read is not evidence of a defect
+        # An early return, not a guard: with it removed the empty string reaches boundary(),
+        # matches neither pattern, and judge returns None anyway. Kept because it states the
+        # intent -- nothing read is not evidence of a defect -- and a mutation of it is
+        # correctly unkillable rather than an uncovered branch.
+        return None
     tail = boundary(text)
     # A turn that ends on a QUESTION is asking, not claiming — whatever was
     # said before it. Found on a real transcript: a message opening "Starting
@@ -294,6 +298,7 @@ def selftest():
          {"last_assistant_message": "That settles it. I'll now run the audit."}, True),
     ]
     failures = 0
+    checks = 0
     cases += [
         # Envelope drift. Silently allowing here would make the gate pass every
         # turn forever while reading as a healthy hook - the exact
@@ -338,13 +343,62 @@ def selftest():
         ("real envelope, announcement substituted -> block",
          dict(real, last_assistant_message="Right. Starting the IR-38 audit.")
          if real else {"__contract__": False}, True if real else "contract"),
+
+        # Envelope shapes. message_text claims to read five, and only some were pinned. The
+        # Stop payload's shape is not this repository's to fix, so each spelling it accepts
+        # needs a case, or a host change silently stops the guard reading anything.
+        ("shape: message as a bare string",
+         {"last_assistant_message": "Starting the audit."}, True),
+        ("shape: message as an object with string content",
+         {"last_assistant_message": {"content": "Starting the audit."}}, True),
+        ("shape: message as an object with a block list",
+         {"last_assistant_message":
+          {"content": [{"type": "text", "text": "Starting the audit."}]}}, True),
+        ("shape: message as a bare block list",
+         {"last_assistant_message": [{"type": "text", "text": "Starting the audit."}]}, True),
+        ("shape: a non-text block contributes nothing",
+         {"last_assistant_message": [{"type": "thinking", "text": "Starting the audit."}]},
+         False),
+        ("shape: message present and null reads as empty",
+         {"last_assistant_message": None}, False),
+        ("shape: an unmodelled message type is drift, not an allow",
+         {"last_assistant_message": 17}, "drift"),
+        ("shape: a payload that is not an object is drift", "not an object", "drift"),
+
+        # Decision arms that had no case of their own.
+        ("empty text is not evidence of a defect", {"last_assistant_message": "   "}, False),
+        ("an announcement handed back to the user does not block",
+         {"last_assistant_message": "Starting the audit. Say the word and I will."}, False),
+        ("the loop guard never re-blocks",
+         {"last_assistant_message": "Starting the audit.", "stop_hook_active": True}, False),
     ]
+
+    # Every drift arm reports, so asserting only THAT it drifted is satisfied by whichever
+    # arm fires first: removing the type check still drifts, from the missing-key branch one
+    # line below. These bind to the diagnosis instead.
+    for label, payload, fragment in (
+            ("a non-object payload names the type it got", "not an object",
+             "parsed to str"),
+            ("a payload missing the key names the key", {}, "no 'last_assistant_message'"),
+            ("an unmodelled message type names the type", {"last_assistant_message": 17},
+             "is a int"),
+    ):
+        try:
+            message_text(payload)
+            detail = ""
+        except EnvelopeDrift as exc:
+            detail = str(exc)
+        ok = fragment in detail
+        failures += 0 if ok else 1
+        checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} {label}")
 
     for name, payload, want in cases:
         if isinstance(payload, dict) and "__contract__" in payload:
             got = "contract" if payload["__contract__"] else "BROKEN"
             if got != want:
                 failures += 1
+            checks += 1
             print(f"  {'PASS' if got == want else 'FAIL'} {name} -> {got}")
             continue
         try:
@@ -353,10 +407,11 @@ def selftest():
             got = "drift"
         if got != want:
             failures += 1
+        checks += 1
         label = got if isinstance(got, str) else ("block" if got else "allow")
         print(f"  {'PASS' if got == want else 'FAIL'} {name} -> {label}")
     print(f"\n  selftest: {failures} failure(s)")
-    print(f"SELFTEST-SUMMARY suite=announced_work_guard checks={len(cases)} "
+    print(f"SELFTEST-SUMMARY suite=announced_work_guard checks={checks} "
           f"failures={failures}")
     return failures == 0
 

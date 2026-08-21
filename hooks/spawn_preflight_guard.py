@@ -136,7 +136,6 @@ def selftest():
             fh.write("a project that never adopted the rule\n")
         good = os.path.join(_tf.gettempdir(), "agent-scratch", "s1", "w1")
 
-        expect_eq = lambda label, got, want: (label, got, want)
         for label, want, cwd in (
             ("a project carrying the rule opts in", True, adopted),
             ("a project without the rule is out of scope", False, plain),
@@ -203,6 +202,26 @@ def selftest():
         ok = got == "deny" and "inside or above the checkout" in why
         bad += (not ok); checks += 1
         print(f"  {'PASS' if ok else 'FAIL'} a symlinked alias of the checkout is denied")
+
+        # The checkout itself, and the filesystem root above it. Both were accepted once.
+        for label, scratch in (("the checkout itself is denied", adopted),
+                               ("the checkout with a trailing slash is denied",
+                                adopted + os.sep),
+                               ("the filesystem root is denied", os.sep)):
+            got, why = scratch_decision({"prompt": f"Scratch: {scratch}\n"}, adopted,
+                                        session_id="s1")
+            ok = got == "deny" and "inside or above the checkout" in why
+            bad += (not ok); checks += 1
+            print(f"  {'PASS' if ok else 'FAIL'} {label}")
+
+        # A checkout AT the filesystem root: `root + os.sep` would be "//", which no real
+        # path starts with, so every scratch would be accepted. Everything is inside a
+        # checkout rooted at "/", so the correct answer is to refuse.
+        got, why = scratch_decision({"prompt": "Scratch: /tmp/anywhere\n"}, os.sep,
+                                    session_id="s1")
+        ok = got == "deny" and "inside or above the checkout" in why
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} a checkout at the filesystem root refuses every scratch")
 
         # ...and the CWD side: the checkout itself reached through an alias.
         got, why = scratch_decision(
@@ -274,6 +293,16 @@ def selftest():
         ok = rc == 0 and '"permissionDecision": "deny"' in out and "Scratch:" in out
         bad += (not ok); checks += 1
         print(f"  {'PASS' if ok else 'FAIL'} the workspace rule outranks a capacity ask")
+
+        # A non-compliant prompt at 99%: the user must be told BOTH, or they fix the prompt
+        # and are refused again for a reason they were never shown.
+        payload["tool_input"]["prompt"] = "do it"
+        os.environ["SPAWN_GUARD_DF_PCT"] = "99"
+        rc, out = run_payload(payload, runtime="claude")
+        del os.environ["SPAWN_GUARD_DF_PCT"]
+        ok = rc == 0 and "data volume" in out and "Scratch:" in out
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} a full volume and a missing directory are both reported")
 
         payload["tool_input"]["prompt"] = f"do it\nScratch: {good}\n"
         os.environ["SPAWN_GUARD_DF_PCT"] = "99"
@@ -405,7 +434,9 @@ def hook_mode(raw, runtime="claude"):
             session_id=payload.get("session_id"),
             agent_name=worker_name(tool_input))
         if workspace_decision == "deny":
-            decision, reason = "deny", workspace_reason
+            reason = (workspace_reason if decision == "allow"
+                      else f"{reason} {workspace_reason}")
+            decision = "deny"
     if decision == "allow":
         return 0
     if runtime == "codex" and decision == "ask":
@@ -510,9 +541,15 @@ def scratch_decision(tool_input, cwd, session_id=None, agent_name=None):
                         f"against whatever directory the worker happens to start in. {fix}")
     # realpath, not abspath: abspath normalises ".." but leaves symlinks, and a symlinked
     # alias of the checkout is the ordinary case on a host where /tmp is /private/tmp.
-    root = os.path.realpath(cwd)
+    root = os.path.realpath(cwd) if isinstance(cwd, str) and cwd else os.sep
     target = os.path.realpath(path)
-    if target.startswith(root + os.sep) or root.startswith(target + os.sep):
+    # Three terms, not two. The equality term was removed once because no case covered it;
+    # an uncovered check is one to test, not one to delete, and dropping it made the checkout
+    # itself an accepted scratch directory. rstrip guards the filesystem root, where `root +
+    # os.sep` is "//" and no real path starts with that.
+    if (target == root
+            or target.startswith(root.rstrip(os.sep) + os.sep)
+            or root.startswith(target.rstrip(os.sep) + os.sep)):
         return ("deny", f"the worker's scratch path {path!r} is inside or above the checkout "
                         f"at {root!r}. Scratch never shares a tree with the code under "
                         f"measurement. {fix}")

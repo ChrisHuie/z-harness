@@ -1777,12 +1777,12 @@ def workspace_doctrine_error(source_texts=None, doctrine=None,
                        if forbidden_paths is None else forbidden_paths)
     negations = FORBIDDEN_WORKSPACE_NEGATIONS if negations is None else negations
     if not negations:
-        return ("workspace negation set is empty, so the rule can be revoked in prose", 0, 0)
+        return ("workspace negation set is empty, so the rule can be revoked in prose", 0, 0, 0)
     if not doctrine:
-        return ("workspace doctrine table is empty, so this check asserts nothing", 0, 0)
+        return ("workspace doctrine table is empty, so this check asserts nothing", 0, 0, 0)
     if not forbidden_paths:
         return ("runtime-path forbidden set is empty, so the shared policy is "
-                "unconstrained", 0, 0)
+                "unconstrained", 0, 0, 0)
     problems = []
     if source_texts is None:
         source_texts = {}
@@ -1805,7 +1805,11 @@ def workspace_doctrine_error(source_texts=None, doctrine=None,
     # The shared policy must be IN the scan set. Reading it as optional made a clean verdict
     # indistinguishable from never having checked: both reported hits=0 with no problem.
     shared = source_texts.get(SHARED_POLICY_DOCUMENT)
-    hits = 0
+    # Two counters, not one. A single tally was printed as "runtime-path hit(s)" while it also
+    # carried negation hits, so a revocation was reported under the wrong name; and with one
+    # tally an assertion about either arm could be satisfied by the other.
+    path_hits = 0
+    negation_hits = 0
     if shared is None:
         problems.append(
             f"the shared policy {SHARED_POLICY_DOCUMENT} is absent from the scanned set, so the "
@@ -1814,14 +1818,14 @@ def workspace_doctrine_error(source_texts=None, doctrine=None,
         normalized_shared = re.sub(r"\s+", " ", shared).lower()
         for path_text in forbidden_paths:
             if path_text in shared:
-                hits += 1
+                path_hits += 1
                 problems.append(
                     f"{SHARED_POLICY_DOCUMENT} names the runtime-specific path "
                     f"{path_text!r}; the shared policy states the property and the adapter "
                     "names the path")
         for negation in negations:
             if negation in normalized_shared:
-                hits += 1
+                negation_hits += 1
                 problems.append(
                     f"{SHARED_POLICY_DOCUMENT} carries the retired spelling {negation!r}, which "
                     "revokes the rule the required phrases assert")
@@ -1836,8 +1840,8 @@ def workspace_doctrine_error(source_texts=None, doctrine=None,
                 f"{SHARED_POLICY_DOCUMENT}, so the guard matches nothing and enforces nothing")
     if problems:
         return ("worker-workspace doctrine: " + "; ".join(problems[:5]),
-                len(source_texts), hits)
-    return "", len(source_texts), hits
+                len(source_texts), path_hits, negation_hits)
+    return "", len(source_texts), path_hits, negation_hits
 
 
 def _missing_dispatch_body_probe() -> str:
@@ -2067,10 +2071,12 @@ def gate(
           f"{DISPATCH_BODY_DOCUMENT}")
     if retired_claim_problem:
         failures.append(retired_claim_problem)
-    workspace_problem, workspace_documents, workspace_hits = workspace_doctrine_error()
+    (workspace_problem, workspace_documents, workspace_path_hits,
+     workspace_negation_hits) = workspace_doctrine_error()
     print(f"  {'FAIL' if workspace_problem else 'PASS'} worker-workspace-doctrine "
           f"over {workspace_documents} document(s), "
-          f"{workspace_hits} runtime-path hit(s) in {SHARED_POLICY_DOCUMENT}")
+          f"{workspace_path_hits} runtime-path hit(s) and "
+          f"{workspace_negation_hits} negation hit(s) in {SHARED_POLICY_DOCUMENT}")
     if workspace_problem:
         failures.append(workspace_problem)
     review_problem, review_documents, review_blocks = review_include_scan()
@@ -3445,6 +3451,22 @@ def selftest() -> int:
         "a dispatch body that does not exist is a failure",
         "missing dispatch body" in _missing_dispatch_body_probe(),
     )
+    # Same folding, same gap: the retired spelling reappearing in title case is the realistic
+    # regression, and every fixture here was lower-case.
+    expect(
+        "a retired dispatch claim in title case is still caught",
+        retired_dispatch_claim_error(
+            body_text="The Append-To-Subagent-System-Prompt flag is the channel.") != "",
+    )
+    # The folding is two-sided and only one side is reachable from the shipped constants, which
+    # are all lower-case. The needle side is exercised through the parameter, so a mixed-case
+    # entry added to the table later cannot silently stop matching.
+    expect(
+        "a mixed-case entry in the retired table still matches a lower-case body",
+        retired_dispatch_claim_error(
+            body_text="the append-flag is the channel.",
+            retired=("Append-Flag",)) != "",
+    )
 
     workspace_sources = {
         relative: (ROOT / relative).read_text(encoding="utf-8")
@@ -3478,11 +3500,25 @@ def selftest() -> int:
             "rule withdrawn", "do not assign per-worker scratch",
             "a shared scratch directory is fine"),
     )
+    # Keys AND values. The phrase loop below iterates this table, so dropping a phrase drops
+    # its own test and only the check count moves; the keys alone do not see that.
     expect(
-        "the doctrine table covers exactly the documents that must carry the rule",
-        tuple(sorted(WORKSPACE_DOCTRINE)) == (
-            "AGENTS.md", "CLAUDE.md", "docs/openai-agents.md",
-            "skills/agent-dispatch/references/deferred.md"),
+        "the doctrine table covers exactly the documents and phrases that must carry the rule",
+        tuple(sorted(WORKSPACE_DOCTRINE.items())) == (
+            ("AGENTS.md", (
+                "Every dispatched worker owns an exclusive scratch directory",
+                "The parent never reads a scratch path it did not assign.",
+                "`Scratch: <absolute path>`")),
+            ("CLAUDE.md", (
+                "every subagent inherits that exact path",
+                "the shared root is not a workspace")),
+            ("docs/openai-agents.md", (
+                "Codex hands a subagent no scratch directory.",
+                "assign an exclusive per-worker directory in both")),
+            ("skills/agent-dispatch/references/deferred.md", (
+                "a dispatched worker owns its scratch directory",
+                "never read a scratch path you did not assign")),
+        ),
     )
     # Every phrase, not just the first: the rest were load-bearing in production and untested.
     for relative, required in WORKSPACE_DOCTRINE.items():
@@ -3512,6 +3548,14 @@ def selftest() -> int:
             f"the shared policy revoking the rule with {negation!r} turns the check red",
             "revokes the rule" in workspace_doctrine_error(source_texts=revoked)[0],
         )
+    # Every negation fixture was lower-case, so the case folding was decorative: a revocation
+    # written in prose capitalisation is the realistic spelling and went undetected.
+    capitalized = dict(workspace_sources)
+    capitalized[SHARED_POLICY_DOCUMENT] += "\nRevision: Workers Share One Directory now.\n"
+    expect(
+        "a revocation in prose capitalisation still turns the check red",
+        "revokes the rule" in workspace_doctrine_error(source_texts=capitalized)[0],
+    )
     # A revocation that survives a reflow is the realistic one; single-line fixtures leave the
     # whitespace normalisation unexercised.
     reflowed = dict(workspace_sources)
@@ -3520,9 +3564,32 @@ def selftest() -> int:
         "a revocation broken across lines still turns the check red",
         "revokes the rule" in workspace_doctrine_error(source_texts=reflowed)[0],
     )
+    clean_verdict = workspace_doctrine_error(source_texts=workspace_sources)
     expect(
         "the shared policy carries no runtime-specific path or negation today",
-        workspace_doctrine_error(source_texts=workspace_sources)[2] == 0,
+        clean_verdict[2] == 0 and clean_verdict[3] == 0,
+    )
+    # The reported document count was never asserted, so the scan could silently narrow while
+    # printing a clean verdict over fewer files than the doctrine names.
+    expect(
+        "the verdict reports one document per doctrine entry",
+        clean_verdict[1] == len(WORKSPACE_DOCTRINE),
+    )
+    # ...and each counter must reach a NONZERO value from its own arm. Read only at zero, both
+    # increments were dead: removing either left every case green.
+    leaked_once = dict(workspace_sources)
+    leaked_once[SHARED_POLICY_DOCUMENT] += "\nWorkers write under ~/.claude/scratch.\n"
+    leaked_verdict = workspace_doctrine_error(source_texts=leaked_once)
+    expect(
+        "one leaked runtime path counts on the path arm and not the negation arm",
+        leaked_verdict[2] == 1 and leaked_verdict[3] == 0,
+    )
+    revoked_once = dict(workspace_sources)
+    revoked_once[SHARED_POLICY_DOCUMENT] += "\nRevision: rule withdrawn.\n"
+    revoked_verdict = workspace_doctrine_error(source_texts=revoked_once)
+    expect(
+        "one revocation counts on the negation arm and not the path arm",
+        revoked_verdict[3] == 1 and revoked_verdict[2] == 0,
     )
     # The shared policy must be inside the scan set: absent, the runtime-path and negation arms
     # assert nothing while reporting a clean verdict.
@@ -3565,6 +3632,13 @@ def selftest() -> int:
         "an empty negation set is a failure, not a clean verdict",
         workspace_doctrine_error(
             source_texts=workspace_sources, negations=())[0] != "",
+    )
+    # The third empty-set arm. Its two siblings were cased and this one was not, so an empty
+    # forbidden-path set left the shared policy unconstrained while reporting clean.
+    expect(
+        "an empty runtime-path forbidden set is a failure, not a clean verdict",
+        workspace_doctrine_error(
+            source_texts=workspace_sources, forbidden_paths=())[0] != "",
     )
 
     expect(
@@ -3933,7 +4007,7 @@ def selftest() -> int:
     # append left the suite green while the gate printed FAIL and exited 0.
     original_workspace_doctrine = workspace_doctrine_error
     globals()["workspace_doctrine_error"] = (
-        lambda *a, **k: ("planted workspace-doctrine failure", 4, 0))
+        lambda *a, **k: ("planted workspace-doctrine failure", 4, 0, 0))
     try:
         expect(
             "production gate adopts the worker-workspace doctrine result",

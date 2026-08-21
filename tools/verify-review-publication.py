@@ -299,15 +299,24 @@ def _handoff_inventory(
                 "body", "html_url", "issue_url", "created_at", "updated_at")
             item_user = _object(item.get("user"))
             current_user = _object(current.get("user"))
+            try:
+                inventory_user_id = _positive_int(
+                    item_user.get("id"), "inventory current user.id")
+            except PublicationError as exc:
+                return str(exc), None, {}
             if (any(item.get(field) != current.get(field) for field in compared_fields)
                     or item_user.get("login") != current_user.get("login")
-                    or item_user.get("id") != current_user.get("id")):
+                    or inventory_user_id != current_user.get("id")):
                 return (
                     "current publication differs between its comment object and the "
                     "complete pull-request comment inventory", None, {})
             continue
         item_user = _object(item.get("user"))
-        item_user_id = item_user.get("id")
+        try:
+            item_user_id = _positive_int(
+                item_user.get("id"), "inventory user.id")
+        except PublicationError as exc:
+            return str(exc), None, {}
         same_login = item_user.get("login") == expected_author
         same_identity = item_user_id == current_user_id
         if not same_login and not same_identity:
@@ -936,6 +945,19 @@ def selftest() -> int:
                     issue_comment_pages=[[later_comment, predecessor]]),
                 initial_publication=False, predecessor_urls=(predecessor_url,)),
                 "invalid predecessor user.id"),
+        )
+        inventory_float_identity = dict(
+            predecessor, user={"login": author, "id": 42.0})
+        expect(
+            "a float inventory user id cannot equal the direct numeric identity",
+            denies(lambda: verify_comment(
+                repo, pr, comment_id, head, author, body,
+                runner_for(
+                    later_comment, predecessor_data=predecessor,
+                    issue_comment_pages=[[
+                        later_comment, inventory_float_identity]]),
+                initial_publication=False, predecessor_urls=(predecessor_url,)),
+                "invalid inventory user.id"),
         )
         body.write_bytes(body_bytes)
         expect(

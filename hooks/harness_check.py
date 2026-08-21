@@ -116,7 +116,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 200
+SELFTEST_FLOOR = 201
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -141,7 +141,7 @@ SELFTEST_SUITES = [
     ("repository-ownership", ["tools/repository_ownership.py", "--selftest"], 17),
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 8),
     ("verify-review-publication",
-     ["tools/verify-review-publication.py", "--selftest"], 93),
+     ["tools/verify-review-publication.py", "--selftest"], 94),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
     ("ci-gate", ["tools/ci-gate.py", "--selftest"], 317),
@@ -160,7 +160,7 @@ def expected_selftest_checks(name):
     fixed = {
         "ci-gate": 317,
         "spawn_preflight_guard": 88,
-        "verify-review-publication": 93,
+        "verify-review-publication": 94,
     }
     if name in fixed:
         return fixed[name]
@@ -2318,6 +2318,10 @@ def selftest():
         exact_registration_run = Run(registration_root, ci=True)
         exact_registration_run.c7_anchors()
         exact_registration_checks = exact_registration_run.checks
+        expect_red(
+            "C7 accepts the exact checked-in Claude and Codex registrations",
+            lambda: not exact_registration_run.failures,
+        )
 
         missing_stop_registration = json.load(open(os.path.join(ROOT, "settings.json")))
         del missing_stop_registration["hooks"]["Stop"]

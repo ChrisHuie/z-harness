@@ -275,6 +275,20 @@ def selftest():
         bad += (not ok); checks += 1
         print(f"  {'PASS' if ok else 'FAIL'} a symlink alias of the checkout is denied")
 
+        real_samefile = os.path.samefile
+        def identity_eio(_left, _right):
+            raise OSError(5, "planted identity EIO")
+        try:
+            os.path.samefile = identity_eio
+            got, why = scratch_decision(
+                {"prompt": f"Scratch: {fresh('identity-eio')}\n"}, root,
+                reserve=False, nonce="identity-eio")
+        finally:
+            os.path.samefile = real_samefile
+        ok = got == "deny" and "planted identity EIO" in why
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} filesystem identity errors fail closed")
+
         case_alias_supported = False
         case_alias_ok = True
         if sys.platform == "darwin":

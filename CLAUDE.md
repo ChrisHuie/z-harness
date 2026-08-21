@@ -21,10 +21,11 @@ Worktree isolation may branch from `main`, so pass the target SHA and make the w
 
 Claude Code gives a session one scratchpad directory and every subagent inherits that exact path, so
 a fan-out writes into one shared namespace. Assign each worker its own subdirectory and name it in
-the worker's prompt; the shared root is not a workspace. Regenerate the collision surface with
-`ls -1 "$CLAUDE_SCRATCHPAD" | wc -l` and `ls -1 "$CLAUDE_SCRATCHPAD" | sed 's/[0-9]*\.py$//' |
-sort | uniq -d`: a fan-out over this branch left several hundred files at one root, including
-`probe.py` through `probe4.py` and `mutate.py` through `mutate5.py` written by different workers.
+the worker's prompt; the shared root is not a workspace. To inspect that collision surface, run
+`scratch_root='<absolute path copied from Claude Scratchpad Directory context>'` after replacing the
+right-hand placeholder, then `ls -1 "$scratch_root" | wc -l` and `ls -1 "$scratch_root" |
+sed 's/[0-9]*\.py$//' | sort | uniq -d`. `scratch_root` is a shell-local convenience, not a runtime
+variable: this repository defines no `$CLAUDE_SCRATCHPAD` producer.
 
 The AskUserQuestion AFK control is Claude-specific. After every Claude Code upgrade run:
 

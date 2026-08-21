@@ -30,17 +30,28 @@ Codex does not support `permissionDecision: "ask"` in PreToolUse. With
 inspect capacity and retry. Silently proceeding would turn an unreadable safety check
 into a pass.
 
+Both shipped registrations also pass `--require-scratch`. In that mode the prompt must
+carry exactly one `Scratch: <absolute path>` naming a fresh absent leaf outside the Git
+worktree. The hook atomically creates that directory mode 0700 before the spawn proceeds;
+two workers naming one leaf cannot both pass. This is collision isolation for workers that
+share a uid, not an operating-system security boundary. Without the flag the adapter is a
+deliberate capacity-only guard.
+
 Exit codes: 0 decision emitted or out of scope · 1 selftest failure ·
 2 usage error / unreadable df.
 """
 import json
+import hashlib
 import os
 import re
+import secrets
+import stat
 import subprocess
 import tempfile
 import sys
+from pathlib import Path
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 SPAWN_TOOLS = {"Agent", "Task", "spawn_agent"}
 RUNTIMES = {"claude", "codex"}
 # Claude puts the spawn text in tool_input.prompt; Codex uses tool_input.message. Both were
@@ -48,14 +59,15 @@ RUNTIMES = {"claude", "codex"}
 # tool_input keys ['description', 'name', 'prompt', 'subagent_type'] with the full prompt.
 PROMPT_FIELDS = ("prompt", "message")
 SCRATCH_LINE = re.compile(r"^Scratch:[ \t]+(\S+)[ \t]*$", re.MULTILINE)
-# The guard is installed user-wide, so a blanket requirement would impose one repository's
-# convention on every unrelated project. A project opts in by carrying the rule itself.
-WORKSPACE_RULE_MARKER = "Every dispatched worker owns an exclusive scratch directory"
 DATA_VOLUME = "/System/Volumes/Data" if sys.platform == "darwin" else "/"
 
 
 class EnvelopeError(ValueError):
     """The matched PreToolUse envelope cannot be judged safely."""
+
+
+class ScratchPolicyError(ValueError):
+    """The required scratch assignment could not be validated or reserved safely."""
 
 
 def data_volume_use_pct():
@@ -120,199 +132,298 @@ def selftest():
         bad += (not ok)
         checks += 1
         print(f"  {'PASS' if ok else 'FAIL'} want={want:<5} got={got:<5} {label}")
-    # --- worker-workspace arm --------------------------------------------------------
-    import tempfile as _tf
-    with _tf.TemporaryDirectory(prefix="spawn-guard-") as _root:
+    # --- collision-exclusive scratch arm -------------------------------------------
+    import threading
+    with tempfile.TemporaryDirectory(prefix="spawn-guard-") as _root:
         _root = os.path.realpath(_root)
         adopted = os.path.join(_root, "adopted")
+        nested = os.path.join(adopted, "work", "subdir")
         plain = os.path.join(_root, "plain")
-        os.makedirs(adopted); os.makedirs(plain)
-        # A LITERAL, never WORKSPACE_RULE_MARKER: a fixture built from the constant under test
-        # follows it, so the marker could drift out of the shared policy undetected.
-        with open(os.path.join(adopted, "AGENTS.md"), "w", encoding="utf-8") as fh:
-            fh.write("policy\nEvery dispatched worker owns an exclusive scratch "
-                     "directory, assigned at spawn.\n")
-        with open(os.path.join(plain, "AGENTS.md"), "w", encoding="utf-8") as fh:
-            fh.write("a project that never adopted the rule\n")
-        good = os.path.join(_tf.gettempdir(), "agent-scratch", "s1", "w1")
+        os.makedirs(nested); os.makedirs(plain)
+        subprocess.run(["git", "init", "--quiet", adopted], check=True)
 
-        for label, want, cwd in (
-            ("a project carrying the rule opts in", True, adopted),
-            ("a project without the rule is out of scope", False, plain),
-            ("a missing cwd is out of scope, never an unchecked deny", False, None),
+        root = protected_workspace_root(nested)
+        ok = _same_file(root, adopted)
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} nested cwd resolves the complete Git worktree root")
+        ok = _same_file(protected_workspace_root(plain), plain)
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} a plain directory uses its physical cwd as root")
+        try:
+            protected_workspace_root(None)
+            ok = False
+        except ScratchPolicyError as exc:
+            ok = "no usable cwd" in str(exc)
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} a missing cwd has a named fail-closed error")
+
+        class GitDone:
+            def __init__(self, returncode=0, stdout=b"", stderr=b""):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = stderr
+
+        def wrong_root_runner(_argv, **_kwargs):
+            return GitDone(stdout=os.fsencode(plain) + b"\n")
+        try:
+            protected_workspace_root(nested, runner=wrong_root_runner)
+            ok = False
+        except ScratchPolicyError as exc:
+            ok = "expected" in str(exc)
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} Git cannot substitute a different worktree root")
+
+        def malformed_root_runner(_argv, **_kwargs):
+            return GitDone(stdout=os.fsencode(adopted))
+        try:
+            protected_workspace_root(nested, runner=malformed_root_runner)
+            ok = False
+        except ScratchPolicyError as exc:
+            ok = "malformed path" in str(exc)
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} malformed Git root output fails closed")
+
+        def broken_root_runner(_argv, **_kwargs):
+            raise OSError(5, "planted EIO")
+        try:
+            protected_workspace_root(nested, runner=broken_root_runner)
+            ok = False
+        except ScratchPolicyError as exc:
+            ok = "planted EIO" in str(exc)
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} Git root I/O errors fail closed")
+
+        def fresh(label):
+            return os.path.join(_root, f"scratch-{label}")
+
+        assigned = fresh("assigned")
+        got, why = scratch_decision(
+            {"prompt": f"do it\nScratch: {assigned}\n"}, root,
+            session_id="s1", agent_name="w1", nonce="assigned")
+        ok = (got == "allow" and not why and os.path.isdir(assigned)
+              and stat.S_IMODE(os.stat(assigned).st_mode) == 0o700)
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} an assigned fresh leaf is atomically reserved mode 0700")
+        got, why = scratch_decision(
+            {"prompt": f"Scratch: {assigned}\n"}, root,
+            session_id="s1", agent_name="w2", nonce="reused")
+        ok = got == "deny" and "already exists" in why
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} a second spawn cannot reuse one reservation")
+
+        for label, named, ti in (
+            ("no Scratch line is denied", "expected 1", {"prompt": "do it"}),
+            ("two Scratch lines are denied", "expected 1",
+             {"prompt": f"Scratch: {fresh('a')}\nScratch: {fresh('b')}\n"}),
+            ("a relative scratch path is denied", "is not absolute",
+             {"prompt": "Scratch: ./w1\n"}),
+            ("a sibling inside the worktree is denied", "inside the checkout",
+             {"prompt": f"Scratch: {os.path.join(adopted, 'sibling')}\n"}),
+            ("a path above the worktree is denied", "inside or above the checkout",
+             {"prompt": f"Scratch: {os.path.dirname(adopted)}\n"}),
+            ("a Scratch line with trailing text is not a marker", "expected 1",
+             {"prompt": f"Scratch: {fresh('trailing')} and also do Y\n"}),
+            ("a Scratch line mid-line is not a marker", "expected 1",
+             {"prompt": f"please use Scratch: {fresh('midline')}\n"}),
+            ("a non-object tool_input fails closed", "fails closed", None),
         ):
-            got = project_requires_scratch(cwd)
-            ok = got is want
+            got, why = scratch_decision(ti, root, session_id="s1", reserve=False,
+                                        nonce=label)
+            ok = got == "deny" and named in why
             bad += (not ok); checks += 1
             print(f"  {'PASS' if ok else 'FAIL'} {label}")
 
-        # The marker the guard matches must be the sentence the shared policy actually carries.
-        ok = WORKSPACE_RULE_MARKER == (
-            "Every dispatched worker owns an exclusive scratch directory")
+        missing_parent = os.path.join(_root, "missing-parent", "leaf")
+        got, why = scratch_decision(
+            {"prompt": f"Scratch: {missing_parent}\n"}, root,
+            reserve=False, nonce="missing-parent")
+        ok = got == "deny" and "not a real existing directory" in why
         bad += (not ok); checks += 1
-        print(f"  {'PASS' if ok else 'FAIL'} the activation marker is the reviewed sentence")
+        print(f"  {'PASS' if ok else 'FAIL'} a missing scratch parent fails closed")
 
-        # An unreadable policy must not silently opt the project out.
-        unreadable = os.path.join(_root, "locked")
-        os.makedirs(unreadable)
-        locked_policy = os.path.join(unreadable, "AGENTS.md")
-        with open(locked_policy, "w", encoding="utf-8") as fh:
-            fh.write("Every dispatched worker owns an exclusive scratch directory.\n")
-        def _denied_opener(*_a, **_k):
-            raise PermissionError(13, "planted")
-        ok = project_requires_scratch(unreadable, opener=_denied_opener) is True
+        root_candidate = fresh("rooted")
+        got, why = scratch_decision(
+            {"prompt": f"Scratch: {root_candidate}\n"}, os.sep,
+            reserve=False, nonce="root")
+        ok = got == "deny" and "inside the checkout" in why
         bad += (not ok); checks += 1
-        print(f"  {'PASS' if ok else 'FAIL'} an unreadable policy fails closed, never opting out")
+        print(f"  {'PASS' if ok else 'FAIL'} a workspace at filesystem root refuses every scratch")
 
-        # Assert the REASON, not merely that something denied: every one of these also trips a
-        # later check, so a decision-only assertion is satisfied by a neighbour.
-        for label, want, named, ti in (
-            ("an assigned directory is allowed", "allow", "",
-             {"prompt": f"do it\nScratch: {good}\n"}),
-            ("no Scratch line is denied", "deny", "expected 1", {"prompt": "do it"}),
-            ("two Scratch lines are denied", "deny", "expected 1",
-             {"prompt": f"Scratch: {good}\nScratch: {good}\n"}),
-            ("a relative scratch path is denied", "deny", "is not absolute",
-             {"prompt": "Scratch: ./w1\n"}),
-            ("a scratch path inside the checkout is denied", "deny",
-             "inside or above the checkout",
-             {"prompt": f"Scratch: {os.path.join(adopted, 'w1')}\n"}),
-            ("a scratch path above the checkout is denied", "deny",
-             "inside or above the checkout",
-             {"prompt": f"Scratch: {os.path.dirname(adopted)}\n"}),
-            ("a Scratch line with trailing text is not a marker", "deny", "expected 1",
-             {"prompt": f"Scratch: {good} and also do Y\n"}),
-            ("a Scratch line mid-line is not a marker", "deny", "expected 1",
-             {"prompt": f"please use Scratch: {good}\n"}),
-            ("the Codex message field is read like a Claude prompt", "allow", "",
-             {"message": f"do it\nScratch: {good}\n"}),
-            ("a non-object tool_input fails closed", "deny", "fails closed", None),
+        existing_dir = fresh("existing-dir"); os.mkdir(existing_dir)
+        regular = fresh("regular"); open(regular, "w").write("x")
+        symlink = fresh("symlink"); os.symlink(existing_dir, symlink)
+        dangling = fresh("dangling"); os.symlink(fresh("missing-target"), dangling)
+        for label, path in (
+            ("an existing directory is rejected as potentially shared", existing_dir),
+            ("a regular file is not a scratch directory", regular),
+            ("a directory symlink is not a fresh reservation", symlink),
+            ("a dangling symlink is not a fresh reservation", dangling),
+            ("a device is not a scratch directory", os.devnull),
         ):
-            got, why = scratch_decision(ti, adopted, session_id="s1")
-            ok = got == want and (named in why)
+            got, why = scratch_decision(
+                {"prompt": f"Scratch: {path}\n"}, root, reserve=False, nonce=label)
+            ok = got == "deny" and "already exists" in why
             bad += (not ok); checks += 1
-            print(f"  {'PASS' if ok else 'FAIL'} want={want:<5} got={got:<5} {label}")
+            print(f"  {'PASS' if ok else 'FAIL'} {label}")
 
-        # Containment is resolved, not lexical: a symlinked alias of the checkout is the
-        # ordinary case wherever /tmp is /private/tmp.
         alias = os.path.join(_root, "alias")
         os.symlink(adopted, alias)
         got, why = scratch_decision(
-            {"prompt": f"Scratch: {os.path.join(alias, 'w1')}\n"}, adopted, session_id="s1")
-        ok = got == "deny" and "inside or above the checkout" in why
+            {"prompt": f"Scratch: {os.path.join(alias, 'alias-leaf')}\n"}, root,
+            reserve=False, nonce="alias")
+        ok = got == "deny" and "inside the checkout" in why
         bad += (not ok); checks += 1
-        print(f"  {'PASS' if ok else 'FAIL'} a symlinked alias of the checkout is denied")
+        print(f"  {'PASS' if ok else 'FAIL'} a symlink alias of the checkout is denied")
 
-        # The checkout itself, and the filesystem root above it. Both were accepted once.
-        for label, scratch in (("the checkout itself is denied", adopted),
-                               ("the checkout with a trailing slash is denied",
-                                adopted + os.sep),
-                               ("the filesystem root is denied", os.sep)):
-            got, why = scratch_decision({"prompt": f"Scratch: {scratch}\n"}, adopted,
-                                        session_id="s1")
-            ok = got == "deny" and "inside or above the checkout" in why
-            bad += (not ok); checks += 1
-            print(f"  {'PASS' if ok else 'FAIL'} {label}")
-
-        # A checkout AT the filesystem root: `root + os.sep` would be "//", which no real
-        # path starts with, so every scratch would be accepted. Everything is inside a
-        # checkout rooted at "/", so the correct answer is to refuse.
-        got, why = scratch_decision({"prompt": "Scratch: /tmp/anywhere\n"}, os.sep,
-                                    session_id="s1")
-        ok = got == "deny" and "inside or above the checkout" in why
+        case_alias_supported = False
+        case_alias_ok = True
+        if sys.platform == "darwin":
+            case_alias = adopted.swapcase()
+            try:
+                case_alias_supported = os.path.samefile(case_alias, adopted)
+            except OSError:
+                case_alias_supported = False
+            if case_alias_supported:
+                got, why = scratch_decision(
+                    {"prompt": f"Scratch: {os.path.join(case_alias, 'case-leaf')}\n"},
+                    root, reserve=False, nonce="case")
+                case_alias_ok = got == "deny" and "inside the checkout" in why
+        ok = not case_alias_supported or case_alias_ok
         bad += (not ok); checks += 1
-        print(f"  {'PASS' if ok else 'FAIL'} a checkout at the filesystem root refuses every scratch")
+        print(f"  {'PASS' if ok else 'FAIL'} a real macOS case alias cannot narrow containment")
 
-        # ...and the CWD side: the checkout itself reached through an alias.
+        suggestions = [
+            suggested_scratch(root, "../../session", "../../worker") for _ in range(2)
+        ]
+        unnamed = [suggested_scratch(root, None, None) for _ in range(2)]
+        ok = (len(set(suggestions + unnamed)) == 4
+              and all(os.path.dirname(path) == tempfile.gettempdir()
+                      for path in suggestions + unnamed))
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} named and unnamed suggestions are unique and path-safe")
+        suggested = suggested_scratch(
+            root, "s1", "w1", nonce=os.path.basename(_root))
         got, why = scratch_decision(
-            {"prompt": f"Scratch: {os.path.join(adopted, 'w1')}\n"}, alias, session_id="s1")
-        ok = got == "deny" and "inside or above the checkout" in why
+            {"message": f"Scratch: {suggested}\n"}, root,
+            session_id="s1", agent_name="w1", nonce="unused")
+        ok = got == "allow" and not why and os.path.isdir(suggested)
         bad += (not ok); checks += 1
-        print(f"  {'PASS' if ok else 'FAIL'} a checkout reached through an alias still contains")
+        print(f"  {'PASS' if ok else 'FAIL'} the Codex message field can reserve a suggested path")
 
-        # The guard must accept its own remedy, whatever TMPDIR resolves to.
-        suggestion = suggested_scratch(adopted, "s1", "w1")
-        got, _ = scratch_decision({"prompt": f"Scratch: {suggestion}\n"}, adopted,
-                                  session_id="s1")
-        ok = got == "allow"
+        simultaneous = fresh("simultaneous")
+        barrier = threading.Barrier(2)
+        outcomes = []
+        def reserve_once():
+            barrier.wait()
+            try:
+                reserve_scratch(simultaneous)
+                outcomes.append("allow")
+            except ScratchPolicyError:
+                outcomes.append("deny")
+        workers = [threading.Thread(target=reserve_once) for _ in range(2)]
+        for worker in workers: worker.start()
+        for worker in workers: worker.join()
+        ok = sorted(outcomes) == ["allow", "deny"]
         bad += (not ok); checks += 1
-        print(f"  {'PASS' if ok else 'FAIL'} the guard accepts the path it suggests")
-        resolved = os.path.realpath(suggestion)
-        ok = (not resolved.startswith(os.path.realpath(adopted) + os.sep)
-              and "s1" in suggestion and suggestion.endswith("w1")
-              and os.path.isabs(suggestion))
-        bad += (not ok); checks += 1
-        print(f"  {'PASS' if ok else 'FAIL'} the suggestion is absolute, outside the checkout, "
-              f"and per session and worker")
-        ok = suggested_scratch(adopted, "s1", "w1") != suggested_scratch(adopted, "s1", "w2")
-        bad += (not ok); checks += 1
-        print(f"  {'PASS' if ok else 'FAIL'} two workers are suggested different directories")
+        print(f"  {'PASS' if ok else 'FAIL'} two concurrent reservations yield one winner")
 
-        # Codex has no `name`; it carries `task_name`.
         for label, want, ti in (
             ("a Claude name is read", "w1", {"name": "w1"}),
             ("a Codex task_name is read", "w2", {"task_name": "w2"}),
-            ("an absent worker name is None, never a shared default", None, {"prompt": "x"}),
+            ("an absent worker name is None", None, {"prompt": "x"}),
         ):
-            got = worker_name(ti)
-            ok = got == want
+            ok = worker_name(ti) == want
             bad += (not ok); checks += 1
             print(f"  {'PASS' if ok else 'FAIL'} {label}")
 
-        payload = {"tool_name": "Agent", "cwd": adopted, "session_id": "s1",
+        payload = {"tool_name": "Agent", "cwd": nested, "session_id": "s1",
                    "tool_input": {"name": "w1", "prompt": "do it"}}
-        rc, out = run_payload(payload, runtime="claude")
-        ok = rc == 0 and '"permissionDecision": "deny"' in out and "Scratch:" in out
-        bad += (not ok); checks += 1
-        print(f"  {'PASS' if ok else 'FAIL'} end to end: an unassigned spawn is denied and told the fix")
+        old_pct = os.environ.get("SPAWN_GUARD_DF_PCT")
+        os.environ["SPAWN_GUARD_DF_PCT"] = "50"
+        try:
+            rc, out = run_payload(payload, runtime="claude", require_scratch=True)
+            ok = rc == 0 and '"permissionDecision": "deny"' in out and "Scratch:" in out
+            bad += (not ok); checks += 1
+            print(f"  {'PASS' if ok else 'FAIL'} required mode denies an unassigned plain spawn")
 
-        task_payload = dict(payload, tool_name="Task")
-        rc, out = run_payload(task_payload, runtime="claude")
-        ok = rc == 0 and '"permissionDecision": "deny"' in out
-        bad += (not ok); checks += 1
-        print(f"  {'PASS' if ok else 'FAIL'} the Task spawn tool is in scope too")
+            import codex_session_start
+            plugin_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            injected = codex_session_start.build_context(
+                Path(plugin_root), plain,
+                codex_home=os.path.join(_root, "empty-codex-home"))
+            rc, out = run_payload(
+                {"tool_name": "spawn_agent", "cwd": plain, "session_id": "s1",
+                 "tool_input": {"message": "do it"}},
+                runtime="codex", require_scratch=True)
+            ok = ("Every dispatched worker owns an exclusive scratch directory" in injected
+                  and '"permissionDecision": "deny"' in out and "Scratch:" in out)
+            bad += (not ok); checks += 1
+            print(f"  {'PASS' if ok else 'FAIL'} installed Codex policy and required guard compose in a plain project")
 
-        payload["tool_input"]["prompt"] = f"do it\nScratch: {good}\n"
-        rc, out = run_payload(payload, runtime="claude")
-        ok = rc == 0 and out == ""
-        bad += (not ok); checks += 1
-        print(f"  {'PASS' if ok else 'FAIL'} end to end: an assigned spawn passes silently")
+            task_payload = dict(payload, tool_name="Task")
+            rc, out = run_payload(task_payload, runtime="claude", require_scratch=True)
+            ok = rc == 0 and '"permissionDecision": "deny"' in out
+            bad += (not ok); checks += 1
+            print(f"  {'PASS' if ok else 'FAIL'} required mode covers the Task spawn alias")
 
-        plain_payload = {"tool_name": "Agent", "cwd": plain, "session_id": "s1",
-                         "tool_input": {"name": "w1", "prompt": "do it"}}
-        rc, out = run_payload(plain_payload, runtime="claude")
-        ok = rc == 0 and out == ""
-        bad += (not ok); checks += 1
-        print(f"  {'PASS' if ok else 'FAIL'} a project that never adopted the rule is untouched")
+            rc, out = run_payload(payload, runtime="claude", require_scratch=False)
+            ok = rc == 0 and out == ""
+            bad += (not ok); checks += 1
+            print(f"  {'PASS' if ok else 'FAIL'} capacity-only mode stays explicitly available")
 
-        # The rule must not vanish in the warn band, where the user approves an ask.
-        payload["tool_input"]["prompt"] = "do it"
+            e2e = fresh("e2e")
+            payload["tool_input"]["prompt"] = f"do it\nScratch: {e2e}\n"
+            rc, out = run_payload(payload, runtime="claude", require_scratch=True)
+            ok = rc == 0 and out == "" and os.path.isdir(e2e)
+            bad += (not ok); checks += 1
+            print(f"  {'PASS' if ok else 'FAIL'} required mode reserves an assigned directory")
+
+            rc, out = run_payload(
+                {"tool_name": "Agent", "cwd": None, "tool_input": {"prompt": "do it"}},
+                runtime="codex", require_scratch=True)
+            ok = rc == 0 and '"permissionDecision": "deny"' in out and "usable cwd" in out
+            bad += (not ok); checks += 1
+            print(f"  {'PASS' if ok else 'FAIL'} required mode fails closed on missing cwd")
+        finally:
+            if old_pct is None:
+                del os.environ["SPAWN_GUARD_DF_PCT"]
+            else:
+                os.environ["SPAWN_GUARD_DF_PCT"] = old_pct
+
+        codex_warn = fresh("codex-warn")
+        payload["tool_input"]["prompt"] = f"Scratch: {codex_warn}\n"
         os.environ["SPAWN_GUARD_DF_PCT"] = "92"
-        rc, out = run_payload(payload, runtime="claude")
+        rc, out = run_payload(payload, runtime="codex", require_scratch=True)
         del os.environ["SPAWN_GUARD_DF_PCT"]
-        ok = rc == 0 and '"permissionDecision": "deny"' in out and "Scratch:" in out
+        ok = ('"permissionDecision": "deny"' in out and not os.path.lexists(codex_warn))
         bad += (not ok); checks += 1
-        print(f"  {'PASS' if ok else 'FAIL'} the workspace rule outranks a capacity ask")
+        print(f"  {'PASS' if ok else 'FAIL'} a Codex capacity deny creates no reservation")
 
-        # A non-compliant prompt at 99%: the user must be told BOTH, or they fix the prompt
-        # and are refused again for a reason they were never shown.
+        claude_warn = fresh("claude-warn")
+        payload["tool_input"]["prompt"] = f"Scratch: {claude_warn}\n"
+        os.environ["SPAWN_GUARD_DF_PCT"] = "92"
+        rc, out = run_payload(payload, runtime="claude", require_scratch=True)
+        del os.environ["SPAWN_GUARD_DF_PCT"]
+        ok = ('"permissionDecision": "ask"' in out and os.path.isdir(claude_warn))
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} a Claude capacity ask reserves before confirmation")
+
+        full = fresh("full")
+        payload["tool_input"]["prompt"] = f"Scratch: {full}\n"
+        os.environ["SPAWN_GUARD_DF_PCT"] = "99"
+        rc, out = run_payload(payload, runtime="claude", require_scratch=True)
+        del os.environ["SPAWN_GUARD_DF_PCT"]
+        ok = "data volume" in out and not os.path.lexists(full)
+        bad += (not ok); checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} a full-volume denial creates no reservation")
+
         payload["tool_input"]["prompt"] = "do it"
         os.environ["SPAWN_GUARD_DF_PCT"] = "99"
-        rc, out = run_payload(payload, runtime="claude")
+        rc, out = run_payload(payload, runtime="claude", require_scratch=True)
         del os.environ["SPAWN_GUARD_DF_PCT"]
-        ok = rc == 0 and "data volume" in out and "Scratch:" in out
+        ok = "data volume" in out and "Scratch:" in out
         bad += (not ok); checks += 1
-        print(f"  {'PASS' if ok else 'FAIL'} a full volume and a missing directory are both reported")
-
-        payload["tool_input"]["prompt"] = f"do it\nScratch: {good}\n"
-        os.environ["SPAWN_GUARD_DF_PCT"] = "99"
-        rc, out = run_payload(payload, runtime="claude")
-        del os.environ["SPAWN_GUARD_DF_PCT"]
-        ok = rc == 0 and "data volume" in out
-        bad += (not ok); checks += 1
-        print(f"  {'PASS' if ok else 'FAIL'} capacity still denies a compliant spawn when full")
-
-
+        print(f"  {'PASS' if ok else 'FAIL'} capacity and assignment failures are both reported")
 
     # envelope arm: out-of-scope tool is silent-allow
     payload = {"tool_name": "Bash", "tool_input": {}}
@@ -372,33 +483,34 @@ def selftest():
     return 1 if bad else 0
 
 
-def run_payload(payload, runtime="claude"):
+def run_payload(payload, runtime="claude", require_scratch=False):
     """In-process hook-mode run -> (exit_code, stdout_text)."""
     import io
     buf = io.StringIO()
     old = sys.stdout
     sys.stdout = buf
     try:
-        rc = hook_mode(json.dumps(payload), runtime=runtime)
+        rc = hook_mode(
+            json.dumps(payload), runtime=runtime, require_scratch=require_scratch)
     finally:
         sys.stdout = old
     return rc, buf.getvalue()
 
 
-def run_raw(raw, runtime="claude"):
+def run_raw(raw, runtime="claude", require_scratch=False):
     """In-process raw hook run -> (exit_code, stdout_text, stderr_text)."""
     import io
     out, err = io.StringIO(), io.StringIO()
     old_out, old_err = sys.stdout, sys.stderr
     sys.stdout, sys.stderr = out, err
     try:
-        rc = hook_mode(raw, runtime=runtime)
+        rc = hook_mode(raw, runtime=runtime, require_scratch=require_scratch)
     finally:
         sys.stdout, sys.stderr = old_out, old_err
     return rc, out.getvalue(), err.getvalue()
 
 
-def hook_mode(raw, runtime="claude"):
+def hook_mode(raw, runtime="claude", require_scratch=False):
     if not raw.strip():
         sys.stderr.write("spawn_preflight_guard: empty stdin\n")
         return 2
@@ -423,26 +535,31 @@ def hook_mode(raw, runtime="claude"):
             f"spawn_preflight_guard: capacity check failed ({exc!r}); refusing to spawn blind\n"
         )
         return 2
-    # Evaluated independently of the capacity band. Sitting under `allow` meant the whole rule
-    # vanished in the 90-94% warn band, where the user approves an `ask` -- the control
-    # disappearing exactly when disk pressure makes a collision most likely.
-    tool_input = payload.get("tool_input")
-    cwd = payload.get("cwd")
-    if project_requires_scratch(cwd):
-        workspace_decision, workspace_reason = scratch_decision(
-            tool_input, cwd,
-            session_id=payload.get("session_id"),
-            agent_name=worker_name(tool_input))
+    if runtime == "codex" and decision == "ask":
+        decision = "deny"
+        reason += (" Codex PreToolUse cannot request confirmation, so z-harness "
+                   "fails closed; inspect capacity and retry the spawn.")
+    # Scratch is an installed-hook contract, not a policy bit controlled by the repository
+    # being inspected. Both shipped registrations pass --require-scratch. Keeping the flag
+    # explicit preserves capacity-only use for a deliberate standalone installation.
+    if require_scratch:
+        tool_input = payload.get("tool_input")
+        try:
+            workspace_root = protected_workspace_root(payload.get("cwd"))
+            workspace_decision, workspace_reason = scratch_decision(
+                tool_input, workspace_root,
+                session_id=payload.get("session_id"),
+                agent_name=worker_name(tool_input),
+                reserve=decision != "deny")
+        except ScratchPolicyError as exc:
+            workspace_decision = "deny"
+            workspace_reason = f"scratch policy could not be evaluated safely: {exc}"
         if workspace_decision == "deny":
             reason = (workspace_reason if decision == "allow"
                       else f"{reason} {workspace_reason}")
             decision = "deny"
     if decision == "allow":
         return 0
-    if runtime == "codex" and decision == "ask":
-        decision = "deny"
-        reason += (" Codex PreToolUse cannot request confirmation, so z-harness "
-                   "fails closed; inspect capacity and retry the spawn.")
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
         "permissionDecision": decision,
@@ -450,29 +567,72 @@ def hook_mode(raw, runtime="claude"):
     return 0
 
 
-def project_requires_scratch(cwd, marker=WORKSPACE_RULE_MARKER, opener=None):
-    """True when the project containing `cwd` declares the worker-workspace rule."""
-    opener = open if opener is None else opener
-    if not isinstance(cwd, str) or not cwd:
+_GIT_REPOSITORY_ENV = frozenset({
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_NAMESPACE",
+})
+
+
+def sanitized_git_environment(source=None):
+    """Remove ambient selectors that could substitute another repository."""
+    env = dict(os.environ if source is None else source)
+    for key in tuple(env):
+        if (key in _GIT_REPOSITORY_ENV or key == "GIT_CONFIG"
+                or key.startswith("GIT_CONFIG_")):
+            del env[key]
+    return env
+
+
+def _same_file(left, right):
+    try:
+        return os.path.samefile(left, right)
+    except FileNotFoundError:
         return False
-    here = os.path.abspath(cwd)
-    while True:
-        candidate = os.path.join(here, "AGENTS.md")
-        try:
-            with opener(candidate, encoding="utf-8", errors="replace") as handle:
-                if marker in re.sub(r"\s+", " ", handle.read()):
-                    return True
-        except PermissionError:
-            # Every other unreadable input in this file fails closed. A policy we cannot read
-            # must not become a silent opt-out, which is the one direction that disables the
-            # control without saying so.
-            return True
-        except OSError:
-            pass
-        parent = os.path.dirname(here)
-        if parent == here:
-            return False
-        here = parent
+    except OSError as exc:
+        raise ScratchPolicyError(
+            f"cannot compare filesystem identities {left!r} and {right!r}: {exc}") from exc
+
+
+def protected_workspace_root(cwd, runner=None):
+    """Resolve the physical project root that a scratch directory must not overlap."""
+    if not isinstance(cwd, str) or not cwd:
+        raise ScratchPolicyError("spawn payload has no usable cwd")
+    if not os.path.isdir(cwd):
+        raise ScratchPolicyError(f"spawn cwd is not an existing directory: {cwd!r}")
+    physical_cwd = os.path.realpath(cwd)
+    marker_root = physical_cwd
+    while not os.path.lexists(os.path.join(marker_root, ".git")):
+        parent = os.path.dirname(marker_root)
+        if parent == marker_root:
+            return physical_cwd
+        marker_root = parent
+
+    runner = subprocess.run if runner is None else runner
+    try:
+        done = runner(
+            ["git", "-C", physical_cwd, "rev-parse", "--show-toplevel"],
+            capture_output=True, text=False, timeout=2,
+            env=sanitized_git_environment())
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ScratchPolicyError(f"cannot resolve the Git worktree root: {exc}") from exc
+    if done.returncode != 0:
+        detail = bytes(done.stderr or b"").decode("utf-8", "replace").strip()
+        raise ScratchPolicyError(
+            f"git rev-parse --show-toplevel exited {done.returncode}"
+            f"{': ' + detail[:200] if detail else ''}")
+    raw = bytes(done.stdout)
+    if not raw.endswith(b"\n") or b"\0" in raw or b"\n" in raw[:-1]:
+        raise ScratchPolicyError("git rev-parse --show-toplevel returned a malformed path")
+    value = raw[:-1]
+    if value.endswith(b"\r"):
+        value = value[:-1]
+    reported = os.fsdecode(value)
+    if not os.path.isdir(reported) or not _same_file(reported, marker_root):
+        raise ScratchPolicyError(
+            f"git resolved worktree root {reported!r}, expected {marker_root!r}")
+    return os.path.realpath(reported)
 
 
 def worker_name(tool_input):
@@ -491,23 +651,102 @@ def worker_name(tool_input):
     return None
 
 
-def suggested_scratch(cwd, session_id, agent_name):
-    """An absolute, per-worker path that is never inside the checkout."""
-    leaf = agent_name if isinstance(agent_name, str) and agent_name else "worker"
-    session = session_id if isinstance(session_id, str) and session_id else "session"
-    return os.path.join(tempfile.gettempdir(), "agent-scratch", session, leaf)
+def _readable_digest(value, fallback):
+    text = value if isinstance(value, str) and value else fallback
+    label = re.sub(r"[^A-Za-z0-9]+", "-", text).strip("-").lower()[:20] or fallback
+    digest = hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:10]
+    return f"{label}-{digest}"
 
 
-def scratch_decision(tool_input, cwd, session_id=None, agent_name=None):
-    """-> (decision, reason). Deny a spawn that assigns the worker no directory of its own.
+def suggested_scratch(cwd, session_id, agent_name, nonce=None):
+    """Return a fresh, path-safe reservation candidate beneath the host temp directory."""
+    del cwd  # compatibility parameter; the suggestion is deliberately checkout-independent.
+    token = secrets.token_hex(16) if nonce is None else str(nonce)
+    token = re.sub(r"[^A-Za-z0-9]+", "", token) or secrets.token_hex(16)
+    session = _readable_digest(session_id, "session")
+    worker = _readable_digest(agent_name, "worker")
+    return os.path.join(
+        tempfile.gettempdir(), f"agent-scratch-{session}-{worker}-{token}")
 
-    What this proves: the spawn names exactly one directory, it is absolute, and it resolves
-    outside the checkout. What it does NOT prove is that two workers were given DIFFERENT
-    directories. Neither runtime carries a dependable per-worker identifier -- Claude's `name`
-    is optional and Codex's spawn tool has `task_name` instead -- so a uniqueness check here
-    would be inert on one runtime and bypassable on the other while reading as protection.
-    Distinctness is the parent's obligation under the shared policy, and the suggested path
-    below is per-worker wherever a name is available.
+
+def _path_ancestors(path):
+    current = os.path.abspath(path)
+    while True:
+        yield current
+        parent = os.path.dirname(current)
+        if parent == current:
+            return
+        current = parent
+
+
+def _scratch_path_error(path, workspace_root):
+    """Return why `path` cannot be atomically reserved as fresh external scratch."""
+    if not os.path.isabs(path):
+        return f"the worker's scratch path {path!r} is not absolute"
+    normalized = os.path.abspath(path)
+    parent, leaf = os.path.dirname(normalized), os.path.basename(normalized)
+    if not leaf:
+        return f"the worker's scratch path {path!r} has no directory leaf"
+
+    # Compare each existing spelling by filesystem identity. This catches symlink aliases and
+    # the case aliases accepted by default macOS volumes without lowercasing case-sensitive
+    # paths. An absent candidate cannot be an ancestor of the already-existing workspace.
+    for ancestor in _path_ancestors(parent):
+        if _same_file(ancestor, workspace_root):
+            return (
+                f"the worker's scratch path {path!r} is inside the checkout "
+                f"at {workspace_root!r}")
+    if os.path.lexists(normalized):
+        for ancestor in _path_ancestors(workspace_root):
+            if _same_file(normalized, ancestor):
+                return (
+                    f"the worker's scratch path {path!r} is inside or above the checkout "
+                    f"at {workspace_root!r}")
+        return (
+            f"the worker's scratch path {path!r} already exists; each spawn requires a "
+            "fresh absent directory so two workers cannot reuse one reservation")
+    if os.path.islink(parent) or not os.path.isdir(parent):
+        return f"the worker's scratch parent {parent!r} is not a real existing directory"
+    return ""
+
+
+def reserve_scratch(path):
+    """Atomically create one mode-0700 directory; EEXIST is a collision, never success."""
+    normalized = os.path.abspath(path)
+    parent, leaf = os.path.dirname(normalized), os.path.basename(normalized)
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_DIRECTORY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        parent_fd = os.open(parent, flags)
+    except OSError as exc:
+        raise ScratchPolicyError(f"cannot open scratch parent {parent!r}: {exc}") from exc
+    try:
+        opened = os.fstat(parent_fd)
+        current = os.stat(parent, follow_symlinks=False)
+        if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+            raise ScratchPolicyError(f"scratch parent changed while being reserved: {parent!r}")
+        try:
+            os.mkdir(leaf, 0o700, dir_fd=parent_fd)
+        except OSError as exc:
+            raise ScratchPolicyError(
+                f"cannot reserve fresh scratch directory {normalized!r}: {exc}") from exc
+        created = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        if not stat.S_ISDIR(created.st_mode):
+            raise ScratchPolicyError(f"reserved scratch is not a directory: {normalized!r}")
+        os.chmod(leaf, 0o700, dir_fd=parent_fd, follow_symlinks=False)
+    finally:
+        os.close(parent_fd)
+
+
+def scratch_decision(
+        tool_input, workspace_root, session_id=None, agent_name=None, reserve=True,
+        nonce=None):
+    """Deny a spawn without one fresh collision-exclusive external directory.
+
+    The path must be absent, have a real external parent, and is created atomically mode 0700.
+    Thus two concurrent spawns naming the same path cannot both pass. This prevents accidental
+    cross-worker file collisions; it is not an OS security sandbox because workers share a uid.
 
     The reason carries the exact line to add, so a denial hands back the fix rather than only
     refusing. A PreToolUse hook returns a decision and cannot write into the child, so the
@@ -526,7 +765,7 @@ def scratch_decision(tool_input, cwd, session_id=None, agent_name=None):
         if isinstance(value, str) and value:
             prompt = value
             break
-    suggestion = suggested_scratch(cwd, session_id, agent_name)
+    suggestion = suggested_scratch(workspace_root, session_id, agent_name, nonce=nonce)
     fix = f"Add a line reading exactly: Scratch: {suggestion}"
     found = SCRATCH_LINE.findall(prompt)
     if len(found) != 1:
@@ -536,23 +775,14 @@ def scratch_decision(tool_input, cwd, session_id=None, agent_name=None):
                 f"1. Concurrent workers sharing one directory overwrite each other silently "
                 f"and the loser measures the wrong thing. {fix}")
     path = found[0]
-    if not os.path.isabs(path):
-        return ("deny", f"the worker's scratch path {path!r} is not absolute, so it resolves "
-                        f"against whatever directory the worker happens to start in. {fix}")
-    # realpath, not abspath: abspath normalises ".." but leaves symlinks, and a symlinked
-    # alias of the checkout is the ordinary case on a host where /tmp is /private/tmp.
-    root = os.path.realpath(cwd) if isinstance(cwd, str) and cwd else os.sep
-    target = os.path.realpath(path)
-    # Three terms, not two. The equality term was removed once because no case covered it;
-    # an uncovered check is one to test, not one to delete, and dropping it made the checkout
-    # itself an accepted scratch directory. rstrip guards the filesystem root, where `root +
-    # os.sep` is "//" and no real path starts with that.
-    if (target == root
-            or target.startswith(root.rstrip(os.sep) + os.sep)
-            or root.startswith(target.rstrip(os.sep) + os.sep)):
-        return ("deny", f"the worker's scratch path {path!r} is inside or above the checkout "
-                        f"at {root!r}. Scratch never shares a tree with the code under "
-                        f"measurement. {fix}")
+    try:
+        problem = _scratch_path_error(path, workspace_root)
+        if problem:
+            return "deny", f"{problem}. {fix}"
+        if reserve:
+            reserve_scratch(path)
+    except ScratchPolicyError as exc:
+        return "deny", f"scratch reservation failed closed: {exc}. {fix}"
     return ("allow", "")
 
 
@@ -567,7 +797,15 @@ def read_hook_input(stream):
 def main(argv):
     args = argv[1:]
     runtime = "claude"
-    if len(args) >= 2 and args[0] == "--runtime":
+    require_scratch = False
+    while args and args[0] in {"--runtime", "--require-scratch"}:
+        if args[0] == "--require-scratch":
+            require_scratch = True
+            args = args[1:]
+            continue
+        if len(args) < 2:
+            sys.stderr.write("--runtime requires claude or codex\n")
+            return 2
         runtime = args[1]
         args = args[2:]
         if runtime not in RUNTIMES:
@@ -588,7 +826,7 @@ def main(argv):
     if raw is None:
         print(error, file=sys.stderr)
         return 2
-    return hook_mode(raw, runtime=runtime)
+    return hook_mode(raw, runtime=runtime, require_scratch=require_scratch)
 
 
 if __name__ == "__main__":

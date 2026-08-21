@@ -91,11 +91,11 @@ Claude Code live tree.
 | skill discovery | `~/.claude/skills/` | plugin `skills` entry | same directories and `SKILL.md` bodies |
 | skill invocation | `Skill` tool / slash command / implicit routing | explicit `$skill-name` or implicit metadata match | equivalent workflow selection, different invocation surface |
 | shell guard | `PreToolUse` matcher `Bash`; uncertain patterns may `ask` | `PreToolUse` matcher `Bash`; `ask` maps to `deny` | same predicates, runtime-specific confirmation handling |
-| spawn guard | `Agent|Task`; `ask` or `deny` | `Agent` alias over `spawn_agent`; Codex lacks PreToolUse `ask` | warn/unknown maps to deny in Codex |
+| spawn guard | `Agent|Task`; required fresh scratch plus capacity `ask` or `deny` | `Agent` alias over `spawn_agent`; required fresh scratch; Codex lacks PreToolUse `ask` | both installed registrations require atomic collision-exclusive reservation; warn/unknown maps to deny in Codex |
 | question timeout | AskUserQuestion exposes `afkTimeoutMs` | no equivalent contract used here | Claude-only; no parity claim |
 | project memory | Claude injects its host-local project `MEMORY.md` | no project memory is packaged; optional Codex-home context only | host-bound data stays runtime-local; no false parity claim |
-| subagents | Agent/Task and Claude worktree mechanics | native Codex subagents and SubagentStart hook | shared opt-in policy and capacity gate; runtime orchestration differs |
-| worker scratch | one session scratchpad path, inherited by every subagent | no agent scratchpad; `cwd` is the project root | assign an exclusive per-worker directory in both; Codex column read from the installed artifact, not from a fan-out on a host |
+| subagents | Agent/Task and Claude worktree mechanics | native Codex subagents and SubagentStart hook | shared installed policy and required spawn guard; runtime orchestration differs |
+| worker scratch | one session scratchpad path, inherited by every subagent | no agent scratchpad; hook resolves the complete Git worktree from `cwd` | name one fresh absent path per worker; the hook atomically reserves it mode 0700 in both runtimes |
 | cost accounting | requestId/UUID dedupe, max provisional usage | sums per-request `last_token_usage` once, replay dedupe | tokens only; no cross-provider price inference |
 | PR delivery state | shared `git`/`gh` evidence command | same command and GitHub API | local commit, remote PR head, and exact-head CI remain separate states |
 | skill telemetry | transcript `Skill`/`attributionSkill` evidence | no persisted equivalent asserted | Claude report remains Claude-only |
@@ -124,8 +124,12 @@ Codex hands a subagent no scratch directory. `~/.codex/tmp/arg0/` holds per-invo
 shims and `~/.codex/sessions/` holds date-partitioned rollout transcripts; neither is agent-facing,
 and `cwd` defaults to the project root. A worker with no assigned directory therefore writes into the
 checkout rather than beside it, which is the pressure the shared mutation-worker rule already names.
-SubagentStart is the channel that can assign one. This paragraph is read from the installed artifact
-at `@openai/codex@0.144.4`; no Codex fan-out was run on a host, so it carries no parity claim.
+The parent assigns one by adding `Scratch: <absolute path>` to the spawn prompt; the PreToolUse hook
+resolves the full Git worktree, rejects a relative, pre-existing, inside, or above path, and atomically
+creates the fresh directory before allowing the spawn. Two calls naming one path cannot both pass.
+Workers still share a uid, so this is collision isolation rather than a security sandbox. The Codex
+surface facts in this paragraph are read from the installed artifact at `@openai/codex@0.144.4`; no
+Codex fan-out was run on a host, so it carries no parity claim.
 
 The adapter also runs for SubagentStart so a spawned context does not depend on an implicit parent
 copy. Its matcherless registration covers every subagent type and constructs the full policy
@@ -171,7 +175,8 @@ Configured events:
 
 - `SessionStart` and `SubagentStart` call `codex_session_start.py`.
 - `PreToolUse` on `Bash` calls the shared `bash_command_guard.py`.
-- `PreToolUse` on the `Agent` alias calls `spawn_preflight_guard.py --runtime codex`.
+- `PreToolUse` on the `Agent` alias calls `spawn_preflight_guard.py --runtime codex
+  --require-scratch`.
 
 Codex and Claude accept the same `hookSpecificOutput.permissionDecision: "deny"` shape for a Bash
 PreToolUse block. Codex does not currently support `permissionDecision: "ask"` at this event. Both
@@ -181,7 +186,10 @@ hook response from failing open and allowing the underlying command.
 
 Both PreToolUse adapters validate the top-level object and their matched tool envelope. A malformed
 matched payload or internal predicate failure exits 2 only after writing a non-empty blocking reason
-to stderr; a bare exit 2 is not treated as a block by Codex. C9 allows runtime-observed Codex event names,
+to stderr; a bare exit 2 is not treated as a block by Codex. Scratch enforcement is activated by the
+reviewed hook registrations themselves, not by an `AGENTS.md` marker that the inspected repository
+could omit or rewrite. The flagless spawn adapter remains an explicit capacity-only installation
+mode; neither shipped runtime uses that weaker mode. C9 allows runtime-observed Codex event names,
 requires the package's three operational events, accepts runtime entry metadata such as `enabled`
 and `trusted_hash` with validated types, requires command handlers, rejects async handlers, and
 validates timeout types and matcher regexes. C7 pins every required

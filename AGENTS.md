@@ -79,7 +79,9 @@ names, and the loss is silent: the loser reads the winner's bytes and reports a 
 number. The parent never reads a scratch path it did not assign. Runtimes differ in what they hand a
 worker, so the adapter names the concrete path and this rule fixes the property. Express the
 assignment as one line in the worker's prompt reading `Scratch: <absolute path>`; the spawn guard
-requires exactly one, refuses a relative path, and refuses any path inside or above the checkout.
+requires exactly one, refuses a relative or pre-existing path, resolves containment against the
+complete Git worktree, and atomically reserves the fresh directory mode 0700. This prevents two
+spawns from claiming one writable directory; it is not an OS sandbox because workers share a uid.
 
 Give every worker a Step 0 read list of absolute paths. Mutation workers use isolated worktrees or
 in-memory copies, never a shared checkout. Commit the baseline first so a worker's revert cannot

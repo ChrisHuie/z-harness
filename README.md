@@ -115,7 +115,7 @@ same shared policy at both user and project scope.
 | `hooks/hooks.json` | Codex | SessionStart/SubagentStart policy injection and PreToolUse guard wiring |
 | `settings.json` | Claude | Claude hooks, permissions, model, status line, and UI settings |
 | `hooks/bash_command_guard.py` | shared adapter | shared predicates; Codex maps unsupported `ask` results to fail-closed `deny` |
-| `hooks/spawn_preflight_guard.py` | shared adapter | disk-capacity gate; maps unsupported Codex `ask` decisions to fail-closed `deny` |
+| `hooks/spawn_preflight_guard.py` | shared adapter | disk-capacity gate plus required fresh scratch reservation; maps unsupported Codex `ask` decisions to fail-closed `deny` |
 | `hooks/askq_timeout_guard.py` | Claude | AskUserQuestion AFK guard; no claimed Codex equivalent |
 | `hooks/codex_session_start.py` | Codex | injects mandatory shared policy, resolved adapter commands, and optional host-local context |
 | `$CODEX_HOME/z-harness/AGENTS.local.md` | local Codex host | optional non-packaged machine instructions appended by the session adapter |

@@ -52,7 +52,7 @@ EVAL_SKILL_FLOOR = 7
 # 165 here and 178 in harness_check -- and a fake that hardcodes its own number tests the
 # literal rather than the contract.
 SUITE_FLOORS = {
-    "harness_check": 161,
+    "harness_check": 163,
     "render-packages": 192,
     "bash_command_guard": 1366,
     "git_grep_engine_guard": 1149,
@@ -1493,17 +1493,19 @@ WORKSPACE_DOCTRINE = {
     "AGENTS.md": (
         "Every dispatched worker owns an exclusive scratch directory",
         "The parent never reads a scratch path it did not assign.",
-        # The gate enforces a literal marker; a convention the doctrine never states is one
-        # an agent can only discover by being denied.
         "`Scratch: <absolute path>`",
+        "atomically reserves the fresh directory mode 0700",
     ),
     "CLAUDE.md": (
         "every subagent inherits that exact path",
         "the shared root is not a workspace",
+        "defines no `$CLAUDE_SCRATCHPAD` producer",
     ),
     "docs/openai-agents.md": (
         "Codex hands a subagent no scratch directory.",
-        "assign an exclusive per-worker directory in both",
+        "name one fresh absent path per worker",
+        "neither shipped runtime uses that weaker mode",
+        "Two calls naming one path cannot both pass.",
     ),
     "skills/agent-dispatch/references/deferred.md": (
         "a dispatched worker owns its scratch directory",
@@ -1533,9 +1535,8 @@ FORBIDDEN_WORKSPACE_NEGATIONS = (
     "do not assign per-worker scratch",
     "a shared scratch directory is fine",
 )
-# The spawn guard carries its own copy of the activation sentence. Nothing else binds it, and a
-# reword of the shared policy that this gate accepts would leave the guard matching nothing and
-# enforcing nothing, silently.
+# The installed registrations activate scratch enforcement explicitly. Repository prose is not
+# an authority bit that the constrained checkout may turn off.
 SPAWN_GUARD_SOURCE = "hooks/spawn_preflight_guard.py"
 RUNTIME_PATHS_FORBIDDEN_IN_SHARED_POLICY = (
     "~/.claude",
@@ -1769,19 +1770,28 @@ def review_publication_manifest_error(data=None) -> str:
     return ""
 
 
-def spawn_guard_marker(source=None):
-    """The activation sentence the spawn guard actually matches on, or None.
-
-    Read from the guard's source rather than duplicated here: a third authored copy is what let
-    the marker drift out of the shared policy with every suite green.
-    """
+def spawn_guard_activation_error(source=None):
+    """Return why the explicit installed scratch-enforcement path is incomplete."""
     try:
         text = (ROOT / SPAWN_GUARD_SOURCE).read_text(encoding="utf-8") if source is None \
             else source
-    except OSError:
-        return None
-    found = re.search(r'^WORKSPACE_RULE_MARKER\s*=\s*"([^"]+)"', text, re.MULTILINE)
-    return found.group(1) if found else None
+    except OSError as exc:
+        return f"cannot read {SPAWN_GUARD_SOURCE}: {exc}"
+    required = (
+        'args[0] == "--require-scratch"',
+        "if require_scratch:",
+        "protected_workspace_root(payload.get(\"cwd\"))",
+        'reserve=decision != "deny"',
+        "reserve_scratch(path)",
+    )
+    missing = [fragment for fragment in required if fragment not in text]
+    if missing:
+        return (
+            "spawn guard explicit scratch activation is incomplete: "
+            f"missing={missing}")
+    if "WORKSPACE_RULE_MARKER" in text or "project_requires_scratch" in text:
+        return "spawn guard still lets repository prose disable installed scratch enforcement"
+    return ""
 
 
 def workspace_doctrine_error(source_texts=None, doctrine=None,
@@ -1854,15 +1864,9 @@ def workspace_doctrine_error(source_texts=None, doctrine=None,
                 problems.append(
                     f"{SHARED_POLICY_DOCUMENT} carries the retired spelling {negation!r}, which "
                     "revokes the rule the required phrases assert")
-        marker = spawn_guard_marker(guard_source)
-        if marker is None:
-            problems.append(
-                f"cannot read the activation marker from {SPAWN_GUARD_SOURCE}, so the spawn "
-                "guard's copy is unbound")
-        elif marker not in re.sub(r"\s+", " ", shared):
-            problems.append(
-                f"the spawn guard's activation marker {marker!r} is absent from "
-                f"{SHARED_POLICY_DOCUMENT}, so the guard matches nothing and enforces nothing")
+        activation_problem = spawn_guard_activation_error(guard_source)
+        if activation_problem:
+            problems.append(activation_problem)
     if problems:
         return ("worker-workspace doctrine: " + "; ".join(problems[:5]),
                 len(source_texts), path_hits, negation_hits)
@@ -3585,13 +3589,17 @@ def selftest() -> int:
             ("AGENTS.md", (
                 "Every dispatched worker owns an exclusive scratch directory",
                 "The parent never reads a scratch path it did not assign.",
-                "`Scratch: <absolute path>`")),
+                "`Scratch: <absolute path>`",
+                "atomically reserves the fresh directory mode 0700")),
             ("CLAUDE.md", (
                 "every subagent inherits that exact path",
-                "the shared root is not a workspace")),
+                "the shared root is not a workspace",
+                "defines no `$CLAUDE_SCRATCHPAD` producer")),
             ("docs/openai-agents.md", (
                 "Codex hands a subagent no scratch directory.",
-                "assign an exclusive per-worker directory in both")),
+                "name one fresh absent path per worker",
+                "neither shipped runtime uses that weaker mode",
+                "Two calls naming one path cannot both pass.")),
             ("skills/agent-dispatch/references/deferred.md", (
                 "a dispatched worker owns its scratch directory",
                 "never read a scratch path you did not assign")),
@@ -3678,23 +3686,24 @@ def selftest() -> int:
             doctrine={k: v for k, v in WORKSPACE_DOCTRINE.items()
                       if k != SHARED_POLICY_DOCUMENT})[0],
     )
-    # The spawn guard's activation marker is a third copy of the policy sentence. Bind it here
-    # or a reword of the shared policy silently turns the live guard off.
+    # The explicit flag and its consumer are the enforcement channel. Repository prose remains
+    # doctrine, never a mutable opt-out bit.
     expect(
-        "the spawn guard's activation marker is read from its own source",
-        spawn_guard_marker(guard_text) == (
-            "Every dispatched worker owns an exclusive scratch directory"),
+        "the spawn guard carries the complete explicit activation and reservation path",
+        spawn_guard_activation_error(guard_text) == "",
     )
     expect(
-        "an activation marker absent from the shared policy turns the check red",
-        "matches nothing and enforces nothing" in workspace_doctrine_error(
+        "dropping required-scratch CLI activation turns the doctrine check red",
+        "explicit scratch activation is incomplete" in workspace_doctrine_error(
             source_texts=workspace_sources,
-            guard_source='WORKSPACE_RULE_MARKER = "a sentence the policy does not carry"\n')[0],
+            guard_source=guard_text.replace(
+                'args[0] == "--require-scratch"', 'args[0] == "--optional"', 1))[0],
     )
     expect(
-        "an unreadable activation marker is a failure, not a clean verdict",
-        "so the spawn guard's copy is unbound" in workspace_doctrine_error(
-            source_texts=workspace_sources, guard_source="no assignment here\n")[0],
+        "restoring repository-controlled marker activation turns the doctrine check red",
+        "repository prose disable" in workspace_doctrine_error(
+            source_texts=workspace_sources,
+            guard_source=guard_text + "\nWORKSPACE_RULE_MARKER = 'opt out'\n")[0],
     )
     expect(
         "a doctrine source that does not exist is a failure",

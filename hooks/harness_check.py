@@ -91,10 +91,10 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 161
+SELFTEST_FLOOR = 163
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
-CURRENT_PLUGIN_VERSION = "0.3.1"
+CURRENT_PLUGIN_VERSION = "0.3.2"
 
 AUTHORING_SKILLS = {"craft-prompt", "craft-skill", "craft-context-file", "review-prompt"}
 BODY_CHAR_CAP = 5000          # chars after frontmatter — the builders' instrument
@@ -117,12 +117,12 @@ SELFTEST_SUITES = [
      ["tools/verify-review-publication.py", "--selftest"], 59),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
-    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 279),
+    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 296),
     ("write-mutation-receipt",
      ["tools/write-mutation-receipt.py", "--selftest"], 59),
     ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 65),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
-    ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 45),
+    ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 57),
     ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 1149),
     ("zsh_rev_modifier_guard", ["hooks/guards/zsh_rev_modifier_guard.py", "--selftest"], 487),
 ]
@@ -130,6 +130,13 @@ SELFTEST_SUITES = [
 
 def expected_selftest_checks(name):
     """Exact execution-derived counts for suites whose former formulas hid probes."""
+    fixed = {
+        "ci-gate": 296,
+        "spawn_preflight_guard": 57,
+        "verify-review-publication": 59,
+    }
+    if name in fixed:
+        return fixed[name]
     if name == "bash_command_guard":
         return 1366
     if name == "zsh_rev_modifier_guard":
@@ -307,9 +314,10 @@ ROUTING_SKILLS = ["git-workflow", "pr-review-method", "testing-ci", "agent-dispa
 # the same end state as the deleted hooks block it was written to catch. Bind the script to
 # the event instead.
 REQUIRED_CLAUDE_HANDLERS = [
-    ("PostToolUse", "AskUserQuestion", "hooks/askq_timeout_guard.py"),
-    ("PreToolUse", "Bash", "hooks/bash_command_guard.py"),
-    ("PreToolUse", "Agent|Task", "hooks/spawn_preflight_guard.py"),
+    ("PostToolUse", "AskUserQuestion", "hooks/askq_timeout_guard.py", ()),
+    ("PreToolUse", "Bash", "hooks/bash_command_guard.py", ()),
+    ("PreToolUse", "Agent|Task", "hooks/spawn_preflight_guard.py",
+     ("--require-scratch",)),
 ]
 
 RESERVED_BASENAMES = {"claude.md", "agents.md", "gemini.md"}
@@ -329,7 +337,8 @@ REQUIRED_CODEX_HANDLERS = [
     ("SessionStart", "startup|resume|clear|compact", "hooks/codex_session_start.py", ()),
     ("SubagentStart", None, "hooks/codex_session_start.py", ()),
     ("PreToolUse", "^Bash$", "hooks/bash_command_guard.py", ("--runtime", "codex")),
-    ("PreToolUse", "^Agent$", "hooks/spawn_preflight_guard.py", ("--runtime", "codex")),
+    ("PreToolUse", "^Agent$", "hooks/spawn_preflight_guard.py",
+     ("--runtime", "codex", "--require-scratch")),
 ]
 DELIVERY_CONTRACT = {
     "AGENTS.md": [
@@ -1270,16 +1279,18 @@ class Run:
         # and zero failures -- a silent pass over an empty scan set, which this file's own
         # exit-code contract calls an error. The Codex side is bound by
         # REQUIRED_CODEX_HANDLERS; this is its Claude counterpart.
-        for event, matcher, script in REQUIRED_CLAUDE_HANDLERS:
+        for event, matcher, script, required_args in REQUIRED_CLAUDE_HANDLERS:
             matches = [
                 h for entry in st.get("hooks", {}).get(event, [])
                 if entry.get("matcher") == matcher
                 for h in entry.get("hooks", [])
                 if script in h.get("command", "")
+                and all(arg in shlex.split(h.get("command", ""))
+                        for arg in required_args)
             ]
             self.result("C7", len(matches) == 1,
                         f"settings.json {event} matcher={matcher!r} -> {script}: "
-                        f"{len(matches)} match(es)")
+                        f"args={list(required_args)!r}: {len(matches)} match(es)")
         for event, entries in st.get("hooks", {}).items():
             for entry in entries:
                 for h in entry.get("hooks", []):
@@ -2185,6 +2196,52 @@ def selftest():
         expect_red("C7 goes red when settings.json registers no Claude guard",
                    lambda: any(c == "C7" and "0 match(es)" in d
                                for c, d in c7_nohooks.failures))
+
+        registration_root = os.path.join(td, "scratch-registration")
+        os.makedirs(os.path.join(registration_root, "hooks"), exist_ok=True)
+        for skill in ROUTING_SKILLS:
+            os.makedirs(os.path.join(registration_root, "skills", skill), exist_ok=True)
+        for rel in ("hooks/askq_timeout_guard.py", "hooks/bash_command_guard.py",
+                    "hooks/spawn_preflight_guard.py", "hooks/codex_session_start.py"):
+            open(os.path.join(registration_root, rel), "w").write("# fixture\n")
+        claude_registration = json.load(open(os.path.join(ROOT, "settings.json")))
+        for entry in claude_registration["hooks"]["PreToolUse"]:
+            if entry.get("matcher") == "Agent|Task":
+                entry["hooks"][0]["command"] = entry["hooks"][0]["command"].replace(
+                    " --require-scratch", "")
+        open(os.path.join(registration_root, "settings.json"), "w").write(
+            json.dumps(claude_registration))
+        codex_registration = json.load(open(os.path.join(ROOT, "hooks/hooks.json")))
+        open(os.path.join(registration_root, "hooks/hooks.json"), "w").write(
+            json.dumps(codex_registration))
+        missing_claude_activation = Run(registration_root, ci=True)
+        missing_claude_activation.c7_anchors()
+        expect_red(
+            "C7 rejects a Claude spawn registration that omits required scratch",
+            lambda: any(c == "C7" and "spawn_preflight_guard.py" in d
+                        and "--require-scratch" in d and "0 match(es)" in d
+                        for c, d in missing_claude_activation.failures),
+        )
+
+        claude_registration = json.load(open(os.path.join(ROOT, "settings.json")))
+        open(os.path.join(registration_root, "settings.json"), "w").write(
+            json.dumps(claude_registration))
+        for entries in codex_registration["hooks"].values():
+            for entry in entries:
+                for handler in entry.get("hooks", []):
+                    if "spawn_preflight_guard.py" in handler.get("command", ""):
+                        handler["command"] = handler["command"].replace(
+                            " --require-scratch", "")
+        open(os.path.join(registration_root, "hooks/hooks.json"), "w").write(
+            json.dumps(codex_registration))
+        missing_codex_activation = Run(registration_root, ci=True)
+        missing_codex_activation.c7_anchors()
+        expect_red(
+            "C7 rejects a Codex spawn registration that omits required scratch",
+            lambda: any(c == "C7" and "required Codex handler" in d
+                        and "--require-scratch" in d and "0 match(es)" in d
+                        for c, d in missing_codex_activation.failures),
+        )
 
         r = Run(td, ci=True)
         r.c2_shared_identity()
@@ -3601,7 +3658,7 @@ def selftest():
                     }]},
                     {"matcher": "^Agent$", "hooks": [{
                         "type": "command",
-                        "command": "python3 \"${PLUGIN_ROOT}/hooks/spawn_preflight_guard.py\" --runtime codex",
+                        "command": "python3 \"${PLUGIN_ROOT}/hooks/spawn_preflight_guard.py\" --runtime codex --require-scratch",
                         "timeout": 5,
                     }]},
                 ],

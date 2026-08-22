@@ -40,6 +40,7 @@ zero inputs (an empty scan set is an error, never a clean verdict).
 """
 import fnmatch
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -116,7 +117,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 201
+SELFTEST_FLOOR = 202
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -2799,6 +2800,25 @@ def selftest():
             lambda: _GIT_REPOSITORY_ENV == frozenset(reviewed_repository_selectors),
         )
 
+        # The spawn guard restates this roster instead of importing it, because a hook that
+        # reaches into tools/ turns a partially synchronised installation into an
+        # ImportError, and this host continues the tool call on any exit other than 2. A
+        # restated constant can only go stale, so the staleness is what gets a check: both
+        # definitions are compared to the literal roster above, and to each other. Loaded
+        # by path rather than by import name so the comparison does not depend on which
+        # directory the harness was started from.
+        def spawn_guard_selectors():
+            spec = importlib.util.spec_from_file_location(
+                "_harness_check_spawn_guard",
+                os.path.join(ROOT, "hooks", "spawn_preflight_guard.py"))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module._GIT_REPOSITORY_ENV
+        expect_red(
+            "the spawn guard scrubs exactly the same reviewed selectors",
+            lambda: spawn_guard_selectors()
+            == frozenset(reviewed_repository_selectors) == _GIT_REPOSITORY_ENV,
+        )
         hostile_git_env = {
             key: "planted" for key in (
                 *reviewed_repository_selectors, "GIT_CONFIG", "GIT_CONFIG_COUNT",

@@ -1088,11 +1088,22 @@ def hook_mode(raw, runtime="claude", require_scratch=False):
     return 0
 
 
+# The same roster tools/repository_ownership.py carries, restated rather than imported.
+# A hook is loaded by the runtime before anything in this repository runs, and this host's
+# PreToolUse contract continues the tool call on any exit other than 2 -- so an ImportError
+# reaching for tools/ during a partially synchronised installation would turn every spawn
+# into an unchecked allow. A restated constant can only be stale; an imported one can be
+# absent. Staleness is what harness_check compares the two against a literal roster for,
+# and that comparison is the reason this copy is safe to keep.
 _GIT_REPOSITORY_ENV = frozenset({
     "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
     "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-    "GIT_NAMESPACE",
+    "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE", "GIT_PREFIX", "GIT_INTERNAL_SUPER_PREFIX",
+    "GIT_SHALLOW_FILE", "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_NAMESPACE",
+    "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS",
+    "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS",
 })
 
 

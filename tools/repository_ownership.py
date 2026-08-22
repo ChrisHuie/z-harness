@@ -64,14 +64,15 @@ def run_git(runner, argv, **kwargs):
 def same_file(left, right):
     """Return whether two path spellings identify the same filesystem object.
 
-    ValueError, not only OSError: a NUL byte in a candidate path raises it from stat, and
-    is_repository_boundary catches OSError alone, so it would leave the ownership layer as
-    an unhandled exception in a caller that only models RepositoryOwnershipError. Two
-    spellings that cannot both name one object are not the same object.
+    OSError only. A NUL byte in a candidate path raises ValueError from stat, and
+    swallowing that here would answer -- silently, as "not the same object" -- for every
+    operand upstream that rejects such a record on purpose. is_repository_boundary converts
+    it into the modelled error instead, so a malformed record stays loud and the operand
+    that refuses it keeps deciding.
     """
     try:
         return os.path.samefile(left, right)
-    except (OSError, ValueError):
+    except OSError:
         return False
 
 
@@ -189,10 +190,9 @@ def _bound_separate_gitdir(path, marker, runner):
         ["git", "--git-dir", admin, "config", "--local", "--path", "--null",
          "--get-all", "core.worktree"], capture_output=True, text=False)
     raw = bytes(configured.stdout)
-    # The terminator count refuses a multi-valued record here rather than downstream. It is
-    # redundant with same_file's malformed-path arm, which also refuses the joined value,
-    # so removing it is not observable and the case below pins the behaviour rather than
-    # this operand. Kept because the refusal belongs where the record is read.
+    # The terminator count refuses a multi-valued record where the record is read. Without
+    # it the joined value reaches os.path.samefile carrying a NUL, which is a raised error
+    # rather than a decision -- so the operand is what makes this a refusal.
     if configured.returncode != 0 or not raw.endswith(b"\0") or raw.count(b"\0") != 1:
         return False
     worktree = os.fsdecode(raw[:-1])
@@ -245,7 +245,12 @@ def is_repository_boundary(path, owner_root=None, runner=None):
         return (_indexed_gitlink(path, owner_root, runner)
                 or _registered_linked_worktree(path, marker)
                 or _bound_separate_gitdir(path, marker, runner))
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # ValueError as well as OSError: a malformed record reaching os.path.samefile with
+        # an embedded NUL raises it, and callers model RepositoryOwnershipError alone, so
+        # letting it through would surface the ownership layer as an unhandled exception.
+        # Converted here rather than absorbed in same_file, which would turn every such
+        # record into a silent "not a boundary" and retire the operands that reject one.
         raise RepositoryOwnershipError(
             f"cannot resolve Git ownership for {path!r}: {exc}") from exc
 
@@ -381,6 +386,16 @@ def selftest():
             check=True)
         expect("a separately-bound gitdir is an ownership boundary",
                is_repository_boundary(separate, owner))
+        # The comparison the accept depends on. Without it any administration directory
+        # recording any single core.worktree becomes a boundary, and the accept above cannot
+        # tell that apart because it accepts either way.
+        foreign_bound = os.path.join(tmp, "foreign-bound")
+        os.makedirs(foreign_bound)
+        with open(os.path.join(foreign_bound, ".git"), "w", encoding="utf-8") as fh:
+            fh.write(f"gitdir: {separate_admin}\n")
+        expect("a gitdir whose config binds another worktree is not a boundary here",
+               not _bound_separate_gitdir(
+                   foreign_bound, os.path.join(foreign_bound, ".git"), subprocess.run))
 
         calls = 0
         def late_git_failure(argv, **kwargs):
@@ -508,15 +523,22 @@ def selftest():
                not _registered_linked_worktree(
                    strayed_worktree, os.path.join(strayed_worktree, ".git")))
 
-        # core.worktree must resolve to exactly one value. This pins the behaviour, not one
-        # operand: the terminator count and same_file's malformed-path arm both refuse the
-        # joined record, so neither alone can be graded by removing it.
+        # core.worktree must resolve to exactly one value, and the refusal is the
+        # terminator count alone: with it removed the joined record reaches samefile and
+        # raises instead of returning a verdict.
         subprocess.run(
             ["git", "--git-dir", separate_admin, "config", "--add", "core.worktree",
              owner], check=True)
+        def doubly_recorded_is_refused():
+            # Reported rather than raised: with the terminator count removed this call
+            # raises, and an uncaught raise ends the suite instead of naming the operand.
+            try:
+                return not _bound_separate_gitdir(
+                    separate, os.path.join(separate, ".git"), subprocess.run)
+            except (OSError, ValueError):
+                return False
         expect("a doubly-recorded core.worktree is not a separately-bound gitdir",
-               not _bound_separate_gitdir(
-                   separate, os.path.join(separate, ".git"), subprocess.run))
+               doubly_recorded_is_refused())
         subprocess.run(
             ["git", "--git-dir", separate_admin, "config", "--unset-all",
              "core.worktree"], check=True)
@@ -526,6 +548,30 @@ def selftest():
         expect("one recorded core.worktree is accepted again",
                _bound_separate_gitdir(
                    separate, os.path.join(separate, ".git"), subprocess.run))
+
+        # A ValueError raised anywhere under the ownership probes is the modelled error,
+        # not a raised one: every consumer catches RepositoryOwnershipError and nothing
+        # else, so an unconverted one surfaces as an unhandled exception. Injected through
+        # the same runner seam the OSError case above uses, because with every operand in
+        # place no record reaches the filesystem call malformed -- the arm exists for the
+        # state where one of those operands is gone.
+        def raises_value_error(argv, **kwargs):
+            # Only the config read: the toplevel probe runs before the guarded block, so
+            # raising there would prove the wrong thing by escaping a different way.
+            if "config" in argv:
+                raise ValueError("planted malformed ownership record")
+            return subprocess.run(argv, **kwargs)
+        malformed_problem = ""
+        try:
+            is_repository_boundary(separate, owner, raises_value_error)
+        except RepositoryOwnershipError as exc:
+            malformed_problem = str(exc)
+        except ValueError:
+            # Reported, not propagated: an unconverted error would otherwise end the suite
+            # rather than naming the arm that was supposed to convert it.
+            malformed_problem = "escaped unconverted"
+        expect("a malformed ownership record is named as the modelled error",
+               "planted malformed ownership record" in malformed_problem)
 
         # An indexed gitlink is a 160000 entry. A tracked ordinary file at the same path is
         # not a repository boundary, and only the mode comparison separates them.
@@ -538,6 +584,23 @@ def selftest():
         subprocess.run(["git", "-C", owner, "add", "--", "gitlinked"], check=True)
         expect("an indexed gitlink is an ownership boundary",
                _indexed_gitlink(gitlinked, owner, subprocess.run))
+        # ...and that it is the arm is_repository_boundary reaches for a submodule, whose
+        # .git is a FILE. Dropping that arm left this module green because the other two
+        # answered every fixture; only a marker no other arm accepts separates them.
+        submodule = os.path.join(owner, "submodule")
+        submodule_admin = os.path.join(tmp, "submodule-admin")
+        subprocess.run(
+            ["git", "init", "--quiet", "--separate-git-dir", submodule_admin, submodule],
+            check=True)
+        subprocess.run(
+            ["git", "-C", submodule, "-c", "user.name=fixture", "-c",
+             "user.email=fixture@example.invalid", "commit", "--quiet",
+             "--allow-empty", "-m", "sub"], check=True)
+        subprocess.run(["git", "-C", owner, "add", "--", "submodule"], check=True)
+        expect("a file-marked submodule is a boundary through the indexed-gitlink arm",
+               not _registered_linked_worktree(
+                   submodule, os.path.join(submodule, ".git"))
+               and is_repository_boundary(submodule, owner))
         plain = os.path.join(owner, "plain")
         os.makedirs(plain)
         with open(os.path.join(plain, "note.md"), "w", encoding="utf-8") as fh:

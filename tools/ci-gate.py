@@ -54,7 +54,7 @@ EVAL_SKILL_FLOOR = 7
 # 165 here and 178 in harness_check -- and a fake that hardcodes its own number tests the
 # literal rather than the contract.
 SUITE_FLOORS = {
-    "harness_check": 202,
+    "harness_check": 205,
     "render-packages": 192,
     "bash_command_guard": 1366,
     "git_grep_engine_guard": 1149,
@@ -409,6 +409,23 @@ def _yaml_step_headers(block: str) -> list[str]:
     ]
 
 
+def _folded_command(step: str) -> tuple[str, ...]:
+    """Return every line of a folded `run: >-` block, comments included.
+
+    YAML recognises no comment inside a block scalar, so a `#`-leading line there is
+    content: folding joins it to the command with a space and the shell then treats the
+    whole folded line as a comment. Dropping those lines the way a literal `run: |` block
+    allows -- where `#` really is a shell comment -- let one inserted line turn the sweep's
+    receipt comparison into a no-op that exits zero while this oracle read the command it
+    expected. Every line is returned, so an inserted one changes the tuple and is refused.
+    """
+    return tuple(
+        line.strip()
+        for line in _yaml_mapping_block(step, "        run: >-").splitlines()[1:]
+        if line.strip()
+    )
+
+
 def _yaml_run_commands(step: str) -> tuple[str, ...]:
     run_block = _yaml_mapping_block(step, "        run: |")
     return tuple(
@@ -621,11 +638,7 @@ def mutation_workflow_authority_error(data: str) -> str:
     receipt_step = _yaml_mapping_block(shard, "      - name: run mutation shard")
     if _yaml_fields(receipt_step, 8) != ["run: >-"]:
         return "mutation shard receipt step fields are not exactly one folded command"
-    receipt_command = tuple(
-        line.strip()
-        for line in _yaml_mapping_block(receipt_step, "        run: >-").splitlines()[1:]
-        if line.strip() and not line.lstrip().startswith("#")
-    )
+    receipt_command = _folded_command(receipt_step)
     if receipt_command != (
             "python3 tools/write-mutation-receipt.py",
             "--shard-index ${{ matrix.shard }}",
@@ -662,12 +675,7 @@ def mutation_workflow_authority_error(data: str) -> str:
         "      - name: reject incomplete evidence and compare the tracked receipt")
     if _yaml_fields(comparison_step, 8) != ["run: >-"]:
         return "mutation aggregate comparison step fields are not one folded command"
-    comparison_command = tuple(
-        line.strip()
-        for line in _yaml_mapping_block(
-            comparison_step, "        run: >-").splitlines()[1:]
-        if line.strip() and not line.lstrip().startswith("#")
-    )
+    comparison_command = _folded_command(comparison_step)
     if comparison_command != (
             "python3 tools/write-mutation-receipt.py",
             "--aggregate mutation-fragments/*.json"):
@@ -3244,6 +3252,25 @@ def selftest() -> int:
          sweep_replacement("          --aggregate mutation-fragments/*.json\n",
                            "          --aggregate mutation-fragments/one.json\n"),
          "mutation aggregate comparison command"),
+        # YAML recognises no comment inside a block scalar, so a `#` line in a FOLDED
+        # command is content: folding joins it and the shell comments out the whole line.
+        # Dropping those lines the way a literal `run: |` block allows turned the sweep's
+        # receipt comparison into a no-op that exits zero, with this oracle reading the
+        # command it expected.
+        ("a comment line folded into the aggregate command",
+         sweep_replacement("          python3 tools/write-mutation-receipt.py\n"
+                           "          --aggregate mutation-fragments/*.json\n",
+                           "          # measurement disabled\n"
+                           "          python3 tools/write-mutation-receipt.py\n"
+                           "          --aggregate mutation-fragments/*.json\n"),
+         "mutation aggregate comparison command"),
+        ("a comment line folded into the shard command",
+         sweep_replacement(
+             "          --expected-head '${{ github.event.pull_request.head.sha "
+             "|| github.sha }}'\n",
+             "          # --expected-head '${{ github.event.pull_request.head.sha "
+             "|| github.sha }}'\n"),
+         "mutation shard receipt command"),
     ):
         expect(
             f"coordinated sweep bytes cannot hide {label}",

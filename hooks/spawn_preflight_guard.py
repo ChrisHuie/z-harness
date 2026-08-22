@@ -1089,12 +1089,13 @@ def hook_mode(raw, runtime="claude", require_scratch=False):
 
 
 # The same roster tools/repository_ownership.py carries, restated rather than imported.
-# A hook is loaded by the runtime before anything in this repository runs, and this host's
-# PreToolUse contract continues the tool call on any exit other than 2 -- so an ImportError
-# reaching for tools/ during a partially synchronised installation would turn every spawn
-# into an unchecked allow. A restated constant can only be stale; an imported one can be
-# absent. Staleness is what harness_check compares the two against a literal roster for,
-# and that comparison is the reason this copy is safe to keep.
+# An import would fail CLOSED, not open -- an unmodelled error here already becomes a deny
+# -- and that is the problem: a hook is installed independently of the tools directory, and
+# a hook newer than the installed tools/ would deny every Agent and Task spawn on the
+# machine until the two catch up. That is the outage the doctrine table already names for
+# this guard, and it is live: the current installation has no tools/repository_ownership.py
+# at all. A restated constant can only go stale, and staleness is what harness_check
+# compares both definitions against a literal roster for.
 _GIT_REPOSITORY_ENV = frozenset({
     "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
     "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",

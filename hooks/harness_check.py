@@ -117,7 +117,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 202
+SELFTEST_FLOOR = 205
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -134,18 +134,18 @@ DESC_CAP = 400                # house cap (spec ceiling is 1024)
 SELFTEST_SUITES = [
     ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"], 1366),
     ("askq_timeout_guard", ["hooks/askq_timeout_guard.py", "--selftest"], 13),
-    ("announced_work_guard", ["hooks/announced_work_guard.py", "--selftest"], 62),
+    ("announced_work_guard", ["hooks/announced_work_guard.py", "--selftest"], 83),
     ("harness_report", ["hooks/harness_report.py", "--selftest"], 12),
     ("cc-cost", ["tools/cc-cost.py", "--selftest"], 8),
     ("codex-cost", ["tools/codex-cost.py", "--selftest"], 28),
     ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 53),
-    ("repository-ownership", ["tools/repository_ownership.py", "--selftest"], 31),
+    ("repository-ownership", ["tools/repository_ownership.py", "--selftest"], 34),
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 8),
     ("verify-review-publication",
      ["tools/verify-review-publication.py", "--selftest"], 94),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
-    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 351),
+    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 353),
     ("write-mutation-receipt",
      ["tools/write-mutation-receipt.py", "--selftest"], 59),
     ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 65),
@@ -159,7 +159,7 @@ SELFTEST_SUITES = [
 def expected_selftest_checks(name):
     """Exact execution-derived counts for suites whose former formulas hid probes."""
     fixed = {
-        "ci-gate": 351,
+        "ci-gate": 353,
         "spawn_preflight_guard": 88,
         "verify-review-publication": 94,
     }
@@ -2807,17 +2807,32 @@ def selftest():
         # definitions are compared to the literal roster above, and to each other. Loaded
         # by path rather than by import name so the comparison does not depend on which
         # directory the harness was started from.
-        def spawn_guard_selectors():
+        def guard_module(name):
             spec = importlib.util.spec_from_file_location(
-                "_harness_check_spawn_guard",
-                os.path.join(ROOT, "hooks", "spawn_preflight_guard.py"))
+                f"_harness_check_{name}", os.path.join(ROOT, "hooks", f"{name}.py"))
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
-            return module._GIT_REPOSITORY_ENV
+            return module
+        # Two assertions, not one chained comparison: chained, the shared authority's
+        # operand was already answered by the roster case above, so removing it changed
+        # nothing and the check read as grading more than it did.
         expect_red(
-            "the spawn guard scrubs exactly the same reviewed selectors",
-            lambda: spawn_guard_selectors()
-            == frozenset(reviewed_repository_selectors) == _GIT_REPOSITORY_ENV,
+            "the spawn guard scrubs exactly the reviewed selectors",
+            lambda: guard_module("spawn_preflight_guard")._GIT_REPOSITORY_ENV
+            == frozenset(reviewed_repository_selectors),
+        )
+        expect_red(
+            "the spawn guard and the shared authority scrub the same selectors",
+            lambda: guard_module("spawn_preflight_guard")._GIT_REPOSITORY_ENV
+            == _GIT_REPOSITORY_ENV,
+        )
+        # A second constant both PreToolUse guards must agree on. hooks/hooks.json registers
+        # the spawn guard with --runtime codex, so a copy that drops a runtime refuses every
+        # Codex spawn while its own suite stays green.
+        expect_red(
+            "both PreToolUse guards accept exactly the same runtimes",
+            lambda: guard_module("spawn_preflight_guard").RUNTIMES
+            == guard_module("bash_command_guard").RUNTIMES == {"claude", "codex"},
         )
         hostile_git_env = {
             key: "planted" for key in (
@@ -2837,6 +2852,16 @@ def selftest():
             and scrubbed_git_env == {
                 "PATH": "retained", "Z_HARNESS_SENTINEL": "retained",
                 "GIT_AUTHOR_NAME": "retained"}),
+        )
+        # The constant is not the whole copy. The function around it is restated too, and
+        # comparing only the names left its GIT_CONFIG operands ungraded in the hook: either
+        # could be deleted there with both suites green. Compared by RESULT over the same
+        # hostile environment, so the two implementations have to agree on what they remove
+        # rather than on how they spell it.
+        expect_red(
+            "the spawn guard scrubs a hostile environment identically",
+            lambda: guard_module("spawn_preflight_guard").sanitized_git_environment(
+                dict(hostile_git_env)) == scrubbed_git_env,
         )
 
         # C7 owns every file below each repository skill directory in Claude's installed

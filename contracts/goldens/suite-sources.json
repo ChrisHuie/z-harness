@@ -1,7 +1,7 @@
 {
   "note": "sha256 of each aggregated selftest suite's source. The check count in a receipt is self-reported, so an eight-line stub printing a passing receipt satisfied the floor and the whole gate went green. Under a workflow that invokes the authentic harness/ci-gate pair, this binding detects an isolated suite or runner replacement that merely claims to have run. It is not independent attestation against an in-repository workflow edit that bypasses those runners; reviewer diff inspection or an externally administered required workflow remains that trust root. Update an entry in the same commit that changes its tool, and review the diff: this file is authored, never generated from whatever is on disk.",
   "suites": {
-    "announced_work_guard": "b89e672348061a0f930ef4cc96d61918b01d2fb51f9339e5267c304fdb927bea",
+    "announced_work_guard": "808f93b33eff50781127d8ecbb51633af89899815a6a6e4d8dc66f1f0b465ee4",
     "askq_timeout_guard": "85c136dc24f3b4f41a60987b8abecb97779e209e49c4e29e74a5d46174d695ef",
     "bash_command_guard": "fe8d2e68f1cffeb94f8fe6ccb79a1211f7f8b9fae601f3cbae0fde7e47011f00",
     "cc-cost": "972b0122b5f84de10f41915a133132f555b943c46061d91b07e3f7b534a4d003",
@@ -10,12 +10,12 @@
     "codex-cost": "fc46c95da8babd276e705c9578c5857a6563588b588da540ea4222c2c6ca793c",
     "codex_session_start": "b9dbedba94d623304ef97ca1b13a14b2f7b000cc98f35e016448ed4c85030567",
     "git_grep_engine_guard": "2fa728eb17d041bdf1c4f38fc6416f0bbf90df7d122ba3b1da15b1aa4c254bd0",
-    "harness_check": "1816873b723004aec5bd57163bfb5ce0b63206ab619b943d33e548f1459cd8e1",
+    "harness_check": "a6fcc8644d664aecff74e23acf19d8dcaf6924ede901247917bc1c84af28dce8",
     "harness_report": "eec022de9c2f7dec81c612e751dac472f2f8b695029d627784e7e5d840312cbc",
     "portable-conformance": "8eb48510971d0e4f7371cd7a4d16c41850e8e1324a739b70b71d3b85c5823606",
     "pr-delivery-state": "da5293b7134b159c1b6bb91b67c40193550076c908db8e185ddcb9d82011fe6b",
     "render-packages": "6b05aa44c351651202e8a5e720bd1a13ed8d2301705367cea0dc198d7f5a178e",
-    "repository-ownership": "348135fde23b464445faf265c9feaa58e8f241d2819c8335ff4f210d7629d894",
+    "repository-ownership": "4148899391d865fc18fe3cd533222fd335f7cf39fadae70f15d7f49b02d6dddb",
     "run-skill-evals": "38115603816e7698926a290d401179c3db2f4f5ffa12b49e2bfe04b3f294a508",
     "spawn_preflight_guard": "4fc7ec94bb72de30c7b3f4a0353f3fb65e808e140c408642e0604d0961b4e965",
     "verify-review-publication": "fb7a4b95248de1f664180ad0598a54778591f321963b2265e734b37ff7bcd455",

@@ -331,6 +331,24 @@ def selftest():
         expect("a silent nonzero Git exit is named",
                "exited 7" in git_toplevel_error(
                    owner, lambda *_a, **_k: Done(7, b"", b"")))
+        nested_probe_root = os.path.join(tmp, "probe-root")
+        os.makedirs(nested_probe_root)
+        with open(os.path.join(nested_probe_root, ".git"), "w", encoding="utf-8") as fh:
+            fh.write("gitdir: nowhere\n")
+        # The other failure channel: Git could not be launched at all. It is a distinct arm
+        # from a nonzero exit, and is_repository_boundary raises on it rather than returning
+        # a verdict, because an unlaunchable Git is not evidence that no boundary exists.
+        def unlaunchable_git(*_args, **_kwargs):
+            raise OSError(2, "planted unlaunchable git")
+        expect("an unlaunchable Git is named rather than read as a clean answer",
+               "planted unlaunchable git" in git_toplevel_error(owner, unlaunchable_git))
+        unlaunchable_problem = ""
+        try:
+            is_repository_boundary(nested_probe_root, owner, unlaunchable_git)
+        except RepositoryOwnershipError as exc:
+            unlaunchable_problem = str(exc)
+        expect("an unlaunchable Git fails closed at the ownership boundary",
+               "planted unlaunchable git" in unlaunchable_problem)
 
         os.makedirs(nested)
         with open(os.path.join(nested, ".git"), "w", encoding="utf-8") as fh:

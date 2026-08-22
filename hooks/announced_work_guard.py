@@ -568,6 +568,23 @@ def selftest():
          {"last_assistant_message": "Starting the audit.", "stop_hook_active": True}, False),
     ]
 
+    # The cases above compare block-vs-allow, so the RETURNED trigger is unasserted:
+    # returning a bare True or False for it keeps every one of them green while the block
+    # message quotes the wrong text back. The message is the whole output of a block.
+    for label, message, trigger in (
+        ("the blocked trigger is the announcement, quoted",
+         "Right. Starting the IR-38 audit.", "Starting the"),
+        ("an emphasised trigger loses its markup, not its words",
+         "**Starting the IR-38 audit.**", "Starting the"),
+        ("a clause trigger carries the lead that anchored it",
+         "The gate is green; starting the IR-38 audit.", "; starting the"),
+    ):
+        got = judge({"last_assistant_message": message})
+        ok = got == trigger
+        failures += 0 if ok else 1
+        checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} {label} -> {got!r}")
+
     # Every drift arm reports, so asserting only THAT it drifted is satisfied by whichever
     # arm fires first: removing the type check still drifts, from the missing-key branch one
     # line below. These bind to the diagnosis instead.

@@ -133,12 +133,12 @@ DESC_CAP = 400                # house cap (spec ceiling is 1024)
 SELFTEST_SUITES = [
     ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"], 1366),
     ("askq_timeout_guard", ["hooks/askq_timeout_guard.py", "--selftest"], 13),
-    ("announced_work_guard", ["hooks/announced_work_guard.py", "--selftest"], 48),
+    ("announced_work_guard", ["hooks/announced_work_guard.py", "--selftest"], 62),
     ("harness_report", ["hooks/harness_report.py", "--selftest"], 12),
     ("cc-cost", ["tools/cc-cost.py", "--selftest"], 8),
     ("codex-cost", ["tools/codex-cost.py", "--selftest"], 28),
     ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 53),
-    ("repository-ownership", ["tools/repository_ownership.py", "--selftest"], 17),
+    ("repository-ownership", ["tools/repository_ownership.py", "--selftest"], 31),
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 8),
     ("verify-review-publication",
      ["tools/verify-review-publication.py", "--selftest"], 94),
@@ -2798,6 +2798,7 @@ def selftest():
             "the scrubbed selector set covers exactly the reviewed roster",
             lambda: _GIT_REPOSITORY_ENV == frozenset(reviewed_repository_selectors),
         )
+
         hostile_git_env = {
             key: "planted" for key in (
                 *reviewed_repository_selectors, "GIT_CONFIG", "GIT_CONFIG_COUNT",

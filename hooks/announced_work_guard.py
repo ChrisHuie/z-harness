@@ -25,8 +25,12 @@ imminent action, that action is not going to happen.
 WHAT THIS CANNOT DO. It reads the tail of one message. It cannot tell a
 sincere announcement from a rhetorical one, it cannot catch work promised in
 the middle of a message and quietly dropped, and it says nothing about whether
-the work that DID run was any good. Blocking here costs one turn; missing costs
-the user's trust in every status line, which is why it is tuned to fire.
+the work that DID run was any good. It anchors on a unit start or a clause
+terminator, so an announcement led by a labelling colon -- `Next: I'll now run
+the sweep.` -- is not seen: adding `:` to that anchor also blocks `Background:
+Running the sweep in eight shards.`, which reports work already running.
+Blocking here costs one turn; missing costs the user's trust in every status
+line, which is why it is tuned to fire.
 
 CONTRACT, VERIFIED THREE WAYS rather than read once. (1) In-binary against
 Claude Code 2.1.227. (2) Against a REAL captured Stop envelope, shipped as
@@ -66,7 +70,12 @@ ANNOUNCE = re.compile(
     # NOT `-\s*` in the prefix: it matched the hyphen inside `long-running`
     # and fired on five turns across three projects that never announced
     # anything. Em-dash is a real clause lead; hyphen is part of a word.
-    r'(?:^|[.!?\n]\s*|—\s*)'
+    # `;` joins two independent clauses, so it ends a claim the way a full stop does.
+    # `:` does NOT: it labels what follows, and `Background: Running the sweep in eight
+    # shards.` is a report on work already running -- the same carve-out the participle
+    # arm makes for `Continuing to wait`. A colon-led announcement is therefore out of
+    # scope and said so below, rather than bought at the price of that shape.
+    r'(?:^|[.!?;\n]\s*|—\s*)'
     r'(?:'
     # The participle must lead into an OBJECT — "Starting the audit",
     # "Continuing with the merge class". `Continuing to wait/collect/hold` is a
@@ -119,9 +128,41 @@ SPLIT = re.compile(
 )                                              # heading, fence
 
 
+# A unit can OPEN with markdown decoration. SPLIT already treats a list marker, quote
+# caret, heading hash, table pipe and fence as a unit lead, and then the units were joined
+# back into one string, which erased every boundary SPLIT had just found: after the join
+# only sentence punctuation could still anchor a unit start, so `**Starting the audit.**`,
+# `- Starting the audit.` and `> Starting the audit.` all walked past while the same
+# sentence after a full stop blocked. Strip the decoration off each unit's head rather
+# than widening ANNOUNCE's prefix, which is what admitted the hyphen inside `long-running`.
+# Backticks are not stripped: a fenced unit is code, not a claim about what happens next.
+DECORATION = re.compile(r'^[\s>#|]*(?:(?:[-*+]|\d+[.)])[ \t]+)?[\s>#|]*(?:\*\*|__|\*|_)*')
+
+
 def boundary(text):
-    parts = [p for p in SPLIT.split(text.strip()) if p and p.strip()]
-    return " ".join(parts[-TAIL_UNITS:]) if parts else ""
+    """The last TAIL_UNITS units, undecorated, as a list -- never pre-joined.
+
+    A fence is tracked across units rather than tested per unit. SPLIT breaks before any
+    line opening with a list marker, so a fence CONTAINING one is split into three units
+    and only the first carries the ``` -- testing each unit alone left `- Starting the
+    audit` inside a code block reading as a claim once decoration was stripped. The units
+    are still emitted, because they occupy tail slots and the fence control depends on
+    that; they are only marked as code so nothing matches inside them.
+    """
+    parts, fenced = [], False
+    for part in SPLIT.split(text.strip()):
+        if not part or not part.strip():
+            continue
+        opens = part.lstrip().startswith("```")
+        if fenced or opens:
+            parts.append((part, True))
+            if opens:
+                fenced = not fenced
+            continue
+        stripped = DECORATION.sub("", part).strip()
+        if stripped:
+            parts.append((stripped, False))
+    return parts[-TAIL_UNITS:]
 
 BLOCK_MSG = """\
 STOP BLOCKED — announced-work guard ({v}).
@@ -209,7 +250,8 @@ def judge(payload):
         # intent -- nothing read is not evidence of a defect -- and a mutation of it is
         # correctly unkillable rather than an uncovered branch.
         return None
-    tail = boundary(text)
+    units = boundary(text)
+    tail = " ".join(unit for unit, _ in units)
     # A turn that ends on a QUESTION is asking, not claiming — whatever was
     # said before it. Found on a real transcript: a message opening "Starting
     # with a mechanical producer-existence check" and closing "Does the
@@ -219,8 +261,17 @@ def judge(payload):
         return None
     if HANDBACK.search(tail):
         return None
-    m = ANNOUNCE.search(tail)
-    return m.group(0).strip() if m else None
+    # Searched per unit, because a unit's start is what ANNOUNCE's `^` alternative is for.
+    # HANDBACK stays on the joined tail: handing the decision back in the following
+    # sentence retracts an announcement in the one before it, which is the whole point of
+    # reading two units rather than one.
+    for unit, is_code in units:
+        if is_code:
+            continue
+        found = ANNOUNCE.search(unit)
+        if found:
+            return found.group(0).strip()
+    return None
 
 
 def selftest():
@@ -364,6 +415,56 @@ def selftest():
         ("shape: an unmodelled message type is drift, not an allow",
          {"last_assistant_message": 17}, "drift"),
         ("shape: a payload that is not an object is drift", "not an object", "drift"),
+
+        # Markdown decoration on a unit's HEAD. SPLIT recognises each of these as a unit
+        # lead, so before the units stopped being pre-joined the same sentence blocked
+        # after a full stop and walked past behind two asterisks, a bullet or a caret.
+        # These are the shapes this house writes its closing lines in.
+        ("a bold announcement is still an announcement",
+         {"last_assistant_message": "**Starting the IR-38 audit.**"}, True),
+        ("a bulleted announcement is still an announcement",
+         {"last_assistant_message": "Remaining work:\n\n- Starting the IR-38 audit."}, True),
+        ("a quoted announcement is still an announcement",
+         {"last_assistant_message": "> Starting the IR-38 audit."}, True),
+        ("a heading announcement is still an announcement",
+         {"last_assistant_message": "Two items closed.\n\n## Starting the IR-38 audit"}, True),
+        ("a semicolon ends a clause the way a full stop does",
+         {"last_assistant_message": "The gate is green; starting the IR-38 audit."}, True),
+
+        # The price of that strip, controlled. Each of these was allowed before and must
+        # stay allowed: a matcher that buys the five cases above with any of them is a
+        # matcher the reader learns to switch off.
+        ("a hyphen inside a word is not a unit lead",
+         {"last_assistant_message": "The sweep is long-running, so the receipt lands later."},
+         False),
+        ("a bulleted finding list is not an announcement",
+         {"last_assistant_message": "Findings:\n\n- long-running sweep\n- residue green"},
+         False),
+        ("a status table row is not an announcement",
+         {"last_assistant_message": "Agents:\n\n| worker | state |\n|---|---|\n"
+                                    "| F1 | Running the sweep |"}, False),
+        ("decoration inside a fence is code, not a claim",
+         {"last_assistant_message": "Two items closed.\n\n```\n- Starting the audit\n```"},
+         False),
+        ("a closed fence releases the next unit back to prose",
+         {"last_assistant_message": "```\nx = 1\n```\n\nStarting the IR-38 audit."}, True),
+        ("an unclosed fence keeps its remainder code",
+         {"last_assistant_message": "Two items closed.\n\n```\n- Starting the audit"},
+         False),
+        # Why DECORATION stops short of the backtick. Inline code quotes a string rather
+        # than claiming it, and this file's own prose ends on quoted matcher text.
+        ("an inline code span quotes a claim rather than making one",
+         {"last_assistant_message": "The matcher fires on this tail.\n\n"
+                                    "`Starting the audit`"}, False),
+        # The declared out-of-scope boundary, pinned as a case so widening it is a
+        # deliberate edit rather than a drift. A colon labels what follows instead of
+        # ending a clause, and the shape below is the cost of treating it as a terminator.
+        ("a colon-led announcement is out of scope",
+         {"last_assistant_message": "Two items remain. Next: I\'ll now run the sweep."},
+         False),
+        ("a labelled report of running work is not an announcement",
+         {"last_assistant_message": "Background: Running the sweep in eight shards. "
+                                    "The receipt lands when it finishes."}, False),
 
         # Decision arms that had no case of their own.
         ("empty text is not evidence of a defect", {"last_assistant_message": "   "}, False),

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import tempfile
 
@@ -61,10 +62,16 @@ def run_git(runner, argv, **kwargs):
 
 
 def same_file(left, right):
-    """Return whether two path spellings identify the same filesystem object."""
+    """Return whether two path spellings identify the same filesystem object.
+
+    ValueError, not only OSError: a NUL byte in a candidate path raises it from stat, and
+    is_repository_boundary catches OSError alone, so it would leave the ownership layer as
+    an unhandled exception in a caller that only models RepositoryOwnershipError. Two
+    spellings that cannot both name one object are not the same object.
+    """
     try:
         return os.path.samefile(left, right)
-    except OSError:
+    except (OSError, ValueError):
         return False
 
 
@@ -182,6 +189,10 @@ def _bound_separate_gitdir(path, marker, runner):
         ["git", "--git-dir", admin, "config", "--local", "--path", "--null",
          "--get-all", "core.worktree"], capture_output=True, text=False)
     raw = bytes(configured.stdout)
+    # The terminator count refuses a multi-valued record here rather than downstream. It is
+    # redundant with same_file's malformed-path arm, which also refuses the joined value,
+    # so removing it is not observable and the case below pins the behaviour rather than
+    # this operand. Kept because the refusal belongs where the record is read.
     if configured.returncode != 0 or not raw.endswith(b"\0") or raw.count(b"\0") != 1:
         return False
     worktree = os.fsdecode(raw[:-1])
@@ -398,6 +409,156 @@ def selftest():
                boundary_between(owner, os.path.join(owner, "outer.md")) is None)
         expect("an unrelated path does not manufacture a boundary",
                boundary_between(owner, os.path.join(tmp, "elsewhere.md")) is None)
+
+        # The escape guard, with a discriminating fixture. The case above is answered by
+        # the walk running out of repositories, so it stayed green with the guard removed.
+        # Here the escaping candidate's own directory IS a proven boundary, so returning
+        # None can only come from refusing to leave the root.
+        outside_repo = os.path.join(tmp, "outside-repo")
+        os.makedirs(outside_repo)
+        subprocess.run(["git", "init", "--quiet", outside_repo], check=True)
+        outside_file = os.path.join(outside_repo, "evidence.md")
+        with open(outside_file, "w", encoding="utf-8") as fh:
+            fh.write("evidence\n")
+        expect("a candidate outside the root never names a boundary outside it",
+               is_repository_boundary(outside_repo, owner)
+               and boundary_between(owner, outside_file) is None)
+
+        # A probe failure is unknown only where the marker carries repository metadata. A
+        # .git directory with no HEAD carries none, so the outer scan keeps the directory
+        # instead of failing closed on it; the dubious-ownership case above proves the
+        # other arm, and only the pair separates them.
+        hollow = os.path.join(tmp, "hollow")
+        os.makedirs(os.path.join(hollow, ".git"))
+        def hollow_marker_stays_outer_owned():
+            try:
+                return not is_repository_boundary(
+                    hollow, owner,
+                    lambda *_a, **_k: Done(7, b"", b"planted hollow probe failure\n"))
+            except RepositoryOwnershipError:
+                return False
+        expect("a .git directory with no HEAD stays outer-owned when the probe fails",
+               hollow_marker_stays_outer_owned())
+
+        # Registered-worktree metadata, forged. Each of these three fixtures satisfies every
+        # part of the linked-worktree contract except one, so each names one operand.
+        registered = os.path.join(tmp, "registered")
+        subprocess.run(
+            ["git", "-C", owner, "-c", "user.name=fixture", "-c",
+             "user.email=fixture@example.invalid", "commit", "--quiet",
+             "--allow-empty", "-m", "base"], check=True)
+        subprocess.run(
+            ["git", "-C", owner, "worktree", "add", "--quiet", "--detach", registered],
+            check=True)
+        expect("a registered linked worktree is an ownership boundary",
+               is_repository_boundary(registered, owner))
+        registered_admin = _gitdir_from_marker(registered, os.path.join(registered, ".git"))
+        backlink_path = os.path.join(registered_admin, "gitdir")
+        original_backlink = open(backlink_path, encoding="utf-8").read()
+        with open(backlink_path, "w", encoding="utf-8") as fh:
+            fh.write(os.path.join(tmp, "some-other-worktree", ".git") + "\n")
+        expect("a linked worktree whose backlink names another worktree is refused",
+               not _registered_linked_worktree(
+                   registered, os.path.join(registered, ".git")))
+        with open(backlink_path, "w", encoding="utf-8") as fh:
+            fh.write(original_backlink)
+        expect("the restored backlink is accepted again",
+               _registered_linked_worktree(registered, os.path.join(registered, ".git")))
+
+        # Without the commondir requirement, an administration directory that is not a
+        # registered worktree at all can be dressed to satisfy the parent comparison: point
+        # its `worktrees` entry at its own parent and add a backlink. The separately-bound
+        # arm refuses it on the sibling-key exclusion, so only this operand stops it.
+        forged_link = os.path.join(tmp, "forged-link")
+        forged_link_admin = os.path.join(tmp, "forged-link-admin")
+        subprocess.run(
+            ["git", "init", "--quiet", "--separate-git-dir", forged_link_admin,
+             forged_link], check=True)
+        subprocess.run(
+            ["git", "--git-dir", forged_link_admin, "config", "core.worktree",
+             forged_link], check=True)
+        with open(os.path.join(forged_link_admin, "gitdir"), "w", encoding="utf-8") as fh:
+            fh.write(os.path.join(forged_link, ".git") + "\n")
+        os.symlink(os.path.dirname(forged_link_admin),
+                   os.path.join(forged_link_admin, "worktrees"))
+        expect("an administration directory with no commondir is not a linked worktree",
+               not _registered_linked_worktree(
+                   forged_link, os.path.join(forged_link, ".git")))
+        expect("the sibling-key exclusion refuses the same forged administration directory",
+               not _bound_separate_gitdir(
+                   forged_link, os.path.join(forged_link, ".git"), subprocess.run))
+        expect("the forged administration directory is not an ownership boundary",
+               not is_repository_boundary(forged_link, owner))
+
+        # A worktrees parent that is not the common directory's own `worktrees` entry.
+        strayed = os.path.join(tmp, "strayed-admin")
+        shutil.copytree(registered_admin, strayed, symlinks=True)
+        with open(os.path.join(strayed, "commondir"), "w", encoding="utf-8") as fh:
+            fh.write(os.path.join(owner, ".git") + "\n")
+        strayed_worktree = os.path.join(tmp, "strayed")
+        os.makedirs(strayed_worktree)
+        # The backlink names THIS worktree, so the backlink comparison accepts it and the
+        # parent comparison is the only operand left to refuse the administration
+        # directory's location.
+        with open(os.path.join(strayed, "gitdir"), "w", encoding="utf-8") as fh:
+            fh.write(os.path.join(strayed_worktree, ".git") + "\n")
+        with open(os.path.join(strayed_worktree, ".git"), "w", encoding="utf-8") as fh:
+            fh.write(f"gitdir: {strayed}\n")
+        expect("an administration directory outside the common worktrees entry is refused",
+               not _registered_linked_worktree(
+                   strayed_worktree, os.path.join(strayed_worktree, ".git")))
+
+        # core.worktree must resolve to exactly one value. This pins the behaviour, not one
+        # operand: the terminator count and same_file's malformed-path arm both refuse the
+        # joined record, so neither alone can be graded by removing it.
+        subprocess.run(
+            ["git", "--git-dir", separate_admin, "config", "--add", "core.worktree",
+             owner], check=True)
+        expect("a doubly-recorded core.worktree is not a separately-bound gitdir",
+               not _bound_separate_gitdir(
+                   separate, os.path.join(separate, ".git"), subprocess.run))
+        subprocess.run(
+            ["git", "--git-dir", separate_admin, "config", "--unset-all",
+             "core.worktree"], check=True)
+        subprocess.run(
+            ["git", "--git-dir", separate_admin, "config", "core.worktree", separate],
+            check=True)
+        expect("one recorded core.worktree is accepted again",
+               _bound_separate_gitdir(
+                   separate, os.path.join(separate, ".git"), subprocess.run))
+
+        # An indexed gitlink is a 160000 entry. A tracked ordinary file at the same path is
+        # not a repository boundary, and only the mode comparison separates them.
+        gitlinked = os.path.join(owner, "gitlinked")
+        subprocess.run(["git", "init", "--quiet", gitlinked], check=True)
+        subprocess.run(
+            ["git", "-C", gitlinked, "-c", "user.name=fixture", "-c",
+             "user.email=fixture@example.invalid", "commit", "--quiet",
+             "--allow-empty", "-m", "nested"], check=True)
+        subprocess.run(["git", "-C", owner, "add", "--", "gitlinked"], check=True)
+        expect("an indexed gitlink is an ownership boundary",
+               _indexed_gitlink(gitlinked, owner, subprocess.run))
+        plain = os.path.join(owner, "plain")
+        os.makedirs(plain)
+        with open(os.path.join(plain, "note.md"), "w", encoding="utf-8") as fh:
+            fh.write("note\n")
+        subprocess.run(["git", "-C", owner, "add", "--", "plain/note.md"], check=True)
+        expect("a tracked ordinary path is not an indexed gitlink",
+               not _indexed_gitlink(plain, owner, subprocess.run))
+        # The index is not the filesystem. A path recorded as an ordinary blob and later
+        # replaced by a separately-bound worktree matches the recorded path exactly, so the
+        # 160000 comparison is the only thing separating a stale entry from a gitlink.
+        stale = os.path.join(owner, "stale-entry")
+        with open(stale, "w", encoding="utf-8") as fh:
+            fh.write("was a file\n")
+        subprocess.run(["git", "-C", owner, "add", "--", "stale-entry"], check=True)
+        os.remove(stale)
+        stale_admin = os.path.join(tmp, "stale-admin")
+        subprocess.run(
+            ["git", "init", "--quiet", "--separate-git-dir", stale_admin, stale],
+            check=True)
+        expect("a stale ordinary index entry is not an indexed gitlink",
+               not _indexed_gitlink(stale, owner, subprocess.run))
 
     print(f"SELFTEST-SUMMARY suite=repository-ownership checks={checks} failures={failures}")
     return 1 if failures else 0

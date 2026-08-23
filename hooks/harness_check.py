@@ -134,12 +134,12 @@ DESC_CAP = 400                # house cap (spec ceiling is 1024)
 SELFTEST_SUITES = [
     ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"], 1366),
     ("askq_timeout_guard", ["hooks/askq_timeout_guard.py", "--selftest"], 13),
-    ("announced_work_guard", ["hooks/announced_work_guard.py", "--selftest"], 86),
+    ("announced_work_guard", ["hooks/announced_work_guard.py", "--selftest"], 136),
     ("harness_report", ["hooks/harness_report.py", "--selftest"], 12),
     ("cc-cost", ["tools/cc-cost.py", "--selftest"], 8),
     ("codex-cost", ["tools/codex-cost.py", "--selftest"], 28),
-    ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 53),
-    ("repository-ownership", ["tools/repository_ownership.py", "--selftest"], 36),
+    ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 57),
+    ("repository-ownership", ["tools/repository_ownership.py", "--selftest"], 40),
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 8),
     ("verify-review-publication",
      ["tools/verify-review-publication.py", "--selftest"], 94),
@@ -3670,8 +3670,8 @@ def selftest():
         )
 
         # The exit status decides here too. A failed index query can still have written
-        # gitlink-shaped bytes, and parsing them prunes the directory on the word of a
-        # command that reported it had failed.
+        # gitlink-shaped bytes. Neither parsing those bytes nor treating the query as an
+        # ordinary negative is valid; ownership is unknown and the inventory must fail.
         def stale_type_partial_stage(args, **kwargs):
             if "--stage" in args:
                 return subprocess.CompletedProcess(
@@ -3682,8 +3682,9 @@ def selftest():
         stale_type_partial_run = Run(stale_type_owner, ci=True)
         stale_type_partial_run.c8_reserved_basenames(runner=stale_type_partial_stage)
         expect_red(
-            "C8 rejects gitlink-shaped output from a failed index query",
-            lambda: any(c == "C8" and "sub/CLAUDE.md" in d
+            "C8 fails closed on gitlink-shaped output from a failed index query",
+            lambda: any(c == "C8" and "cannot inspect indexed gitlink" in d
+                        and "git ls-files --stage exited 1: planted" in d
                         for c, d in stale_type_partial_run.failures),
         )
         shutil.rmtree(stale_type_owner)

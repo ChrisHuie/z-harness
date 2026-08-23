@@ -60,6 +60,7 @@ reason on stderr · 1 selftest failure.
 import json
 import os
 import re
+import subprocess
 import sys
 
 VERSION = "1.0.0"
@@ -111,7 +112,57 @@ ANNOUNCE = re.compile(
 # announcement in this one.
 REPORT = re.compile(
     r'\b(?:completed|finished|took|landed|ran|passed|failed|produced|returned|wrote|'
-    r'reproduced|stayed|showed|found|already)\b', re.I)
+    r'reproduced|stayed|showed|found)\b', re.I)
+
+# A completed-work token is evidence only when it is the predicate of the activity that
+# ANNOUNCE matched. The participle arm can form that grammatical subject; "Let me", "I'll"
+# and the fixed-form arms cannot. Clause boundaries stop the association, so a prior run's
+# result in "Starting the audit because the previous run failed" cannot excuse the new
+# announcement. This remains an explicit English heuristic, not a general parser.
+PARTICIPLE_ANNOUNCEMENT = re.compile(
+    r'(?:Starting|Running|Proceeding|Continuing|Beginning|Kicking off|Firing off)'
+    r'\s+(?:with|on|the|a|an)$', re.I)
+REPORT_CLAUSE_BREAK = re.compile(
+    r'[.!?;,](?=\s|$)|:(?=[ \t]+[A-Za-z])|—|(?<!\S)--(?=\s)|'
+    r'\b(?:and|but|or|nor|so|yet|because|since|after|before|when|while|'
+    r'although|though|whereas|if|unless|until|once|which|who|whose|that|then)\b',
+    re.I)
+REPORT_WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9_'/-]*")
+REPORT_MODIFIERS = frozenset({
+    "already", "earlier", "formerly", "last", "previously", "prior", "recently",
+})
+REPORT_NONFINAL = frozenset({
+    "a", "an", "the", "of", "for", "with", "on", "in", "from", "to", "by",
+    "against", "because", "since", "after", "before", "when", "while", "although",
+    "though", "whereas", "if", "unless", "until", "once", "which", "who", "whose",
+    "that", "and", "but", "or", "nor", "so", "yet", "not", "never",
+})
+REPORT_INCOMPLETE = frozenset({
+    "will", "would", "shall", "should", "may", "might", "can", "could", "must",
+    "being", "not", "never",
+})
+
+
+def reports_this_activity(unit, found):
+    """Return whether a direct completed-work predicate belongs to ``found``."""
+    if not PARTICIPLE_ANNOUNCEMENT.search(found.group(0)):
+        return False
+    remainder = unit[found.end():]
+    for report in REPORT.finditer(remainder):
+        between = remainder[:report.start()]
+        if REPORT_CLAUSE_BREAK.search(between):
+            return False
+        words = [word.casefold() for word in REPORT_WORD.findall(between)]
+        core = [word for word in words if word not in REPORT_MODIFIERS]
+        # A determiner is inside ANNOUNCE, so the remainder must still name an activity.
+        # This rejects "Starting the failed audit" and "Starting the already completed
+        # audit"; a dangling preposition rejects "Starting the audit for failed checks".
+        if not core or core[-1] in REPORT_NONFINAL:
+            continue
+        if any(word in REPORT_INCOMPLETE for word in core):
+            continue
+        return True
+    return False
 
 HANDBACK = re.compile(
     r'(stopping here|stopped here|say go|your call|let me know|over to you|'
@@ -153,6 +204,9 @@ SPLIT = re.compile(
 # prefix has no `>`, `|`, `#` or list-marker alternative, so an unstripped lead cannot be an
 # anchor. Stripping those leads was the first attempt and it invented seven false positives.
 EMPHASIS = re.compile(r'^(?:\*\*|__|\*|_)+')
+CONTAINER = re.compile(
+    r'^[ \t]*(?:[>|#]|[-+*][ \t]+|\d+[.)][ \t]+)'
+)
 # A fenced unit is the one container HANDBACK must not read inside either, because
 # `let me know` in a code sample is not the speaker handing anything back. A bulleted or
 # quoted handback IS one, so only the fence is excluded, not every container. An INDENTED
@@ -160,25 +214,41 @@ EMPHASIS = re.compile(r'^(?:\*\*|__|\*|_)+')
 # with it, so the marker never survives to be read -- said here rather than carried as an
 # operand nothing can reach.
 def boundary(text):
-    """The last TAIL_UNITS units as (text, is_code) -- never pre-joined.
+    """The last TAIL_UNITS units as (text, is_code, is_container).
 
     A fence is tracked across units rather than tested per unit, because a fence containing
     a list marker is split into three units and only the first carries the delimiter. Every
     unit is still emitted: they occupy tail slots, which is what keeps an announcement three
-    paragraphs above a closing table out of the boundary.
+    paragraphs above a closing table out of the boundary. Container identity comes from the
+    original physical line, so sentence splitting cannot turn a quote's second sentence into
+    a claim by the speaker.
     """
+    body = text.strip()
+    raw_parts = []
+    cursor = 0
+    for separator in SPLIT.finditer(body):
+        raw_parts.append((body[cursor:separator.start()], cursor))
+        cursor = separator.end()
+    raw_parts.append((body[cursor:], cursor))
+
     parts, fenced = [], False
-    for part in SPLIT.split(text.strip()):
+    for part, start in raw_parts:
         if not part or not part.strip():
             continue
+        line_start = body.rfind("\n", 0, start) + 1
+        line_end = body.find("\n", line_start)
+        if line_end < 0:
+            line_end = len(body)
+        container = bool(CONTAINER.match(body[line_start:line_end]))
         opens = part.lstrip().startswith(("```", "~~~"))
         if fenced or opens:
-            parts.append((part, True))
+            parts.append((part, True, container))
             if opens:
                 fenced = not fenced
             continue
-        parts.append((EMPHASIS.sub("", part).strip(), False))
-    return [(unit, code) for unit, code in parts if unit][-TAIL_UNITS:]
+        unit = part.strip() if container else EMPHASIS.sub("", part).strip()
+        parts.append((unit, False, container))
+    return [(unit, code, container) for unit, code, container in parts if unit][-TAIL_UNITS:]
 
 
 BLOCK_MSG = """\
@@ -270,7 +340,7 @@ def judge(payload):
     units = boundary(text)
     # Code is excluded here too. Reading it let text inside a fence retract a real
     # announcement in the sentence above, which is the same mistake in the other direction.
-    tail = " ".join(unit for unit, code in units if not code)
+    tail = " ".join(unit for unit, code, _container in units if not code)
     # A turn that ends on a QUESTION is asking, not claiming — whatever was
     # said before it. Found on a real transcript: a message opening "Starting
     # with a mechanical producer-existence check" and closing "Does the
@@ -284,12 +354,12 @@ def judge(payload):
     # HANDBACK stays on the joined tail: handing the decision back in the following
     # sentence retracts an announcement in the one before it, which is the whole point of
     # reading two units rather than one.
-    for unit, is_code in units:
-        if is_code:
+    for unit, is_code, is_container in units:
+        if is_code or is_container:
             continue
-        found = ANNOUNCE.search(unit)
-        if found and not REPORT.search(unit[found.end():]):
-            return found.group(0).strip()
+        for found in ANNOUNCE.finditer(unit):
+            if not reports_this_activity(unit, found):
+                return found.group(0).strip()
     return None
 
 
@@ -466,6 +536,27 @@ def selftest():
         ("a first-column table cell is not a claim",
          {"last_assistant_message": "| step | owner |\n|---|---|\n"
                                     "| Starting the audit | F1 |"}, False),
+        # Structural identity belongs to the physical Markdown line, not only its first
+        # sentence. SPLIT removes the marker from every later fragment unless boundary()
+        # carries the line's classification beside it.
+        ("a quote's second sentence remains quoted material",
+         {"last_assistant_message": "> Log says safe. Starting the audit."}, False),
+        ("a hyphen item's second sentence remains a plan item",
+         {"last_assistant_message": "- Status note. Starting the audit."}, False),
+        ("a plus item's second sentence remains a plan item",
+         {"last_assistant_message": "+ Status note. Starting the audit."}, False),
+        ("an asterisk item's first sentence is not emphasis",
+         {"last_assistant_message": "* Starting the audit."}, False),
+        ("an asterisk item's second sentence remains a plan item",
+         {"last_assistant_message": "* Status note. Starting the audit."}, False),
+        ("a numbered item's second sentence remains a plan item",
+         {"last_assistant_message": "1. Status note. Starting the audit."}, False),
+        ("a table cell's second sentence remains shown material",
+         {"last_assistant_message": "| Status note. Starting the audit. |"}, False),
+        ("a heading's second sentence remains a heading",
+         {"last_assistant_message": "## Status note. Starting the audit."}, False),
+        ("the same second sentence in prose remains an announcement",
+         {"last_assistant_message": "Log says safe. Starting the audit."}, True),
         ("text inside a fence cannot retract a claim above it",
          {"last_assistant_message": "Starting the IR-38 audit.\n\n```\nlet me know```"},
          True),
@@ -525,6 +616,55 @@ def selftest():
         ("a clause reporting elapsed work is not an announcement",
          {"last_assistant_message": "The receipt landed; running the sweep took four "
                                     "minutes."}, False),
+        # A report token is not portable evidence for every earlier clause. Each historical
+        # result below belongs to another activity and therefore cannot excuse this one.
+        ("a semicolon-separated historical failure does not excuse the announcement",
+         {"last_assistant_message": "Starting the audit; the prior run failed."}, True),
+        ("a colon-labelled historical failure does not excuse the announcement",
+         {"last_assistant_message": "Starting the audit: the prior run failed."}, True),
+        ("a timestamp colon stays inside the direct report",
+         {"last_assistant_message": "Starting the audit at 12:04 failed."}, False),
+        ("a ratio colon stays inside the direct report",
+         {"last_assistant_message": "Running the sweep at 1:1 returned zero."}, False),
+        ("a predicate directly after a colon still reports the activity",
+         {"last_assistant_message": "Starting the audit: completed in 4m."}, False),
+        ("URL punctuation stays inside the direct report",
+         {"last_assistant_message":
+          "Starting the audit at https://example.test failed."}, False),
+        ("an image tag colon stays inside the direct report",
+         {"last_assistant_message": "Starting the image:v1 audit failed."}, False),
+        ("a URN colon stays inside the direct report",
+         {"last_assistant_message": "Starting the urn:example audit failed."}, False),
+        ("version dots stay inside the direct report",
+         {"last_assistant_message": "Starting the v1.2.3 audit failed."}, False),
+        ("an attached CLI option stays inside the direct report",
+         {"last_assistant_message": "Starting the audit with --verbose failed."}, False),
+        ("an ASCII-dash historical failure does not excuse the announcement",
+         {"last_assistant_message": "Starting the audit -- the prior run failed."}, True),
+        ("an em-dash historical failure does not excuse the announcement",
+         {"last_assistant_message": "Starting the audit — the prior run failed."}, True),
+        ("a causal historical failure does not excuse the announcement",
+         {"last_assistant_message": "Starting the audit because the previous run failed."},
+         True),
+        ("a temporal historical result does not excuse the announcement",
+         {"last_assistant_message": "Starting the audit after the checks passed."}, True),
+        ("a direct completion predicate still reports the activity",
+         {"last_assistant_message": "Running the sweep completed in 4m."}, False),
+        ("a direct elapsed predicate still reports the activity",
+         {"last_assistant_message": "Starting the audit took four minutes."}, False),
+        ("a direct failure predicate still reports the activity",
+         {"last_assistant_message": "Proceeding with step 3 failed at 12:04."}, False),
+        ("a report adjective before the activity noun is not evidence",
+         {"last_assistant_message": "Starting the failed audit."}, True),
+        ("a report adjective after a dangling preposition is not evidence",
+         {"last_assistant_message": "Starting the audit for failed checks."}, True),
+        ("an aspect marker plus a report adjective is not evidence",
+         {"last_assistant_message": "Starting the already completed audit."}, True),
+        ("a future passive is not a completed-work report",
+         {"last_assistant_message": "Running the sweep will be completed tomorrow."}, True),
+        ("a genuine report cannot hide a later announcement in the same unit",
+         {"last_assistant_message": "Running the sweep completed in 4m; starting the audit."},
+         True),
         ("a report in the NEXT sentence does not excuse this one",
          {"last_assistant_message": "Starting the IR-38 audit. The last one took an hour."},
          True),
@@ -622,6 +762,63 @@ def selftest():
         checks += 1
         label = got if isinstance(got, str) else ("block" if got else "allow")
         print(f"  {'PASS' if got == want else 'FAIL'} {name} -> {label}")
+
+    # Production-path controls: these enter through JSON stdin and assert the hook's actual
+    # exit/receipt contract, not only judge(). The direct cases above localise failures; this
+    # matrix proves main() still carries each decision to the Stop host correctly.
+    environment = dict(os.environ)
+    environment.pop("ANNOUNCED_WORK_GUARD", None)
+    for label, message, want, trigger in (
+        ("main blocks a semicolon-separated historical report",
+         "Starting the audit; the prior run failed.", 2, "Starting the"),
+        ("main blocks a colon-labelled historical report",
+         "Starting the audit: the prior run failed.", 2, "Starting the"),
+        ("main keeps a timestamp colon inside the direct report",
+         "Starting the audit at 12:04 failed.", 0, None),
+        ("main keeps a predicate directly after a colon with the activity",
+         "Starting the audit: completed in 4m.", 0, None),
+        ("main keeps URL punctuation inside the direct report",
+         "Starting the audit at https://example.test failed.", 0, None),
+        ("main keeps version dots inside the direct report",
+         "Starting the v1.2.3 audit failed.", 0, None),
+        ("main keeps an attached CLI option inside the direct report",
+         "Starting the audit with --verbose failed.", 0, None),
+        ("main blocks an ASCII-dash historical report",
+         "Starting the audit -- the prior run failed.", 2, "Starting the"),
+        ("main blocks an em-dash historical report",
+         "Starting the audit — the prior run failed.", 2, "Starting the"),
+        ("main blocks a causal historical report",
+         "Starting the audit because the previous run failed.", 2, "Starting the"),
+        ("main blocks a temporal historical report",
+         "Starting the audit after the checks passed.", 2, "Starting the"),
+        ("main allows the activity's direct completed-work predicate",
+         "Running the sweep completed in 4m.", 0, None),
+        ("main checks a later announcement after a genuine report",
+         "Running the sweep completed in 4m; starting the audit.", 2, "; starting the"),
+        ("main preserves a quote container across sentence splitting",
+         "> Log says safe. Starting the audit.", 0, None),
+        ("main preserves a hyphen list across sentence splitting",
+         "- Status note. Starting the audit.", 0, None),
+        ("main distinguishes an asterisk list from emphasis",
+         "* Status note. Starting the audit.", 0, None),
+        ("main preserves a table row across sentence splitting",
+         "| Status note. Starting the audit. |", 0, None),
+        ("main preserves a heading across sentence splitting",
+         "## Status note. Starting the audit.", 0, None),
+        ("main still blocks the plain-prose control",
+         "Log says safe. Starting the audit.", 2, "Starting the"),
+    ):
+        done = subprocess.run(
+            [sys.executable, os.path.abspath(__file__)],
+            input=json.dumps({"hook_event_name": "Stop",
+                              "last_assistant_message": message}),
+            capture_output=True, text=True, timeout=5, env=environment)
+        ok = (done.returncode == want
+              and ((want == 0 and not done.stdout and not done.stderr)
+                   or (want == 2 and not done.stdout and trigger in done.stderr)))
+        failures += 0 if ok else 1
+        checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} {label} -> rc={done.returncode}")
     print(f"\n  selftest: {failures} failure(s)")
     print(f"SELFTEST-SUMMARY suite=announced_work_guard checks={checks} "
           f"failures={failures}")

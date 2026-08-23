@@ -1089,13 +1089,12 @@ def hook_mode(raw, runtime="claude", require_scratch=False):
 
 
 # The same roster tools/repository_ownership.py carries, restated rather than imported.
-# An import would fail CLOSED, not open -- an unmodelled error here already becomes a deny
-# -- and that is the problem: a hook is installed independently of the tools directory, and
-# a hook newer than the installed tools/ would deny every Agent and Task spawn on the
-# machine until the two catch up. That is the outage the doctrine table already names for
-# this guard, and it is live: the current installation has no tools/repository_ownership.py
-# at all. A restated constant can only go stale, and staleness is what harness_check
-# compares both definitions against a literal roster for.
+# A top-level import would fail OPEN: it runs before hook_mode's catch-all exists, and this
+# host continues the tool call when the process exits with anything other than 2. A hook is
+# installed independently of the tools directory, so a hook newer than the installed tools/
+# could silently disable this guard until the two catch up. Keeping the hook self-contained
+# avoids that partial-install dependency. A restated constant can only go stale, and
+# harness_check compares both definitions against a literal roster for that reason.
 _GIT_REPOSITORY_ENV = frozenset({
     "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
     "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",

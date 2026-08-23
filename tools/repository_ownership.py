@@ -141,17 +141,28 @@ def _git_common_dir(admin):
 
 
 def _indexed_gitlink(path, owner_root, runner):
-    if owner_root is None:
+    # A markerless installed-package root has no Git index and therefore cannot own a
+    # gitlink. Do not manufacture an operational failure by asking Git for an index that
+    # the caller already knows does not exist.
+    if owner_root is None or not os.path.lexists(os.path.join(owner_root, ".git")):
         return False
     relative = os.path.relpath(path, owner_root).replace(os.sep, "/")
     if relative == ".." or relative.startswith("../"):
         return False
-    staged = run_git(
-        runner,
-        ["git", "-C", owner_root, "ls-files", "--stage", "-z", "--", relative],
-        capture_output=True, text=False)
+    try:
+        staged = run_git(
+            runner,
+            ["git", "-C", owner_root, "ls-files", "--stage", "-z", "--", relative],
+            capture_output=True, text=False)
+    except (OSError, ValueError) as exc:
+        raise RepositoryOwnershipError(
+            f"cannot inspect indexed gitlink {path!r}: "
+            f"cannot run git ls-files --stage: {exc}") from exc
     if staged.returncode != 0:
-        return False
+        raise RepositoryOwnershipError(
+            f"cannot inspect indexed gitlink {path!r}: "
+            + git_command_failure(
+                staged.returncode, staged.stderr, "git ls-files --stage"))
     for record in bytes(staged.stdout).split(b"\0"):
         metadata, separator, recorded_path = record.partition(b"\t")
         if (separator and metadata.startswith(b"160000 ")
@@ -242,9 +253,23 @@ def is_repository_boundary(path, owner_root=None, runner=None):
     if not os.path.isfile(marker):
         return False
     try:
-        return (_indexed_gitlink(path, owner_root, runner)
-                or _registered_linked_worktree(path, marker)
-                or _bound_separate_gitdir(path, marker, runner))
+        indexed_problem = None
+        try:
+            if _indexed_gitlink(path, owner_root, runner):
+                return True
+        except RepositoryOwnershipError as exc:
+            # A failed index read makes this operand unknown, not false. Another ownership
+            # arm may still prove the boundary independently; only re-raise when neither
+            # does, preserving the three-valued rule ``unknown OR true == true``.
+            indexed_problem = exc
+        if (_registered_linked_worktree(path, marker)
+                or _bound_separate_gitdir(path, marker, runner)):
+            return True
+        if indexed_problem is not None:
+            raise indexed_problem
+        return False
+    except RepositoryOwnershipError:
+        raise
     except (OSError, ValueError) as exc:
         # ValueError as well as OSError: a malformed record reaching os.path.samefile with
         # an embedded NUL raises it, and callers model RepositoryOwnershipError alone, so
@@ -322,6 +347,19 @@ def selftest():
         class Done:
             def __init__(self, rc=0, stdout=b"", stderr=b""):
                 self.returncode, self.stdout, self.stderr = rc, stdout, stderr
+
+        markerless_owner = os.path.join(tmp, "markerless-owner")
+        markerless_candidate = os.path.join(markerless_owner, "candidate")
+        os.makedirs(markerless_candidate)
+        markerless_called = False
+        def markerless_runner(*_args, **_kwargs):
+            nonlocal markerless_called
+            markerless_called = True
+            raise AssertionError("a markerless owner has no index to query")
+        expect("a markerless package root is a known non-gitlink without a Git query",
+               not _indexed_gitlink(
+                   markerless_candidate, markerless_owner, markerless_runner)
+               and not markerless_called)
 
         def wrong_root(_argv, **_kwargs):
             return Done(stdout=os.fsencode(decoy) + b"\n")
@@ -618,7 +656,62 @@ def selftest():
         expect("a file-marked submodule is a boundary through the indexed-gitlink arm",
                not _registered_linked_worktree(
                    submodule, os.path.join(submodule, ".git"))
+               and not _bound_separate_gitdir(
+                   submodule, os.path.join(submodule, ".git"), subprocess.run)
                and is_repository_boundary(submodule, owner))
+
+        def failed_index_query(argv, **kwargs):
+            if "ls-files" in argv and "--stage" in argv:
+                return Done(128, b"", b"planted unreadable owner index\n")
+            return subprocess.run(argv, **kwargs)
+
+        direct_problem = boundary_problem = ""
+        try:
+            _indexed_gitlink(submodule, owner, failed_index_query)
+        except RepositoryOwnershipError as exc:
+            direct_problem = str(exc)
+        try:
+            is_repository_boundary(submodule, owner, failed_index_query)
+        except RepositoryOwnershipError as exc:
+            boundary_problem = str(exc)
+        expect("a failed indexed-gitlink query is typed at the helper and public boundary",
+               all("git ls-files --stage exited 128" in problem
+                   and "planted unreadable owner index" in problem
+                   for problem in (direct_problem, boundary_problem)))
+
+        def unlaunchable_index_query(argv, **kwargs):
+            if "ls-files" in argv and "--stage" in argv:
+                raise OSError(5, "planted unlaunchable index query")
+            return subprocess.run(argv, **kwargs)
+
+        direct_problem = boundary_problem = ""
+        try:
+            _indexed_gitlink(submodule, owner, unlaunchable_index_query)
+        except RepositoryOwnershipError as exc:
+            direct_problem = str(exc)
+        try:
+            is_repository_boundary(submodule, owner, unlaunchable_index_query)
+        except RepositoryOwnershipError as exc:
+            boundary_problem = str(exc)
+        expect("an unlaunchable indexed-gitlink query has the same typed boundary",
+               all("cannot run git ls-files --stage" in problem
+                   and "planted unlaunchable index query" in problem
+                   for problem in (direct_problem, boundary_problem)))
+
+        # One unknown operand cannot erase a positive sibling. This separately-bound
+        # worktree lives under the owner so the planted index failure is reached, while its
+        # own core.worktree binding independently proves the boundary.
+        separate_inside = os.path.join(owner, "separate-inside")
+        separate_inside_admin = os.path.join(tmp, "separate-inside-admin")
+        subprocess.run(
+            ["git", "init", "--quiet", "--separate-git-dir", separate_inside_admin,
+             separate_inside], check=True)
+        subprocess.run(
+            ["git", "--git-dir", separate_inside_admin, "config", "core.worktree",
+             separate_inside], check=True)
+        expect("a positive separate-gitdir proof survives an unknown index operand",
+               is_repository_boundary(separate_inside, owner, failed_index_query))
+
         plain = os.path.join(owner, "plain")
         os.makedirs(plain)
         with open(os.path.join(plain, "note.md"), "w", encoding="utf-8") as fh:

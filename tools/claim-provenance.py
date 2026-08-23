@@ -751,6 +751,64 @@ def selftest():
         record("a late ownership I/O failure becomes a named citation verdict",
                _late_state == "io" and "planted late ownership EIO" in _late_detail)
 
+        # A real indexed gitlink is the cross-layer boundary case: with both file-marker
+        # alternatives false, a failed owner-index read must become ``io`` rather than
+        # certify the nested file as evidence belonging to this repository.
+        subprocess.run(["git", "init", "--quiet", tmp], check=True)
+        _gitlink = os.path.join(tmp, "indexed-submodule")
+        subprocess.run(["git", "init", "--quiet", _gitlink], check=True)
+        _gitlink_evidence = os.path.join(_gitlink, "evidence.md")
+        with open(_gitlink_evidence, "w", encoding="utf-8") as fh:
+            fh.write("nested evidence\n")
+        subprocess.run(
+            ["git", "-C", _gitlink, "-c", "user.name=fixture", "-c",
+             "user.email=fixture@example.invalid", "add", "--", "evidence.md"],
+            check=True)
+        subprocess.run(
+            ["git", "-C", _gitlink, "-c", "user.name=fixture", "-c",
+             "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "nested"],
+            check=True)
+        _gitlink_admin = os.path.join(tmp, ".indexed-submodule-admin")
+        os.rename(os.path.join(_gitlink, ".git"), _gitlink_admin)
+        with open(os.path.join(_gitlink, ".git"), "w", encoding="utf-8") as fh:
+            fh.write(f"gitdir: {_gitlink_admin}\n")
+        subprocess.run(["git", "-C", tmp, "add", "--", "indexed-submodule"], check=True)
+        _staged = subprocess.run(
+            ["git", "-C", tmp, "ls-files", "--stage", "--", "indexed-submodule"],
+            capture_output=True, text=True, check=True).stdout
+        record("the citation fixture is a genuine indexed gitlink",
+               _staged.startswith("160000 "))
+        _normal_path, _normal_state, _normal_detail = resolve_citation(
+            "indexed-submodule/evidence.md", tmp)
+        record("a qualified citation into the indexed gitlink is refused as a boundary",
+               _normal_path is None and _normal_state == "boundary"
+               and _normal_detail is not None)
+
+        def failed_index_runner(argv, **kwargs):
+            if "ls-files" in argv and "--stage" in argv:
+                return subprocess.CompletedProcess(
+                    argv, 128, stdout=b"", stderr=b"planted unreadable owner index\n")
+            return subprocess.run(argv, **kwargs)
+
+        _failed_path, _failed_state, _failed_detail = resolve_citation(
+            "indexed-submodule/evidence.md", tmp, failed_index_runner)
+        record("a failed gitlink index query is an I/O verdict, not resolved evidence",
+               _failed_path is None and _failed_state == "io"
+               and "git ls-files --stage exited 128" in (_failed_detail or "")
+               and "planted unreadable owner index" in (_failed_detail or ""))
+
+        def unlaunchable_index_runner(argv, **kwargs):
+            if "ls-files" in argv and "--stage" in argv:
+                raise OSError(5, "planted unlaunchable index query")
+            return subprocess.run(argv, **kwargs)
+
+        _launch_path, _launch_state, _launch_detail = resolve_citation(
+            "indexed-submodule/evidence.md", tmp, unlaunchable_index_runner)
+        record("an unlaunchable gitlink index query has the same I/O verdict",
+               _launch_path is None and _launch_state == "io"
+               and "cannot run git ls-files --stage" in (_launch_detail or "")
+               and "planted unlaunchable index query" in (_launch_detail or ""))
+
         # ...and must NOT cover a token whose file half does not exist. Calling that a
         # location would replace a true "not found" with a claim that the file is there.
         _, _absent_state, _absent_detail = resolve_citation("schemas/nope.json:1", tmp)

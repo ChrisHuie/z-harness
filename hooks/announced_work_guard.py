@@ -127,8 +127,9 @@ PARTICIPLE_ANNOUNCEMENT = re.compile(
     r'\s+(?:with|on|the|a|an)$', re.I)
 REPORT_CLAUSE_BREAK = re.compile(
     r'[.!?;,](?=\s|$)|:(?=[ \t]+[A-Za-z])|—|(?<!\S)--(?=\s)|'
-    r'\b(?:and|but|or|nor|so|yet|because|since|after|before|when|while|'
-    r'although|though|whereas|if|unless|until|once|which|who|whose|that|then)\b',
+    r'\b(?:and|but|or|nor|so|yet|because|since|after|before|when|while|although|'
+    r'though|whereas|if|unless|until|once|whether|why|where|how|which|who|whose|'
+    r'that|then)\b',
     re.I)
 REPORT_WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9_'/-]*")
 REPORT_MODIFIERS = frozenset({
@@ -152,8 +153,10 @@ REPORT_INCOMPLETE = frozenset({
 # Block classification has already separated containers and paragraphs; wrapping inside
 # the remaining prose unit must not change whether a predicate reports completed work.
 REPORT_ADJECTIVAL = frozenset({"completed", "finished", "passed", "failed"})
+# Matched with pattern.match(remainder, pos): the call anchors the attempt, so the
+# pattern itself carries no ^ (which would refuse every nonzero position).
 REPORT_RESULT_TAIL = re.compile(
-    r'^[*_]*(?:[ \t\r\n]*$|[.!?;,:)]|[ \t\r\n]+(?:in|at|on|by|after|before|during|with|'
+    r'[*_]*(?:[ \t\r\n]*$|[.!?;,:)]|[ \t\r\n]+(?:in|at|on|by|after|before|during|with|'
     r'without|to|because|since|when|successfully|unsuccessfully|earlier|recently|'
     r'today|yesterday|again|a|an|the|this|that|these|those|all|both|each|every|any|'
     r'some|several|many|multiple|no|another|[0-9]+|zero|one|two|three|four|five|six|'
@@ -162,25 +165,52 @@ REPORT_RESULT_TAIL = re.compile(
 
 
 def reports_this_activity(unit, found):
-    """Return whether a direct completed-work predicate belongs to ``found``."""
+    """Return whether a direct completed-work predicate belongs to ``found``.
+
+    One pass, linear in the unit. The clause-break search and the token state advance
+    alongside the report matches instead of being recomputed over a growing prefix: this
+    runs inside the registered five-second hook budget, and a rescanning shape let a
+    thirty-kilobyte tail of report tokens time the guard out into an allow. A token that
+    straddles the report match contributes no word state; between spaced words the two
+    formulations read the same prefix.
+    """
     if not PARTICIPLE_ANNOUNCEMENT.search(found.group(0)):
         return False
     remainder = unit[found.end():]
+    token_iter = REPORT_WORD.finditer(remainder)
+    token = next(token_iter, None)
+    core_last = None          # last non-modifier token ending at or before the report
+    core_incomplete = False   # an INCOMPLETE token seen among those
+    # A full-string break match is verified against each report's own prefix (endpos),
+    # because a lookahead may succeed only on characters past the cut: a colon before
+    # "completed in 4m" is a label there, not a clause break. The one break a prefix can
+    # see that the full string cannot is terminal punctuation directly at the cut, checked
+    # per report in constant time.
+    break_hint = REPORT_CLAUSE_BREAK.search(remainder)
+    break_from = break_hint.start() if break_hint else None
     for report in REPORT.finditer(remainder):
-        between = remainder[:report.start()]
-        if REPORT_CLAUSE_BREAK.search(between):
+        cut = report.start()
+        if cut and remainder[cut - 1] in ".!?;,":
             return False
-        words = [word.casefold() for word in REPORT_WORD.findall(between)]
-        core = [word for word in words if word not in REPORT_MODIFIERS]
-        # A determiner is inside ANNOUNCE, so the remainder must still name an activity.
-        # This rejects "Starting the failed audit" and "Starting the already completed
-        # audit"; a dangling preposition rejects "Starting the audit for failed checks".
-        if not core or core[-1] in REPORT_NONFINAL:
+        if break_from is not None and break_from < cut:
+            if REPORT_CLAUSE_BREAK.search(remainder, break_from, cut) is not None:
+                return False
+        while token is not None and token.end() <= cut:
+            word = token.group(0).casefold()
+            if word not in REPORT_MODIFIERS:
+                # A determiner is inside ANNOUNCE, so the remainder must still name an
+                # activity. This rejects "Starting the failed audit" and "Starting the
+                # already completed audit"; a dangling preposition rejects "Starting the
+                # audit for failed checks".
+                core_last = word
+                core_incomplete = core_incomplete or word in REPORT_INCOMPLETE
+            token = next(token_iter, None)
+        if core_last is None or core_last in REPORT_NONFINAL:
             continue
-        if any(word in REPORT_INCOMPLETE for word in core):
+        if core_incomplete:
             continue
         if (report.group(0).casefold() in REPORT_ADJECTIVAL
-                and not REPORT_RESULT_TAIL.match(remainder[report.end():])):
+                and not REPORT_RESULT_TAIL.match(remainder, report.end())):
             continue
         return True
     return False
@@ -436,8 +466,8 @@ def judge(payload):
     """-> trigger string to block on, or None to allow."""
     if isinstance(payload, dict) and payload.get("stop_hook_active"):
         return None                     # documented loop guard; never re-block
-    text = message_text(payload).strip()
-    if not text:
+    text = message_text(payload)
+    if not text.strip():
         # An early return, not a guard: with it removed the empty string reaches boundary(),
         # matches neither pattern, and judge returns None anyway. Kept because it states the
         # intent -- nothing read is not evidence of a defect -- and a mutation of it is
@@ -798,6 +828,27 @@ def selftest():
          {"last_assistant_message": "Starting the already completed audit."}, True),
         ("a future passive is not a completed-work report",
          {"last_assistant_message": "Running the sweep will be completed tomorrow."}, True),
+        # An interrogative complement names what the announced activity will decide; the
+        # report token inside it is not that activity's predicate. The conditional
+        # siblings (if, unless, once) were already clause breaks.
+        ("a whether complement does not report the announced activity",
+         {"last_assistant_message": "Starting the audit of whether the tests passed."},
+         True),
+        ("a why complement does not report the announced activity",
+         {"last_assistant_message":
+          "Starting the investigation into why the tests failed."}, True),
+        ("a how complement does not report the announced activity",
+         {"last_assistant_message": "Starting the review of how the migration failed."},
+         True),
+        ("a where complement does not report the announced activity",
+         {"last_assistant_message": "Starting the search for where the check failed."},
+         True),
+        ("an embedded report token inside a larger word is not a predicate",
+         {"last_assistant_message": "Starting the re/completed after checks."}, True),
+        ("terminal punctuation directly at a report token stays a clause break",
+         {"last_assistant_message": "Starting the audit;failed to excuse it."}, True),
+        ("a first line keeps the indentation it was written with",
+         {"last_assistant_message": "    > deep\nStarting the audit."}, True),
         ("a genuine report cannot hide a later announcement in the same unit",
          {"last_assistant_message": "Running the sweep completed in 4m; starting the audit."},
          True),
@@ -959,6 +1010,28 @@ def selftest():
     failures += 0 if ok else 1
     checks += 1
     print(f"  {'PASS' if ok else 'FAIL'} main answers the 360019-byte scale case in budget")
+    # The single-unit shapes: report tokens flooding one sentence, spaced and embedded.
+    # These reach reports_this_activity, which the many-sentence case above never does;
+    # a growing-prefix rescan there times the guard out into an allow at thirty kilobytes.
+    for label, scale_message in (
+        ("main answers a 400016-byte report-token flood in budget",
+         "Starting the " + "failed of " * 40000 + "end"),
+        ("main answers a 289028-byte embedded-report token in budget",
+         "Starting the audit " + "-failed" * 41287 + " and more"),
+    ):
+        try:
+            scaled = subprocess.run(
+                [sys.executable, os.path.abspath(__file__)],
+                input=json.dumps({"hook_event_name": "Stop",
+                                  "last_assistant_message": scale_message}),
+                capture_output=True, text=True, timeout=5, env=environment)
+            ok = (scaled.returncode == 2 and not scaled.stdout
+                  and "'Starting the'" in scaled.stderr)
+        except subprocess.TimeoutExpired:
+            ok = False
+        failures += 0 if ok else 1
+        checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} {label}")
     for label, message, want, trigger in (
         ("main blocks a semicolon-separated historical report",
          "Starting the audit; the prior run failed.", 2, "Starting the"),
@@ -1028,6 +1101,12 @@ def selftest():
          "Running the three failed checks.", 2, "Running the"),
         ("main retains a result adverb",
          "Running the sweep completed successfully.", 0, None),
+        ("main blocks a whether complement on the participle arm",
+         "Starting the audit of whether the tests passed.", 2, "Starting the"),
+        ("main blocks a why complement on the participle arm",
+         "Starting the investigation into why the tests failed.", 2, "Starting the"),
+        ("main keeps a first line's own indentation",
+         "    > deep\nStarting the audit.", 2, "Starting the"),
         ("main blocks a let-me whether complement",
          "Let me check whether the tests passed.", 2, "Let me check"),
         ("main blocks an imminent whether complement",

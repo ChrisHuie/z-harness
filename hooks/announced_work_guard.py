@@ -204,8 +204,11 @@ SPLIT = re.compile(
 # prefix has no `>`, `|`, `#` or list-marker alternative, so an unstripped lead cannot be an
 # anchor. Stripping those leads was the first attempt and it invented seven false positives.
 EMPHASIS = re.compile(r'^(?:\*\*|__|\*|_)+')
+# The structural leads, as the physical line carries them. A heading is one to six hashes
+# followed by a space or the line end, as CommonMark's ATX rule has it; `#12 fixed.` is prose
+# naming an issue, not a heading, and treating it as one let the sentence after it walk past.
 CONTAINER = re.compile(
-    r'^[ \t]*(?:[>|#]|[-+*][ \t]+|\d+[.)][ \t]+)'
+    r'^[ \t]*(?:[>|]|#{1,6}(?=[ \t]|$)|[-+*][ \t]+|\d+[.)][ \t]+)'
 )
 # A fenced unit is the one container HANDBACK must not read inside either, because
 # `let me know` in a code sample is not the speaker handing anything back. A bulleted or
@@ -220,8 +223,10 @@ def boundary(text):
     a list marker is split into three units and only the first carries the delimiter. Every
     unit is still emitted: they occupy tail slots, which is what keeps an announcement three
     paragraphs above a closing table out of the boundary. Container identity comes from the
-    original physical line, so sentence splitting cannot turn a quote's second sentence into
-    a claim by the speaker.
+    physical lines, so sentence splitting cannot turn a quote's second sentence into a claim
+    by the speaker -- and it must hold on EVERY line the unit spans, because SPLIT keeps a
+    marker-led line joined to an unmarked line that follows it without a sentence end. A
+    heading ends at its line break; the line under it is prose, whatever the first line was.
     """
     body = text.strip()
     raw_parts = []
@@ -236,10 +241,8 @@ def boundary(text):
         if not part or not part.strip():
             continue
         line_start = body.rfind("\n", 0, start) + 1
-        line_end = body.find("\n", line_start)
-        if line_end < 0:
-            line_end = len(body)
-        container = bool(CONTAINER.match(body[line_start:line_end]))
+        spanned = body[line_start:start + len(part)].split("\n")
+        container = all(CONTAINER.match(line) for line in spanned)
         opens = part.lstrip().startswith(("```", "~~~"))
         if fenced or opens:
             parts.append((part, True, container))
@@ -557,6 +560,28 @@ def selftest():
          {"last_assistant_message": "## Status note. Starting the audit."}, False),
         ("the same second sentence in prose remains an announcement",
          {"last_assistant_message": "Log says safe. Starting the audit."}, True),
+        # A container's identity ends where its physical line does. SPLIT keeps a marker-led
+        # line joined to an unmarked line that follows it without a sentence end, so reading
+        # the first line alone let a heading cover the announcement under it.
+        ("a heading ends at its line break",
+         {"last_assistant_message": "## Plan\nStarting the audit."}, True),
+        ("a heading with a trailing colon ends at its line break",
+         {"last_assistant_message": "## Next:\nStarting the audit."}, True),
+        ("a list item's unmarked continuation line is prose",
+         {"last_assistant_message": "- item one\nStarting the audit."}, True),
+        ("a numbered item's unmarked continuation line is prose",
+         {"last_assistant_message": "1. item one\nStarting the audit."}, True),
+        ("a quote's unmarked continuation line is prose",
+         {"last_assistant_message": "> Log says safe\nStarting the audit."}, True),
+        ("a table's following unmarked line is prose",
+         {"last_assistant_message": "| a | b |\n|---|---|\n| c | d |\nStarting the audit."},
+         True),
+        ("a wrapped quote stays quoted on every line",
+         {"last_assistant_message": "> Log says safe\n> Starting the audit."}, False),
+        ("consecutive plan items stay plan items",
+         {"last_assistant_message": "- item one\n- Starting the audit."}, False),
+        ("an issue reference is not a heading",
+         {"last_assistant_message": "#12 fixed. Starting the audit."}, True),
         ("text inside a fence cannot retract a claim above it",
          {"last_assistant_message": "Starting the IR-38 audit.\n\n```\nlet me know```"},
          True),
@@ -807,6 +832,14 @@ def selftest():
          "## Status note. Starting the audit.", 0, None),
         ("main still blocks the plain-prose control",
          "Log says safe. Starting the audit.", 2, "Starting the"),
+        ("main reads the line under a heading as prose",
+         "## Plan\nStarting the audit.", 2, "Starting the"),
+        ("main reads a list item's unmarked continuation line as prose",
+         "- item one\nStarting the audit.", 2, "Starting the"),
+        ("main reads an issue reference as prose",
+         "#12 fixed. Starting the audit.", 2, "Starting the"),
+        ("main keeps a wrapped quote quoted",
+         "> Log says safe\n> Starting the audit.", 0, None),
     ):
         done = subprocess.run(
             [sys.executable, os.path.abspath(__file__)],

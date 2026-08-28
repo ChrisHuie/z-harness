@@ -119,6 +119,9 @@ REPORT = re.compile(
 # and the fixed-form arms cannot. Clause boundaries stop the association, so a prior run's
 # result in "Starting the audit because the previous run failed" cannot excuse the new
 # announcement. This remains an explicit English heuristic, not a general parser.
+# The participle test states intent rather than grading a branch: after "Let me", "I'll now"
+# or a fixed form, a completed-work verb cannot follow without a clause break or an empty
+# activity, and both already return False below, so its mutation is correctly unkillable.
 PARTICIPLE_ANNOUNCEMENT = re.compile(
     r'(?:Starting|Running|Proceeding|Continuing|Beginning|Kicking off|Firing off)'
     r'\s+(?:with|on|the|a|an)$', re.I)
@@ -238,6 +241,9 @@ def boundary(text):
 
     parts, fenced = [], False
     for part, start in raw_parts:
+        # Unreachable for a non-empty body: every SPLIT alternative consumes the whitespace
+        # it matches and none can match at a part's first character, so no part is empty or
+        # blank. Kept as intent, so a mutation of it is correctly unkillable.
         if not part or not part.strip():
             continue
         line_start = body.rfind("\n", 0, start) + 1
@@ -502,6 +508,13 @@ def selftest():
         ("shape: a non-text block contributes nothing",
          {"last_assistant_message": [{"type": "thinking", "text": "Starting the audit."}]},
          False),
+        ("shape: a non-text block inside an object's block list contributes nothing",
+         {"last_assistant_message":
+          {"content": [{"type": "thinking", "text": "Starting the audit."}]}}, False),
+        ("shape: a non-object entry in an object's block list is skipped",
+         {"last_assistant_message": {"content": ["Starting the audit."]}}, False),
+        ("shape: a non-object entry in a bare block list is skipped",
+         {"last_assistant_message": ["Starting the audit."]}, False),
         ("shape: message present and null reads as empty",
          {"last_assistant_message": None}, False),
         ("shape: an unmodelled message type is drift, not an allow",
@@ -849,6 +862,44 @@ def selftest():
         ok = (done.returncode == want
               and ((want == 0 and not done.stdout and not done.stderr)
                    or (want == 2 and not done.stdout and trigger in done.stderr)))
+        failures += 0 if ok else 1
+        checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} {label} -> rc={done.returncode}")
+
+    # Envelope and switch controls through main(): the off switch on each of its three
+    # arms, an event outside this guard's scope, a payload that is not an object, and
+    # stdin that is not JSON. The matrix above holds the envelope fixed and cannot reach
+    # these; each is the hook's own exit and receipt as the Stop host sees them.
+    off_environment = dict(environment, ANNOUNCED_WORK_GUARD="off")
+    announcing = json.dumps({"hook_event_name": "Stop",
+                             "last_assistant_message": "Starting the audit."})
+    for label, raw, env, want, needle in (
+        ("main blocks the announcement the switch controls start from",
+         announcing, environment, 2, "Starting the"),
+        ("main honours the off switch for an announcement",
+         announcing, off_environment, 0, None),
+        ("main reports stdin that is not JSON as drift",
+         "not json", environment, 2, "stdin is not JSON"),
+        ("main honours the off switch for stdin that is not JSON",
+         "not json", off_environment, 0, None),
+        ("main reports a payload that is not an object as drift",
+         json.dumps(["Starting the audit."]), environment, 2, "expected a JSON object"),
+        ("main honours the off switch for envelope drift",
+         json.dumps(["Starting the audit."]), off_environment, 0, None),
+        ("main ignores an event outside its scope",
+         json.dumps({"hook_event_name": "PreToolUse",
+                     "last_assistant_message": "Starting the audit."}), environment, 0, None),
+        ("main reads a SubagentStop event",
+         json.dumps({"hook_event_name": "SubagentStop",
+                     "last_assistant_message": "Starting the audit."}), environment, 2,
+         "Starting the"),
+    ):
+        done = subprocess.run(
+            [sys.executable, os.path.abspath(__file__)], input=raw,
+            capture_output=True, text=True, timeout=5, env=env)
+        ok = (done.returncode == want and not done.stdout
+              and ((needle is None and not done.stderr)
+                   or (needle is not None and needle in done.stderr)))
         failures += 0 if ok else 1
         checks += 1
         print(f"  {'PASS' if ok else 'FAIL'} {label} -> rc={done.returncode}")

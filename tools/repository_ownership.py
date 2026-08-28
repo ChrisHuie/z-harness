@@ -467,6 +467,27 @@ def selftest():
             late_problem = str(exc)
         expect("a late ownership-probe I/O failure is named and fails closed",
                "planted late ownership EIO" in late_problem)
+        # The public entry's default: no owner root. The indexed-gitlink arm has nothing to
+        # ask and the other arms must still decide, in both the proving and failing shapes.
+        expect("the public entry judges a bound worktree without an owner root",
+               is_repository_boundary(separate))
+        calls = 0
+        ownerless_problem = ""
+        try:
+            is_repository_boundary(separate, None, late_git_failure)
+        except RepositoryOwnershipError as exc:
+            ownerless_problem = str(exc)
+        expect("a late probe failure without an owner root still fails closed",
+               "planted late ownership EIO" in ownerless_problem)
+        ownerless_exit_problem = ""
+        try:
+            is_repository_boundary(
+                separate, None,
+                lambda *_a, **_k: Done(128, b"", b"fatal: planted probe exit\n"))
+        except RepositoryOwnershipError as exc:
+            ownerless_exit_problem = str(exc)
+        expect("a failed probe on a file-marked repository fails closed without an owner",
+               "planted probe exit" in ownerless_exit_problem)
 
         recorded = []
         def recording_runner(argv, **kwargs):

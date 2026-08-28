@@ -117,7 +117,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 205
+SELFTEST_FLOOR = 227
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -134,12 +134,12 @@ DESC_CAP = 400                # house cap (spec ceiling is 1024)
 SELFTEST_SUITES = [
     ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"], 1366),
     ("askq_timeout_guard", ["hooks/askq_timeout_guard.py", "--selftest"], 13),
-    ("announced_work_guard", ["hooks/announced_work_guard.py", "--selftest"], 160),
+    ("announced_work_guard", ["hooks/announced_work_guard.py", "--selftest"], 226),
     ("harness_report", ["hooks/harness_report.py", "--selftest"], 12),
     ("cc-cost", ["tools/cc-cost.py", "--selftest"], 8),
     ("codex-cost", ["tools/codex-cost.py", "--selftest"], 28),
-    ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 57),
-    ("repository-ownership", ["tools/repository_ownership.py", "--selftest"], 43),
+    ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 78),
+    ("repository-ownership", ["tools/repository_ownership.py", "--selftest"], 73),
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 8),
     ("verify-review-publication",
      ["tools/verify-review-publication.py", "--selftest"], 94),
@@ -1782,6 +1782,8 @@ class Run:
 
 # ---- selftest: every check proves it can go red -------------------------------
 def selftest():
+    from unittest.mock import patch
+
     bad = checks = 0
 
     def expect_red(label, fn):
@@ -2614,6 +2616,133 @@ def selftest():
             "the package inventory names a late ownership-probe I/O failure",
             lambda: "planted package ownership EIO" in (late_package_error or ""),
         )
+
+        for surface in ("live", "installed"):
+            ownership_root = os.path.join(td, f"metadata-{surface}")
+            donor = os.path.join(td, f"metadata-{surface}-donor")
+            os.makedirs(os.path.join(ownership_root, "skills", "check", "references"))
+            open(os.path.join(ownership_root, "README.md"), "w").write("outer-owned\n")
+            open(os.path.join(ownership_root, "skills", "check", "SKILL.md"), "w").write(
+                "Read references/rule.md\n")
+            open(os.path.join(ownership_root, "skills", "check", "references", "rule.md"),
+                 "w").write("See `README.md`.\n")
+            if surface == "live":
+                subprocess.run(["git", "init", "--quiet", ownership_root], check=True)
+                subprocess.run(["git", "-C", ownership_root, "add", "README.md"], check=True)
+            subprocess.run(["git", "init", "--quiet", donor], check=True)
+            subprocess.run(
+                ["git", "-C", donor, "-c", "user.name=fixture", "-c",
+                 "user.email=fixture@example.invalid", "commit", "--quiet",
+                 "--allow-empty", "-m", "base"], check=True)
+            linked = os.path.join(ownership_root, "registered")
+            subprocess.run(
+                ["git", "-C", donor, "worktree", "add", "--quiet", "--detach", linked],
+                check=True)
+            open(os.path.join(linked, "AGENTS.md"), "w").write("nested-owner\n")
+            linked_admin = _gitdir_from_marker(linked, os.path.join(linked, ".git"))
+            backlink = os.path.join(linked_admin, "gitdir")
+
+            def ownership_inventory():
+                if surface == "installed":
+                    _kind, paths, error = package_paths(ownership_root)
+                    return paths, error
+                inventory = git_owned_live_paths(ownership_root)
+                return inventory["paths"], inventory["error"]
+
+            paths, error = ownership_inventory()
+            expect_red(
+                f"{surface} inventory excludes a registered worktree and retains outer files",
+                lambda: not error and "README.md" in paths
+                and not any(p.startswith("registered/") for p in paths))
+            control_c3, control_c8 = Run(ownership_root, ci=True), Run(ownership_root, ci=True)
+            control_c3.c3_reference_resolution()
+            control_c8.c8_reserved_basenames()
+            expect_red(f"{surface} ownership fixture has nonempty passing C3 and C8 controls",
+                       lambda: control_c3.checks > 0 and control_c8.checks == 1
+                       and not control_c3.failures and not control_c8.failures)
+
+            real_open = open
+            def denied_backlink(filename, *args, **kwargs):
+                if os.fspath(filename) == backlink:
+                    raise PermissionError(13, "planted metadata permission failure", filename)
+                return real_open(filename, *args, **kwargs)
+            with patch("builtins.open", denied_backlink):
+                paths, error = ownership_inventory()
+                error_c3, error_c8 = Run(ownership_root, ci=True), Run(ownership_root, ci=True)
+                error_c3.c3_reference_resolution()
+                error_c8.c8_reserved_basenames()
+            expect_red(f"{surface} inventory fails closed on an unreadable backlink",
+                       lambda: not paths and "planted metadata permission failure" in (error or ""))
+            for code, run in (("C3", error_c3), ("C8", error_c8)):
+                expect_red(f"{surface} {code} names the ownership metadata error",
+                           lambda code=code, run=run: run.checks == 1
+                           and len(run.failures) == 1
+                           and run.failures[0][0] == code
+                           and "planted metadata permission failure" in run.failures[0][1])
+
+            mode = stat.S_IMODE(os.stat(backlink).st_mode)
+            os.chmod(backlink, 0)
+            try:
+                try:
+                    with real_open(backlink, "rb") as fh:
+                        fh.read()
+                    permission_enforced = False
+                except PermissionError:
+                    permission_enforced = True
+                paths, error = ownership_inventory()
+            finally:
+                os.chmod(backlink, mode)
+            print(f"  OBSERVATION {surface} chmod-backlink permission_enforced={permission_enforced}")
+            expect_red(f"{surface} inventory does not admit files after chmod-zero metadata",
+                       lambda: (not paths and "cannot read Git metadata" in (error or ""))
+                       if permission_enforced else (
+                           not error and "README.md" in paths
+                           and not any(p.startswith("registered/") for p in paths)))
+
+            for name in ("ordinary-cr\r", "registered-cr\r"):
+                nested = os.path.join(ownership_root, name)
+                if name.startswith("ordinary"):
+                    subprocess.run(["git", "init", "--quiet", nested], check=True)
+                else:
+                    subprocess.run(
+                        ["git", "-C", donor, "worktree", "add", "--quiet", "--detach",
+                         nested], check=True)
+                open(os.path.join(nested, "GEMINI.md"), "w").write("nested-owner\n")
+                paths, error = ownership_inventory()
+                expect_red(f"{surface} inventory excludes a CR-ending repository: {name!r}",
+                           lambda: not error and "README.md" in paths
+                           and not any(p.startswith(name + "/") for p in paths))
+
+            separate = os.path.join(ownership_root, "separate")
+            admin = os.path.join(td, f"metadata-{surface}-separate-admin")
+            subprocess.run(
+                ["git", "init", "--quiet", "--separate-git-dir", admin, separate], check=True)
+            open(os.path.join(separate, "AGENTS.md"), "w").write("no independent binding\n")
+            paths, error = ownership_inventory()
+            expect_red(f"{surface} inventory retains an absent-config negative control",
+                       lambda: not error and "README.md" in paths
+                       and "separate/AGENTS.md" in paths)
+            subprocess.run(
+                ["git", "--git-dir", admin, "config", "core.worktree", separate], check=True)
+            real_run = subprocess.run
+            def failed_config(argv, **kwargs):
+                if "config" in argv and "core.worktree" in argv:
+                    return subprocess.CompletedProcess(
+                        argv, 128, b"", b"planted config failure")
+                return real_run(argv, **kwargs)
+            with patch("subprocess.run", failed_config):
+                paths, error = ownership_inventory()
+                config_c8 = Run(ownership_root, ci=True)
+                config_c8.c8_reserved_basenames()
+            expect_red(f"{surface} inventory distinguishes an operational config error",
+                       lambda: not paths and "core.worktree exited 128: planted config failure"
+                       in (error or ""))
+            expect_red(f"{surface} C8 names an operational config error",
+                       lambda: config_c8.checks == 1 and len(config_c8.failures) == 1
+                       and "core.worktree exited 128: planted config failure"
+                       in config_c8.failures[0][1])
+            for fixture in (ownership_root, donor, admin):
+                shutil.rmtree(fixture)
 
         newline_repo = os.path.join(td, "newline-source")
         os.makedirs(newline_repo)
@@ -3864,11 +3993,16 @@ def selftest():
             lambda: _bound_separate_gitdir(
                 reply_tree, reply_marker,
                 reply_runner(0, encoded_reply_tree + b"\0")) is True)
-        expect_red(
-            "C8 rejects a core.worktree reply whose query failed",
-            lambda: _bound_separate_gitdir(
-                reply_tree, reply_marker,
-                reply_runner(1, encoded_reply_tree + b"\0")) is False)
+        def failed_config_reply_is_unknown():
+            try:
+                _bound_separate_gitdir(
+                    reply_tree, reply_marker,
+                    reply_runner(1, encoded_reply_tree + b"\0"))
+            except RepositoryOwnershipError as exc:
+                return "core.worktree exited 1" in str(exc)
+            return False
+        expect_red("C8 treats partial output from a failed config query as unknown",
+                   failed_config_reply_is_unknown)
         expect_red(
             "C8 rejects an unterminated core.worktree reply rather than raising",
             lambda: _bound_separate_gitdir(

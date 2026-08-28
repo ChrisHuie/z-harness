@@ -670,6 +670,8 @@ def check_citations(doc_path, transcript_path, root):
 
 def selftest():
     """Exercise real-format fixtures and CLI boundaries, including red cases."""
+    from unittest.mock import patch
+
     results = []
 
     def record(label, ok):
@@ -796,6 +798,17 @@ def selftest():
                _failed_path is None and _failed_state == "io"
                and "git ls-files --stage exited 128" in (_failed_detail or "")
                and "planted unreadable owner index" in (_failed_detail or ""))
+        _base_path, _base_state, _base_detail = resolve_citation(
+            "evidence.md", tmp, failed_index_runner)
+        record("a basename gitlink index failure is an I/O verdict, not resolved evidence",
+               _base_path is None and _base_state == "io"
+               and "git ls-files --stage exited 128" in (_base_detail or "")
+               and "planted unreadable owner index" in (_base_detail or ""))
+        record("a basename found only inside a known indexed gitlink stays missing",
+               resolve_citation("evidence.md", tmp)[1] == "missing")
+        record("an outer qualified file still resolves when no ownership probe is needed",
+               resolve_citation("schemas/order.json", tmp, failed_index_runner)[1]
+               == "resolved")
 
         def unlaunchable_index_runner(argv, **kwargs):
             if "ls-files" in argv and "--stage" in argv:
@@ -835,6 +848,145 @@ def selftest():
             with open(path, "wb") as fh:
                 fh.write(body)
             return path
+
+        # Exercise the actual CLI as well as its direct resolution entry points. The
+        # injected permission error is always run: chmod alone does not deny root reads.
+        ownership_root = os.path.join(tmp, "ownership-citations")
+        donor = os.path.join(tmp, "ownership-donor")
+        subprocess.run(["git", "init", "--quiet", ownership_root], check=True)
+        subprocess.run(["git", "init", "--quiet", donor], check=True)
+        subprocess.run(
+            ["git", "-C", donor, "-c", "user.name=fixture", "-c",
+             "user.email=fixture@example.invalid", "commit", "--quiet",
+             "--allow-empty", "-m", "base"], check=True)
+        linked = os.path.join(ownership_root, "registered")
+        subprocess.run(
+            ["git", "-C", donor, "worktree", "add", "--quiet", "--detach", linked],
+            check=True)
+        linked_marker = os.path.join(linked, ".git")
+        with open(linked_marker, "rb") as fh:
+            linked_admin = os.fsdecode(fh.read()[len(b"gitdir: "):-1])
+        backlink = os.path.join(linked_admin, "gitdir")
+        evidence = "An independent repository owns these exact evidence bytes"
+        with open(os.path.join(linked, "registered-evidence.md"), "w") as fh:
+            fh.write(evidence)
+
+        def evidence_document(path):
+            doc = document("ownership-quote.md", f'[source: `{path}`] *"{evidence}"*.')
+            resolved = os.path.join(ownership_root, path)
+            if os.sep not in path:
+                resolved = os.path.join(linked, path)
+            transcript = document("ownership-read.jsonl", "\n".join([
+                json.dumps({"type": "assistant", "cwd": ownership_root, "message": {
+                    "content": [{"type": "tool_use", "id": "ownership", "name": "Read",
+                                 "input": {"file_path": resolved}}]}}),
+                json.dumps({"type": "user", "message": {"content": [{
+                    "type": "tool_result", "tool_use_id": "ownership",
+                    "content": evidence, "is_error": False}]}}),
+            ]) + "\n")
+            return ("--quotes", doc, "--citations", doc, "--root", ownership_root,
+                    "--transcript", transcript)
+
+        def injected_cli(args, *, blocked=None, config=False):
+            # Only the selected external operand is replaced; runpy executes main with
+            # ordinary CLI argv, including quote extraction and citation correlation.
+            code = (
+                "import builtins, os, runpy, subprocess, sys\n"
+                f"blocked = {blocked!r}\nconfig = {config!r}\n"
+                "real_open, real_run = builtins.open, subprocess.run\n"
+                "def opened(path, *a, **k):\n"
+                "    if blocked is not None and os.fspath(path) == blocked:\n"
+                "        raise PermissionError(13, 'planted metadata permission failure', path)\n"
+                "    return real_open(path, *a, **k)\n"
+                "def ran(argv, **k):\n"
+                "    if config and 'config' in argv and 'core.worktree' in argv:\n"
+                "        return subprocess.CompletedProcess(argv, 128, b'', b'planted config failure')\n"
+                "    return real_run(argv, **k)\n"
+                "builtins.open, subprocess.run = opened, ran\n"
+                f"sys.path.insert(0, {os.path.dirname(os.path.abspath(__file__))!r})\n"
+                f"sys.argv = {[os.path.abspath(__file__), *args]!r}\n"
+                f"runpy.run_path({os.path.abspath(__file__)!r}, run_name='__main__')\n"
+            )
+            return subprocess.run([sys.executable, "-B", "-c", code],
+                                  capture_output=True, text=True, timeout=10)
+
+        def no_compared_evidence(run):
+            return (run.returncode == 1
+                    and "selected=1 compared_segments=0 verified=0 cited_files=0" in run.stdout
+                    and "citations  cited=1" in run.stdout
+                    and "CONFIRMED_READ=1" in run.stdout)
+
+        real_open = open
+        def denied_backlink(filename, *args, **kwargs):
+            if os.fspath(filename) == backlink:
+                raise PermissionError(13, "planted metadata permission failure", filename)
+            return real_open(filename, *args, **kwargs)
+
+        for path in ("registered/registered-evidence.md", "registered-evidence.md"):
+            cli_args = evidence_document(path)
+            record(f"known registered evidence stays excluded through the CLI: {path}",
+                   no_compared_evidence(invoke(*cli_args)))
+            with patch("builtins.open", denied_backlink):
+                resolved, state, detail = resolve_citation(path, ownership_root)
+            record(f"an unreadable backlink is an I/O citation verdict: {path}",
+                   resolved is None and state == "io"
+                   and "planted metadata permission failure" in (detail or ""))
+            run = injected_cli(cli_args, blocked=backlink)
+            record(f"the CLI refuses unreadable registered evidence: {path}",
+                   no_compared_evidence(run)
+                   and "planted metadata permission failure" in run.stdout)
+            mode = os.stat(backlink).st_mode & 0o777
+            os.chmod(backlink, 0)
+            try:
+                run = invoke(*cli_args)
+            finally:
+                os.chmod(backlink, mode)
+            record(f"a physical chmod-zero backlink cannot clear CLI evidence: {path}",
+                   no_compared_evidence(run))
+
+        for name in ("ordinary-cr\r", "registered-cr\r"):
+            nested_path = os.path.join(ownership_root, name)
+            if name.startswith("ordinary"):
+                subprocess.run(["git", "init", "--quiet", nested_path], check=True)
+            else:
+                subprocess.run(
+                    ["git", "-C", donor, "worktree", "add", "--quiet", "--detach",
+                     nested_path], check=True)
+            basename = name.rstrip("\r") + "-evidence.md"
+            with open(os.path.join(nested_path, basename), "w") as fh:
+                fh.write(evidence)
+            record(f"a qualified CR-path citation remains a boundary: {name!r}",
+                   resolve_citation(f"{name}/{basename}", ownership_root)[1] == "boundary")
+            # CR-containing tokens are outside the citation syntax; an ordinary basename
+            # must nevertheless not select the file in that repository.
+            linked = nested_path
+            record(f"a CR-path basename cannot clear CLI evidence: {name!r}",
+                   no_compared_evidence(invoke(*evidence_document(basename))))
+
+        separate = os.path.join(ownership_root, "separate")
+        admin = os.path.join(tmp, "citation-separate-admin")
+        subprocess.run(
+            ["git", "init", "--quiet", "--separate-git-dir", admin, separate], check=True)
+        with open(os.path.join(separate, "config-evidence.md"), "w") as fh:
+            fh.write(evidence)
+        for path in ("separate/config-evidence.md", "config-evidence.md"):
+            record(f"absent core.worktree keeps outer-owned citations resolvable: {path}",
+                   resolve_citation(path, ownership_root)[1] == "resolved")
+        subprocess.run(
+            ["git", "--git-dir", admin, "config", "core.worktree", separate], check=True)
+        def failed_config(argv, **kwargs):
+            if "config" in argv and "core.worktree" in argv:
+                return subprocess.CompletedProcess(argv, 128, b"", b"planted config failure")
+            return subprocess.run(argv, **kwargs)
+        linked = separate
+        for path in ("separate/config-evidence.md", "config-evidence.md"):
+            resolved, state, detail = resolve_citation(path, ownership_root, failed_config)
+            record(f"an operational config error is an I/O citation verdict: {path}",
+                   resolved is None and state == "io"
+                   and "core.worktree exited 128: planted config failure" in (detail or ""))
+            run = injected_cli(evidence_document(path), config=True)
+            record(f"the CLI refuses evidence after an operational config error: {path}",
+                   no_compared_evidence(run) and "planted config failure" in run.stdout)
 
         exact = document(
             "exact.md", f'[source: `schemas/order.json`] *"{source}"*.'

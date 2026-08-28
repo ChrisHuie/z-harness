@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 
@@ -64,16 +65,40 @@ def run_git(runner, argv, **kwargs):
 def same_file(left, right):
     """Return whether two path spellings identify the same filesystem object.
 
-    OSError only. A NUL byte in a candidate path raises ValueError from stat, and
-    swallowing that here would answer -- silently, as "not the same object" -- for every
+    Only absence is a negative. A NUL byte in a candidate path raises ValueError from stat,
+    and swallowing that here would answer -- silently, as "not the same object" -- for every
     operand upstream that rejects such a record on purpose. is_repository_boundary converts
     it into the modelled error instead, so a malformed record stays loud and the operand
     that refuses it keeps deciding.
     """
     try:
         return os.path.samefile(left, right)
-    except OSError:
+    except (FileNotFoundError, NotADirectoryError):
         return False
+    except OSError as exc:
+        raise RepositoryOwnershipError(
+            f"cannot compare Git metadata paths {left!r} and {right!r}: {exc}") from exc
+
+
+def _metadata_stat(path, *, follow_symlinks=True):
+    """Distinguish an absent metadata entry from an unreadable one."""
+    try:
+        return os.stat(path, follow_symlinks=follow_symlinks)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except (OSError, ValueError) as exc:
+        raise RepositoryOwnershipError(
+            f"cannot inspect Git metadata {path!r}: {exc}") from exc
+
+
+def _git_path_value(value, base):
+    """Preserve an existing literal spelling before accepting a CRLF alternative."""
+    literal = os.fsdecode(value)
+    if literal.endswith("\r"):
+        candidate = literal if os.path.isabs(literal) else os.path.join(base, literal)
+        if _metadata_stat(candidate) is None:
+            return literal[:-1]
+    return literal
 
 
 def git_toplevel_error(root, runner=None):
@@ -91,11 +116,12 @@ def git_toplevel_error(root, runner=None):
     raw = bytes(done.stdout)
     if not raw.endswith(b"\n") or b"\0" in raw:
         return "git rev-parse --show-toplevel returned a malformed path"
-    value = raw[:-1]
-    if value.endswith(b"\r"):
-        value = value[:-1]
-    reported = os.fsdecode(value)
-    if not same_file(reported, root):
+    try:
+        reported = _git_path_value(raw[:-1], os.getcwd())
+        matches = same_file(reported, root)
+    except (RepositoryOwnershipError, OSError, ValueError) as exc:
+        return f"cannot inspect Git top-level identity: {exc}"
+    if not matches:
         return (
             "git rev-parse --show-toplevel resolved "
             f"{reported!r}, expected {os.path.realpath(root)!r}"
@@ -107,23 +133,26 @@ def _git_path_line(path, prefix=b""):
     try:
         with open(path, "rb") as source:
             raw = source.read()
-    except OSError:
+    except (FileNotFoundError, NotADirectoryError):
         return None
+    except OSError as exc:
+        raise RepositoryOwnershipError(
+            f"cannot read Git metadata {path!r}: {exc}") from exc
     if not raw.startswith(prefix):
         return None
     value = raw[len(prefix):]
     if not value.endswith(b"\n") or b"\0" in value:
         return None
-    value = value[:-1]
-    if value.endswith(b"\r"):
-        value = value[:-1]
-    return os.fsdecode(value)
+    if value == b"\n":
+        return None
+    return _git_path_value(value[:-1], os.path.dirname(path)) or None
 
 
 def _gitdir_from_marker(path, marker):
-    if os.path.isdir(marker):
+    metadata = _metadata_stat(marker)
+    if metadata is not None and stat.S_ISDIR(metadata.st_mode):
         return os.path.realpath(marker)
-    if not os.path.isfile(marker):
+    if metadata is None or not stat.S_ISREG(metadata.st_mode):
         return None
     pointer = _git_path_line(marker, b"gitdir: ")
     if pointer is None:
@@ -132,8 +161,9 @@ def _gitdir_from_marker(path, marker):
         pointer if os.path.isabs(pointer) else os.path.join(path, pointer))
 
 
-def _git_common_dir(admin):
-    pointer = _git_path_line(os.path.join(admin, "commondir"))
+def _git_common_dir(admin, pointer=None):
+    if pointer is None:
+        pointer = _git_path_line(os.path.join(admin, "commondir"))
     if pointer is None:
         return admin
     return os.path.realpath(
@@ -144,7 +174,9 @@ def _indexed_gitlink(path, owner_root, runner):
     # A markerless installed-package root has no Git index and therefore cannot own a
     # gitlink. Do not manufacture an operational failure by asking Git for an index that
     # the caller already knows does not exist.
-    if owner_root is None or not os.path.lexists(os.path.join(owner_root, ".git")):
+    if (owner_root is None
+            or _metadata_stat(os.path.join(owner_root, ".git"),
+                              follow_symlinks=False) is None):
         return False
     relative = os.path.relpath(path, owner_root).replace(os.sep, "/")
     if relative == ".." or relative.startswith("../"):
@@ -178,7 +210,7 @@ def _registered_linked_worktree(path, marker):
     common_pointer = _git_path_line(os.path.join(admin, "commondir"))
     if common_pointer is None:
         return False
-    common = _git_common_dir(admin)
+    common = _git_common_dir(admin, common_pointer)
     if not same_file(os.path.dirname(admin), os.path.join(common, "worktrees")):
         return False
     backlink = _git_path_line(os.path.join(admin, "gitdir"))
@@ -191,20 +223,32 @@ def _registered_linked_worktree(path, marker):
 
 def _bound_separate_gitdir(path, marker, runner):
     admin = _gitdir_from_marker(path, marker)
-    if admin is None or not os.path.isdir(admin):
+    metadata = _metadata_stat(admin) if admin is not None else None
+    if metadata is None or not stat.S_ISDIR(metadata.st_mode):
         return False
-    if (os.path.lexists(os.path.join(admin, "commondir"))
-            or os.path.lexists(os.path.join(admin, "gitdir"))):
+    if (_metadata_stat(os.path.join(admin, "commondir"), follow_symlinks=False)
+            is not None
+            or _metadata_stat(os.path.join(admin, "gitdir"), follow_symlinks=False)
+            is not None):
         return False
-    configured = run_git(
-        runner,
-        ["git", "--git-dir", admin, "config", "--local", "--path", "--null",
-         "--get-all", "core.worktree"], capture_output=True, text=False)
+    command = "git config --local --path --null --get-all core.worktree"
+    try:
+        configured = run_git(
+            runner,
+            ["git", "--git-dir", admin, "config", "--local", "--path", "--null",
+             "--get-all", "core.worktree"], capture_output=True, text=False)
+    except (OSError, ValueError) as exc:
+        raise RepositoryOwnershipError(f"cannot run {command}: {exc}") from exc
     raw = bytes(configured.stdout)
+    if configured.returncode == 1 and not raw and not configured.stderr:
+        return False
+    if configured.returncode != 0:
+        raise RepositoryOwnershipError(
+            git_command_failure(configured.returncode, configured.stderr, command))
     # The terminator count refuses a multi-valued record where the record is read. Without
     # it the joined value reaches os.path.samefile carrying a NUL, which is a raised error
     # rather than a decision -- so the operand is what makes this a refusal.
-    if configured.returncode != 0 or not raw.endswith(b"\0") or raw.count(b"\0") != 1:
+    if not raw.endswith(b"\0") or raw.count(b"\0") != 1 or raw == b"\0":
         return False
     worktree = os.fsdecode(raw[:-1])
     if not os.path.isabs(worktree):
@@ -220,18 +264,20 @@ def _plausible_repository_marker(path, marker, owner_root):
     longer proves that no boundary exists. Treating that operational failure as ``False``
     lets a genuine nested repository disappear into the outer scan set.
     """
-    if os.path.isdir(marker):
-        return os.path.isfile(os.path.join(marker, "HEAD"))
-    if not os.path.isfile(marker):
+    metadata = _metadata_stat(marker)
+    if metadata is not None and stat.S_ISDIR(metadata.st_mode):
+        head = _metadata_stat(os.path.join(marker, "HEAD"))
+        return head is not None and stat.S_ISREG(head.st_mode)
+    if metadata is None or not stat.S_ISREG(metadata.st_mode):
         return False
     admin = _gitdir_from_marker(path, marker)
-    if admin is None or not os.path.isfile(os.path.join(admin, "HEAD")):
+    head = _metadata_stat(os.path.join(admin, "HEAD")) if admin is not None else None
+    if head is None or not stat.S_ISREG(head.st_mode):
         return False
     if owner_root is None:
         return True
     owner_marker = os.path.join(owner_root, ".git")
-    owner_admin = (_gitdir_from_marker(owner_root, owner_marker)
-                   if os.path.isfile(owner_marker) else owner_marker)
+    owner_admin = _gitdir_from_marker(owner_root, owner_marker)
     return owner_admin is None or not same_file(admin, owner_admin)
 
 
@@ -239,34 +285,37 @@ def is_repository_boundary(path, owner_root=None, runner=None):
     """Return true only for a proven independent Git worktree at ``path``."""
     runner = subprocess.run if runner is None else runner
     marker = os.path.join(path, ".git")
-    if not os.path.lexists(marker) or os.path.islink(marker):
-        return False
-    toplevel_problem = git_toplevel_error(path, runner)
-    if (toplevel_problem.startswith("cannot run git rev-parse")
-            or (toplevel_problem.startswith("git rev-parse --show-toplevel exited")
-                and _plausible_repository_marker(path, marker, owner_root))):
-        raise RepositoryOwnershipError(toplevel_problem)
-    if toplevel_problem:
-        return False
-    if os.path.isdir(marker):
-        return True
-    if not os.path.isfile(marker):
-        return False
     try:
-        indexed_problem = None
-        try:
-            if _indexed_gitlink(path, owner_root, runner):
-                return True
-        except RepositoryOwnershipError as exc:
-            # A failed index read makes this operand unknown, not false. Another ownership
-            # arm may still prove the boundary independently; only re-raise when neither
-            # does, preserving the three-valued rule ``unknown OR true == true``.
-            indexed_problem = exc
-        if (_registered_linked_worktree(path, marker)
-                or _bound_separate_gitdir(path, marker, runner)):
+        metadata = _metadata_stat(marker, follow_symlinks=False)
+        if metadata is None or stat.S_ISLNK(metadata.st_mode):
+            return False
+        toplevel_problem = git_toplevel_error(path, runner)
+        if (toplevel_problem.startswith("cannot ")
+                or (toplevel_problem.startswith("git rev-parse --show-toplevel exited")
+                    and _plausible_repository_marker(path, marker, owner_root))):
+            raise RepositoryOwnershipError(toplevel_problem)
+        if toplevel_problem:
+            return False
+        if stat.S_ISDIR(metadata.st_mode):
             return True
-        if indexed_problem is not None:
-            raise indexed_problem
+        if not stat.S_ISREG(metadata.st_mode):
+            return False
+        problems = []
+        # All ownership operands use the same three-valued OR. An operational failure
+        # cannot become false, but must not erase an independent positive sibling.
+        for prove in (
+                lambda: _indexed_gitlink(path, owner_root, runner),
+                lambda: _registered_linked_worktree(path, marker),
+                lambda: _bound_separate_gitdir(path, marker, runner)):
+            try:
+                if prove():
+                    return True
+            except RepositoryOwnershipError as exc:
+                problems.append(str(exc))
+            except (OSError, ValueError) as exc:
+                problems.append(f"cannot resolve Git ownership for {path!r}: {exc}")
+        if problems:
+            raise RepositoryOwnershipError("; ".join(dict.fromkeys(problems)))
         return False
     except RepositoryOwnershipError:
         raise
@@ -300,6 +349,8 @@ def boundary_between(root, candidate, runner=None):
 
 
 def selftest():
+    from unittest.mock import patch
+
     checks = failures = 0
 
     def expect(label, ok):
@@ -307,6 +358,19 @@ def selftest():
         checks += 1
         failures += not ok
         print(f"  {'PASS' if ok else 'FAIL'} {label}")
+
+    def ownership_error(call):
+        try:
+            call()
+        except RepositoryOwnershipError as exc:
+            return str(exc)
+        return ""
+
+    def boundary_value(*args, **kwargs):
+        try:
+            return is_repository_boundary(*args, **kwargs)
+        except RepositoryOwnershipError:
+            return False
 
     hostile = {
         "PATH": "/bin", "SENTINEL": "kept", "GIT_AUTHOR_NAME": "kept",
@@ -626,6 +690,167 @@ def selftest():
                _bound_separate_gitdir(
                    separate, os.path.join(separate, ".git"), subprocess.run))
 
+        def config_failure(argv, **kwargs):
+            if "config" in argv:
+                return Done(128, b"", b"planted unreadable local config\n")
+            return subprocess.run(argv, **kwargs)
+        expect("an operational config exit is a named ownership error",
+               "core.worktree exited 128: planted unreadable local config" in
+               ownership_error(lambda: is_repository_boundary(separate, owner,
+                                                               config_failure)))
+        expect("the separate-gitdir helper preserves an operational config exit",
+               "core.worktree exited 128" in ownership_error(
+                   lambda: _bound_separate_gitdir(
+                       separate, os.path.join(separate, ".git"), config_failure)))
+        for label, reply in (
+                ("partial output", Done(1, os.fsencode(separate) + b"\0")),
+                ("diagnostic", Done(1, b"", b"planted config failure"))):
+            expect(f"a status-one config reply with {label} is not an absent value",
+                   "core.worktree exited 1" in ownership_error(
+                       lambda reply=reply: _bound_separate_gitdir(
+                           separate, os.path.join(separate, ".git"),
+                           lambda *_a, **_k: reply)))
+        expect("an absent core.worktree is a known negative",
+               not _bound_separate_gitdir(
+                   separate, os.path.join(separate, ".git"),
+                   lambda *_a, **_k: Done(1)))
+
+        real_open = open
+        registered_marker = os.path.join(registered, ".git")
+        for label, blocked in (
+                ("marker", registered_marker),
+                ("commondir", os.path.join(registered_admin, "commondir")),
+                ("backlink", backlink_path)):
+            def denied_open(filename, *args, **kwargs):
+                if os.fspath(filename) == blocked:
+                    raise PermissionError(13, "planted metadata permission failure", filename)
+                return real_open(filename, *args, **kwargs)
+            with patch("builtins.open", denied_open):
+                problem = ownership_error(lambda: is_repository_boundary(registered, owner))
+            expect(f"an unreadable registered-worktree {label} is unknown, not absent",
+                   "cannot read Git metadata" in problem
+                   and "planted metadata permission failure" in problem)
+
+        original_mode = stat.S_IMODE(os.stat(backlink_path).st_mode)
+        os.chmod(backlink_path, 0)
+        try:
+            try:
+                with real_open(backlink_path, "rb") as fh:
+                    fh.read()
+                permission_enforced = False
+            except PermissionError:
+                permission_enforced = True
+            physical_problem = ownership_error(
+                lambda: is_repository_boundary(registered, owner))
+            physical_boundary = (False if physical_problem else
+                                 is_repository_boundary(registered, owner))
+        finally:
+            os.chmod(backlink_path, original_mode)
+        print(f"  OBSERVATION chmod-backlink permission_enforced={permission_enforced}")
+        expect("a chmod-zero backlink never becomes a negative ownership decision",
+               (permission_enforced and "cannot read Git metadata" in physical_problem)
+               or (not permission_enforced and physical_boundary))
+        expect("the mode-restored registered worktree remains a boundary",
+               is_repository_boundary(registered, owner))
+
+        real_stat = os.stat
+        for label, blocked, candidate in (
+                ("marker", registered_marker, registered),
+                ("admin", separate_admin, separate),
+                ("registration", os.path.join(separate_admin, "commondir"), separate)):
+            blocked = os.path.realpath(blocked)
+            def denied_stat(filename, *args, **kwargs):
+                if os.path.realpath(filename) == blocked:
+                    raise PermissionError(13, "planted metadata stat failure", filename)
+                return real_stat(filename, *args, **kwargs)
+            with patch("os.stat", denied_stat):
+                problem = ownership_error(lambda: is_repository_boundary(candidate, owner))
+            expect(f"an unreadable {label} stat cannot substitute an absent entry",
+                   "planted metadata stat failure" in problem)
+
+        def failed_identity(*_args, **_kwargs):
+            raise PermissionError(13, "planted metadata identity failure")
+        with patch("os.path.samefile", failed_identity):
+            problem = ownership_error(lambda: is_repository_boundary(registered, owner))
+        expect("an unreadable top-level identity is a modeled ownership error",
+               "planted metadata identity failure" in problem)
+
+        # The registered arm may be unknown while the separate arm independently proves
+        # ownership. The injected read error names an absent registration file, and the
+        # separate arm's successful stat still establishes that no registration exists.
+        absent_common = os.path.join(os.path.realpath(separate_admin), "commondir")
+        registration_failures = []
+        def unknown_registration(filename, *args, **kwargs):
+            if os.fspath(filename) == absent_common:
+                registration_failures.append(filename)
+                raise OSError(5, "planted registration read failure", filename)
+            return real_open(filename, *args, **kwargs)
+        with patch("builtins.open", unknown_registration):
+            sibling_boundary = boundary_value(separate, owner)
+        expect("a positive separate binding survives an unknown registered operand",
+               sibling_boundary and registration_failures == [absent_common])
+
+        cr_root = os.path.join(owner, "carriage\r")
+        os.makedirs(cr_root[:-1])
+        subprocess.run(["git", "init", "--quiet", cr_root], check=True)
+        raw_top = subprocess.run(
+            ["git", "-C", cr_root, "rev-parse", "--show-toplevel"],
+            capture_output=True, check=True).stdout
+        expect("real Git preserves a CR byte before its top-level LF terminator",
+               raw_top == os.fsencode(os.path.realpath(cr_root)) + b"\n")
+        expect("a real CR-ending repository is a boundary even with a non-CR sibling",
+               is_repository_boundary(cr_root, owner))
+        linked_cr = os.path.join(owner, "linked-carriage\r")
+        subprocess.run(
+            ["git", "-C", owner, "worktree", "add", "--quiet", "--detach", linked_cr],
+            check=True)
+        linked_cr_admin = _gitdir_from_marker(linked_cr, os.path.join(linked_cr, ".git"))
+        expect("a registered worktree with a CR-bearing backlink remains a boundary",
+               is_repository_boundary(linked_cr, owner)
+               and b"\r/.git\n" in real_open(
+                   os.path.join(linked_cr_admin, "gitdir"), "rb").read())
+        path_record = os.path.join(tmp, "path-record")
+        with real_open(path_record, "wb") as fh:
+            fh.write(os.fsencode(cr_root) + b"\n")
+        expect("the metadata line reader preserves a valid CR-ending path",
+               _git_path_line(path_record) == cr_root)
+        with real_open(path_record, "wb") as fh:
+            fh.write(os.fsencode(registered_admin) + b"\r\n")
+        expect("the metadata line reader accepts CRLF when its literal path is absent",
+               _git_path_line(path_record) == registered_admin)
+        expect("a CRLF top-level reply retains compatibility for an absent literal path",
+               git_toplevel_error(owner, lambda *_a, **_k:
+                                  Done(stdout=os.fsencode(owner) + b"\r\n")) == "")
+        expect("a valid CR-ending reply cannot be reinterpreted as a different sibling",
+               "resolved" in git_toplevel_error(
+                   cr_root[:-1], lambda *_a, **_k: Done(stdout=raw_top)))
+        def unreadable_literal(filename, *args, **kwargs):
+            if os.path.realpath(filename) == os.path.realpath(cr_root):
+                raise PermissionError(13, "planted CR-path stat failure", filename)
+            return real_stat(filename, *args, **kwargs)
+        with patch("os.stat", unreadable_literal):
+            try:
+                top_problem = git_toplevel_error(cr_root)
+            except RepositoryOwnershipError:
+                top_problem = "escaped instead of returning a string"
+            boundary_problem = ownership_error(lambda: is_repository_boundary(cr_root, owner))
+        expect("unknown CR-path identity remains a string error for top-level callers",
+               "planted CR-path stat failure" in top_problem)
+        expect("unknown CR-path identity remains typed at the public boundary",
+               "planted CR-path stat failure" in boundary_problem)
+        with real_open(path_record, "wb") as fh:
+            fh.write(os.fsencode(cr_root) + b"\n")
+        with patch("os.stat", unreadable_literal):
+            line_problem = ownership_error(lambda: _git_path_line(path_record))
+        expect("unknown literal metadata identity cannot fall back to a CRLF spelling",
+               "planted CR-path stat failure" in line_problem)
+        for malformed in (b"\n", b"\r\n", b"gitdir: \n", b"gitdir: \r\n"):
+            with real_open(path_record, "wb") as fh:
+                fh.write(malformed)
+            expect(f"an empty metadata path is not a pointer: {malformed!r}",
+                   _git_path_line(path_record, b"gitdir: "
+                                  if malformed.startswith(b"gitdir: ") else b"") is None)
+
         # A ValueError raised anywhere under the ownership probes is the modelled error,
         # not a raised one: every consumer catches RepositoryOwnershipError and nothing
         # else, so an unconverted one surfaces as an unhandled exception. Injected through
@@ -731,7 +956,9 @@ def selftest():
             ["git", "--git-dir", separate_inside_admin, "config", "core.worktree",
              separate_inside], check=True)
         expect("a positive separate-gitdir proof survives an unknown index operand",
-               is_repository_boundary(separate_inside, owner, failed_index_query))
+               boundary_value(separate_inside, owner, failed_index_query))
+        expect("a positive registered-worktree proof survives an unknown index operand",
+               boundary_value(linked_cr, owner, failed_index_query))
 
         plain = os.path.join(owner, "plain")
         os.makedirs(plain)

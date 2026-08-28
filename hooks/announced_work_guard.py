@@ -62,6 +62,7 @@ import os
 import re
 import subprocess
 import sys
+from collections import deque
 
 VERSION = "1.0.0"
 
@@ -119,9 +120,8 @@ REPORT = re.compile(
 # and the fixed-form arms cannot. Clause boundaries stop the association, so a prior run's
 # result in "Starting the audit because the previous run failed" cannot excuse the new
 # announcement. This remains an explicit English heuristic, not a general parser.
-# The participle test states intent rather than grading a branch: after "Let me", "I'll now"
-# or a fixed form, a completed-work verb cannot follow without a clause break or an empty
-# activity, and both already return False below, so its mutation is correctly unkillable.
+# The participle check is load-bearing: "Let me check whether the tests passed" has a
+# completed-work token and a nonempty complement, but does not report the proposed check.
 PARTICIPLE_ANNOUNCEMENT = re.compile(
     r'(?:Starting|Running|Proceeding|Continuing|Beginning|Kicking off|Firing off)'
     r'\s+(?:with|on|the|a|an)$', re.I)
@@ -144,6 +144,14 @@ REPORT_INCOMPLETE = frozenset({
     "will", "would", "shall", "should", "may", "might", "can", "could", "must",
     "being", "not", "never",
 })
+# These forms can modify a following noun: a count before "failed tests" is not a
+# completed activity. Accept their unambiguous result tails, not a bare following noun.
+# Other REPORT verbs retain their object-taking forms ("produced output", "took minutes").
+REPORT_ADJECTIVAL = frozenset({"completed", "finished", "passed", "failed"})
+REPORT_RESULT_TAIL = re.compile(
+    r'^[*_]*(?:[ \t]*$|[.!?;,:)]|[ \t]+(?:in|at|on|by|after|before|during|with|'
+    r'without|to|because|since|when|successfully|unsuccessfully|earlier|recently|'
+    r'today|yesterday|again)\b)', re.I)
 
 
 def reports_this_activity(unit, found):
@@ -164,6 +172,9 @@ def reports_this_activity(unit, found):
             continue
         if any(word in REPORT_INCOMPLETE for word in core):
             continue
+        if (report.group(0).casefold() in REPORT_ADJECTIVAL
+                and not REPORT_RESULT_TAIL.match(remainder[report.end():])):
+            continue
         return True
     return False
 
@@ -181,83 +192,149 @@ HANDBACK = re.compile(
 # whole discriminator, so it has to be measured in sentences.
 TAIL_UNITS = 2
 
-# A "unit" ends at a sentence terminator OR at a structural break, because prose
-# punctuation is not the only thing that ends a thought. Splitting on `[.!?]`
-# alone was the second bug this file's own controls caught: a message ending in
-# a table, a bullet list or a code fence has no terminal punctuation near the
-# end, so an announcement three paragraphs up landed inside "the last sentence"
-# and blocked. Messages here end in tables constantly, so that would have fired
-# all day and taught the reader to ignore the gate.
-SPLIT = re.compile(
-    r'(?<=[.!?])[\s\n]+'                       # end of a sentence
-    r'|\n\s*\n'                                # paragraph break
-    r'|\n(?=\s*(?:[|\-*+>#]|\d+[.)]|```))'     # table row, list item, quote,
-)                                              # heading, fence
-
-
-# A unit can OPEN with markdown decoration, and the two kinds do not mean the same thing.
-# A STRUCTURAL container -- a quote caret, table pipe, heading hash, fence, or an indented
-# or list-marked block -- holds material that is being shown: a quoted log line, a status
-# row, a section title, a plan item. Ending a turn on one of those is the behaviour the
-# rule wants more of, so a container is data and nothing matches inside it. INLINE emphasis
-# is not a container; `**Starting the audit.**` is the same sentence as `Starting the
-# audit.` wearing bold, and only the two asterisks kept it from being read as one.
-# Only the emphasis is stripped. A structural lead is left in place, which is what keeps a
-# quoted log line, a table cell, a heading and a plan item out of the matcher's reach: the
-# prefix has no `>`, `|`, `#` or list-marker alternative, so an unstripped lead cannot be an
-# anchor. Stripping those leads was the first attempt and it invented seven false positives.
+# Structural blocks are identified before sentence splitting. Each table row, heading,
+# list item or paragraph supplies units; a fenced code block supplies exactly ONE unit,
+# regardless of delimiter type, content punctuation or the presence of a closing line.
+# Shown material still occupies tail slots, but cannot announce work. Code also cannot
+# supply a handback. Inline emphasis is decoration, not a structural container.
+SENTENCE_END = re.compile(r'(?<=[.!?])\s+')
 EMPHASIS = re.compile(r'^(?:\*\*|__|\*|_)+')
-# The structural leads, as the physical line carries them. A heading is one to six hashes
-# followed by a space or the line end, as CommonMark's ATX rule has it; `#12 fixed.` is prose
-# naming an issue, not a heading, and treating it as one let the sentence after it walk past.
-CONTAINER = re.compile(
-    r'^[ \t]*(?:[>|]|#{1,6}(?=[ \t]|$)|[-+*][ \t]+|\d+[.)][ \t]+)'
-)
-# A fenced unit is the one container HANDBACK must not read inside either, because
-# `let me know` in a code sample is not the speaker handing anything back. A bulleted or
-# quoted handback IS one, so only the fence is excluded, not every container. An INDENTED
-# code block is not modelled: SPLIT's sentence break consumes the blank line and the indent
-# with it, so the marker never survives to be read -- said here rather than carried as an
-# operand nothing can reach.
+QUOTE_LEAD = re.compile(r'^(?: {0,3}>[ \t]?)+')
+QUOTE_MARKER = re.compile(r' {0,3}>[ \t]?')
+LIST_LEAD = re.compile(r'^[ \t]*(?:[-+*]|\d+[.)])[ \t]+')
+ATX_HEADING = re.compile(r'^[ \t]*#{1,6}(?=[ \t]|$)')
+FENCE_LINE = re.compile(r'^ {0,3}(`{3,}|~{3,})(.*)$')
+
+
+def markdown_blocks(text):
+    """Yield the supported physical block spans as (text, code, container).
+
+    Quote/list paragraphs admit marked, indented and lazy continuation lines; ATX
+    headings and table rows end at their physical line. Blank lines end lazy continuation.
+    List indentation can retain a following paragraph. A fence closes only on a matching
+    kind, sufficient length and whitespace-only suffix, or at its containing block's end.
+    This is a bounded block classifier, not a full Markdown parser: setext headings, HTML
+    blocks, thematic breaks and standalone indented code are not classified here.
+    """
+    lines, kind = [], "prose"
+    paragraph = False
+    list_indent = 0
+    fence = None
+
+    def take():
+        nonlocal lines
+        block = "\n".join(lines)
+        lines = []
+        return block, kind == "code", kind != "prose"
+
+    for raw in text.split("\n"):
+        line = raw.expandtabs(4)
+        quote = QUOTE_LEAD.match(line)
+        depth = quote.group(0).count(">") if quote else 0
+        content = line[quote.end():] if quote else line
+        indent = len(content) - len(content.lstrip(" "))
+        if fence:
+            delimiter, length, quote_depth, fence_indent = fence
+            offset = 0
+            for _ in range(quote_depth):
+                prefix = QUOTE_MARKER.match(line, offset)
+                if not prefix:
+                    break
+                offset = prefix.end()
+            # Strip only the opener's container prefix. Extra `>` characters inside code
+            # are literal content, not a new quote whose marker can reveal a closer.
+            content = line[offset:]
+            indent = len(content) - len(content.lstrip(" "))
+            if (depth < quote_depth
+                    or (fence_indent and content.strip() and indent < fence_indent)):
+                yield take()
+                fence = None
+                paragraph, list_indent = False, 0
+            else:
+                lines.append(raw)
+                closer = FENCE_LINE.match(content[fence_indent:])
+                if (closer and closer.group(1)[0] == delimiter
+                        and len(closer.group(1)) >= length
+                        and not closer.group(2).strip(" \t")):
+                    yield take()
+                    fence = None
+                continue
+        if not line.strip():
+            if lines:
+                yield take()
+            paragraph = False
+            continue
+
+        indented_item = bool(list_indent and indent >= list_indent)
+        if indented_item:
+            content = content[list_indent:]
+        item = LIST_LEAD.match(content)
+        if item:
+            list_indent = (list_indent if indented_item else 0) + item.end()
+            content = content[item.end():]
+            next_kind = "list"
+        elif depth or indented_item:
+            next_kind = "list" if indented_item else "quote"
+        elif paragraph and kind in ("quote", "list"):
+            next_kind = kind
+        else:
+            next_kind, list_indent = "prose", 0
+
+        marker = FENCE_LINE.match(content)
+        if marker and (marker.group(1)[0] != "`" or "`" not in marker.group(2)):
+            if lines:
+                yield take()
+            kind, lines = "code", [raw]
+            fence = (marker.group(1)[0], len(marker.group(1)), depth,
+                     list_indent if item or indented_item else 0)
+            paragraph = False
+            continue
+        if ATX_HEADING.match(content) or content.lstrip().startswith("|"):
+            if lines:
+                yield take()
+            kind, lines = "container", [raw]
+            yield take()
+            paragraph = False
+            if not item and not indented_item:
+                list_indent = 0
+            continue
+        if item or kind != next_kind or not content.strip():
+            if lines:
+                yield take()
+        kind = next_kind
+        lines.append(raw)
+        paragraph = bool(content.strip())
+    if lines:
+        yield take()
+
+
 def boundary(text):
     """The last TAIL_UNITS units as (text, is_code, is_container).
 
-    A fence is tracked across units rather than tested per unit, because a fence containing
-    a list marker is split into three units and only the first carries the delimiter. Every
-    unit is still emitted: they occupy tail slots, which is what keeps an announcement three
-    paragraphs above a closing table out of the boundary. Container identity comes from the
-    physical lines, so sentence splitting cannot turn a quote's second sentence into a claim
-    by the speaker -- and it must hold on EVERY line the unit spans, because SPLIT keeps a
-    marker-led line joined to an unmarked line that follows it without a sentence end. A
-    heading ends at its line break; the line under it is prose, whatever the first line was.
+    Work policy: classify physical lines once, split each non-code block once, and retain
+    only two units. No sentence rescans or copies its growing physical-line prefix; no
+    tail truncation can discard an earlier fence opener. The scale selftest checks this
+    progress property separately from the actual-stdin five-second runtime probe.
     """
-    body = text.strip()
-    raw_parts = []
-    cursor = 0
-    for separator in SPLIT.finditer(body):
-        raw_parts.append((body[cursor:separator.start()], cursor))
-        cursor = separator.end()
-    raw_parts.append((body[cursor:], cursor))
+    parts = deque(maxlen=TAIL_UNITS)
 
-    parts, fenced = [], False
-    for part, start in raw_parts:
-        # Unreachable for a non-empty body: every SPLIT alternative consumes the whitespace
-        # it matches and none can match at a part's first character, so no part is empty or
-        # blank. Kept as intent, so a mutation of it is correctly unkillable.
-        if not part or not part.strip():
+    def append(part, container):
+        unit = part.strip()
+        if not container:
+            unit = EMPHASIS.sub("", unit).strip()
+        if unit:
+            parts.append((unit, False, container))
+
+    for block, code, container in markdown_blocks(text):
+        if code:
+            parts.append((block, True, container))
             continue
-        line_start = body.rfind("\n", 0, start) + 1
-        spanned = body[line_start:start + len(part)].split("\n")
-        container = all(CONTAINER.match(line) for line in spanned)
-        opens = part.lstrip().startswith(("```", "~~~"))
-        if fenced or opens:
-            parts.append((part, True, container))
-            if opens:
-                fenced = not fenced
-            continue
-        unit = part.strip() if container else EMPHASIS.sub("", part).strip()
-        parts.append((unit, False, container))
-    return [(unit, code, container) for unit, code, container in parts if unit][-TAIL_UNITS:]
+        cursor = 0
+        for separator in SENTENCE_END.finditer(block):
+            append(block[cursor:separator.start()], container)
+            cursor = separator.end()
+        append(block[cursor:], container)
+    return list(parts)
 
 
 BLOCK_MSG = """\
@@ -309,6 +386,20 @@ class EnvelopeDrift(ValueError):
     """
 
 
+def text_blocks(blocks):
+    """Read supported text blocks without coercing malformed values into evidence."""
+    parts = []
+    for index, block in enumerate(blocks):
+        if not isinstance(block, dict) or block.get("type") != "text":
+            continue
+        value = block.get("text", "")
+        if not isinstance(value, str):
+            raise EnvelopeDrift(f"text block {index} has {type(value).__name__} text, "
+                                "expected str")
+        parts.append(value)
+    return "\n".join(parts)
+
+
 def message_text(payload):
     """The last assistant message as plain text, however it is shaped."""
     if not isinstance(payload, dict):
@@ -324,11 +415,9 @@ def message_text(payload):
         if isinstance(c, str):
             return c
         if isinstance(c, list):
-            return "\n".join(b.get("text", "") for b in c
-                             if isinstance(b, dict) and b.get("type") == "text")
+            return text_blocks(c)
     if isinstance(m, list):
-        return "\n".join(b.get("text", "") for b in m
-                         if isinstance(b, dict) and b.get("type") == "text")
+        return text_blocks(m)
     if m is None:
         return ""            # present and empty is a real, readable state
     raise EnvelopeDrift(f"last_assistant_message is a {type(m).__name__}, "
@@ -404,9 +493,11 @@ def selftest():
         ("ends in a bullet list",
          {"last_assistant_message": "I'll run the audit and report.\n\n"
                                     "- F20 live\n- F90 live"}, False),
-        ("ends in a code fence",
+        # A whole fenced block is one structural unit, so the preceding sentence is
+        # still in the two-unit tail. Showing code does not itself retract that claim.
+        ("one closed code block leaves the preceding announcement in the tail",
          {"last_assistant_message": "Let me look at the hook.\n\n"
-                                    "```python\nx = 1\n```"}, False),
+                                    "```python\nx = 1\n```"}, True),
         ("ends in a numbered list",
          {"last_assistant_message": "Let me start on the batch.\n\n"
                                     "1. F20\n2. F90"}, False),
@@ -521,8 +612,8 @@ def selftest():
          {"last_assistant_message": 17}, "drift"),
         ("shape: a payload that is not an object is drift", "not an object", "drift"),
 
-        # Markdown decoration on a unit's HEAD. SPLIT recognises each of these as a unit
-        # lead, so before the units stopped being pre-joined the same sentence blocked
+        # Markdown decoration on a unit's HEAD. Before units stopped being pre-joined,
+        # the same sentence blocked
         # after a full stop and walked past behind two asterisks, a bullet or a caret.
         # These are the shapes this house writes its closing lines in.
         ("a bold announcement is still an announcement",
@@ -553,7 +644,7 @@ def selftest():
          {"last_assistant_message": "| step | owner |\n|---|---|\n"
                                     "| Starting the audit | F1 |"}, False),
         # Structural identity belongs to the physical Markdown line, not only its first
-        # sentence. SPLIT removes the marker from every later fragment unless boundary()
+        # sentence. Sentence splitting removes the marker from every later fragment unless boundary()
         # carries the line's classification beside it.
         ("a quote's second sentence remains quoted material",
          {"last_assistant_message": "> Log says safe. Starting the audit."}, False),
@@ -573,19 +664,18 @@ def selftest():
          {"last_assistant_message": "## Status note. Starting the audit."}, False),
         ("the same second sentence in prose remains an announcement",
          {"last_assistant_message": "Log says safe. Starting the audit."}, True),
-        # A container's identity ends where its physical line does. SPLIT keeps a marker-led
-        # line joined to an unmarked line that follows it without a sentence end, so reading
-        # the first line alone let a heading cover the announcement under it.
+        # A heading ends at its physical line; a quote/list paragraph can continue without
+        # repeating the marker. The latter are CommonMark's lazy continuation lines.
         ("a heading ends at its line break",
          {"last_assistant_message": "## Plan\nStarting the audit."}, True),
         ("a heading with a trailing colon ends at its line break",
          {"last_assistant_message": "## Next:\nStarting the audit."}, True),
-        ("a list item's unmarked continuation line is prose",
-         {"last_assistant_message": "- item one\nStarting the audit."}, True),
-        ("a numbered item's unmarked continuation line is prose",
-         {"last_assistant_message": "1. item one\nStarting the audit."}, True),
-        ("a quote's unmarked continuation line is prose",
-         {"last_assistant_message": "> Log says safe\nStarting the audit."}, True),
+        ("a list item's unmarked paragraph continuation remains a plan item",
+         {"last_assistant_message": "- item one\nStarting the audit."}, False),
+        ("a numbered item's unmarked paragraph continuation remains a plan item",
+         {"last_assistant_message": "1. item one\nStarting the audit."}, False),
+        ("a quote's unmarked paragraph continuation remains quoted",
+         {"last_assistant_message": "> Log says safe\nStarting the audit."}, False),
         ("a table's following unmarked line is prose",
          {"last_assistant_message": "| a | b |\n|---|---|\n| c | d |\nStarting the audit."},
          True),
@@ -801,11 +891,66 @@ def selftest():
         label = got if isinstance(got, str) else ("block" if got else "allow")
         print(f"  {'PASS' if got == want else 'FAIL'} {name} -> {label}")
 
+    # Count scanned/copied characters at the sentence-to-block seam. The two fixed sizes
+    # exercise real boundary(), not a duplicate algorithm; a growing-prefix search or
+    # slice exceeds the linear work allowance without depending on host timing.
+    original_blocks = markdown_blocks
+    for repetitions in (2048, 4096):
+        work = {"block_chars": 0, "copied": 0, "searched": 0}
+
+        class MeasuredBlock(str):
+            def __getitem__(self, key):
+                result = super().__getitem__(key)
+                if isinstance(key, slice):
+                    work["copied"] += len(result)
+                return result
+
+            def rfind(self, sub, start=0, end=None):
+                bound = len(self) if end is None else end
+                work["searched"] += max(0, bound - start)
+                return super().rfind(sub, start, bound)
+
+        def measured_blocks(text):
+            for block, code, container in original_blocks(text):
+                work["block_chars"] += len(block)
+                yield MeasuredBlock(block), code, container
+
+        message = "x. " * repetitions + "Starting the audit."
+        globals()["markdown_blocks"] = measured_blocks
+        try:
+            got = boundary(message)
+            ok = (got == [("x.", False, False), ("Starting the audit.", False, False)]
+                  and work["block_chars"] == len(message)
+                  and work["copied"] + work["searched"] <= 4 * len(message))
+        except Exception:
+            ok = False
+        finally:
+            globals()["markdown_blocks"] = original_blocks
+        failures += 0 if ok else 1
+        checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} boundary progress n={repetitions} -> {work}")
+
     # Production-path controls: these enter through JSON stdin and assert the hook's actual
     # exit/receipt contract, not only judge(). The direct cases above localise failures; this
     # matrix proves main() still carries each decision to the Stop host correctly.
     environment = dict(os.environ)
     environment.pop("ANNOUNCED_WORK_GUARD", None)
+    # This is the demonstrated 360019-byte message, at the registered five-second budget.
+    # A timeout is one failed check, not an aborted suite with a different cardinality.
+    try:
+        large = subprocess.run(
+            [sys.executable, os.path.abspath(__file__)],
+            input=json.dumps({"hook_event_name": "Stop",
+                              "last_assistant_message": "x. " * 120000
+                              + "Starting the audit."}),
+            capture_output=True, text=True, timeout=5, env=environment)
+        ok = (large.returncode == 2 and not large.stdout
+              and "'Starting the'" in large.stderr)
+    except subprocess.TimeoutExpired:
+        ok = False
+    failures += 0 if ok else 1
+    checks += 1
+    print(f"  {'PASS' if ok else 'FAIL'} main answers the 360019-byte scale case in budget")
     for label, message, want, trigger in (
         ("main blocks a semicolon-separated historical report",
          "Starting the audit; the prior run failed.", 2, "Starting the"),
@@ -831,6 +976,38 @@ def selftest():
          "Starting the audit after the checks passed.", 2, "Starting the"),
         ("main allows the activity's direct completed-work predicate",
          "Running the sweep completed in 4m.", 0, None),
+        ("main blocks a word-counted failure adjective",
+         "Running the three failed tests.", 2, "Running the"),
+        ("main blocks a digit-counted failure adjective",
+         "Running the 3 failed tests.", 2, "Running the"),
+        ("main blocks a remaining-object failure adjective",
+         "Running the remaining failed tests.", 2, "Running the"),
+        ("main blocks an ordinal completion adjective",
+         "Starting the second completed audit.", 2, "Starting the"),
+        ("main blocks a digit-counted completion adjective",
+         "Starting the 2 completed audits.", 2, "Starting the"),
+        ("main blocks an ambiguous object after a completion token",
+         "Running the script completed tasks.", 2, "Running the"),
+        ("main allows a counted object's direct failure predicate",
+         "Running the three tests failed.", 0, None),
+        ("main allows a counted object's direct completion predicate",
+         "Starting the second audit completed in 4m.", 0, None),
+        ("main associates the predicate after a failure adjective",
+         "Running the three failed tests completed in 4m.", 0, None),
+        ("main associates the predicate after a completion adjective",
+         "Starting the second completed audit failed.", 0, None),
+        ("main retains object-taking result predicates",
+         "Running the sweep produced three files.", 0, None),
+        ("main retains a result adverb",
+         "Running the sweep completed successfully.", 0, None),
+        ("main blocks a let-me whether complement",
+         "Let me check whether the tests passed.", 2, "Let me check"),
+        ("main blocks an imminent whether complement",
+         "I'll now check whether the tests passed.", 2, "I'll now check"),
+        ("main blocks a let-me why complement",
+         "Let me check why the tests failed.", 2, "Let me check"),
+        ("main blocks an imminent where complement",
+         "I'll now check where the tests failed.", 2, "I'll now check"),
         ("main checks a later announcement after a genuine report",
          "Running the sweep completed in 4m; starting the audit.", 2, "; starting the"),
         ("main preserves a quote container across sentence splitting",
@@ -847,12 +1024,74 @@ def selftest():
          "Log says safe. Starting the audit.", 2, "Starting the"),
         ("main reads the line under a heading as prose",
          "## Plan\nStarting the audit.", 2, "Starting the"),
-        ("main reads a list item's unmarked continuation line as prose",
-         "- item one\nStarting the audit.", 2, "Starting the"),
+        ("main preserves a list item's lazy paragraph continuation",
+         "- item one\nStarting the audit.", 0, None),
         ("main reads an issue reference as prose",
          "#12 fixed. Starting the audit.", 2, "Starting the"),
         ("main keeps a wrapped quote quoted",
          "> Log says safe\n> Starting the audit.", 0, None),
+        ("main keeps a lazy quote continuation quoted",
+         "> Log says safe\nStarting the audit.", 0, None),
+        ("main preserves an ordered item's lazy continuation",
+         "1. item one\nStarting the audit.", 0, None),
+        ("main preserves a plus item's lazy continuation",
+         "+ item one\nStarting the audit.", 0, None),
+        ("main preserves an asterisk item's lazy continuation",
+         "* item one\nStarting the audit.", 0, None),
+        ("main preserves an indented list continuation",
+         "- item one\n  Starting the audit.", 0, None),
+        ("main preserves an indented ordered continuation",
+         "1. item one\n   Starting the audit.", 0, None),
+        ("main retains an indented list paragraph after a blank line",
+         "- item one\n\n  Starting the audit.", 0, None),
+        ("main ends a lazy quote at a blank line",
+         "> Log says safe\n\nStarting the audit.", 2, "Starting the"),
+        ("main ends a lazy list at a blank line",
+         "- item one\n\nStarting the audit.", 2, "Starting the"),
+        ("main does not lazily continue a quoted heading",
+         "> ## Plan\nStarting the audit.", 2, "Starting the"),
+        ("main does not lazily continue a list heading",
+         "- ## Plan\nStarting the audit.", 2, "Starting the"),
+        ("main reads prose immediately after a backtick closer",
+         "```\nx = 1\n```\nStarting the audit.", 2, "Starting the"),
+        ("main reads prose immediately after a tilde closer",
+         "~~~\nx = 1\n~~~\nStarting the audit.", 2, "Starting the"),
+        ("main reads prose after a tilde closer and blank line",
+         "~~~\nx = 1\n~~~\n\nStarting the audit.", 2, "Starting the"),
+        ("main accepts a longer matching closer",
+         "```\nx = 1\n`````\nStarting the audit.", 2, "Starting the"),
+        ("main rejects a shorter closer",
+         "````\nx = 1\n```\n\nStarting the audit.", 0, None),
+        ("main rejects a different delimiter as a closer",
+         "```\nx = 1\n~~~\n\nStarting the audit.", 0, None),
+        ("main rejects a shorter tilde closer",
+         "~~~~\nx = 1\n~~~\n\nStarting the audit.", 0, None),
+        ("main rejects a quoted delimiter inside top-level code",
+         "```\n> ```\nStarting the audit.", 0, None),
+        ("main keeps an extra quote marker literal inside quoted code",
+         "> ```\n> > ```\n> Starting the audit.", 0, None),
+        ("main rejects a closer with non-whitespace suffix",
+         "```\nx = 1\n``` not closed\nStarting the audit.", 0, None),
+        ("main retains an unclosed tilde block",
+         "~~~\nx = 1\n\nStarting the audit.", 0, None),
+        ("main does not open a backtick fence with backticks in its info string",
+         "```lang`\nStarting the audit.", 2, "Starting the"),
+        ("main excludes backtick code from the handback read",
+         "Starting the audit.\n\n```\nlet me know\n```", 2, "Starting the"),
+        ("main excludes tilde code from the handback read",
+         "Starting the audit.\n\n~~~\nlet me know\n~~~", 2, "Starting the"),
+        ("main counts a punctuated backtick block as one tail unit",
+         "Starting the audit.\n\n```\nfirst. second. third.\n```", 2, "Starting the"),
+        ("main counts a punctuated tilde block as one tail unit",
+         "Starting the audit.\n\n~~~\nfirst. second. third.\n~~~", 2, "Starting the"),
+        ("main excludes a quoted fence from the handback read",
+         "Starting the audit.\n\n> ```\n> let me know\n> ```", 2, "Starting the"),
+        ("main releases an unclosed quoted fence when its container ends",
+         "> ```\n> code\nStarting the audit.", 2, "Starting the"),
+        ("main retains a direct result before a closed code block",
+         "Running the sweep completed in 4m.\n\n```\nx = 1\n```", 0, None),
+        ("main excludes an announcement before two later structural units",
+         "Starting the audit.\n\n```\nx = 1\n```\n\n## Results", 0, None),
     ):
         done = subprocess.run(
             [sys.executable, os.path.abspath(__file__)],
@@ -873,6 +1112,36 @@ def selftest():
     off_environment = dict(environment, ANNOUNCED_WORK_GUARD="off")
     announcing = json.dumps({"hook_event_name": "Stop",
                              "last_assistant_message": "Starting the audit."})
+    # Both accepted block-list envelopes use the same value validator. Each case enters
+    # main() so a TypeError, a coerced value, or a missing drift receipt cannot pass.
+    for shape in ("bare", "content"):
+        for value, expected, receipt in (
+                (None, 2, "text block 1 has NoneType text, expected str"),
+                (7, 2, "text block 1 has int text, expected str"),
+                (True, 2, "text block 1 has bool text, expected str"),
+                (1.25, 2, "text block 1 has float text, expected str"),
+                ([], 2, "text block 1 has list text, expected str"),
+                ({"value": "Starting the audit."}, 2,
+                 "text block 1 has dict text, expected str"),
+                ("Starting the audit.", 2, "Your final sentence announces work"),
+                ("", 0, None)):
+            blocks = [{"type": "thinking", "text": None},
+                      {"type": "text", "text": value}]
+            message = blocks if shape == "bare" else {"content": blocks}
+            done = subprocess.run(
+                [sys.executable, os.path.abspath(__file__)],
+                input=json.dumps({"hook_event_name": "Stop",
+                                  "last_assistant_message": message}),
+                capture_output=True, text=True, timeout=5, env=environment)
+            ok = (done.returncode == expected and not done.stdout
+                  and ((receipt is None and not done.stderr)
+                       or (receipt is not None and receipt in done.stderr
+                           and "Traceback" not in done.stderr)))
+            failures += 0 if ok else 1
+            checks += 1
+            print(f"  {'PASS' if ok else 'FAIL'} main reads {shape} text-block "
+                  f"{type(value).__name__} -> rc={done.returncode}")
+
     for label, raw, env, want, needle in (
         ("main blocks the announcement the switch controls start from",
          announcing, environment, 2, "Starting the"),

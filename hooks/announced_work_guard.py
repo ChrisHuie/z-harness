@@ -235,7 +235,8 @@ def markdown_blocks(text):
         return block, kind == "code", kind != "prose"
 
     for raw in text.split("\n"):
-        line = raw.expandtabs(4)
+        # CRLF framing is not a fence suffix. Keep the original block text unchanged.
+        line = (raw[:-1] if raw.endswith("\r") else raw).expandtabs(4)
         quote = QUOTE_LEAD.match(line)
         depth = quote.group(0).count(">") if quote else 0
         content = line[quote.end():] if quote else line
@@ -1150,8 +1151,8 @@ def selftest():
         checks += 1
         print(f"  {'PASS' if ok else 'FAIL'} {label} -> rc={done.returncode}")
 
-    # A soft line break within a prose unit retains the report's meaning. Paragraph and
-    # container boundaries remain separate units and cannot supply a missing predicate.
+    # Line-ending framing preserves both report meaning and fence boundaries. Paragraphs
+    # and containers remain separate units and cannot supply a missing predicate.
     for ending_name, ending in (("LF", "\n"), ("CRLF", "\r\n")):
         for label, message, want in (
             ("wrapped completion object", "Running the script completed\nthe migration.", 0),
@@ -1164,6 +1165,29 @@ def selftest():
             ("separate paragraph result", "Running the audit\n\nThe prior run failed.", 2),
             ("separate heading result", "Running the audit\n## The prior run failed.", 2),
             ("separate quote result", "Running the audit\n> The prior run failed.", 2),
+            ("closed backtick fence", "```\nexample\n```\nStarting the audit.", 2),
+            ("closed tilde fence", "~~~\nexample\n~~~\nStarting the audit.", 2),
+            ("longer backtick closer", "```\nexample\n`````\nStarting the audit.", 2),
+            ("longer tilde closer", "~~~\nexample\n~~~~~\nStarting the audit.", 2),
+            ("indented fence closer", "```\nexample\n   ```\nStarting the audit.", 2),
+            ("fence closer with horizontal space",
+             "```\nexample\n``` \t\nStarting the audit.", 2),
+            ("shorter backtick is not a closer",
+             "````\nexample\n```\nStarting the audit.", 0),
+            ("shorter tilde is not a closer", "~~~~\nexample\n~~~\nStarting the audit.", 0),
+            ("different fence kind is not a closer",
+             "```\nexample\n~~~\nStarting the audit.", 0),
+            ("text after a delimiter is not a closer",
+             "```\nexample\n``` text\nStarting the audit.", 0),
+            ("unclosed fence", "```\nexample\nStarting the audit.", 0),
+            ("code question cannot hand back",
+             "Starting the audit.\n\n```\nexample?\n```", 2),
+            ("question after a closer can hand back",
+             "Starting the audit.\n\n```\nexample\n```\nShould I proceed?", 0),
+            ("heading after a closer supplies another structural unit",
+             "Starting the audit.\n\n```\nexample\n```\n## Results", 0),
+            ("closed quoted fence", "> ```\n> example\n> ```\nStarting the audit.", 2),
+            ("closed list fence", "- ```\n  example\n  ```\n\nStarting the audit.", 2),
         ):
             done = subprocess.run(
                 [sys.executable, os.path.abspath(__file__)],

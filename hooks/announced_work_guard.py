@@ -145,13 +145,18 @@ REPORT_INCOMPLETE = frozenset({
     "being", "not", "never",
 })
 # These forms can modify a following noun: a count before "failed tests" is not a
-# completed activity. Accept their unambiguous result tails, not a bare following noun.
+# completed activity. Accept result tails and determiner/quantifier-led result objects,
+# not an ambiguous bare following noun. "completed the migration" is a result predicate;
+# "three completed migrations" still describes the object being announced.
 # Other REPORT verbs retain their object-taking forms ("produced output", "took minutes").
 REPORT_ADJECTIVAL = frozenset({"completed", "finished", "passed", "failed"})
 REPORT_RESULT_TAIL = re.compile(
     r'^[*_]*(?:[ \t]*$|[.!?;,:)]|[ \t]+(?:in|at|on|by|after|before|during|with|'
     r'without|to|because|since|when|successfully|unsuccessfully|earlier|recently|'
-    r'today|yesterday|again)\b)', re.I)
+    r'today|yesterday|again|a|an|the|this|that|these|those|all|both|each|every|any|'
+    r'some|several|many|multiple|no|another|[0-9]+|zero|one|two|three|four|five|six|'
+    r'seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|'
+    r'eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)\b)', re.I)
 
 
 def reports_this_activity(unit, found):
@@ -439,12 +444,12 @@ def judge(payload):
     # Code is excluded here too. Reading it let text inside a fence retract a real
     # announcement in the sentence above, which is the same mistake in the other direction.
     tail = " ".join(unit for unit, code, _container in units if not code)
-    # A turn that ends on a QUESTION is asking, not claiming — whatever was
+    # A non-code tail that ends on a QUESTION is asking, not claiming — whatever was
     # said before it. Found on a real transcript: a message opening "Starting
     # with a mechanical producer-existence check" and closing "Does the
     # fifth-entity model look right to you before I write any of it?" blocked,
     # which would have punished the exact behaviour the rule wants.
-    if text.rstrip().endswith("?"):
+    if tail.rstrip().endswith("?"):
         return None
     if HANDBACK.search(tail):
         return None
@@ -998,6 +1003,26 @@ def selftest():
          "Starting the second completed audit failed.", 0, None),
         ("main retains object-taking result predicates",
          "Running the sweep produced three files.", 0, None),
+        ("main retains a completion predicate with a determiner-led result object",
+         "Running the script completed the migration.", 0, None),
+        ("main retains a finishing predicate with a determiner-led result object",
+         "Running the script finished the conversion.", 0, None),
+        ("main retains a passing predicate with a quantified result object",
+         "Running the test suite passed all checks.", 0, None),
+        ("main retains a failing predicate with a word-counted result object",
+         "Running the validator failed three invalid requests.", 0, None),
+        ("main retains a digit-counted result object",
+         "Running the test suite passed 12 checks.", 0, None),
+        ("main retains a compound word-counted result object",
+         "Running the validator failed twenty-four invalid requests.", 0, None),
+        ("main retains a both-quantified result object",
+         "Running the script completed both migrations.", 0, None),
+        ("main retains an each-quantified result object",
+         "Running the script finished each conversion.", 0, None),
+        ("main still rejects a counted completion adjective before its noun",
+         "Running the three completed migrations.", 2, "Running the"),
+        ("main still rejects a counted failure adjective before its noun",
+         "Running the three failed checks.", 2, "Running the"),
         ("main retains a result adverb",
          "Running the sweep completed successfully.", 0, None),
         ("main blocks a let-me whether complement",
@@ -1080,6 +1105,24 @@ def selftest():
          "Starting the audit.\n\n```\nlet me know\n```", 2, "Starting the"),
         ("main excludes tilde code from the handback read",
          "Starting the audit.\n\n~~~\nlet me know\n~~~", 2, "Starting the"),
+        ("main excludes a question inside an unclosed backtick block",
+         "Starting the audit.\n\n```\nexample?", 2, "Starting the"),
+        ("main excludes a question inside an unclosed tilde block",
+         "Starting the audit.\n\n~~~\nexample?", 2, "Starting the"),
+        ("main excludes a question inside a closed backtick block",
+         "Starting the audit.\n\n```\nexample?\n```", 2, "Starting the"),
+        ("main excludes a question inside a closed tilde block",
+         "Starting the audit.\n\n~~~\nexample?\n~~~", 2, "Starting the"),
+        ("main retains a direct question handback",
+         "Starting the audit; is that the next step?", 0, None),
+        ("main retains a quoted question handback",
+         "Starting the audit.\n\n> Is that the next step?", 0, None),
+        ("main retains a listed question handback",
+         "Starting the audit.\n\n- Is that the next step?", 0, None),
+        ("main retains a question handback followed by backtick code",
+         "Starting the audit; is that the next step?\n\n```\nexample\n```", 0, None),
+        ("main retains a question handback followed by tilde code",
+         "Starting the audit; is that the next step?\n\n~~~\nexample\n~~~", 0, None),
         ("main counts a punctuated backtick block as one tail unit",
          "Starting the audit.\n\n```\nfirst. second. third.\n```", 2, "Starting the"),
         ("main counts a punctuated tilde block as one tail unit",

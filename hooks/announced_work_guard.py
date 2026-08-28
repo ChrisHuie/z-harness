@@ -120,15 +120,17 @@ REPORT = re.compile(
 # and the fixed-form arms cannot. Clause boundaries stop the association, so a prior run's
 # result in "Starting the audit because the previous run failed" cannot excuse the new
 # announcement. This remains an explicit English heuristic, not a general parser.
-# The participle check is load-bearing: "Let me check whether the tests passed" has a
-# completed-work token and a nonempty complement, but does not report the proposed check.
+# The participle check is load-bearing: "Let me verify the checks passed earlier" has a
+# completed-work token, a result tail, and no clause break, yet reports nothing about the
+# proposed verification. Interrogative complements are also clause breaks, so they cannot
+# be the shape that grades this test.
 PARTICIPLE_ANNOUNCEMENT = re.compile(
     r'(?:Starting|Running|Proceeding|Continuing|Beginning|Kicking off|Firing off)'
     r'\s+(?:with|on|the|a|an)$', re.I)
 REPORT_CLAUSE_BREAK = re.compile(
     r'[.!?;,](?=\s|$)|:(?=[ \t]+[A-Za-z])|—|(?<!\S)--(?=\s)|'
     r'\b(?:and|but|or|nor|so|yet|because|since|after|before|when|while|although|'
-    r'though|whereas|if|unless|until|once|whether|why|where|how|which|who|whose|'
+    r'though|whereas|if|unless|until|once|whether|what|why|where|how|which|who|whose|'
     r'that|then)\b',
     re.I)
 REPORT_WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9_'/-]*")
@@ -190,11 +192,17 @@ def reports_this_activity(unit, found):
     break_from = break_hint.start() if break_hint else None
     for report in REPORT.finditer(remainder):
         cut = report.start()
+        # cut is positive: ANNOUNCE ends on a word character, so a report token cannot
+        # begin at the remainder's first character without erasing its own boundary. The
+        # cut operand guards the index anyway and is correctly unkillable.
         if cut and remainder[cut - 1] in ".!?;,":
             return False
-        if break_from is not None and break_from < cut:
-            if REPORT_CLAUSE_BREAK.search(remainder, break_from, cut) is not None:
-                return False
+        if (break_from is not None
+                and REPORT_CLAUSE_BREAK.search(remainder, break_from, cut) is not None):
+            return False
+        # A report match is itself word characters, so it lies inside some token whose
+        # end exceeds the cut; the iterator cannot exhaust while a report is pending, and
+        # the None guard is correctly unkillable.
         while token is not None and token.end() <= cut:
             word = token.group(0).casefold()
             if word not in REPORT_MODIFIERS:
@@ -843,6 +851,20 @@ def selftest():
         ("a where complement does not report the announced activity",
          {"last_assistant_message": "Starting the search for where the check failed."},
          True),
+        ("a what complement does not report the announced activity",
+         {"last_assistant_message": "Starting the review of what the sweep produced."},
+         True),
+        ("a what complement cannot excuse a let-me announcement",
+         {"last_assistant_message": "Let me check what the sweep produced."}, True),
+        ("a result tail cannot excuse a let-me announcement",
+         {"last_assistant_message": "Let me verify the checks passed earlier."}, True),
+        ("a bare future completion is not a completed-work report",
+         {"last_assistant_message": "Running the sweep will be finished."}, True),
+        ("a result verb after a dangling determiner is not evidence",
+         {"last_assistant_message": "Starting the audit of the produced artifacts."},
+         True),
+        ("a result verb keeps its plain object",
+         {"last_assistant_message": "Running the sweep produced output."}, False),
         ("an embedded report token inside a larger word is not a predicate",
          {"last_assistant_message": "Starting the re/completed after checks."}, True),
         ("terminal punctuation directly at a report token stays a clause break",
@@ -1101,6 +1123,8 @@ def selftest():
          "Running the three failed checks.", 2, "Running the"),
         ("main retains a result adverb",
          "Running the sweep completed successfully.", 0, None),
+        ("main blocks a what complement on the participle arm",
+         "Starting the review of what the sweep produced.", 2, "Starting the"),
         ("main blocks a whether complement on the participle arm",
          "Starting the audit of whether the tests passed.", 2, "Starting the"),
         ("main blocks a why complement on the participle arm",

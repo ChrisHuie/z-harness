@@ -149,9 +149,11 @@ REPORT_INCOMPLETE = frozenset({
 # not an ambiguous bare following noun. "completed the migration" is a result predicate;
 # "three completed migrations" still describes the object being announced.
 # Other REPORT verbs retain their object-taking forms ("produced output", "took minutes").
+# Block classification has already separated containers and paragraphs; wrapping inside
+# the remaining prose unit must not change whether a predicate reports completed work.
 REPORT_ADJECTIVAL = frozenset({"completed", "finished", "passed", "failed"})
 REPORT_RESULT_TAIL = re.compile(
-    r'^[*_]*(?:[ \t]*$|[.!?;,:)]|[ \t]+(?:in|at|on|by|after|before|during|with|'
+    r'^[*_]*(?:[ \t\r\n]*$|[.!?;,:)]|[ \t\r\n]+(?:in|at|on|by|after|before|during|with|'
     r'without|to|because|since|when|successfully|unsuccessfully|earlier|recently|'
     r'today|yesterday|again|a|an|the|this|that|these|those|all|both|each|every|any|'
     r'some|several|many|multiple|no|another|[0-9]+|zero|one|two|three|four|five|six|'
@@ -1147,6 +1149,33 @@ def selftest():
         failures += 0 if ok else 1
         checks += 1
         print(f"  {'PASS' if ok else 'FAIL'} {label} -> rc={done.returncode}")
+
+    # A soft line break within a prose unit retains the report's meaning. Paragraph and
+    # container boundaries remain separate units and cannot supply a missing predicate.
+    for ending_name, ending in (("LF", "\n"), ("CRLF", "\r\n")):
+        for label, message, want in (
+            ("wrapped completion object", "Running the script completed\nthe migration.", 0),
+            ("wrapped finishing object", "Running the script finished\nevery conversion.", 0),
+            ("wrapped passing object", "Running the test suite passed\nall checks.", 0),
+            ("wrapped failing object", "Running the validator failed\nthree invalid requests.", 0),
+            ("wrapped result modifier", "Running the audit completed\nin four minutes.", 0),
+            ("wrapped failure adjective", "Running the three failed\nchecks.", 2),
+            ("wrapped completion adjective", "Starting the second completed\naudit.", 2),
+            ("separate paragraph result", "Running the audit\n\nThe prior run failed.", 2),
+            ("separate heading result", "Running the audit\n## The prior run failed.", 2),
+            ("separate quote result", "Running the audit\n> The prior run failed.", 2),
+        ):
+            done = subprocess.run(
+                [sys.executable, os.path.abspath(__file__)],
+                input=json.dumps({"hook_event_name": "Stop",
+                                  "last_assistant_message": message.replace("\n", ending)}),
+                capture_output=True, text=True, timeout=5, env=environment)
+            ok = (done.returncode == want and not done.stdout
+                  and ((want == 0 and not done.stderr)
+                       or (want == 2 and "Your final sentence announces work" in done.stderr)))
+            failures += 0 if ok else 1
+            checks += 1
+            print(f"  {'PASS' if ok else 'FAIL'} main {ending_name} {label} -> rc={done.returncode}")
 
     # Envelope and switch controls through main(): the off switch on each of its three
     # arms, an event outside this guard's scope, a payload that is not an object, and

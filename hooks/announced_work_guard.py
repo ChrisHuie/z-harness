@@ -189,7 +189,8 @@ REPORT_ADJECTIVAL = frozenset({"completed", "finished", "passed", "failed"})
 # classified separately: only an activity-noun-shaped token before the report is sufficient
 # to distinguish a predicate from another adjective modifying the announced activity noun.
 REPORT_RESULT_TAIL = re.compile(
-    r'[*_]*(?:[ \t\r\n]*$|[.!?;:)]|[ \t\r\n]+(?:in|at|on|by|after|before|during|with|'
+    r'[*_]*(?:[ \t\r\n]*$|[.!?;:)]|[ \t\r\n]+["\'\u201c\u2018(\[{`]|'
+    r'[ \t\r\n]+(?:in|at|on|by|after|before|during|with|'
     r'without|to|because|since|when|successfully|unsuccessfully|earlier|recently|'
     r'today|yesterday|again|a|an|the|this|that|these|those|all|both|each|every|any|'
     r'some|several|many|multiple|no|another|[0-9]+|zero|one|two|three|four|five|six|'
@@ -220,6 +221,23 @@ def report_separator_breaks(separator, following_word):
         if separated and following_word.casefold() not in REPORT_TERMS:
             return True
     return False
+
+
+def colon_label_pending(separator, following_word):
+    """Return whether a colon label withheld its break only for a following report term.
+
+    The exemption exists for the direct predicate -- ``Starting the audit: completed in
+    4m.`` -- and for nothing else. The caller applies the withheld break unless that exact
+    token resolves as the activity's predicate: without this, one report term after a
+    colon label disarmed the break for the whole remainder, and a later report excused
+    ``Starting the audit: failed checks were found earlier.`` Derived from the classifier
+    itself with a probe word of matching case, so the two can never parse a colon
+    differently.
+    """
+    if ":" not in separator or report_separator_breaks(separator, following_word):
+        return False
+    probe = "X" if following_word[:1].isupper() else "x"
+    return report_separator_breaks(separator, probe)
 
 
 def comma_subject_is_clear(core_words):
@@ -319,17 +337,31 @@ def reports_this_activity(unit, found):
         outside_separator = separator
         if not url_active:
             if url_was_active:
-                # URL punctuation before the first whitespace stays locator content. A
-                # closing quote/backtick there must not become a new prose opener merely
-                # because the following token is outside the URL.
-                separator = separator[next(
-                    index for index, character in enumerate(separator)
-                    if character.isspace()):]
+                # URL punctuation before the first whitespace stays locator content,
+                # except a trailing run of sentence punctuation against that whitespace,
+                # which is prose the way GFM autolinks read it: ``https://x.test, failed``
+                # ends the locator at the comma. A closing quote/backtick inside the
+                # locator must not become a new prose opener merely because the following
+                # token is outside the URL.
+                cut = next(index for index, character in enumerate(separator)
+                           if character.isspace())
+                locator = separator[:cut]
+                prose_tail = len(locator) - len(locator.rstrip(".,;:!?"))
+                separator = separator[cut - prose_tail:]
             outside_separator, outer_group_closed = report_group_separator(
                 separator, group_stack)
             if outer_group_closed:
                 after_group = True
         if not url_active and group_stack:
+            # An outside break mark before this group's opener ends the activity clause
+            # even though the group is open: the em dash in ``sweep — (nightly)`` is
+            # outer prose, and an in-group separator carries no outside text, so this
+            # fires only on what precedes the opener. A pending colon label also stands,
+            # because a token inside an aside cannot be the activity's direct predicate.
+            if report_separator_breaks(outside_separator, original_word):
+                return False
+            if colon_label_pending(outside_separator, original_word):
+                return False
             # Tokens inside an aside cannot replace the announced activity's subject or
             # provide its completed-work predicate. Once the group closes, the next token
             # resumes against the outer subject accumulated before the opener.
@@ -345,6 +377,8 @@ def reports_this_activity(unit, found):
             continue
         if not url_active and report_separator_breaks(outside_separator, original_word):
             return False
+        pending_colon = (not url_active
+                         and colon_label_pending(outside_separator, original_word))
         if url_active:
             # Locator tokens are neither clause words nor completed-work predicates.
             # Only the first whitespace-bearing separator releases prose parsing.
@@ -361,11 +395,15 @@ def reports_this_activity(unit, found):
             return False
         if word in REPORT_TERMS:
             if core_last is None or core_last in REPORT_NONFINAL or core_incomplete:
+                if pending_colon:
+                    return False
                 previous_end = token.end()
                 continue
             if (word in REPORT_ADJECTIVAL
                     and not adjectival_report_is_predicate(
                         remainder, token.end(), core_words)):
+                if pending_colon:
+                    return False
                 previous_end = token.end()
                 continue
             return True
@@ -1049,6 +1087,34 @@ def selftest():
         ("nested closed subject asides retain the outer predicate",
          {"last_assistant_message":
           "Running the checks (three [slow] tests) failed, returning errors."}, False),
+        ("a comma ending a URL is prose punctuation",
+         {"last_assistant_message":
+          "Starting the audit at https://x.test, failed checks were found earlier."},
+         True),
+        ("a full stop ending a URL is prose punctuation",
+         {"last_assistant_message":
+          "Starting the audit at https://x.test. The prior run failed."}, True),
+        ("an interior URL semicolon stays locator content",
+         {"last_assistant_message":
+          "Starting the audit at https://example.test/path;mode=full failed."}, False),
+        ("an outer dash break survives a following inline-code group",
+         {"last_assistant_message": "Starting the sweep — `nightly` failed earlier."},
+         True),
+        ("an outer semicolon break survives a following parenthetical",
+         {"last_assistant_message": "Starting the sweep; (nightly) failed earlier."},
+         True),
+        ("an outer comma break survives a following parenthetical",
+         {"last_assistant_message": "Starting the sweep, (nightly) failed earlier."},
+         True),
+        ("a colon label stands unless its report term is the direct predicate",
+         {"last_assistant_message":
+          "Starting the audit: failed checks were found earlier."}, True),
+        ("a colon label before an empty activity stands",
+         {"last_assistant_message": "Starting the: took checks completed."}, True),
+        ("a parenthetical result after a predicate stays a report",
+         {"last_assistant_message": "Running the sweep failed (three errors)."}, False),
+        ("a bracketed result after a predicate stays a report",
+         {"last_assistant_message": "Running the sweep failed [see log]."}, False),
         ("a temporal historical result does not excuse the announcement",
          {"last_assistant_message": "Starting the audit after the checks passed."}, True),
         ("a direct completion predicate still reports the activity",
@@ -1598,6 +1664,20 @@ def selftest():
          "Running the sweep completed successfully.", 0, None),
         ("main blocks a what complement on the participle arm",
          "Starting the review of what the sweep produced.", 2, "Starting the"),
+        ("main blocks a report after a URL-ending comma",
+         "Starting the audit at https://x.test, failed checks were found earlier.", 2,
+         "Starting the"),
+        ("main blocks a report after a URL-ending full stop",
+         "Starting the audit at https://x.test. The prior run failed.", 2,
+         "Starting the"),
+        ("main blocks an outer dash break before an inline-code group",
+         "Starting the sweep — `nightly` failed earlier.", 2, "Starting the"),
+        ("main blocks an outer semicolon break before a parenthetical",
+         "Starting the sweep; (nightly) failed earlier.", 2, "Starting the"),
+        ("main applies a colon label to a non-predicate report term",
+         "Starting the audit: failed checks were found earlier.", 2, "Starting the"),
+        ("main keeps a parenthetical result after a predicate",
+         "Running the sweep failed (three errors).", 0, None),
         ("main blocks a whether complement on the participle arm",
          "Starting the audit of whether the tests passed.", 2, "Starting the"),
         ("main blocks a why complement on the participle arm",

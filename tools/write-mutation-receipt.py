@@ -297,24 +297,52 @@ SITE_MUTATIONS = (
         "label": "URL prose-release boundary dropped", "module": STOP,
         "anchor": (
             "            if url_was_active:\n"
-            "                # URL punctuation before the first whitespace stays locator content. A\n"
-            "                # closing quote/backtick there must not become a new prose opener merely\n"
-            "                # because the following token is outside the URL.\n"
-            "                separator = separator[next(\n"
-            "                    index for index, character in enumerate(separator)\n"
-            "                    if character.isspace()):]"),
+            "                # URL punctuation before the first whitespace stays locator content,\n"
+            "                # except a trailing run of sentence punctuation against that whitespace,\n"
+            "                # which is prose the way GFM autolinks read it: ``https://x.test, failed``\n"
+            "                # ends the locator at the comma. A closing quote/backtick inside the\n"
+            "                # locator must not become a new prose opener merely because the following\n"
+            "                # token is outside the URL.\n"
+            "                cut = next(index for index, character in enumerate(separator)\n"
+            "                           if character.isspace())\n"
+            "                locator = separator[:cut]\n"
+            "                prose_tail = len(locator) - len(locator.rstrip(\".,;:!?\"))\n"
+            "                separator = separator[cut - prose_tail:]"),
         "replacement": (
             "            if False and url_was_active:\n"
-            "                # URL punctuation before the first whitespace stays locator content. A\n"
-            "                # closing quote/backtick there must not become a new prose opener merely\n"
-            "                # because the following token is outside the URL.\n"
-            "                separator = separator[next(\n"
-            "                    index for index, character in enumerate(separator)\n"
-            "                    if character.isspace()):]"),
+            "                # URL punctuation before the first whitespace stays locator content,\n"
+            "                # except a trailing run of sentence punctuation against that whitespace,\n"
+            "                # which is prose the way GFM autolinks read it: ``https://x.test, failed``\n"
+            "                # ends the locator at the comma. A closing quote/backtick inside the\n"
+            "                # locator must not become a new prose opener merely because the following\n"
+            "                # token is outside the URL.\n"
+            "                cut = next(index for index, character in enumerate(separator)\n"
+            "                           if character.isspace())\n"
+            "                locator = separator[:cut]\n"
+            "                prose_tail = len(locator) - len(locator.rstrip(\".,;:!?\"))\n"
+            "                separator = separator[cut - prose_tail:]"),
         "selectors": (
             "main string keeps a URL closing backtick out of prose grouping",
             "main content keeps a URL closing backtick out of prose grouping",
             "main bare keeps a URL closing backtick out of prose grouping",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "URL trailing-punctuation trim dropped", "module": STOP,
+        "anchor": (
+            "                cut = next(index for index, character in enumerate(separator)\n"
+            "                           if character.isspace())\n"
+            "                locator = separator[:cut]\n"
+            "                prose_tail = len(locator) - len(locator.rstrip(\".,;:!?\"))\n"
+            "                separator = separator[cut - prose_tail:]"),
+        "replacement": (
+            "                separator = separator[next(\n"
+            "                    index for index, character in enumerate(separator)\n"
+            "                    if character.isspace()):]"),
+        "selectors": (
+            "a comma ending a URL is prose punctuation",
+            "main blocks a report after a URL-ending comma",
         ),
         "allowed_statuses": (),
     },

@@ -52,6 +52,7 @@ Swept sources: `hooks/announced_work_guard.py`, `hooks/bash_command_guard.py`, `
 | `announced_work_guard.py` | URL prose-release boundary dropped | caught |
 | `announced_work_guard.py` | URL punctuation bypass dropped | caught |
 | `announced_work_guard.py` | URL semantic-token bypass dropped | caught |
+| `announced_work_guard.py` | URL trailing-punctuation trim dropped | caught |
 | `announced_work_guard.py` | attached period classification dropped | caught |
 | `announced_work_guard.py` | comma adjective distinction dropped | caught |
 | `announced_work_guard.py` | comma predicate continuation dropped | caught |
@@ -116,7 +117,7 @@ Swept sources: `hooks/announced_work_guard.py`, `hooks/bash_command_guard.py`, `
 | `zsh_rev_modifier_guard.py` | zsh unmodelled modifier uncertainty dropped | caught |
 | `repository_ownership.py` | effective core.worktree scalar lookup dropped | caught |
 
-261 of 341 planned mutations are caught; 80 exact mutation IDs remain recorded coverage debt.
+262 of 342 planned mutations are caught; 80 exact mutation IDs remain recorded coverage debt.
 
 A kill scored only because the recorded check count moved is not evidence that the suites observe the change. That count is recorded per result and reported by the gate rather than shown here, because whether an assertion fires can differ between hosts and this file is compared across them.
 

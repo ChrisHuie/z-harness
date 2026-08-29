@@ -1,16 +1,16 @@
 {
   "note": "sha256 of each aggregated selftest suite's source. The check count in a receipt is self-reported, so an eight-line stub printing a passing receipt satisfied the floor and the whole gate went green. Under a workflow that invokes the authentic harness/ci-gate pair, this binding detects an isolated suite or runner replacement that merely claims to have run. It is not independent attestation against an in-repository workflow edit that bypasses those runners; reviewer diff inspection or an externally administered required workflow remains that trust root. Update an entry in the same commit that changes its tool, and review the diff: this file is authored, never generated from whatever is on disk.",
   "suites": {
-    "announced_work_guard": "ab3fc5ebf7adf24886b4de2b508817fa9327527c50933cdbfde0efeda4620393",
+    "announced_work_guard": "c33016c8189783bb840a85653c6273d9a4ce8e393c82581ef60e0207526ba277",
     "askq_timeout_guard": "85c136dc24f3b4f41a60987b8abecb97779e209e49c4e29e74a5d46174d695ef",
     "bash_command_guard": "fe8d2e68f1cffeb94f8fe6ccb79a1211f7f8b9fae601f3cbae0fde7e47011f00",
     "cc-cost": "972b0122b5f84de10f41915a133132f555b943c46061d91b07e3f7b534a4d003",
-    "ci-gate": "308c007426a07cc724a1e7edf0d6e960c748b7ba417dfb876da6cf598e5f2330",
+    "ci-gate": "a52e0e824e259f85a396b27aec5a25552099bf248bbaabc5c53d551f0d2ebaaa",
     "claim-provenance": "4552d3a8ec1da9b90e47a2dcd36abb0c3b1ad49a873731f50effb9268635e67f",
     "codex-cost": "fc46c95da8babd276e705c9578c5857a6563588b588da540ea4222c2c6ca793c",
     "codex_session_start": "b9dbedba94d623304ef97ca1b13a14b2f7b000cc98f35e016448ed4c85030567",
     "git_grep_engine_guard": "2fa728eb17d041bdf1c4f38fc6416f0bbf90df7d122ba3b1da15b1aa4c254bd0",
-    "harness_check": "ec85e70adb06c68508bd1f7479d4531539cdad3ae4b941a3fb61953ad82be478",
+    "harness_check": "33f9b086d9921fd324589d0ce204fe2a63129b20f7d56a81478f1967e705c47a",
     "harness_report": "eec022de9c2f7dec81c612e751dac472f2f8b695029d627784e7e5d840312cbc",
     "portable-conformance": "8eb48510971d0e4f7371cd7a4d16c41850e8e1324a739b70b71d3b85c5823606",
     "pr-delivery-state": "da5293b7134b159c1b6bb91b67c40193550076c908db8e185ddcb9d82011fe6b",
@@ -19,7 +19,7 @@
     "run-skill-evals": "38115603816e7698926a290d401179c3db2f4f5ffa12b49e2bfe04b3f294a508",
     "spawn_preflight_guard": "8febf4d3e9e47061d31dc8ed45ed9ac60cccf0b22b360cd100854e8ad87c19b6",
     "verify-review-publication": "fb7a4b95248de1f664180ad0598a54778591f321963b2265e734b37ff7bcd455",
-    "write-mutation-receipt": "ca70648c3c950daefc6c90843a0801475fb0e0b832d4547e625abbb43b1296e6",
+    "write-mutation-receipt": "e8420d20037c7470cc49ebbef9d15a125082e0ed690b676cb442239a9f589188",
     "zsh_rev_modifier_guard": "a056e1f8375467c6c7a6b878aff858c257b44c10faaeb0fa3bb685d073c0fb9c"
   }
 }

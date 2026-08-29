@@ -2,15 +2,15 @@
  "schema_version": 3,
  "generated_by": "tools/write-mutation-receipt.py --aggregate",
  "note": "which guard mutations the shipped suites catch; each result's reason is an observation from the host that generated it, not a cross-platform fact",
- "generator_sha256": "ca70648c3c950daefc6c90843a0801475fb0e0b832d4547e625abbb43b1296e6",
+ "generator_sha256": "e8420d20037c7470cc49ebbef9d15a125082e0ed690b676cb442239a9f589188",
  "source_digests": {
   "hooks/guards/git_grep_engine_guard.py": "2fa728eb17d041bdf1c4f38fc6416f0bbf90df7d122ba3b1da15b1aa4c254bd0",
   "hooks/guards/zsh_rev_modifier_guard.py": "a056e1f8375467c6c7a6b878aff858c257b44c10faaeb0fa3bb685d073c0fb9c",
   "hooks/bash_command_guard.py": "fe8d2e68f1cffeb94f8fe6ccb79a1211f7f8b9fae601f3cbae0fde7e47011f00",
-  "hooks/announced_work_guard.py": "ab3fc5ebf7adf24886b4de2b508817fa9327527c50933cdbfde0efeda4620393",
+  "hooks/announced_work_guard.py": "c33016c8189783bb840a85653c6273d9a4ce8e393c82581ef60e0207526ba277",
   "tools/repository_ownership.py": "d72b23ef0e037f81bb0c1eefc93c2198a5355c1820b542ce285a83d8661f35ca"
  },
- "plan_sha256": "d2cbed5aa8d0ef84a5dda92f71f9b6aff0346be8c02fa80f1dcf17640b0bb081",
+ "plan_sha256": "746a9c819a617bfb46cfd7034ef1dbc12c0e277c7be3386e459934993bd4927f",
  "baseline": {
   "hooks/guards/git_grep_engine_guard.py": "passed",
   "hooks/guards/zsh_rev_modifier_guard.py": "passed",
@@ -112,6 +112,22 @@
    "id": "0453256375d591d9d464f7829d55d9f576cb08c71874f84a59fc40f76367ca29",
    "outcome": "caught",
    "reason": "suite-failure"
+  },
+  "060eafeb86c51f5b71c4063f7648039f80799b976c98c09c39a8177d5eb67688": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/announced_work_guard.py",
+   "label": "URL prose-release boundary dropped",
+   "anchor_sha256": "d1d4833b6e7660c06d732687c7302d2db50e399591193cf7e8b918b69cc73229",
+   "replacement_sha256": "81c7d37885bbb9b67aa77eb045a415c12047de893d7f77fec09457c4f1439f2e",
+   "selectors": [
+    "main string keeps a URL closing backtick out of prose grouping",
+    "main content keeps a URL closing backtick out of prose grouping",
+    "main bare keeps a URL closing backtick out of prose grouping"
+   ],
+   "id": "060eafeb86c51f5b71c4063f7648039f80799b976c98c09c39a8177d5eb67688",
+   "outcome": "caught",
+   "reason": "selector-failure"
   },
   "0644bd73a256d2b5a2dfaf5f26459b28af147de07103dfd047a5d5103d7d9894": {
    "version": 1,
@@ -1821,6 +1837,21 @@
    "outcome": "survived",
    "reason": "survived"
   },
+  "76c4555f95e6d3fd5dc1af9cb445638a0deeb13bf1e43d57c4c3479305076d27": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/announced_work_guard.py",
+   "label": "URL trailing-punctuation trim dropped",
+   "anchor_sha256": "1ae554e6042880b4faf878f9abf2688e6e3a4e1fea32b0eefcf3912a9fcb9d74",
+   "replacement_sha256": "c28e9f427c792235d7f5b12e12e5be2dbae6f506a8fe6376b4bd14e5eeca326a",
+   "selectors": [
+    "a comma ending a URL is prose punctuation",
+    "main blocks a report after a URL-ending comma"
+   ],
+   "id": "76c4555f95e6d3fd5dc1af9cb445638a0deeb13bf1e43d57c4c3479305076d27",
+   "outcome": "caught",
+   "reason": "selector-failure"
+  },
   "76e15d18d96c0a40d0117d05ba6e201bedd5cae1ab3fec94a3469b1e7aad43bd": {
    "version": 1,
    "kind": "set-element",
@@ -2255,22 +2286,6 @@
    "id": "972d35559ea43d8186297a87e717b6e4b1cd7e60dbcfb8b496ff7f1f224f7d4f",
    "outcome": "caught",
    "reason": "suite-failure"
-  },
-  "97300eb6cff9ff8ca3a4c24e1bb3e4be24ae5144c365590cfce0624711283d1d": {
-   "version": 1,
-   "kind": "site",
-   "module": "hooks/announced_work_guard.py",
-   "label": "URL prose-release boundary dropped",
-   "anchor_sha256": "8e0b4003a387d6972aa1992af99448d7775b337162c78512debcbc3a337333c6",
-   "replacement_sha256": "f17b247e39637e999a2bb9e18cce4309cf8638c98c7e784c19db52ae876b59bc",
-   "selectors": [
-    "main string keeps a URL closing backtick out of prose grouping",
-    "main content keeps a URL closing backtick out of prose grouping",
-    "main bare keeps a URL closing backtick out of prose grouping"
-   ],
-   "id": "97300eb6cff9ff8ca3a4c24e1bb3e4be24ae5144c365590cfce0624711283d1d",
-   "outcome": "caught",
-   "reason": "selector-failure"
   },
   "974406cf78f89524d098ba630d2afb1d52daf6eba3d158fe06629b82bff04281": {
    "version": 1,
@@ -4001,6 +4016,6 @@
   "fc9390dabe1c6cf6562336aba3ff8721f0b5d6223760043abe75114363b7a027"
  ],
  "unasserted_kills": [],
- "caught": 261,
- "total": 341
+ "caught": 262,
+ "total": 342
 }

@@ -1285,7 +1285,7 @@ def decision_golden_error(golden_data=None, decide=None, snapshot=None,
 MUTATION_RECEIPT = ROOT / "contracts/goldens/mutation-receipt.json"
 MUTATION_SUMMARY = ROOT / "contracts/goldens/mutation-summary.md"
 MUTATION_SURVIVOR_DEBT_CEILING = 80
-MUTATION_PLAN_FLOOR = 341
+MUTATION_PLAN_FLOOR = 342
 # Kills scored only because the recorded check count moved, with no assertion failing. A
 # guard that increments its counter once per element of the collection under mutation moves
 # that count on any removal, so such a kill is decided by loop structure before any probe
@@ -1389,6 +1389,7 @@ EXPECTED_MUTATION_SITES = {
     ("hooks/announced_work_guard.py", "whole complement-token membership dropped"),
     ("hooks/announced_work_guard.py", "whole report-token membership dropped"),
     ("hooks/announced_work_guard.py", "URL punctuation bypass dropped"),
+    ("hooks/announced_work_guard.py", "URL trailing-punctuation trim dropped"),
     ("hooks/announced_work_guard.py", "URL prose-release boundary dropped"),
     ("hooks/announced_work_guard.py", "URL semantic-token bypass dropped"),
     ("tools/repository_ownership.py", "effective core.worktree scalar lookup dropped"),
@@ -1559,6 +1560,9 @@ EXPECTED_MUTATION_SELECTORS = {
         ("main string keeps a URL closing backtick out of prose grouping",
          "main content keeps a URL closing backtick out of prose grouping",
          "main bare keeps a URL closing backtick out of prose grouping"),
+    ("hooks/announced_work_guard.py", "URL trailing-punctuation trim dropped"):
+        ("a comma ending a URL is prose punctuation",
+         "main blocks a report after a URL-ending comma"),
     ("hooks/announced_work_guard.py", "URL semantic-token bypass dropped"):
         ("main keeps URL complement words opaque",
          "main ignores report words inside a URL"),
@@ -1566,7 +1570,7 @@ EXPECTED_MUTATION_SELECTORS = {
         ("a repeated core.worktree binds the effective candidate Git recognises",),
 }
 EXPECTED_MUTATION_SITE_DIGEST = (
-    "56319a3192257ab1fefbe24646e8738aae0cc4e59e017954bc7f38b50b5c2832"
+    "c0f052cf396310d1aaab5f26970be17f9b7020db76211c931e010c4d88751e9c"
 )
 EXPECTED_MUTATION_EXCLUSIONS = {
     "hooks/guards/git_grep_engine_guard.py::ALIAS_GUARDED":

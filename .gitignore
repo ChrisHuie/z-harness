@@ -34,6 +34,8 @@
 !release/**
 !tools/
 !tools/**
+!instruments/
+!instruments/**
 
 !skills/
 !skills/**

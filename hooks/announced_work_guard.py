@@ -111,9 +111,10 @@ ANNOUNCE = re.compile(
 # that shape in reach for the first time. Matched only against the REST of the unit the
 # trigger was found in, so a report in the following sentence cannot excuse an
 # announcement in this one.
-REPORT = re.compile(
-    r'\b(?:completed|finished|took|landed|ran|passed|failed|produced|returned|wrote|'
-    r'reproduced|stayed|showed|found)\b', re.I)
+REPORT_TERMS = frozenset({
+    "completed", "finished", "took", "landed", "ran", "passed", "failed",
+    "produced", "returned", "wrote", "reproduced", "stayed", "showed", "found",
+})
 
 # A completed-work token is evidence only when it is the predicate of the activity that
 # ANNOUNCE matched. The participle arm can form that grammatical subject; "Let me", "I'll"
@@ -127,15 +128,27 @@ REPORT = re.compile(
 PARTICIPLE_ANNOUNCEMENT = re.compile(
     r'(?:Starting|Running|Proceeding|Continuing|Beginning|Kicking off|Firing off)'
     r'\s+(?:with|on|the|a|an)$', re.I)
-REPORT_CLAUSE_BREAK = re.compile(
-    r'[.!?;,](?=\s|$)|:(?=[ \t]+[A-Za-z])|—|(?<!\S)--(?=\s)|'
-    r'\b(?:and|but|or|nor|so|yet|because|since|after|before|when|while|although|'
-    r'though|whereas|if|unless|until|once|whether|what|why|where|how|which|who|whose|'
-    r'that|then)\b',
-    re.I)
-REPORT_WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9_'/-]*")
+# One Unicode-aware token grammar supplies activity words, completed-work predicates and
+# complement breaks. Hyphens and slashes remain inside a token: ``how-to``,
+# ``docs/how-to``, ``re/completed`` and ``x-failed`` cannot acquire a second meaning from
+# a different regex boundary.
+REPORT_TOKEN = re.compile(r"[^\W_][\w'/-]*", re.UNICODE)
+REPORT_COMPLEMENTS = frozenset({
+    "whether", "what", "whatever", "why", "where", "wherever", "how", "however",
+    "which", "whichever", "who", "whoever", "whom", "whomever", "whose",
+})
+REPORT_CLAUSE_WORDS = frozenset({
+    "and", "but", "or", "nor", "so", "yet", "because", "since", "after", "before",
+    "when", "while", "although", "though", "whereas", "if", "unless", "until",
+    "once", "that", "then",
+}) | REPORT_COMPLEMENTS
 REPORT_MODIFIERS = frozenset({
     "already", "earlier", "formerly", "last", "previously", "prior", "recently",
+})
+REPORT_POSTGROUP_MODIFIERS = frozenset({
+    "abruptly", "already", "consistently", "eventually", "immediately", "partially",
+    "previously", "recently", "repeatedly", "successfully", "ultimately", "unexpectedly",
+    "unsuccessfully",
 })
 REPORT_NONFINAL = frozenset({
     "a", "an", "the", "of", "for", "with", "on", "in", "from", "to", "by",
@@ -147,6 +160,22 @@ REPORT_INCOMPLETE = frozenset({
     "will", "would", "shall", "should", "may", "might", "can", "could", "must",
     "being", "not", "never",
 })
+REPORT_ACTIVITY_HEADS = frozenset({
+    "audit", "audits", "build", "builds", "check", "checks", "command", "commands",
+    "investigation", "investigations", "job", "jobs", "migration", "migrations",
+    "operation", "operations", "process", "processes", "receipt", "receipts", "review",
+    "reviews", "run", "runs", "script", "scripts", "search", "searches", "step", "steps",
+    "suite", "suites", "sweep", "sweeps", "task", "tasks", "test", "tests", "validator",
+    "validators", "workflow", "workflows",
+})
+# A report nested inside an aside or quotation describes the nested subject, not the
+# announced activity. The parser carries only the expected closers: it does not interpret
+# the nested prose, and an unclosed group therefore stays opaque and fails closed.
+REPORT_GROUP_PAIRS = {
+    "(": ")", "[": "]", "{": "}", "“": "”", "‘": "’", '"': '"', "'": "'",
+}
+REPORT_GROUP_ESCAPES = frozenset(
+    {*REPORT_GROUP_PAIRS, *REPORT_GROUP_PAIRS.values(), "`", "\\"})
 # These forms can modify a following noun: a count before "failed tests" is not a
 # completed activity. Accept result tails and determiner/quantifier-led result objects,
 # not an ambiguous bare following noun. "completed the migration" is a result predicate;
@@ -156,71 +185,201 @@ REPORT_INCOMPLETE = frozenset({
 # the remaining prose unit must not change whether a predicate reports completed work.
 REPORT_ADJECTIVAL = frozenset({"completed", "finished", "passed", "failed"})
 # Matched with pattern.match(remainder, pos): the call anchors the attempt, so the
-# pattern itself carries no ^ (which would refuse every nonzero position).
+# pattern itself carries no ^ (which would refuse every nonzero position). A comma is
+# classified separately: only an activity-noun-shaped token before the report is sufficient
+# to distinguish a predicate from another adjective modifying the announced activity noun.
 REPORT_RESULT_TAIL = re.compile(
-    r'[*_]*(?:[ \t\r\n]*$|[.!?;,:)]|[ \t\r\n]+(?:in|at|on|by|after|before|during|with|'
+    r'[*_]*(?:[ \t\r\n]*$|[.!?;:)]|[ \t\r\n]+(?:in|at|on|by|after|before|during|with|'
     r'without|to|because|since|when|successfully|unsuccessfully|earlier|recently|'
     r'today|yesterday|again|a|an|the|this|that|these|those|all|both|each|every|any|'
     r'some|several|many|multiple|no|another|[0-9]+|zero|one|two|three|four|five|six|'
     r'seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|'
     r'eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)\b)', re.I)
+REPORT_COMMA_TAIL = re.compile(r'[*_]*,[ \t\r\n]*')
+
+
+def report_separator_breaks(separator, following_word):
+    """Return whether text between two semantic tokens ends the activity clause."""
+    if any(mark in separator for mark in (";", "!", "?", "—")):
+        return True
+    # Repository-style `` -- `` is a clause dash; an attached ``--verbose`` is not.
+    if re.search(r'(?:^|\s)--(?=\s)', separator):
+        return True
+    if "," in separator:
+        return True
+    if "." in separator:
+        # Whitespace/decorated stops and no-space sentence starts are boundaries. Dots
+        # inside versions, URLs and paths retain a lowercase or numeric next token.
+        after = separator.rsplit(".", 1)[1]
+        if any(char.isspace() for char in after) or following_word[:1].isupper():
+            return True
+    if ":" in separator:
+        after = separator.rsplit(":", 1)[1]
+        decorated = after[:1] in "*_\"'“”‘’`([{<"
+        separated = bool(after) and (after[0].isspace() or decorated)
+        if separated and following_word.casefold() not in REPORT_TERMS:
+            return True
+    return False
+
+
+def comma_subject_is_clear(core_words):
+    """Return whether the pre-report tail has an activity-noun shape."""
+    if not core_words:
+        return False
+    head = core_words[-1]
+    # Surface text cannot generally distinguish a noun from an adjective. Only explicit
+    # activity nouns are sufficient evidence; possessives, platform names and unknown
+    # singular or plural heads block for one turn rather than excusing work that never ran.
+    return head in REPORT_ACTIVITY_HEADS
+
+
+def report_group_separator(separator, group_stack):
+    """Return outside text and whether a complete outer group closed in this separator."""
+    outside = []
+    outer_group_closed = False
+    index = 0
+    while index < len(separator):
+        character = separator[index]
+        if (character == "\\" and index + 1 < len(separator)
+                and separator[index + 1] in REPORT_GROUP_ESCAPES):
+            # Markdown-style escapes make a delimiter literal. Omit both bytes from the
+            # semantic separator so the escaped punctuation can neither open/close a group
+            # nor become an outer clause boundary.
+            index += 2
+            continue
+        if character == "`":
+            end = index + 1
+            while end < len(separator) and separator[end] == "`":
+                end += 1
+            run = separator[index:end]
+            if group_stack and group_stack[-1] == run:
+                group_stack.pop()
+                if not group_stack:
+                    outer_group_closed = True
+            elif not group_stack or not group_stack[-1].startswith("`"):
+                group_stack.append(run)
+            index = end
+            continue
+        if group_stack:
+            if character == group_stack[-1]:
+                group_stack.pop()
+                if not group_stack:
+                    outer_group_closed = True
+            elif character in REPORT_GROUP_PAIRS:
+                group_stack.append(REPORT_GROUP_PAIRS[character])
+        elif character in REPORT_GROUP_PAIRS:
+            group_stack.append(REPORT_GROUP_PAIRS[character])
+        else:
+            outside.append(character)
+        index += 1
+    return "".join(outside), outer_group_closed
+
+
+def adjectival_report_is_predicate(remainder, report_end, core_words):
+    """Return whether an adjectival report token has a predicate-shaped continuation."""
+    if REPORT_RESULT_TAIL.match(remainder, report_end):
+        return True
+    comma = REPORT_COMMA_TAIL.match(remainder, report_end)
+    if not comma:
+        return False
+    # Once a comma begins, its following phrase cannot reliably reveal whether the report
+    # word was a predicate (``returning errors``) or another prenominal modifier
+    # (``quarantined in CI tests``). Require the evidence before the report instead.
+    return comma_subject_is_clear(core_words)
 
 
 def reports_this_activity(unit, found):
     """Return whether a direct completed-work predicate belongs to ``found``.
 
-    One pass, linear in the unit. The clause-break search and the token state advance
-    alongside the report matches instead of being recomputed over a growing prefix: this
-    runs inside the registered five-second hook budget, and a rescanning shape let a
-    thirty-kilobyte tail of report tokens time the guard out into an allow. A token that
-    straddles the report match contributes no word state; between spaced words the two
-    formulations read the same prefix.
+    One pass, linear in the unit. Whole semantic tokens carry report, complement and
+    activity-word meaning; separators carry punctuation meaning. Advancing both together
+    avoids growing-prefix rescans and prevents a slash/hyphen fragment from changing roles
+    merely because another activity noun appeared before it.
     """
     if not PARTICIPLE_ANNOUNCEMENT.search(found.group(0)):
         return False
     remainder = unit[found.end():]
-    token_iter = REPORT_WORD.finditer(remainder)
-    token = next(token_iter, None)
     core_last = None          # last non-modifier token ending at or before the report
+    core_words = []           # non-structural tokens preceding a report adjective
     core_incomplete = False   # an INCOMPLETE token seen among those
-    # A full-string break match is verified against each report's own prefix (endpos),
-    # because a lookahead may succeed only on characters past the cut: a colon before
-    # "completed in 4m" is a label there, not a clause break. The one break a prefix can
-    # see that the full string cannot is terminal punctuation directly at the cut, checked
-    # per report in constant time.
-    break_hint = REPORT_CLAUSE_BREAK.search(remainder)
-    break_from = break_hint.start() if break_hint else None
-    for report in REPORT.finditer(remainder):
-        cut = report.start()
-        # cut is positive: ANNOUNCE ends on a word character, so a report token cannot
-        # begin at the remainder's first character without erasing its own boundary. The
-        # cut operand guards the index anyway and is correctly unkillable.
-        if cut and remainder[cut - 1] in ".!?;,":
+    previous_end = 0
+    previous_word = None
+    url_active = False
+    group_stack = []
+    after_group = False
+    for token in REPORT_TOKEN.finditer(remainder):
+        original_word = token.group(0)
+        word = original_word.casefold()
+        separator = remainder[previous_end:token.start()]
+        url_was_active = url_active
+        if any(char.isspace() for char in separator):
+            url_active = False
+        if previous_word in {"http", "https"} and "://" in separator:
+            url_active = True
+        outside_separator = separator
+        if not url_active:
+            if url_was_active:
+                # URL punctuation before the first whitespace stays locator content. A
+                # closing quote/backtick there must not become a new prose opener merely
+                # because the following token is outside the URL.
+                separator = separator[next(
+                    index for index, character in enumerate(separator)
+                    if character.isspace()):]
+            outside_separator, outer_group_closed = report_group_separator(
+                separator, group_stack)
+            if outer_group_closed:
+                after_group = True
+        if not url_active and group_stack:
+            # Tokens inside an aside cannot replace the announced activity's subject or
+            # provide its completed-work predicate. Once the group closes, the next token
+            # resumes against the outer subject accumulated before the opener.
+            # A straight single closing quote is part of REPORT_TOKEN (for contractions
+            # and possessives), so consume it from the token. The post-group rule below
+            # prevents a following noun from replacing the outer activity subject.
+            if group_stack[-1] == "'" and original_word.endswith("'"):
+                group_stack.pop()
+                if not group_stack:
+                    after_group = True
+            previous_word = word
+            previous_end = token.end()
+            continue
+        if not url_active and report_separator_breaks(outside_separator, original_word):
             return False
-        if (break_from is not None
-                and REPORT_CLAUSE_BREAK.search(remainder, break_from, cut) is not None):
+        if url_active:
+            # Locator tokens are neither clause words nor completed-work predicates.
+            # Only the first whitespace-bearing separator releases prose parsing.
+            previous_word = word
+            previous_end = token.end()
+            continue
+        if word in REPORT_CLAUSE_WORDS:
             return False
-        # A report match is itself word characters, so it lies inside some token whose
-        # end exceeds the cut; the iterator cannot exhaust while a report is pending, and
-        # the None guard is correctly unkillable.
-        while token is not None and token.end() <= cut:
-            word = token.group(0).casefold()
-            if word not in REPORT_MODIFIERS:
-                # A determiner is inside ANNOUNCE, so the remainder must still name an
-                # activity. This rejects "Starting the failed audit" and "Starting the
-                # already completed audit"; a dangling preposition rejects "Starting the
-                # audit for failed checks".
-                core_last = word
-                core_incomplete = core_incomplete or word in REPORT_INCOMPLETE
-            token = next(token_iter, None)
-        if core_last is None or core_last in REPORT_NONFINAL:
-            continue
-        if core_incomplete:
-            continue
-        if (report.group(0).casefold() in REPORT_ADJECTIVAL
-                and not REPORT_RESULT_TAIL.match(remainder, report.end())):
-            continue
-        return True
+        if after_group and word not in REPORT_TERMS:
+            if word in REPORT_POSTGROUP_MODIFIERS:
+                previous_word = word
+                previous_end = token.end()
+                continue
+            return False
+        if word in REPORT_TERMS:
+            if core_last is None or core_last in REPORT_NONFINAL or core_incomplete:
+                previous_end = token.end()
+                continue
+            if (word in REPORT_ADJECTIVAL
+                    and not adjectival_report_is_predicate(
+                        remainder, token.end(), core_words)):
+                previous_end = token.end()
+                continue
+            return True
+        if word not in REPORT_MODIFIERS:
+            # A determiner is inside ANNOUNCE, so the remainder must still name an
+            # activity. This rejects "Starting the failed audit" and "Starting the
+            # already completed audit"; a dangling preposition rejects "Starting the
+            # audit for failed checks".
+            core_last = word
+            core_incomplete = core_incomplete or word in REPORT_INCOMPLETE
+            if word not in REPORT_NONFINAL and word not in REPORT_INCOMPLETE:
+                core_words.append(word)
+        previous_word = word
+        previous_end = token.end()
     return False
 
 HANDBACK = re.compile(
@@ -796,6 +955,19 @@ def selftest():
          {"last_assistant_message": "Starting the audit; the prior run failed."}, True),
         ("a colon-labelled historical failure does not excuse the announcement",
          {"last_assistant_message": "Starting the audit: the prior run failed."}, True),
+        ("a semicolon without following space separates a historical report",
+         {"last_assistant_message": "Starting the audit;the prior run failed."}, True),
+        ("a full stop before an attached sentence separates a historical report",
+         {"last_assistant_message": "Starting the audit.The prior run failed."}, True),
+        ("a decorated colon label separates a historical report",
+         {"last_assistant_message":
+          "Starting the audit: **the prior run failed**."}, True),
+        ("a quoted colon label separates a historical report",
+         {"last_assistant_message":
+          "Starting the audit: \u201cthe prior run failed\u201d."}, True),
+        ("unicode whitespace and a unicode letter preserve a colon label",
+         {"last_assistant_message":
+          "Starting the audit:\u00a0\u00c9vidence from the prior run failed."}, True),
         ("a timestamp colon stays inside the direct report",
          {"last_assistant_message": "Starting the audit at 12:04 failed."}, False),
         ("a ratio colon stays inside the direct report",
@@ -805,6 +977,31 @@ def selftest():
         ("URL punctuation stays inside the direct report",
          {"last_assistant_message":
           "Starting the audit at https://example.test failed."}, False),
+        ("URL query punctuation stays inside the direct report",
+         {"last_assistant_message":
+          "Starting the audit at https://example.test/?mode=full failed."}, False),
+        ("uppercase URL hostname dots stay inside the direct report",
+         {"last_assistant_message":
+          "Starting the audit at https://EXAMPLE.COM failed."}, False),
+        ("a complement word inside a URL is not a clause boundary",
+         {"last_assistant_message":
+          "Starting the audit at https://example.test/?mode=whatever failed."}, False),
+        ("a result word inside a URL is not a completed-work predicate",
+         {"last_assistant_message":
+          "Starting the audit at https://example.test/?state=produced."}, True),
+        ("a URL result word cannot excuse a later historical result",
+         {"last_assistant_message":
+          "Starting the audit at https://example.test/?state=failed because the prior run failed."},
+         True),
+        ("a URL semicolon stays locator punctuation until whitespace",
+         {"last_assistant_message":
+          "Starting the audit at https://example.test/path;mode=full failed."}, False),
+        ("a URL exclamation stays locator punctuation until whitespace",
+         {"last_assistant_message":
+          "Starting the audit at https://example.test/a!b failed."}, False),
+        ("a mixed-case URL dot stays locator punctuation until whitespace",
+         {"last_assistant_message":
+          "Starting the audit at https://example.The failed."}, False),
         ("an image tag colon stays inside the direct report",
          {"last_assistant_message": "Starting the image:v1 audit failed."}, False),
         ("a URN colon stays inside the direct report",
@@ -820,6 +1017,38 @@ def selftest():
         ("a causal historical failure does not excuse the announcement",
          {"last_assistant_message": "Starting the audit because the previous run failed."},
          True),
+        # A nested report belongs to the aside's subject, not to the announced activity.
+        # Delimiter handling is deliberately closed and each supported spelling is pinned.
+        ("a parenthetical nested report does not excuse the announcement",
+         {"last_assistant_message":
+          "Starting the audit (tests failed, quarantined in CI)."}, True),
+        ("a parenthetical historical report does not excuse the announcement",
+         {"last_assistant_message":
+          "Starting the audit (the previous test failed, with errors)."}, True),
+        ("a bracketed nested report does not excuse the announcement",
+         {"last_assistant_message":
+          "Starting the audit [checks failed, quarantined in CI]."}, True),
+        ("a curly-double-quoted report does not excuse the announcement",
+         {"last_assistant_message":
+          "Starting the audit “tests failed, quarantined in CI”."}, True),
+        ("a braced nested report does not excuse the announcement",
+         {"last_assistant_message":
+          "Starting the audit {tests failed, quarantined in CI}."}, True),
+        ("a curly-single-quoted report does not excuse the announcement",
+         {"last_assistant_message":
+          "Starting the audit ‘tests failed, quarantined in CI’."}, True),
+        ("a straight-double-quoted report does not excuse the announcement",
+         {"last_assistant_message":
+          'Starting the audit "tests failed, quarantined in CI".'}, True),
+        ("a straight-single-quoted report does not excuse the announcement",
+         {"last_assistant_message":
+          "Starting the audit 'tests failed, quarantined in CI'."}, True),
+        ("a predicate after a closed subject aside still reports the activity",
+         {"last_assistant_message":
+          "Running the checks (three tests) failed, returning errors."}, False),
+        ("nested closed subject asides retain the outer predicate",
+         {"last_assistant_message":
+          "Running the checks (three [slow] tests) failed, returning errors."}, False),
         ("a temporal historical result does not excuse the announcement",
          {"last_assistant_message": "Starting the audit after the checks passed."}, True),
         ("a direct completion predicate still reports the activity",
@@ -854,6 +1083,29 @@ def selftest():
         ("a what complement does not report the announced activity",
          {"last_assistant_message": "Starting the review of what the sweep produced."},
          True),
+        ("a whatever complement does not report the announced activity",
+         {"last_assistant_message": "Starting the review of whatever the sweep produced."},
+         True),
+        ("a whichever complement does not report the announced activity",
+         {"last_assistant_message": "Starting the review of whichever check failed."}, True),
+        ("a wherever complement does not report the announced activity",
+         {"last_assistant_message": "Starting the search for wherever the check failed."},
+         True),
+        ("a however complement does not report the announced activity",
+         {"last_assistant_message": "Starting the review of however the migration failed."},
+         True),
+        ("a whoever complement does not report the announced activity",
+         {"last_assistant_message": "Starting the review of whoever produced output."},
+         True),
+        ("a whomever complement does not report the announced activity",
+         {"last_assistant_message": "Starting the review of whomever produced output."},
+         True),
+        ("a how-to token does not create a complement boundary",
+         {"last_assistant_message": "Starting the how-to audit failed."}, False),
+        ("a where-clause token does not create a complement boundary",
+         {"last_assistant_message": "Starting the where-clause audit failed."}, False),
+        ("a slash-delimited how token does not create a complement boundary",
+         {"last_assistant_message": "Starting the docs/how-to.md audit failed."}, False),
         ("a what complement cannot excuse a let-me announcement",
          {"last_assistant_message": "Let me check what the sweep produced."}, True),
         ("a result tail cannot excuse a let-me announcement",
@@ -867,6 +1119,134 @@ def selftest():
          {"last_assistant_message": "Running the sweep produced output."}, False),
         ("an embedded report token inside a larger word is not a predicate",
          {"last_assistant_message": "Starting the re/completed after checks."}, True),
+        ("an embedded report token after a retained noun is not a predicate",
+         {"last_assistant_message": "Starting the audit re/completed in 4m."}, True),
+        ("a hyphen-embedded report token after a retained noun is not a predicate",
+         {"last_assistant_message": "Starting the audit x-failed in 4m."}, True),
+        ("a slash-embedded report token after a retained noun is not a predicate",
+         {"last_assistant_message": "Starting the audit path/failed in 4m."}, True),
+        ("a comma-separated report adjective remains part of the activity noun",
+         {"last_assistant_message": "Running the three failed, quarantined tests."}, True),
+        ("a comma-separated completion adjective remains part of the activity noun",
+         {"last_assistant_message": "Starting the second completed, archived audit."}, True),
+        ("a conjunction does not promote coordinated failure adjectives",
+         {"last_assistant_message": "Running the three failed, and quarantined tests."},
+         True),
+        ("a conjunction does not promote coordinated completion adjectives",
+         {"last_assistant_message": "Starting the second completed, but archived audit."},
+         True),
+        ("a comma with a result continuation preserves a direct predicate",
+         {"last_assistant_message": "Running the three tests failed, with three errors."},
+         False),
+        ("a comma with a participial result continuation preserves a direct predicate",
+         {"last_assistant_message":
+          "Running the three tests failed, returning three errors."}, False),
+        ("a comma with a terminal adverb preserves a direct predicate",
+         {"last_assistant_message": "Running the three tests failed, unexpectedly."},
+         False),
+        ("a comma does not promote an ing adjective before the activity noun",
+         {"last_assistant_message": "Running the three failed, interesting tests."}, True),
+        ("a comma does not promote an ly adjective before the activity noun",
+         {"last_assistant_message": "Running the three failed, costly tests."}, True),
+        ("a modifier cannot promote comma-coordinated failure adjectives",
+         {"last_assistant_message":
+          "Running the three failed, quarantined in CI tests."}, True),
+        ("a modifier cannot promote comma-coordinated completion adjectives",
+         {"last_assistant_message":
+          "Starting the second completed, archived in 2025 audit."}, True),
+        ("a named modifier cannot promote comma-coordinated adjectives",
+         {"last_assistant_message":
+          "Starting the known failed, quarantined audit."}, True),
+        ("an ing modifier cannot promote a known failure adjective",
+         {"last_assistant_message":
+          "Starting the known failed, interesting tests."}, True),
+        ("a prepositional modifier cannot promote a known failure adjective",
+         {"last_assistant_message":
+          "Starting the known failed, quarantined in CI tests."}, True),
+        ("a prepositional modifier cannot promote a current completion adjective",
+         {"last_assistant_message":
+          "Starting the current completed, archived in 2025 audit."}, True),
+        ("an ly modifier cannot promote a new failure adjective",
+         {"last_assistant_message":
+          "Starting the new failed, costly tests."}, True),
+        ("a prenominal count cannot become a participial comma predicate",
+         {"last_assistant_message":
+          "Running the three failed, returning tests."}, True),
+        ("a prenominal ordinal cannot become an adverbial comma predicate",
+         {"last_assistant_message":
+          "Starting the second completed, unexpectedly late audit."}, True),
+        ("a quantified new modifier is not an activity head",
+         {"last_assistant_message":
+          "Running the three new failed, quarantined tests."}, True),
+        ("a quantified known modifier is not an activity head",
+         {"last_assistant_message":
+          "Running the three known failed, returning tests."}, True),
+        ("a digit-counted critical modifier is not an activity head",
+         {"last_assistant_message":
+          "Running the 3 critical failed, recently quarantined tests."}, True),
+        ("a selected modifier is not an activity head",
+         {"last_assistant_message":
+          "Running the all selected failed, unexpectedly slow tests."}, True),
+        ("a large modifier is not an activity head",
+         {"last_assistant_message":
+          "Starting the second large completed, archived audit."}, True),
+        ("an ous modifier is not a plural activity head",
+         {"last_assistant_message":
+          "Running the three various failed, returning tests."}, True),
+        ("a previous modifier is not a plural activity head",
+         {"last_assistant_message":
+          "Running the three previous failed, unexpectedly slow tests."}, True),
+        ("a straight possessive is not an activity head",
+         {"last_assistant_message":
+          "Running the project's failed, quarantined tests."}, True),
+        ("a curly possessive is not an activity head",
+         {"last_assistant_message":
+          "Running the project’s failed, quarantined tests."}, True),
+        ("an overseas modifier is not an activity head",
+         {"last_assistant_message":
+          "Running the overseas failed, quarantined tests."}, True),
+        ("an off-hours modifier is not an activity head",
+         {"last_assistant_message":
+          "Running the off-hours failed, quarantined tests."}, True),
+        ("a DevOps name is not an activity head",
+         {"last_assistant_message":
+          "Running the DevOps failed, quarantined tests."}, True),
+        ("a Jenkins name is not an activity head",
+         {"last_assistant_message":
+          "Running the Jenkins failed, quarantined tests."}, True),
+        ("a Windows name is not an activity head",
+         {"last_assistant_message":
+          "Running the Windows failed, quarantined tests."}, True),
+        ("a bare participial object preserves a direct comma predicate",
+         {"last_assistant_message":
+          "Running the three tests failed, returning errors."}, False),
+        ("a following adverb preserves a direct comma predicate",
+         {"last_assistant_message":
+          "Running the three tests failed, unexpectedly often."}, False),
+        ("a direct plural subject preserves a comma predicate",
+         {"last_assistant_message":
+          "Running the tests failed, returning errors."}, False),
+        ("an audit subject preserves a comma predicate",
+         {"last_assistant_message":
+          "Running the audit failed, with three errors."}, False),
+        ("a sweep subject preserves a comma predicate",
+         {"last_assistant_message":
+          "Running the sweep failed, unexpectedly often."}, False),
+        ("a multiword integration-test subject preserves a comma predicate",
+         {"last_assistant_message":
+          "Running the three integration tests failed, returning errors."}, False),
+        ("a digit-counted slow-test subject preserves a comma predicate",
+         {"last_assistant_message":
+          "Running the 3 slow tests failed, returning errors."}, False),
+        ("a selected-test subject preserves a comma predicate",
+         {"last_assistant_message":
+          "Running the all selected tests failed, unexpectedly often."}, False),
+        ("a dozen-test subject preserves a comma predicate",
+         {"last_assistant_message":
+          "Running the two dozen tests failed, returning errors."}, False),
+        ("a hundred-test subject preserves a comma predicate",
+         {"last_assistant_message":
+          "Running the one hundred tests failed, unexpectedly often."}, False),
         ("terminal punctuation directly at a report token stays a clause break",
          {"last_assistant_message": "Starting the audit;failed to excuse it."}, True),
         ("a first line keeps the indentation it was written with",
@@ -896,6 +1276,75 @@ def selftest():
         ("an inline code span quotes a claim rather than making one",
          {"last_assistant_message": "The matcher fires on this tail.\n\n"
                                     "`Starting the audit`"}, False),
+        ("an inline code report does not excuse the outer announcement",
+         {"last_assistant_message":
+          "Starting the audit `tests failed, quarantined in CI`."}, True),
+        ("a double-backtick report does not excuse the outer announcement",
+         {"last_assistant_message":
+          "Starting the audit ``tests failed, quarantined in CI``."}, True),
+        ("an emphasised inline code report does not excuse the outer announcement",
+         {"last_assistant_message":
+          "Starting the audit **`tests failed, quarantined in CI`**."}, True),
+        ("a predicate after a closed inline code subject still reports the activity",
+         {"last_assistant_message":
+          "Running the checks `three tests` failed, returning errors."}, False),
+        ("a URL closing backtick cannot open a prose code span",
+         {"last_assistant_message":
+          "Starting the audit at https://example.test/`failed` completed."}, False),
+        ("an escaped parenthesis cannot close an open aside",
+         {"last_assistant_message":
+          "Starting the audit (literal \\) tests failed, quarantined in CI)."}, True),
+        ("an escaped quote cannot close a quoted aside",
+         {"last_assistant_message":
+          'Starting the audit "tests \\"failed with errors\\", archived".'}, True),
+        ("an escaped parenthesis cannot expose an inner predicate",
+         {"last_assistant_message":
+          "Starting the audit (literal \\) failed)."}, True),
+        ("an escaped quote cannot expose an inner predicate",
+         {"last_assistant_message":
+          'Starting the audit "literal \\"failed, archived".'}, True),
+        ("a plural possessive cannot close a straight-single-quoted aside",
+         {"last_assistant_message":
+          "Starting the audit 'the auditors' tests failed, with errors'."}, True),
+        ("a quoted noun cannot replace the announced activity subject",
+         {"last_assistant_message":
+          "Starting the audit 'the auditors' tests failed."}, True),
+        ("a noun after a closed parenthetical cannot replace the activity subject",
+         {"last_assistant_message":
+          "Starting the audit (prior) tests failed."}, True),
+        ("an empty parenthetical cannot replace the activity subject",
+         {"last_assistant_message":
+          "Starting the audit () tests failed."}, True),
+        ("a spaced empty parenthetical cannot replace the activity subject",
+         {"last_assistant_message":
+          "Starting the audit ( ) tests failed."}, True),
+        ("nested empty groups cannot replace the activity subject",
+         {"last_assistant_message":
+          "Starting the audit ([]) tests failed."}, True),
+        ("empty brackets cannot replace the activity subject",
+         {"last_assistant_message":
+          "Starting the audit [] tests failed."}, True),
+        ("empty straight-double quotes cannot replace the activity subject",
+         {"last_assistant_message":
+          'Starting the audit "" tests failed.'}, True),
+        ("empty straight-single quotes cannot replace the activity subject",
+         {"last_assistant_message":
+          "Starting the audit '' tests failed."}, True),
+        ("empty inline code cannot replace the activity subject",
+         {"last_assistant_message":
+          "Starting the audit ` ` tests failed."}, True),
+        ("a predicate after an empty group still reports the activity",
+         {"last_assistant_message":
+          "Running the audit () failed."}, False),
+        ("a modified predicate after nested empty groups still reports the activity",
+         {"last_assistant_message":
+          "Running the audit ([]) unexpectedly failed."}, False),
+        ("a straight-single-quoted subject can close before its outer predicate",
+         {"last_assistant_message":
+          "Running the checks 'three tests' failed, returning errors."}, False),
+        ("a straight-single-quoted subject can close before a modified predicate",
+         {"last_assistant_message":
+          "Running the audit 'Nightly' unexpectedly failed."}, False),
         # The declared out-of-scope boundary, pinned as a case so widening it is a
         # deliberate edit rather than a drift. A colon labels what follows instead of
         # ending a clause, and the shape below is the cost of treating it as a terminator.
@@ -1059,12 +1508,36 @@ def selftest():
          "Starting the audit; the prior run failed.", 2, "Starting the"),
         ("main blocks a colon-labelled historical report",
          "Starting the audit: the prior run failed.", 2, "Starting the"),
+        ("main blocks attached and decorated historical report clauses",
+         "Starting the audit;the prior run: **failed earlier**.", 2, "Starting the"),
+        ("main blocks an attached full-stop historical report clause",
+         "Starting the audit.The prior run failed.", 2, "Starting the"),
+        ("main blocks a unicode colon-labelled historical report",
+         "Starting the audit:\u00a0\u00c9vidence from the prior run failed.", 2,
+         "Starting the"),
         ("main keeps a timestamp colon inside the direct report",
          "Starting the audit at 12:04 failed.", 0, None),
         ("main keeps a predicate directly after a colon with the activity",
          "Starting the audit: completed in 4m.", 0, None),
         ("main keeps URL punctuation inside the direct report",
          "Starting the audit at https://example.test failed.", 0, None),
+        ("main keeps URL query punctuation inside the direct report",
+         "Starting the audit at https://example.test/?mode=full failed.", 0, None),
+        ("main keeps uppercase URL hostname dots inside the direct report",
+         "Starting the audit at https://EXAMPLE.COM failed.", 0, None),
+        ("main keeps URL complement words opaque",
+         "Starting the audit at https://example.test/?mode=whatever failed.", 0, None),
+        ("main ignores report words inside a URL",
+         "Starting the audit at https://example.test/?state=produced.", 2, "Starting the"),
+        ("main keeps URL report words from excusing a historical result",
+         "Starting the audit at https://example.test/?state=failed because the prior run failed.",
+         2, "Starting the"),
+        ("main keeps URL semicolons opaque until whitespace",
+         "Starting the audit at https://example.test/path;mode=full failed.", 0, None),
+        ("main keeps URL exclamations opaque until whitespace",
+         "Starting the audit at https://example.test/a!b failed.", 0, None),
+        ("main keeps mixed-case URL dots opaque until whitespace",
+         "Starting the audit at https://example.The failed.", 0, None),
         ("main keeps version dots inside the direct report",
          "Starting the v1.2.3 audit failed.", 0, None),
         ("main keeps an attached CLI option inside the direct report",
@@ -1129,6 +1602,90 @@ def selftest():
          "Starting the audit of whether the tests passed.", 2, "Starting the"),
         ("main blocks a why complement on the participle arm",
          "Starting the investigation into why the tests failed.", 2, "Starting the"),
+        ("main blocks productive interrogative complements",
+         "Starting the review of whatever the sweep produced.", 2, "Starting the"),
+        ("main keeps a hyphenated complement root inside the activity token",
+         "Starting the how-to audit failed.", 0, None),
+        ("main blocks embedded report substrings after a retained activity noun",
+         "Starting the audit re/completed in 4m.", 2, "Starting the"),
+        ("main blocks comma-separated report adjectives",
+         "Running the three failed, quarantined tests.", 2, "Running the"),
+        ("main preserves a comma result continuation as a direct predicate",
+         "Running the three tests failed, with three errors.", 0, None),
+        ("main preserves a participial comma result continuation",
+         "Running the three tests failed, returning three errors.", 0, None),
+        ("main preserves a terminal comma result adverb",
+         "Running the three tests failed, unexpectedly.", 0, None),
+        ("main blocks an ing adjective after a comma",
+         "Running the three failed, interesting tests.", 2, "Running the"),
+        ("main blocks an ly adjective after a comma",
+         "Running the three failed, costly tests.", 2, "Running the"),
+        ("main blocks modified comma-coordinated failure adjectives",
+         "Running the three failed, quarantined in CI tests.", 2, "Running the"),
+        ("main blocks modified comma-coordinated completion adjectives",
+         "Starting the second completed, archived in 2025 audit.", 2, "Starting the"),
+        ("main blocks coordinated adjectives after a named modifier",
+         "Starting the known failed, quarantined audit.", 2, "Starting the"),
+        ("main blocks an ing modifier after a known failure adjective",
+         "Starting the known failed, interesting tests.", 2, "Starting the"),
+        ("main blocks a prepositional modifier after a known failure adjective",
+         "Starting the known failed, quarantined in CI tests.", 2, "Starting the"),
+        ("main blocks a prepositional modifier after a current completion adjective",
+         "Starting the current completed, archived in 2025 audit.", 2, "Starting the"),
+        ("main blocks an ly modifier after a new failure adjective",
+         "Starting the new failed, costly tests.", 2, "Starting the"),
+        ("main blocks a prenominal participial comma continuation",
+         "Running the three failed, returning tests.", 2, "Running the"),
+        ("main blocks a prenominal adverbial comma continuation",
+         "Starting the second completed, unexpectedly late audit.", 2, "Starting the"),
+        ("main blocks a quantified new comma modifier",
+         "Running the three new failed, quarantined tests.", 2, "Running the"),
+        ("main blocks a quantified known comma modifier",
+         "Running the three known failed, returning tests.", 2, "Running the"),
+        ("main blocks a digit-counted critical comma modifier",
+         "Running the 3 critical failed, recently quarantined tests.", 2, "Running the"),
+        ("main blocks a selected comma modifier",
+         "Running the all selected failed, unexpectedly slow tests.", 2, "Running the"),
+        ("main blocks a large comma modifier",
+         "Starting the second large completed, archived audit.", 2, "Starting the"),
+        ("main blocks an ous comma modifier",
+         "Running the three various failed, returning tests.", 2, "Running the"),
+        ("main blocks a previous comma modifier",
+         "Running the three previous failed, unexpectedly slow tests.", 2, "Running the"),
+        ("main blocks a straight possessive comma modifier",
+         "Running the project's failed, quarantined tests.", 2, "Running the"),
+        ("main blocks a curly possessive comma modifier",
+         "Running the project’s failed, quarantined tests.", 2, "Running the"),
+        ("main blocks an overseas comma modifier",
+         "Running the overseas failed, quarantined tests.", 2, "Running the"),
+        ("main blocks an off-hours comma modifier",
+         "Running the off-hours failed, quarantined tests.", 2, "Running the"),
+        ("main blocks a DevOps comma modifier",
+         "Running the DevOps failed, quarantined tests.", 2, "Running the"),
+        ("main blocks a Jenkins comma modifier",
+         "Running the Jenkins failed, quarantined tests.", 2, "Running the"),
+        ("main blocks a Windows comma modifier",
+         "Running the Windows failed, quarantined tests.", 2, "Running the"),
+        ("main preserves a bare participial comma object",
+         "Running the three tests failed, returning errors.", 0, None),
+        ("main preserves a following comma result adverb",
+         "Running the three tests failed, unexpectedly often.", 0, None),
+        ("main preserves a direct plural comma subject",
+         "Running the tests failed, returning errors.", 0, None),
+        ("main preserves an audit comma subject",
+         "Running the audit failed, with three errors.", 0, None),
+        ("main preserves a sweep comma subject",
+         "Running the sweep failed, unexpectedly often.", 0, None),
+        ("main preserves a multiword integration-test comma subject",
+         "Running the three integration tests failed, returning errors.", 0, None),
+        ("main preserves a digit-counted slow-test comma subject",
+         "Running the 3 slow tests failed, returning errors.", 0, None),
+        ("main preserves a selected-test comma subject",
+         "Running the all selected tests failed, unexpectedly often.", 0, None),
+        ("main preserves a dozen-test comma subject",
+         "Running the two dozen tests failed, returning errors.", 0, None),
+        ("main preserves a hundred-test comma subject",
+         "Running the one hundred tests failed, unexpectedly often.", 0, None),
         ("main keeps a first line's own indentation",
          "    > deep\nStarting the audit.", 2, "Starting the"),
         ("main blocks a let-me whether complement",
@@ -1253,6 +1810,91 @@ def selftest():
         failures += 0 if ok else 1
         checks += 1
         print(f"  {'PASS' if ok else 'FAIL'} {label} -> rc={done.returncode}")
+
+    # The same open-group association through every supported Stop message envelope. The
+    # direct cases localise parser failures; these cases prove that message extraction and
+    # subprocess exit semantics preserve the decision without reconstructing the payload.
+    group_process_cases = (
+        ("blocks a parenthetical nested report",
+         "Starting the audit (tests failed, quarantined in CI).", 2, "Starting the"),
+        ("blocks a parenthetical historical report",
+         "Starting the audit (the previous test failed, with errors).", 2, "Starting the"),
+        ("blocks a bracketed nested report",
+         "Starting the audit [checks failed, quarantined in CI].", 2, "Starting the"),
+        ("blocks a curly-quoted nested report",
+         "Starting the audit “tests failed, quarantined in CI”.", 2, "Starting the"),
+        ("preserves a predicate after a closed subject aside",
+         "Running the checks (three tests) failed, returning errors.", 0, None),
+        ("blocks a single-backtick nested report",
+         "Starting the audit `tests failed, quarantined in CI`.", 2, "Starting the"),
+        ("blocks a double-backtick nested report",
+         "Starting the audit ``tests failed, quarantined in CI``.", 2, "Starting the"),
+        ("blocks an emphasised inline-code nested report",
+         "Starting the audit **`tests failed, quarantined in CI`**.", 2, "Starting the"),
+        ("preserves a predicate after a closed inline-code subject",
+         "Running the checks `three tests` failed, returning errors.", 0, None),
+        ("keeps a URL closing backtick out of prose grouping",
+         "Starting the audit at https://example.test/`failed` completed.", 0, None),
+        ("blocks a report after an escaped parenthesis",
+         "Starting the audit (literal \\) tests failed, quarantined in CI).", 2,
+         "Starting the"),
+        ("blocks a report after an escaped quote",
+         'Starting the audit "tests \\"failed with errors\\", archived".', 2,
+         "Starting the"),
+        ("blocks a predicate after an escaped parenthesis",
+         "Starting the audit (literal \\) failed).", 2, "Starting the"),
+        ("blocks a predicate after an escaped quote",
+         'Starting the audit "literal \\"failed, archived".', 2, "Starting the"),
+        ("blocks a plural possessive inside a straight-single-quoted aside",
+         "Starting the audit 'the auditors' tests failed, with errors'.", 2,
+         "Starting the"),
+        ("blocks a quoted noun from replacing the announced activity subject",
+         "Starting the audit 'the auditors' tests failed.", 2, "Starting the"),
+        ("blocks a noun after a closed parenthetical from replacing the activity subject",
+         "Starting the audit (prior) tests failed.", 2, "Starting the"),
+        ("blocks an empty parenthetical from replacing the activity subject",
+         "Starting the audit () tests failed.", 2, "Starting the"),
+        ("blocks a spaced empty parenthetical from replacing the activity subject",
+         "Starting the audit ( ) tests failed.", 2, "Starting the"),
+        ("blocks nested empty groups from replacing the activity subject",
+         "Starting the audit ([]) tests failed.", 2, "Starting the"),
+        ("blocks empty brackets from replacing the activity subject",
+         "Starting the audit [] tests failed.", 2, "Starting the"),
+        ("blocks empty straight-double quotes from replacing the activity subject",
+         'Starting the audit "" tests failed.', 2, "Starting the"),
+        ("blocks empty straight-single quotes from replacing the activity subject",
+         "Starting the audit '' tests failed.", 2, "Starting the"),
+        ("blocks empty inline code from replacing the activity subject",
+         "Starting the audit ` ` tests failed.", 2, "Starting the"),
+        ("preserves a predicate after an empty group",
+         "Running the audit () failed.", 0, None),
+        ("preserves a modified predicate after nested empty groups",
+         "Running the audit ([]) unexpectedly failed.", 0, None),
+        ("preserves a predicate after a straight-single-quoted subject",
+         "Running the checks 'three tests' failed, returning errors.", 0, None),
+        ("preserves a modified predicate after a straight-single-quoted subject",
+         "Running the audit 'Nightly' unexpectedly failed.", 0, None),
+    )
+    for shape in ("string", "content", "bare"):
+        for label, message, want, trigger in group_process_cases:
+            if shape == "string":
+                wrapped = message
+            elif shape == "content":
+                wrapped = {"content": [{"type": "text", "text": message}]}
+            else:
+                wrapped = [{"type": "text", "text": message}]
+            done = subprocess.run(
+                [sys.executable, os.path.abspath(__file__)],
+                input=json.dumps({"hook_event_name": "Stop",
+                                  "last_assistant_message": wrapped}),
+                capture_output=True, text=True, timeout=5, env=environment)
+            ok = (done.returncode == want and not done.stdout
+                  and ((want == 0 and not done.stderr)
+                       or (want == 2 and trigger in done.stderr)))
+            failures += 0 if ok else 1
+            checks += 1
+            print(f"  {'PASS' if ok else 'FAIL'} main {shape} {label} "
+                  f"-> rc={done.returncode}")
 
     # Line-ending framing preserves both report meaning and fence boundaries. Paragraphs
     # and containers remain separate units and cannot supply a missing predicate.

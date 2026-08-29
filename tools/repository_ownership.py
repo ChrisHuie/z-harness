@@ -231,12 +231,15 @@ def _bound_separate_gitdir(path, marker, runner):
             or _metadata_stat(os.path.join(admin, "gitdir"), follow_symlinks=False)
             is not None):
         return False
-    command = "git config --local --path --null --get-all core.worktree"
+    # Git resolves a repeated key to its last value for ``--get``. Ask for that effective
+    # value rather than retrieving every historical assignment and inventing a different
+    # ambiguity policy from the repository operation this predicate is modelling.
+    command = "git config --local --path --null --get core.worktree"
     try:
         configured = run_git(
             runner,
             ["git", "--git-dir", admin, "config", "--local", "--path", "--null",
-             "--get-all", "core.worktree"], capture_output=True, text=False)
+             "--get", "core.worktree"], capture_output=True, text=False)
     except (OSError, ValueError) as exc:
         raise RepositoryOwnershipError(f"cannot run {command}: {exc}") from exc
     raw = bytes(configured.stdout)
@@ -245,11 +248,11 @@ def _bound_separate_gitdir(path, marker, runner):
     if configured.returncode != 0:
         raise RepositoryOwnershipError(
             git_command_failure(configured.returncode, configured.stderr, command))
-    # The terminator count refuses a multi-valued record where the record is read. Without
-    # it the joined value reaches os.path.samefile carrying a NUL, which is a raised error
-    # rather than a decision -- so the operand is what makes this a refusal.
+    # A successful ``--get`` has exactly one non-empty NUL-terminated value. Anything else
+    # is a malformed instrument reply, not evidence that the candidate is not a boundary.
     if not raw.endswith(b"\0") or raw.count(b"\0") != 1 or raw == b"\0":
-        return False
+        raise RepositoryOwnershipError(
+            f"{command} returned a malformed path record")
     worktree = os.fsdecode(raw[:-1])
     if not os.path.isabs(worktree):
         worktree = os.path.join(admin, worktree)
@@ -664,22 +667,50 @@ def selftest():
                not _registered_linked_worktree(
                    strayed_worktree, os.path.join(strayed_worktree, ".git")))
 
-        # core.worktree must resolve to exactly one value, and the refusal is the
-        # terminator count alone: with it removed the joined record reaches samefile and
-        # raises instead of returning a verdict.
+        # ``git config --get`` and repository discovery both use the last value of a
+        # repeated key. Exercise both orders: a foreign effective value is negative, while
+        # a candidate effective value is a boundary even though an older value remains.
         subprocess.run(
             ["git", "--git-dir", separate_admin, "config", "--add", "core.worktree",
              owner], check=True)
-        def doubly_recorded_is_refused():
-            # Reported rather than raised: with the terminator count removed this call
-            # raises, and an uncaught raise ends the suite instead of naming the operand.
+        effective = subprocess.run(
+            ["git", "--git-dir", separate_admin, "config", "--path", "--get",
+             "core.worktree"], capture_output=True, text=True, check=True).stdout.strip()
+        def repeated_foreign_is_negative():
             try:
-                return not _bound_separate_gitdir(
-                    separate, os.path.join(separate, ".git"), subprocess.run)
-            except (OSError, ValueError):
+                return (same_file(effective, owner)
+                        and not _bound_separate_gitdir(
+                            separate, os.path.join(separate, ".git"), subprocess.run))
+            except RepositoryOwnershipError:
                 return False
-        expect("a doubly-recorded core.worktree is not a separately-bound gitdir",
-               doubly_recorded_is_refused())
+        expect("a repeated core.worktree whose effective value is foreign is not bound",
+               repeated_foreign_is_negative())
+        subprocess.run(
+            ["git", "--git-dir", separate_admin, "config", "--unset-all",
+             "core.worktree"], check=True)
+        subprocess.run(
+            ["git", "--git-dir", separate_admin, "config", "--add", "core.worktree",
+             owner], check=True)
+        subprocess.run(
+            ["git", "--git-dir", separate_admin, "config", "--add", "core.worktree",
+             separate], check=True)
+        effective = subprocess.run(
+            ["git", "--git-dir", separate_admin, "config", "--path", "--get",
+             "core.worktree"], capture_output=True, text=True, check=True).stdout.strip()
+        effective_top = subprocess.run(
+            ["git", "-C", separate, "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, check=True).stdout.strip()
+        def repeated_candidate_is_boundary():
+            try:
+                return (same_file(effective, separate)
+                        and same_file(effective_top, separate)
+                        and _bound_separate_gitdir(
+                            separate, os.path.join(separate, ".git"), subprocess.run)
+                        and is_repository_boundary(separate, owner))
+            except RepositoryOwnershipError:
+                return False
+        expect("a repeated core.worktree binds the effective candidate Git recognises",
+               repeated_candidate_is_boundary())
         subprocess.run(
             ["git", "--git-dir", separate_admin, "config", "--unset-all",
              "core.worktree"], check=True)
@@ -714,6 +745,16 @@ def selftest():
                not _bound_separate_gitdir(
                    separate, os.path.join(separate, ".git"),
                    lambda *_a, **_k: Done(1)))
+        for label, raw in (
+                ("empty", b""),
+                ("empty value", b"\0"),
+                ("unterminated", os.fsencode(separate)),
+                ("multiple", os.fsencode(owner) + b"\0" + os.fsencode(separate) + b"\0")):
+            expect(f"a successful {label} config reply is a named ownership error",
+                   "malformed path record" in ownership_error(
+                       lambda raw=raw: _bound_separate_gitdir(
+                           separate, os.path.join(separate, ".git"),
+                           lambda *_a, **_k: Done(0, raw))))
 
         real_open = open
         registered_marker = os.path.join(registered, ".git")

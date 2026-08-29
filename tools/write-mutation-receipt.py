@@ -28,7 +28,13 @@ SUMMARY = ROOT / "contracts/goldens/mutation-summary.md"
 GREP = "hooks/guards/git_grep_engine_guard.py"
 ZSH = "hooks/guards/zsh_rev_modifier_guard.py"
 BASH = "hooks/bash_command_guard.py"
-GUARDS = (GREP, ZSH, BASH)
+STOP = "hooks/announced_work_guard.py"
+OWNERSHIP = "tools/repository_ownership.py"
+# Every mutation-owned suite participates in source custody and the green baseline. Only
+# the three command guards participate in automatic uppercase-collection removal; Stop and
+# ownership use focused site mutations so the sweep does not grade their fixture vocabularies.
+GUARDS = (GREP, ZSH, BASH, STOP, OWNERSHIP)
+COLLECTION_GUARDS = (GREP, ZSH, BASH)
 SCHEMA_VERSION = 3
 GENERATOR = "tools/write-mutation-receipt.py"
 NOTE = ("which guard mutations the shipped suites catch; each result's reason is an observation from the host that generated it, not a cross-platform fact")
@@ -43,7 +49,8 @@ OUTCOMES = {"caught", "survived"}
 UNASSERTED_KILL_REASON = "exact-check-count"
 UNASSERTED_KILL_CEILING = 1
 KILL_REASONS = frozenset({
-    "suite-failure", UNASSERTED_KILL_REASON, "survived", "invalid-receipt", "timeout",
+    "suite-failure", "selector-failure", UNASSERTED_KILL_REASON, "survived",
+    "invalid-receipt", "timeout",
 })
 # Fields whose value is an observation of the host that produced it rather than a fact about
 # the guards. Whether an assertion fires can differ between environments -- deleting "W" from
@@ -94,6 +101,321 @@ CHARSET_COLLECTIONS = {
 
 # ``timeout`` is an allowed kill only for the edit that restores an unbounded traversal.
 SITE_MUTATIONS = (
+    {
+        "label": "effective core.worktree scalar lookup dropped", "module": OWNERSHIP,
+        "anchor": (
+            "             \"--get\", \"core.worktree\"], capture_output=True, text=False)"),
+        "replacement": (
+            "             \"--get-all\", \"core.worktree\"], capture_output=True, text=False)"),
+        "selectors": (
+            "a repeated core.worktree binds the effective candidate Git recognises",),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "whole report-token membership dropped", "module": STOP,
+        "anchor": "        if word in REPORT_TERMS:",
+        "replacement": "        if any(term in word for term in REPORT_TERMS):",
+        "selectors": (
+            "main blocks embedded report substrings after a retained activity noun",),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "productive complement tokens dropped", "module": STOP,
+        "anchor": (
+            "REPORT_COMPLEMENTS = frozenset({\n"
+            "    \"whether\", \"what\", \"whatever\", \"why\", \"where\", \"wherever\", \"how\", \"however\",\n"
+            "    \"which\", \"whichever\", \"who\", \"whoever\", \"whom\", \"whomever\", \"whose\",\n"
+            "})"),
+        "replacement": (
+            "REPORT_COMPLEMENTS = frozenset({\n"
+            "    \"whether\", \"what\", \"why\", \"where\", \"how\", \"which\", \"who\", \"whom\", \"whose\",\n"
+            "})"),
+        "selectors": ("main blocks productive interrogative complements",),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "whole complement-token membership dropped", "module": STOP,
+        "anchor": "        if word in REPORT_CLAUSE_WORDS:",
+        "replacement": (
+            "        if any(word.startswith(item) for item in REPORT_CLAUSE_WORDS):"),
+        "selectors": (
+            "main keeps a hyphenated complement root inside the activity token",),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "hard separator classification dropped", "module": STOP,
+        "anchor": "    if any(mark in separator for mark in (\";\", \"!\", \"?\", \"—\")):",
+        "replacement": (
+            "    if False and any(mark in separator for mark in (\";\", \"!\", \"?\", \"—\")):"),
+        "selectors": (
+            "main blocks attached and decorated historical report clauses",),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "attached period classification dropped", "module": STOP,
+        "anchor": (
+            "        if any(char.isspace() for char in after) or following_word[:1].isupper():"),
+        "replacement": "        if any(char.isspace() for char in after):",
+        "selectors": (
+            "main blocks an attached full-stop historical report clause",),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "decorated colon classification dropped", "module": STOP,
+        "anchor": "    if \":\" in separator:",
+        "replacement": "    if False and \":\" in separator:",
+        "selectors": ("main blocks a unicode colon-labelled historical report",),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "comma adjective distinction dropped", "module": STOP,
+        "anchor": (
+            "    comma = REPORT_COMMA_TAIL.match(remainder, report_end)\n"
+            "    if not comma:\n"
+            "        return False\n"
+            "    # Once a comma begins, its following phrase cannot reliably reveal whether the report\n"
+            "    # word was a predicate (``returning errors``) or another prenominal modifier\n"
+            "    # (``quarantined in CI tests``). Require the evidence before the report instead.\n"
+            "    return comma_subject_is_clear(core_words)"),
+        "replacement": (
+            "    comma = REPORT_COMMA_TAIL.match(remainder, report_end)\n"
+            "    if not comma:\n"
+            "        return False\n"
+            "    # Once a comma begins, its following phrase cannot reliably reveal whether the report\n"
+            "    # word was a predicate (``returning errors``) or another prenominal modifier\n"
+            "    # (``quarantined in CI tests``). Require the evidence before the report instead.\n"
+            "    return True"),
+        "selectors": (
+            "main blocks a straight possessive comma modifier",
+            "main blocks an overseas comma modifier",
+            "main blocks a DevOps comma modifier",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "comma predicate continuation dropped", "module": STOP,
+        "anchor": (
+            "    comma = REPORT_COMMA_TAIL.match(remainder, report_end)\n"
+            "    if not comma:\n"
+            "        return False\n"
+            "    # Once a comma begins, its following phrase cannot reliably reveal whether the report\n"
+            "    # word was a predicate (``returning errors``) or another prenominal modifier\n"
+            "    # (``quarantined in CI tests``). Require the evidence before the report instead.\n"
+            "    return comma_subject_is_clear(core_words)"),
+        "replacement": (
+            "    comma = REPORT_COMMA_TAIL.match(remainder, report_end)\n"
+            "    if not comma:\n"
+            "        return False\n"
+            "    # Once a comma begins, its following phrase cannot reliably reveal whether the report\n"
+            "    # word was a predicate (``returning errors``) or another prenominal modifier\n"
+            "    # (``quarantined in CI tests``). Require the evidence before the report instead.\n"
+            "    return False"),
+        "selectors": (
+            "main preserves a participial comma result continuation",
+            "main preserves a terminal comma result adverb",
+            "main preserves a direct plural comma subject",
+            "main preserves an audit comma subject",
+            "main preserves a multiword integration-test comma subject",
+            "main preserves a hundred-test comma subject",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "URL punctuation bypass dropped", "module": STOP,
+        "anchor": (
+            "        if not url_active and report_separator_breaks(outside_separator, original_word):"),
+        "replacement": "        if report_separator_breaks(outside_separator, original_word):",
+        "selectors": (
+            "main keeps URL query punctuation inside the direct report",
+            "main keeps uppercase URL hostname dots inside the direct report",
+            "main keeps URL semicolons opaque until whitespace",
+            "main keeps URL exclamations opaque until whitespace",
+            "main keeps mixed-case URL dots opaque until whitespace",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "URL semantic-token bypass dropped", "module": STOP,
+        "anchor": (
+            "        if url_active:\n"
+            "            # Locator tokens are neither clause words nor completed-work predicates.\n"
+            "            # Only the first whitespace-bearing separator releases prose parsing.\n"
+            "            previous_word = word\n"
+            "            previous_end = token.end()\n"
+            "            continue"),
+        "replacement": (
+            "        if False and url_active:\n"
+            "            # Locator tokens are neither clause words nor completed-work predicates.\n"
+            "            # Only the first whitespace-bearing separator releases prose parsing.\n"
+            "            previous_word = word\n"
+            "            previous_end = token.end()\n"
+            "            continue"),
+        "selectors": (
+            "main keeps URL complement words opaque",
+            "main ignores report words inside a URL",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "open-group association dropped", "module": STOP,
+        "anchor": "        if not url_active and group_stack:",
+        "replacement": "        if False and group_stack:",
+        "selectors": (
+            "main string blocks a parenthetical nested report",
+            "main string blocks a parenthetical historical report",
+            "main string blocks a bracketed nested report",
+            "main string blocks a curly-quoted nested report",
+            "main content blocks a parenthetical nested report",
+            "main content blocks a parenthetical historical report",
+            "main content blocks a bracketed nested report",
+            "main content blocks a curly-quoted nested report",
+            "main bare blocks a parenthetical nested report",
+            "main bare blocks a parenthetical historical report",
+            "main bare blocks a bracketed nested report",
+            "main bare blocks a curly-quoted nested report",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "inline-code group recognition dropped", "module": STOP,
+        "anchor": "        if character == \"`\":",
+        "replacement": "        if False and character == \"`\":",
+        "selectors": (
+            "main string blocks a single-backtick nested report",
+            "main string blocks a double-backtick nested report",
+            "main string blocks an emphasised inline-code nested report",
+            "main content blocks a single-backtick nested report",
+            "main content blocks a double-backtick nested report",
+            "main content blocks an emphasised inline-code nested report",
+            "main bare blocks a single-backtick nested report",
+            "main bare blocks a double-backtick nested report",
+            "main bare blocks an emphasised inline-code nested report",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "URL prose-release boundary dropped", "module": STOP,
+        "anchor": (
+            "            if url_was_active:\n"
+            "                # URL punctuation before the first whitespace stays locator content. A\n"
+            "                # closing quote/backtick there must not become a new prose opener merely\n"
+            "                # because the following token is outside the URL.\n"
+            "                separator = separator[next(\n"
+            "                    index for index, character in enumerate(separator)\n"
+            "                    if character.isspace()):]"),
+        "replacement": (
+            "            if False and url_was_active:\n"
+            "                # URL punctuation before the first whitespace stays locator content. A\n"
+            "                # closing quote/backtick there must not become a new prose opener merely\n"
+            "                # because the following token is outside the URL.\n"
+            "                separator = separator[next(\n"
+            "                    index for index, character in enumerate(separator)\n"
+            "                    if character.isspace()):]"),
+        "selectors": (
+            "main string keeps a URL closing backtick out of prose grouping",
+            "main content keeps a URL closing backtick out of prose grouping",
+            "main bare keeps a URL closing backtick out of prose grouping",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "escaped group delimiter handling dropped", "module": STOP,
+        "anchor": (
+            "        if (character == \"\\\\\" and index + 1 < len(separator)\n"
+            "                and separator[index + 1] in REPORT_GROUP_ESCAPES):"),
+        "replacement": (
+            "        if (False and character == \"\\\\\" and index + 1 < len(separator)\n"
+            "                and separator[index + 1] in REPORT_GROUP_ESCAPES):"),
+        "selectors": (
+            "main string blocks a predicate after an escaped parenthesis",
+            "main string blocks a predicate after an escaped quote",
+            "main content blocks a predicate after an escaped parenthesis",
+            "main content blocks a predicate after an escaped quote",
+            "main bare blocks a predicate after an escaped parenthesis",
+            "main bare blocks a predicate after an escaped quote",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "straight-single outer predicate closure dropped", "module": STOP,
+        "anchor": (
+            "            if group_stack[-1] == \"'\" and original_word.endswith(\"'\"):\n"
+            "                group_stack.pop()\n"
+            "                if not group_stack:\n"
+            "                    after_group = True"),
+        "replacement": (
+            "            if False and group_stack[-1] == \"'\" and original_word.endswith(\"'\"):\n"
+            "                group_stack.pop()\n"
+            "                if not group_stack:\n"
+            "                    after_group = True"),
+        "selectors": (
+            "main string preserves a predicate after a straight-single-quoted subject",
+            "main string preserves a modified predicate after a straight-single-quoted subject",
+            "main content preserves a predicate after a straight-single-quoted subject",
+            "main content preserves a modified predicate after a straight-single-quoted subject",
+            "main bare preserves a predicate after a straight-single-quoted subject",
+            "main bare preserves a modified predicate after a straight-single-quoted subject",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "post-group subject replacement guard dropped", "module": STOP,
+        "anchor": "        if after_group and word not in REPORT_TERMS:",
+        "replacement": "        if False and after_group and word not in REPORT_TERMS:",
+        "selectors": (
+            "main string blocks a plural possessive inside a straight-single-quoted aside",
+            "main string blocks a quoted noun from replacing the announced activity subject",
+            "main string blocks a noun after a closed parenthetical from replacing the activity subject",
+            "main content blocks a plural possessive inside a straight-single-quoted aside",
+            "main content blocks a quoted noun from replacing the announced activity subject",
+            "main content blocks a noun after a closed parenthetical from replacing the activity subject",
+            "main bare blocks a plural possessive inside a straight-single-quoted aside",
+            "main bare blocks a quoted noun from replacing the announced activity subject",
+            "main bare blocks a noun after a closed parenthetical from replacing the activity subject",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "outer-group closure signal dropped", "module": STOP,
+        "anchor": "            if outer_group_closed:\n                after_group = True",
+        "replacement": (
+            "            if False and outer_group_closed:\n                after_group = True"),
+        "selectors": (
+            "main string blocks an empty parenthetical from replacing the activity subject",
+            "main string blocks a spaced empty parenthetical from replacing the activity subject",
+            "main string blocks nested empty groups from replacing the activity subject",
+            "main string blocks empty brackets from replacing the activity subject",
+            "main string blocks empty straight-double quotes from replacing the activity subject",
+            "main string blocks empty straight-single quotes from replacing the activity subject",
+            "main string blocks empty inline code from replacing the activity subject",
+            "main content blocks an empty parenthetical from replacing the activity subject",
+            "main content blocks a spaced empty parenthetical from replacing the activity subject",
+            "main content blocks nested empty groups from replacing the activity subject",
+            "main content blocks empty brackets from replacing the activity subject",
+            "main content blocks empty straight-double quotes from replacing the activity subject",
+            "main content blocks empty straight-single quotes from replacing the activity subject",
+            "main content blocks empty inline code from replacing the activity subject",
+            "main bare blocks an empty parenthetical from replacing the activity subject",
+            "main bare blocks a spaced empty parenthetical from replacing the activity subject",
+            "main bare blocks nested empty groups from replacing the activity subject",
+            "main bare blocks empty brackets from replacing the activity subject",
+            "main bare blocks empty straight-double quotes from replacing the activity subject",
+            "main bare blocks empty straight-single quotes from replacing the activity subject",
+            "main bare blocks empty inline code from replacing the activity subject",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "post-group predicate modifier bridge dropped", "module": STOP,
+        "anchor": "            if word in REPORT_POSTGROUP_MODIFIERS:",
+        "replacement": "            if False and word in REPORT_POSTGROUP_MODIFIERS:",
+        "selectors": (
+            "main string preserves a modified predicate after a straight-single-quoted subject",
+            "main content preserves a modified predicate after a straight-single-quoted subject",
+            "main bare preserves a modified predicate after a straight-single-quoted subject",
+        ),
+        "allowed_statuses": (),
+    },
     {
         "label": "merged guard function cache scope dropped", "module": BASH,
         "anchor": (
@@ -767,7 +1089,7 @@ def with_element(source: str, name: str, kind: str, element: str) -> str:
 def mutation_plan() -> tuple[list[dict], dict[str, str]]:
     mutations, rejected = [], {}
     discovered_names = set()
-    for module in GUARDS:
+    for module in COLLECTION_GUARDS:
         declared, module_rejected = declared_sets(module)
         rejected.update(module_rejected)
         for name, (kind, elements) in sorted(declared.items()):
@@ -800,6 +1122,9 @@ def mutation_plan() -> tuple[list[dict], dict[str, str]]:
                 site["replacement"].encode()).hexdigest(),
             "allowed_statuses": list(site["allowed_statuses"]),
         }
+        selectors = list(site.get("selectors", ()))
+        if selectors:
+            descriptor["selectors"] = selectors
         descriptor["id"] = digest(descriptor)
         mutations.append(descriptor)
     for addition in ADDITION_MUTATIONS:
@@ -832,10 +1157,13 @@ RECEIPT_RE = re.compile(
 
 
 def suite_name(relative: str) -> str:
+    if relative == OWNERSHIP:
+        return "repository-ownership"
     return Path(relative).stem
 
 
-def run_suite(tree: Path, relative: str, timeout: int = 240) -> dict:
+def run_suite(tree: Path, relative: str, timeout: int = 240,
+              selectors=()) -> dict:
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
     try:
         done = subprocess.run(
@@ -853,32 +1181,75 @@ def run_suite(tree: Path, relative: str, timeout: int = 240) -> dict:
             "status": "invalid-receipt", "returncode": done.returncode,
             "receipt_count": len(matches), "stderr_tail": done.stderr[-1000:],
         }
-    return {
+    selected = {}
+    for selector in selectors:
+        pattern = re.compile(
+            rf"^  (?P<status>PASS|FAIL) {re.escape(selector)}(?: ->.*)?$")
+        hits = [match.group("status").casefold() for line in done.stdout.splitlines()
+                if (match := pattern.fullmatch(line)) is not None]
+        if len(hits) != 1:
+            return {
+                "status": "invalid-receipt", "returncode": done.returncode,
+                "receipt_count": len(matches),
+                "stderr_tail": f"selector {selector!r} matched {len(hits)} lines",
+            }
+        selected[selector] = hits[0]
+    result = {
         "status": "completed", "returncode": done.returncode,
         "checks": int(matches[0].group("checks")),
         "failures": int(matches[0].group("failures")),
     }
+    if selectors:
+        result["selectors"] = selected
+    return result
 
 
-def baseline_results(tree: Path) -> dict[str, dict]:
+def baseline_results(tree: Path, plan=None) -> dict[str, dict]:
     if shutil.which("zsh") is None:
         raise ValueError(
             "zsh is required for mutation baselines; skipped runtime probes are not proof")
-    baseline = {relative: run_suite(tree, relative) for relative in GUARDS}
+    if plan is None:
+        plan, _exclusions = mutation_plan()
+    by_module = {relative: set() for relative in GUARDS}
+    for descriptor in plan:
+        by_module.setdefault(descriptor["module"], set()).update(
+            descriptor.get("selectors", ()))
+    baseline = {
+        relative: run_suite(tree, relative, selectors=sorted(by_module[relative]))
+        for relative in GUARDS
+    }
     bad = {relative: result for relative, result in baseline.items()
            if result.get("status") != "completed"
            or result.get("returncode") != 0 or result.get("failures") != 0}
     if bad:
         raise ValueError(f"baseline suites are not green: {bad}")
+    nonpassing = {
+        relative: result.get("selectors") for relative, result in baseline.items()
+        if any(status != "pass" for status in result.get("selectors", {}).values())
+    }
+    if nonpassing:
+        raise ValueError(f"baseline selectors are not green: {nonpassing}")
     return baseline
 
 
-def result_kill(result: dict, baseline: dict, allowed_statuses=()) -> tuple[bool, str]:
+def result_kill(result: dict, baseline: dict, allowed_statuses=(),
+                selectors=()) -> tuple[bool, str]:
     status = result.get("status")
     if status != "completed":
         if status in allowed_statuses:
             return True, status
         raise ValueError(f"mutation produced an invalid measurement: {result}")
+    if selectors:
+        expected = set(selectors)
+        baseline_selected = baseline.get("selectors", {})
+        selected = result.get("selectors", {})
+        if (not expected or not expected.issubset(baseline_selected)
+                or any(baseline_selected[name] != "pass" for name in expected)
+                or set(selected) != expected):
+            raise ValueError("mutation selector inventory differs from its green baseline")
+        if all(selected[name] == "fail" for name in expected):
+            return True, "selector-failure"
+        return False, "survived"
     if result.get("returncode") != 0 or result.get("failures", 0) > 0:
         return True, "suite-failure"
     if result.get("checks") != baseline.get("checks"):
@@ -896,7 +1267,7 @@ def needs_merged_run(killed: bool, reason: str, module: str) -> bool:
     changes, so the owner could only ever report the count while the assertion that sees the
     regression lives one suite away and was never run.
     """
-    if module == BASH:
+    if module not in (GREP, ZSH):
         return False
     return (not killed) or reason == UNASSERTED_KILL_REASON
 
@@ -931,9 +1302,11 @@ def apply_mutation(tree: Path, descriptor: dict) -> tuple[Path, str]:
 def execute_mutation(tree: Path, descriptor: dict, baseline: dict) -> dict:
     target, pristine = apply_mutation(tree, descriptor)
     try:
-        owner = run_suite(tree, descriptor["module"])
+        selectors = descriptor.get("selectors", ())
+        owner = run_suite(tree, descriptor["module"], selectors=selectors)
         killed, reason = result_kill(
-            owner, baseline[descriptor["module"]], descriptor.get("allowed_statuses", ()))
+            owner, baseline[descriptor["module"]], descriptor.get("allowed_statuses", ()),
+            selectors)
         merged = None
         if needs_merged_run(killed, reason, descriptor["module"]):
             merged = run_suite(tree, BASH)
@@ -978,7 +1351,7 @@ def fragment_payload(index: int, count: int, expected_head: str | None) -> dict:
         if (file_sha256(tree / GENERATOR) != generator_hash
                 or source_digests(tree) != guard_hashes):
             raise ValueError("private mutation tree differs from the captured sources")
-        baseline = baseline_results(tree)
+        baseline = baseline_results(tree, plan)
         assigned = [item for position, item in enumerate(plan)
                     if position % count == index]
         results = {}
@@ -1042,6 +1415,8 @@ def suite_result_error(result: object, *, baseline: bool = False) -> str:
         "invalid-receipt": {
             "status", "returncode", "receipt_count", "stderr_tail"},
     }.get(status)
+    if status == "completed" and "selectors" in result:
+        expected = expected | {"selectors"}
     if expected is None or set(result) != expected:
         return f"suite result fields differ for status {status!r}"
     if status == "completed":
@@ -1053,6 +1428,12 @@ def suite_result_error(result: object, *, baseline: bool = False) -> str:
             return "completed suite result counters are outside their domain"
         if baseline and (result["returncode"] != 0 or result["failures"] != 0):
             return "baseline suite result is not green"
+        if "selectors" in result:
+            selected = result["selectors"]
+            if (not isinstance(selected, dict) or not selected
+                    or any(not isinstance(name, str) or status not in {"pass", "fail"}
+                           for name, status in selected.items())):
+                return "completed suite selector evidence is malformed"
     elif status == "timeout":
         if (not isinstance(result["timeout_seconds"], int)
                 or isinstance(result["timeout_seconds"], bool)
@@ -1078,7 +1459,7 @@ def recompute_raw_result(raw: object, descriptor: dict, baseline: dict) -> tuple
         raise ValueError(f"raw owner result {descriptor['id']}: {problem}")
     killed, reason = result_kill(
         raw["owner"], baseline[descriptor["module"]],
-        descriptor.get("allowed_statuses", ()))
+        descriptor.get("allowed_statuses", ()), descriptor.get("selectors", ()))
     if not needs_merged_run(killed, reason, descriptor["module"]):
         if raw["merged"] is not None:
             raise ValueError(
@@ -1144,7 +1525,7 @@ def normalized_receipt(fragments: list[dict]) -> dict:
         raise ValueError("fragment guard digests are stale")
     if fragments[0]["plan_sha256"] != digest(plan):
         raise ValueError("fragment plan digest is stale")
-    aggregate_baseline = baseline_results(ROOT)
+    aggregate_baseline = baseline_results(ROOT, plan)
     context_problem = aggregate_context_error(
         fragments[0], git_head(), aggregate_baseline)
     if context_problem:
@@ -1450,12 +1831,35 @@ def selftest() -> int:
     raises("a result carrying no status is not a measurement",
            ValueError, "mutation produced an invalid measurement: {}",
            lambda: result_kill({}, baseline))
+    selector = "the repaired production link goes red"
+    selector_baseline = dict(baseline, selectors={selector: "pass"})
+    equal("a declared selector changing from pass to fail is an asserted kill",
+          result_kill(
+              dict(completed(returncode=1, failures=1),
+                   selectors={selector: "fail"}),
+              selector_baseline, selectors=(selector,)),
+          (True, "selector-failure"))
+    equal("an unrelated suite failure cannot grade a passing declared selector",
+          result_kill(
+              dict(completed(returncode=1, failures=1),
+                   selectors={selector: "pass"}),
+              selector_baseline, selectors=(selector,)),
+          (False, "survived"))
+    raises("a missing declared selector invalidates the measurement",
+           ValueError, "mutation selector inventory differs from its green baseline",
+           lambda: result_kill(completed(), selector_baseline, selectors=(selector,)))
+    raises("a nonpassing baseline selector invalidates the measurement",
+           ValueError, "mutation selector inventory differs from its green baseline",
+           lambda: result_kill(
+               dict(completed(), selectors={selector: "fail"}),
+               dict(selector_baseline, selectors={selector: "fail"}),
+               selectors=(selector,)))
     equal("the unasserted reason is the exact wire value the gate reads",
           UNASSERTED_KILL_REASON, "exact-check-count")
-    equal("the kill-reason vocabulary is closed to these five values",
+    equal("the kill-reason vocabulary includes the selected assertion failure",
           set(KILL_REASONS),
           {"suite-failure", "exact-check-count", "survived", "invalid-receipt",
-           "timeout"})
+           "timeout", "selector-failure"})
 
     # ---- needs_merged_run: where an arithmetic kill must not stop the measurement -----
     equal("the merged suite is not rerun against itself when it survives",
@@ -1478,6 +1882,10 @@ def selftest() -> int:
           needs_merged_run(True, UNASSERTED_KILL_REASON, ZSH), True)
     equal("a detection in the zsh guard stops at the owner suite",
           needs_merged_run(True, "suite-failure", ZSH), False)
+    equal("a Stop mutation never delegates its verdict to the command envelope",
+          needs_merged_run(False, "survived", STOP), False)
+    equal("an ownership mutation never delegates its verdict to the command envelope",
+          needs_merged_run(False, "survived", OWNERSHIP), False)
 
     # ---- without_element / with_element: the edit must be the declared one ------------
     fixture = (
@@ -1631,6 +2039,7 @@ def selftest() -> int:
             patched = {
                 "ROOT": root,
                 "GUARDS": (guard_relative,),
+                "COLLECTION_GUARDS": (guard_relative,),
                 "CHARSET_COLLECTIONS": {qname(guard_relative, "CHARS")},
                 "SWEEP_EXCLUSIONS": overrides.get(
                     "exclusions",
@@ -1679,12 +2088,13 @@ def selftest() -> int:
            ["invalid-receipt"]])
     equal("a site descriptor records both halves of the edit by digest",
           [(item["module"], item["label"], item["anchor_sha256"],
-            item["replacement_sha256"], item["allowed_statuses"])
+            item["replacement_sha256"], item.get("selectors", []),
+            item["allowed_statuses"])
            for item in plan if item["kind"] == "site"],
           [("guards/fixture_guard.py", "fixture site",
             "d1a18fa4c21b99dedf52fd32f735e85635b7afddf9b96d132ac4117426f7c6ae",
             "aecfce5ef61236a70a297f392eab1a1f6ba65ac66dcba3c88522777aa3935439",
-            [])])
+            [], [])])
     identities = [item["id"] for item in plan]
     record("every descriptor carries a distinct 64-hex identity",
            len(identities) == 6 and len(set(identities)) == 6

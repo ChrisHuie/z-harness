@@ -54,7 +54,7 @@ EVAL_SKILL_FLOOR = 7
 # 165 here and 178 in harness_check -- and a fake that hardcodes its own number tests the
 # literal rather than the contract.
 SUITE_FLOORS = {
-    "harness_check": 227,
+    "harness_check": 230,
     "render-packages": 192,
     "bash_command_guard": 1366,
     "git_grep_engine_guard": 1149,
@@ -1285,7 +1285,7 @@ def decision_golden_error(golden_data=None, decide=None, snapshot=None,
 MUTATION_RECEIPT = ROOT / "contracts/goldens/mutation-receipt.json"
 MUTATION_SUMMARY = ROOT / "contracts/goldens/mutation-summary.md"
 MUTATION_SURVIVOR_DEBT_CEILING = 80
-MUTATION_PLAN_FLOOR = 322
+MUTATION_PLAN_FLOOR = 341
 # Kills scored only because the recorded check count moved, with no assertion failing. A
 # guard that increments its counter once per element of the collection under mutation moves
 # that count on any removal, so such a kill is decided by loop structure before any probe
@@ -1373,6 +1373,25 @@ EXPECTED_MUTATION_COLLECTIONS = {
     ("hooks/guards/zsh_rev_modifier_guard.py", "MOD_UNMODELLED"): 1,
 }
 EXPECTED_MUTATION_SITES = {
+    ("hooks/announced_work_guard.py", "attached period classification dropped"),
+    ("hooks/announced_work_guard.py", "comma adjective distinction dropped"),
+    ("hooks/announced_work_guard.py", "comma predicate continuation dropped"),
+    ("hooks/announced_work_guard.py", "decorated colon classification dropped"),
+    ("hooks/announced_work_guard.py", "escaped group delimiter handling dropped"),
+    ("hooks/announced_work_guard.py", "hard separator classification dropped"),
+    ("hooks/announced_work_guard.py", "inline-code group recognition dropped"),
+    ("hooks/announced_work_guard.py", "open-group association dropped"),
+    ("hooks/announced_work_guard.py", "outer-group closure signal dropped"),
+    ("hooks/announced_work_guard.py", "post-group predicate modifier bridge dropped"),
+    ("hooks/announced_work_guard.py", "post-group subject replacement guard dropped"),
+    ("hooks/announced_work_guard.py", "productive complement tokens dropped"),
+    ("hooks/announced_work_guard.py", "straight-single outer predicate closure dropped"),
+    ("hooks/announced_work_guard.py", "whole complement-token membership dropped"),
+    ("hooks/announced_work_guard.py", "whole report-token membership dropped"),
+    ("hooks/announced_work_guard.py", "URL punctuation bypass dropped"),
+    ("hooks/announced_work_guard.py", "URL prose-release boundary dropped"),
+    ("hooks/announced_work_guard.py", "URL semantic-token bypass dropped"),
+    ("tools/repository_ownership.py", "effective core.worktree scalar lookup dropped"),
     ("hooks/bash_command_guard.py", "merged guard function cache scope dropped"),
     ("hooks/guards/git_grep_engine_guard.py", "alias shadowing failure channel dropped"),
     ("hooks/guards/git_grep_engine_guard.py", "attached exec argv-zero grammar dropped"),
@@ -1433,8 +1452,121 @@ EXPECTED_MUTATION_SITES = {
     ("hooks/guards/zsh_rev_modifier_guard.py",
      "zsh unmodelled modifier prefix grammar dropped"),
 }
+EXPECTED_MUTATION_SELECTORS = {
+    ("hooks/announced_work_guard.py", "attached period classification dropped"):
+        ("main blocks an attached full-stop historical report clause",),
+    ("hooks/announced_work_guard.py", "comma adjective distinction dropped"):
+        ("main blocks a straight possessive comma modifier",
+         "main blocks an overseas comma modifier",
+         "main blocks a DevOps comma modifier"),
+    ("hooks/announced_work_guard.py", "comma predicate continuation dropped"):
+        ("main preserves a participial comma result continuation",
+         "main preserves a terminal comma result adverb",
+         "main preserves a direct plural comma subject",
+         "main preserves an audit comma subject",
+         "main preserves a multiword integration-test comma subject",
+         "main preserves a hundred-test comma subject"),
+    ("hooks/announced_work_guard.py", "decorated colon classification dropped"):
+        ("main blocks a unicode colon-labelled historical report",),
+    ("hooks/announced_work_guard.py", "escaped group delimiter handling dropped"):
+        ("main string blocks a predicate after an escaped parenthesis",
+         "main string blocks a predicate after an escaped quote",
+         "main content blocks a predicate after an escaped parenthesis",
+         "main content blocks a predicate after an escaped quote",
+         "main bare blocks a predicate after an escaped parenthesis",
+         "main bare blocks a predicate after an escaped quote"),
+    ("hooks/announced_work_guard.py", "hard separator classification dropped"):
+        ("main blocks attached and decorated historical report clauses",),
+    ("hooks/announced_work_guard.py", "inline-code group recognition dropped"):
+        ("main string blocks a single-backtick nested report",
+         "main string blocks a double-backtick nested report",
+         "main string blocks an emphasised inline-code nested report",
+         "main content blocks a single-backtick nested report",
+         "main content blocks a double-backtick nested report",
+         "main content blocks an emphasised inline-code nested report",
+         "main bare blocks a single-backtick nested report",
+         "main bare blocks a double-backtick nested report",
+         "main bare blocks an emphasised inline-code nested report"),
+    ("hooks/announced_work_guard.py", "open-group association dropped"):
+        ("main string blocks a parenthetical nested report",
+         "main string blocks a parenthetical historical report",
+         "main string blocks a bracketed nested report",
+         "main string blocks a curly-quoted nested report",
+         "main content blocks a parenthetical nested report",
+         "main content blocks a parenthetical historical report",
+         "main content blocks a bracketed nested report",
+         "main content blocks a curly-quoted nested report",
+         "main bare blocks a parenthetical nested report",
+         "main bare blocks a parenthetical historical report",
+         "main bare blocks a bracketed nested report",
+         "main bare blocks a curly-quoted nested report"),
+    ("hooks/announced_work_guard.py", "outer-group closure signal dropped"):
+        ("main string blocks an empty parenthetical from replacing the activity subject",
+         "main string blocks a spaced empty parenthetical from replacing the activity subject",
+         "main string blocks nested empty groups from replacing the activity subject",
+         "main string blocks empty brackets from replacing the activity subject",
+         "main string blocks empty straight-double quotes from replacing the activity subject",
+         "main string blocks empty straight-single quotes from replacing the activity subject",
+         "main string blocks empty inline code from replacing the activity subject",
+         "main content blocks an empty parenthetical from replacing the activity subject",
+         "main content blocks a spaced empty parenthetical from replacing the activity subject",
+         "main content blocks nested empty groups from replacing the activity subject",
+         "main content blocks empty brackets from replacing the activity subject",
+         "main content blocks empty straight-double quotes from replacing the activity subject",
+         "main content blocks empty straight-single quotes from replacing the activity subject",
+         "main content blocks empty inline code from replacing the activity subject",
+         "main bare blocks an empty parenthetical from replacing the activity subject",
+         "main bare blocks a spaced empty parenthetical from replacing the activity subject",
+         "main bare blocks nested empty groups from replacing the activity subject",
+         "main bare blocks empty brackets from replacing the activity subject",
+         "main bare blocks empty straight-double quotes from replacing the activity subject",
+         "main bare blocks empty straight-single quotes from replacing the activity subject",
+         "main bare blocks empty inline code from replacing the activity subject"),
+    ("hooks/announced_work_guard.py", "post-group predicate modifier bridge dropped"):
+        ("main string preserves a modified predicate after a straight-single-quoted subject",
+         "main content preserves a modified predicate after a straight-single-quoted subject",
+         "main bare preserves a modified predicate after a straight-single-quoted subject"),
+    ("hooks/announced_work_guard.py", "post-group subject replacement guard dropped"):
+        ("main string blocks a plural possessive inside a straight-single-quoted aside",
+         "main string blocks a quoted noun from replacing the announced activity subject",
+         "main string blocks a noun after a closed parenthetical from replacing the activity subject",
+         "main content blocks a plural possessive inside a straight-single-quoted aside",
+         "main content blocks a quoted noun from replacing the announced activity subject",
+         "main content blocks a noun after a closed parenthetical from replacing the activity subject",
+         "main bare blocks a plural possessive inside a straight-single-quoted aside",
+         "main bare blocks a quoted noun from replacing the announced activity subject",
+         "main bare blocks a noun after a closed parenthetical from replacing the activity subject"),
+    ("hooks/announced_work_guard.py", "productive complement tokens dropped"):
+        ("main blocks productive interrogative complements",),
+    ("hooks/announced_work_guard.py", "straight-single outer predicate closure dropped"):
+        ("main string preserves a predicate after a straight-single-quoted subject",
+         "main string preserves a modified predicate after a straight-single-quoted subject",
+         "main content preserves a predicate after a straight-single-quoted subject",
+         "main content preserves a modified predicate after a straight-single-quoted subject",
+         "main bare preserves a predicate after a straight-single-quoted subject",
+         "main bare preserves a modified predicate after a straight-single-quoted subject"),
+    ("hooks/announced_work_guard.py", "whole complement-token membership dropped"):
+        ("main keeps a hyphenated complement root inside the activity token",),
+    ("hooks/announced_work_guard.py", "whole report-token membership dropped"):
+        ("main blocks embedded report substrings after a retained activity noun",),
+    ("hooks/announced_work_guard.py", "URL punctuation bypass dropped"):
+        ("main keeps URL query punctuation inside the direct report",
+         "main keeps uppercase URL hostname dots inside the direct report",
+         "main keeps URL semicolons opaque until whitespace",
+         "main keeps URL exclamations opaque until whitespace",
+         "main keeps mixed-case URL dots opaque until whitespace"),
+    ("hooks/announced_work_guard.py", "URL prose-release boundary dropped"):
+        ("main string keeps a URL closing backtick out of prose grouping",
+         "main content keeps a URL closing backtick out of prose grouping",
+         "main bare keeps a URL closing backtick out of prose grouping"),
+    ("hooks/announced_work_guard.py", "URL semantic-token bypass dropped"):
+        ("main keeps URL complement words opaque",
+         "main ignores report words inside a URL"),
+    ("tools/repository_ownership.py", "effective core.worktree scalar lookup dropped"):
+        ("a repeated core.worktree binds the effective candidate Git recognises",),
+}
 EXPECTED_MUTATION_SITE_DIGEST = (
-    "4999ddfc67d497d16a8757a5cfc9ff5a49c7486a20e27a1810a88d53d0945626"
+    "56319a3192257ab1fefbe24646e8738aae0cc4e59e017954bc7f38b50b5c2832"
 )
 EXPECTED_MUTATION_EXCLUSIONS = {
     "hooks/guards/git_grep_engine_guard.py::ALIAS_GUARDED":
@@ -1482,6 +1614,7 @@ def mutation_site_policy_digest(descriptors) -> str:
             "label": descriptor["label"],
             "anchor_sha256": descriptor["anchor_sha256"],
             "replacement_sha256": descriptor["replacement_sha256"],
+            "selectors": list(descriptor.get("selectors", ())),
             "allowed_statuses": list(descriptor["allowed_statuses"]),
         })
     records.sort(key=lambda item: (item["module"], item["label"]))
@@ -1496,6 +1629,7 @@ def mutation_policy_error(plan, exclusions, policy) -> str:
     addition_descriptors = []
     site_identities = []
     site_descriptors = []
+    selector_inventory = {}
     semantic_targets = []
     ids = []
     problems = []
@@ -1511,6 +1645,7 @@ def mutation_policy_error(plan, exclusions, policy) -> str:
             label = descriptor.get("label")
             anchor = descriptor.get("anchor_sha256")
             replacement = descriptor.get("replacement_sha256")
+            selectors = descriptor.get("selectors", ())
             allowed = descriptor.get("allowed_statuses")
             site_identities.append((module, label))
             if (not isinstance(module, str) or not isinstance(label, str)
@@ -1518,6 +1653,10 @@ def mutation_policy_error(plan, exclusions, policy) -> str:
                     or not re.fullmatch(r"[0-9a-f]{64}", anchor)
                     or not isinstance(replacement, str)
                     or not re.fullmatch(r"[0-9a-f]{64}", replacement)
+                    or not isinstance(selectors, (list, tuple))
+                    or any(not isinstance(selector, str) or not selector
+                           for selector in selectors)
+                    or len(selectors) != len(set(selectors))
                     or not isinstance(allowed, (list, tuple))
                     or any(not isinstance(status, str) for status in allowed)):
                 problems.append(f"site descriptor fields are invalid for {(module, label)}")
@@ -1526,9 +1665,12 @@ def mutation_policy_error(plan, exclusions, policy) -> str:
                 "module": module, "label": label,
                 "anchor_sha256": anchor,
                 "replacement_sha256": replacement,
+                "selectors": tuple(selectors),
                 "allowed_statuses": tuple(allowed),
             }
             site_descriptors.append(normalized)
+            if selectors:
+                selector_inventory[(module, label)] = tuple(selectors)
             semantic_targets.append((module, anchor, replacement))
         elif descriptor.get("kind") == "set-addition":
             module = descriptor.get("module")
@@ -1565,6 +1707,10 @@ def mutation_policy_error(plan, exclusions, policy) -> str:
         problems.append(
             f"site inventory differs: observed={set(site_identities)} "
             f"required={policy['sites']}")
+    if selector_inventory != policy["selectors"]:
+        problems.append(
+            f"site selector inventory differs: observed={selector_inventory} "
+            f"required={policy['selectors']}")
     if len(semantic_targets) != len(set(semantic_targets)):
         problems.append("site inventory contains duplicate semantic mutation targets")
     if (len(site_descriptors) == len(site_identities)
@@ -1621,6 +1767,7 @@ def mutation_receipt_error(receipt_data=None, plan=None, exclusions=None,
             policy = {
                 "collections": EXPECTED_MUTATION_COLLECTIONS,
                 "sites": EXPECTED_MUTATION_SITES,
+                "selectors": EXPECTED_MUTATION_SELECTORS,
                 "site_digest": EXPECTED_MUTATION_SITE_DIGEST,
                 "exclusions": EXPECTED_MUTATION_EXCLUSIONS,
                 "additions": EXPECTED_MUTATION_ADDITIONS,
@@ -1656,7 +1803,7 @@ def mutation_receipt_error(receipt_data=None, plan=None, exclusions=None,
         problems.append("source digests do not equal all current guard sources")
     if receipt_data.get("baseline") != {
             relative: "passed" for relative in contract["guards"]}:
-        problems.append("baseline does not prove all three guard suites passed")
+        problems.append("baseline does not prove every mutation-owned suite passed")
     if receipt_data.get("sweep_exclusions") != exclusions:
         problems.append("module-qualified sweep exclusions differ from the exact scan")
     plan_by_id = {item["id"]: item for item in plan}
@@ -3534,7 +3681,7 @@ def selftest() -> int:
     site_mutation = {
         "version": 1, "kind": "site", "module": "guard-b.py", "label": "site probe",
         "anchor_sha256": "a" * 64, "replacement_sha256": "b" * 64,
-        "allowed_statuses": [], "id": "site-id",
+        "selectors": ["probe selector"], "allowed_statuses": [], "id": "site-id",
     }
     addition_mutation = {
         "version": 1, "kind": "set-addition", "module": "guard-a.py",
@@ -3555,7 +3702,7 @@ def selftest() -> int:
         "guards": ("guard-a.py", "guard-b.py", "guard-c.py"),
         "kill_reasons": frozenset({
             "suite-failure", "exact-check-count", "survived", "invalid-receipt",
-            "timeout",
+            "timeout", "selector-failure",
         }),
         "unasserted_reason": "exact-check-count",
         "unasserted_ceiling": 1,
@@ -3595,6 +3742,7 @@ def selftest() -> int:
         "policy": {
             "collections": {("guard-a.py", "TOKENS"): 1},
             "sites": {("guard-b.py", "site probe")},
+            "selectors": {("guard-b.py", "site probe"): ("probe selector",)},
             "site_digest": mutation_site_policy_digest([site_mutation]),
             "exclusions": mutation_probe["sweep_exclusions"],
             "additions": {
@@ -3687,7 +3835,7 @@ def selftest() -> int:
         target = Path(raw) / "guard.py"
         target.write_text("pristine\n", encoding="utf-8")
         writer.apply_mutation = lambda _tree, _descriptor: (target, "pristine\n")
-        writer.run_suite = lambda _tree, relative: (
+        writer.run_suite = lambda _tree, relative, **_kwargs: (
             raw_baseline[writer.GREP] if relative == writer.GREP else invalid_receipt)
         try:
             try:
@@ -4016,6 +4164,14 @@ def selftest() -> int:
         ) != "",
     )
     expect(
+        "changing a site selector fails the independent closed inventory",
+        mutation_policy_error(
+            [set_mutation, dict(
+                site_mutation, selectors=["different selector"], id="changed-selector")],
+            mutation_probe["sweep_exclusions"], mutation_args["policy"],
+        ) != "",
+    )
+    expect(
         "changing a declared addition's allowed kill modes fails closed",
         mutation_policy_error(
             [set_mutation, site_mutation,
@@ -4028,6 +4184,10 @@ def selftest() -> int:
     duplicate_target_policy = dict(
         mutation_args["policy"],
         sites={("guard-b.py", "site probe"), ("guard-b.py", "site twin")},
+        selectors={
+            ("guard-b.py", "site probe"): ("probe selector",),
+            ("guard-b.py", "site twin"): ("probe selector",),
+        },
         site_digest=mutation_site_policy_digest(
             [site_mutation, duplicate_target]),
         floor=3,

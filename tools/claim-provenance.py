@@ -988,6 +988,36 @@ def selftest():
             record(f"the CLI refuses evidence after an operational config error: {path}",
                    no_compared_evidence(run) and "planted config failure" in run.stdout)
 
+        subprocess.run(
+            ["git", "--git-dir", admin, "config", "--unset-all", "core.worktree"],
+            check=True)
+        for value in (ownership_root, separate):
+            subprocess.run(
+                ["git", "--git-dir", admin, "config", "--add", "core.worktree",
+                 value], check=True)
+        effective_binding = subprocess.run(
+            ["git", "--git-dir", admin, "config", "--path", "--get",
+             "core.worktree"], capture_output=True, text=True, check=True).stdout.strip()
+        effective_top = subprocess.run(
+            ["git", "-C", separate, "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, check=True).stdout.strip()
+        record("real Git recognizes the repeated core.worktree candidate",
+               os.path.samefile(effective_binding, separate)
+               and os.path.samefile(effective_top, separate))
+        for path, expected_state in (("separate/config-evidence.md", "boundary"),
+                                     ("config-evidence.md", "missing")):
+            record(f"an effective repeated binding excludes nested evidence: {path}",
+                   resolve_citation(path, ownership_root)[1] == expected_state)
+            run = invoke(*evidence_document(path))
+            record(f"the CLI refuses evidence under an effective repeated binding: {path}",
+                   no_compared_evidence(run))
+        subprocess.run(
+            ["git", "--git-dir", admin, "config", "--unset-all", "core.worktree"],
+            check=True)
+        subprocess.run(
+            ["git", "--git-dir", admin, "config", "core.worktree", separate],
+            check=True)
+
         exact = document(
             "exact.md", f'[source: `schemas/order.json`] *"{source}"*.'
         )

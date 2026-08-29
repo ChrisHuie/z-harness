@@ -117,7 +117,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 227
+SELFTEST_FLOOR = 230
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -134,20 +134,20 @@ DESC_CAP = 400                # house cap (spec ceiling is 1024)
 SELFTEST_SUITES = [
     ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"], 1366),
     ("askq_timeout_guard", ["hooks/askq_timeout_guard.py", "--selftest"], 13),
-    ("announced_work_guard", ["hooks/announced_work_guard.py", "--selftest"], 316),
+    ("announced_work_guard", ["hooks/announced_work_guard.py", "--selftest"], 553),
     ("harness_report", ["hooks/harness_report.py", "--selftest"], 12),
     ("cc-cost", ["tools/cc-cost.py", "--selftest"], 8),
     ("codex-cost", ["tools/codex-cost.py", "--selftest"], 28),
-    ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 78),
-    ("repository-ownership", ["tools/repository_ownership.py", "--selftest"], 73),
+    ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 83),
+    ("repository-ownership", ["tools/repository_ownership.py", "--selftest"], 78),
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 8),
     ("verify-review-publication",
      ["tools/verify-review-publication.py", "--selftest"], 94),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
-    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 353),
+    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 354),
     ("write-mutation-receipt",
-     ["tools/write-mutation-receipt.py", "--selftest"], 59),
+     ["tools/write-mutation-receipt.py", "--selftest"], 65),
     ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 65),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
     ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 88),
@@ -159,7 +159,7 @@ SELFTEST_SUITES = [
 def expected_selftest_checks(name):
     """Exact execution-derived counts for suites whose former formulas hid probes."""
     fixed = {
-        "ci-gate": 353,
+        "ci-gate": 354,
         "spawn_preflight_guard": 88,
         "verify-review-publication": 94,
     }
@@ -191,11 +191,13 @@ def expected_selftest_checks(name):
 # Registered where the 15 s default leaves no headroom for a slower runner. Measured
 # on the authoring host: bash_command_guard 27 s, git_grep_engine_guard 7.3 s (its
 # byte-cap, token and subcommand fixtures parse real megabyte-scale sources, and it
-# probes the installed git and zsh), ci-gate 20.8 s. C1 requires each to finish inside
+# probes the installed git and zsh), announced_work_guard 10.9 s (553 proofs include
+# real Stop-process envelopes), ci-gate 20.8 s. C1 requires each to finish inside
 # SELFTEST_TIMEOUT_MARGIN of its budget, so these are ceilings with room, not targets.
 SELFTEST_TIMEOUTS = {
     "bash_command_guard": 90,
     "git_grep_engine_guard": 60,
+    "announced_work_guard": 30,
     "ci-gate": 60,
 }
 DEFAULT_SELFTEST_TIMEOUT = 15
@@ -2010,6 +2012,27 @@ def selftest():
         expect_red(
             "the registered CI-gate timeout retains measured headroom",
             lambda: SELFTEST_TIMEOUTS["ci-gate"] == 60,
+        )
+
+        announced_timeouts = []
+        def record_announced_timeout(*args, **kwargs):
+            announced_timeouts.append(kwargs.get("timeout"))
+            return subprocess.CompletedProcess(
+                args[0], 0,
+                b"SELFTEST-SUMMARY suite=announced_work_guard checks=553 failures=0\n",
+                b"")
+        subprocess.run = record_announced_timeout
+        try:
+            c1_announced_timeout = Run(td, ci=True)
+            c1_announced_timeout.c1_selftests(
+                [("announced_work_guard", [stub_suite], 553)],
+                sources=planted_sources("announced_work_guard", stub_suite))
+        finally:
+            subprocess.run = original_subprocess_run
+        expect_red(
+            "C1 gives the process-level announced-work suite measured timeout headroom",
+            lambda: SELFTEST_TIMEOUTS["announced_work_guard"] == 30
+            and announced_timeouts == [30] and not c1_announced_timeout.failures,
         )
 
         slow_timeouts = []
@@ -3904,7 +3927,7 @@ def selftest():
         def record_separate_config(args, **kwargs):
             separate_config_environments.append(dict(kwargs.get("env", {})))
             if (args[:3] == ["git", "--git-dir", os.path.realpath(separate_admin)]
-                    and args[-2:] == ["--get-all", "core.worktree"]):
+                    and args[-2:] == ["--get", "core.worktree"]):
                 separate_config_queries.append(args)
             return subprocess.run(args, **kwargs)
         bound_separate_run = Run(live_repo, ci=True)
@@ -3934,7 +3957,7 @@ def selftest():
         expect_red("C8 reads only the local admin-owned core.worktree binding",
                    lambda: {tuple(args) for args in separate_config_queries} == {(
                        "git", "--git-dir", os.path.realpath(separate_admin), "config",
-                       "--local", "--path", "--null", "--get-all", "core.worktree",
+                       "--local", "--path", "--null", "--get", "core.worktree",
                    )}
                    and separate_config_environments
                    and all(env.get("Z_HARNESS_GIT_SENTINEL") == "retained"
@@ -3944,8 +3967,48 @@ def selftest():
         other_separate_tree = os.path.join(td, "other-separate-tree")
         os.makedirs(other_separate_tree)
         subprocess.run(
-            ["git", "--git-dir", separate_admin, "config", "core.worktree",
-             other_separate_tree], check=True)
+            ["git", "--git-dir", separate_admin, "config", "--unset-all",
+             "core.worktree"], check=True)
+        for value in (other_separate_tree, separate_tree):
+            subprocess.run(
+                ["git", "--git-dir", separate_admin, "config", "--add",
+                 "core.worktree", value], check=True)
+        effective_candidate = subprocess.run(
+            ["git", "--git-dir", separate_admin, "config", "--path", "--get",
+             "core.worktree"], capture_output=True, text=True, check=True).stdout.strip()
+        effective_candidate_top = subprocess.run(
+            ["git", "-C", separate_tree, "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, check=True).stdout.strip()
+        effective_candidate_run = Run(live_repo, ci=True)
+        effective_candidate_run.c8_reserved_basenames()
+        expect_red(
+            "C8 prunes a repeated core.worktree whose effective value is the candidate",
+            lambda: (_same_file(effective_candidate, separate_tree)
+                     and _same_file(effective_candidate_top, separate_tree)
+                     and not effective_candidate_run.failures),
+        )
+        subprocess.run(
+            ["git", "--git-dir", separate_admin, "config", "--unset-all",
+             "core.worktree"], check=True)
+        for value in (separate_tree, other_separate_tree):
+            subprocess.run(
+                ["git", "--git-dir", separate_admin, "config", "--add",
+                 "core.worktree", value], check=True)
+        effective_foreign = subprocess.run(
+            ["git", "--git-dir", separate_admin, "config", "--path", "--get",
+             "core.worktree"], capture_output=True, text=True, check=True).stdout.strip()
+        effective_foreign_top = subprocess.run(
+            ["git", "-C", separate_tree, "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, check=True).stdout.strip()
+        effective_foreign_run = Run(live_repo, ci=True)
+        effective_foreign_run.c8_reserved_basenames()
+        expect_red(
+            "C8 rejects a repeated core.worktree whose effective value is foreign",
+            lambda: (_same_file(effective_foreign, other_separate_tree)
+                     and _same_file(effective_foreign_top, other_separate_tree)
+                     and any(c == "C8" and "separate-git-tree/CLAUDE.md" in d
+                             for c, d in effective_foreign_run.failures)),
+        )
         expect_red(
             "the separate-gitdir comparison itself rejects a different bound worktree",
             lambda: not _bound_separate_gitdir(
@@ -3986,6 +4049,14 @@ def selftest():
         def reply_runner(returncode, stdout):
             return lambda args, **kwargs: _ConfigReply(returncode, stdout)
 
+        def malformed_success_is_unknown(stdout):
+            try:
+                _bound_separate_gitdir(
+                    reply_tree, reply_marker, reply_runner(0, stdout))
+            except RepositoryOwnershipError as exc:
+                return "malformed path record" in str(exc)
+            return False
+
         # The control comes first: without a reply this fixture ACCEPTS, so "rejected" below
         # means the operand did it, not that the fixture can never be accepted.
         expect_red(
@@ -4004,16 +4075,12 @@ def selftest():
         expect_red("C8 treats partial output from a failed config query as unknown",
                    failed_config_reply_is_unknown)
         expect_red(
-            "C8 rejects an unterminated core.worktree reply rather than raising",
-            lambda: _bound_separate_gitdir(
-                reply_tree, reply_marker,
-                reply_runner(0, encoded_reply_tree + b"\0X")) is False)
+            "C8 types an unterminated successful core.worktree reply as unknown",
+            lambda: malformed_success_is_unknown(encoded_reply_tree + b"\0X"))
         expect_red(
-            "C8 rejects a two-value core.worktree reply rather than raising",
-            lambda: _bound_separate_gitdir(
-                reply_tree, reply_marker,
-                reply_runner(0, encoded_reply_tree + b"\0"
-                             + encoded_reply_tree + b"\0")) is False)
+            "C8 types a successful two-value core.worktree reply as unknown",
+            lambda: malformed_success_is_unknown(
+                encoded_reply_tree + b"\0" + encoded_reply_tree + b"\0"))
         shutil.rmtree(reply_tree)
         shutil.rmtree(reply_admin)
 

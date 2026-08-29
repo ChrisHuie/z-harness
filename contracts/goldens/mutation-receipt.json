@@ -2,17 +2,21 @@
  "schema_version": 3,
  "generated_by": "tools/write-mutation-receipt.py --aggregate",
  "note": "which guard mutations the shipped suites catch; each result's reason is an observation from the host that generated it, not a cross-platform fact",
- "generator_sha256": "201d53d403757bfd5a88e7fac541024ba5096b928a12be4d01c30480813c3242",
+ "generator_sha256": "ca70648c3c950daefc6c90843a0801475fb0e0b832d4547e625abbb43b1296e6",
  "source_digests": {
   "hooks/guards/git_grep_engine_guard.py": "2fa728eb17d041bdf1c4f38fc6416f0bbf90df7d122ba3b1da15b1aa4c254bd0",
   "hooks/guards/zsh_rev_modifier_guard.py": "a056e1f8375467c6c7a6b878aff858c257b44c10faaeb0fa3bb685d073c0fb9c",
-  "hooks/bash_command_guard.py": "fe8d2e68f1cffeb94f8fe6ccb79a1211f7f8b9fae601f3cbae0fde7e47011f00"
+  "hooks/bash_command_guard.py": "fe8d2e68f1cffeb94f8fe6ccb79a1211f7f8b9fae601f3cbae0fde7e47011f00",
+  "hooks/announced_work_guard.py": "ab3fc5ebf7adf24886b4de2b508817fa9327527c50933cdbfde0efeda4620393",
+  "tools/repository_ownership.py": "d72b23ef0e037f81bb0c1eefc93c2198a5355c1820b542ce285a83d8661f35ca"
  },
- "plan_sha256": "c0feb3c0407f85c646e680b65ca7debb1da6525dac94b8aaf987c009a5f98e6a",
+ "plan_sha256": "d2cbed5aa8d0ef84a5dda92f71f9b6aff0346be8c02fa80f1dcf17640b0bb081",
  "baseline": {
   "hooks/guards/git_grep_engine_guard.py": "passed",
   "hooks/guards/zsh_rev_modifier_guard.py": "passed",
-  "hooks/bash_command_guard.py": "passed"
+  "hooks/bash_command_guard.py": "passed",
+  "hooks/announced_work_guard.py": "passed",
+  "tools/repository_ownership.py": "passed"
  },
  "sweep_exclusions": {
   "hooks/guards/git_grep_engine_guard.py::ALIAS_GUARDED": "repeated characters identify an enum word, not a membership charset",
@@ -83,6 +87,20 @@
    "id": "02a2ed33f9c0ea1f12fc7594a2da5773486e68b765c976bfc3f19fbe27acfc60",
    "outcome": "survived",
    "reason": "survived"
+  },
+  "03f6a41f593ff3133c2f4201e0cd2f398d05ea2413a38ec36a1c8f3d1359de25": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/announced_work_guard.py",
+   "label": "whole complement-token membership dropped",
+   "anchor_sha256": "d22f5fbc34c804723e2745969488f068a7836e462d58de93fc669329134c6b62",
+   "replacement_sha256": "285a74b37304d9a15a1908b592b0a50d35ddbb55931369a8a73b440787d6898e",
+   "selectors": [
+    "main keeps a hyphenated complement root inside the activity token"
+   ],
+   "id": "03f6a41f593ff3133c2f4201e0cd2f398d05ea2413a38ec36a1c8f3d1359de25",
+   "outcome": "caught",
+   "reason": "selector-failure"
   },
   "0453256375d591d9d464f7829d55d9f576cb08c71874f84a59fc40f76367ca29": {
    "version": 1,
@@ -515,6 +533,36 @@
    "outcome": "caught",
    "reason": "suite-failure"
   },
+  "20c969af77e21aa34db58e51c858b2ab8db46fa457040b9255ab85ed619acc33": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/announced_work_guard.py",
+   "label": "attached period classification dropped",
+   "anchor_sha256": "a36d72bc200e1372138312a19f1898714cc423e905ac8e2716d2797b6bb023fe",
+   "replacement_sha256": "859d9707aafba7585ecf0fce628afd744759f50db9ae717dc02e8e3ec378372c",
+   "selectors": [
+    "main blocks an attached full-stop historical report clause"
+   ],
+   "id": "20c969af77e21aa34db58e51c858b2ab8db46fa457040b9255ab85ed619acc33",
+   "outcome": "caught",
+   "reason": "selector-failure"
+  },
+  "21f10f252afa014d2d655d424e428244fa6d3ec5d857813d1207ec3c31d799e1": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/announced_work_guard.py",
+   "label": "post-group predicate modifier bridge dropped",
+   "anchor_sha256": "f3e48cf68f2348277c33a990de832a6684bce150d364a2b8e4fc63dd01b69728",
+   "replacement_sha256": "eebe1a0e6c5dced3ad9d40dc29d8049ee564968b256c14c050fcb809d35b6b71",
+   "selectors": [
+    "main string preserves a modified predicate after a straight-single-quoted subject",
+    "main content preserves a modified predicate after a straight-single-quoted subject",
+    "main bare preserves a modified predicate after a straight-single-quoted subject"
+   ],
+   "id": "21f10f252afa014d2d655d424e428244fa6d3ec5d857813d1207ec3c31d799e1",
+   "outcome": "caught",
+   "reason": "selector-failure"
+  },
   "21febe8d3fff1f38707110d33e590b154138d841a7cd6f4f4a481326a7453ba0": {
    "version": 1,
    "kind": "set-element",
@@ -537,6 +585,20 @@
    "outcome": "caught",
    "reason": "suite-failure"
   },
+  "23ba5030837ce31ee43c2a88e433456bc2cc11fdc33a4394d914ab1df480492f": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/announced_work_guard.py",
+   "label": "decorated colon classification dropped",
+   "anchor_sha256": "83b323198e813d0472951d147c84ee5fec8e37b66cf826d292ee1eb8bda24828",
+   "replacement_sha256": "45f04217e126ed82164604f6c929ce6d1f8053a8f5da7033bcf5107ee0fc23ff",
+   "selectors": [
+    "main blocks a unicode colon-labelled historical report"
+   ],
+   "id": "23ba5030837ce31ee43c2a88e433456bc2cc11fdc33a4394d914ab1df480492f",
+   "outcome": "caught",
+   "reason": "selector-failure"
+  },
   "23df802af9069f4869cbe571f9c7b2a39fbb1341066a625835b045cb87a29c50": {
    "version": 1,
    "kind": "site",
@@ -547,6 +609,28 @@
    "id": "23df802af9069f4869cbe571f9c7b2a39fbb1341066a625835b045cb87a29c50",
    "outcome": "caught",
    "reason": "suite-failure"
+  },
+  "24e53f2d7994c29d8e1418e2434a22bcc70e4481caa25a3af5e119f60c9a3626": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/announced_work_guard.py",
+   "label": "inline-code group recognition dropped",
+   "anchor_sha256": "c2a7465ad5687f33cb68cde488460cee5ed54e8b88c7f50b64bd4bcf88c453ba",
+   "replacement_sha256": "1cd253843f158639cd75546b61bf2714230821e14e6128768cccd63062d74bbc",
+   "selectors": [
+    "main string blocks a single-backtick nested report",
+    "main string blocks a double-backtick nested report",
+    "main string blocks an emphasised inline-code nested report",
+    "main content blocks a single-backtick nested report",
+    "main content blocks a double-backtick nested report",
+    "main content blocks an emphasised inline-code nested report",
+    "main bare blocks a single-backtick nested report",
+    "main bare blocks a double-backtick nested report",
+    "main bare blocks an emphasised inline-code nested report"
+   ],
+   "id": "24e53f2d7994c29d8e1418e2434a22bcc70e4481caa25a3af5e119f60c9a3626",
+   "outcome": "caught",
+   "reason": "selector-failure"
   },
   "27239a068aed59cd0fc349b8c83c2dee44cf75c25c6c0db5d48240ac022a4cfa": {
    "version": 1,
@@ -1120,6 +1204,28 @@
    "outcome": "survived",
    "reason": "survived"
   },
+  "50f4eb766d37547668b26ceacddebbe1bb26249eef4d8154f2cbbdc4081970a5": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/announced_work_guard.py",
+   "label": "post-group subject replacement guard dropped",
+   "anchor_sha256": "15005ef74f9b895b6b1f5e91939cbe71b5e3d90cbed122941f3c385beb43b3b2",
+   "replacement_sha256": "a0b9b8c781fd7b1ce2ebd8b8b8e9e05288bd444864fce139dbab452fd60a8511",
+   "selectors": [
+    "main string blocks a plural possessive inside a straight-single-quoted aside",
+    "main string blocks a quoted noun from replacing the announced activity subject",
+    "main string blocks a noun after a closed parenthetical from replacing the activity subject",
+    "main content blocks a plural possessive inside a straight-single-quoted aside",
+    "main content blocks a quoted noun from replacing the announced activity subject",
+    "main content blocks a noun after a closed parenthetical from replacing the activity subject",
+    "main bare blocks a plural possessive inside a straight-single-quoted aside",
+    "main bare blocks a quoted noun from replacing the announced activity subject",
+    "main bare blocks a noun after a closed parenthetical from replacing the activity subject"
+   ],
+   "id": "50f4eb766d37547668b26ceacddebbe1bb26249eef4d8154f2cbbdc4081970a5",
+   "outcome": "caught",
+   "reason": "selector-failure"
+  },
   "520e25765d49d5fff8be84b8366b15e58ff255557097498f77e574136d611f12": {
    "version": 1,
    "kind": "set-element",
@@ -1262,6 +1368,40 @@
    "id": "59c4941eaa51c254685fafdc1a24da4fc8aa0a003d1b5e1399bfacc293e63452",
    "outcome": "caught",
    "reason": "suite-failure"
+  },
+  "5a16e5dce35da9e19f1c6dc2969ac61aa4440bdb9c73d5d6fa2c76452a65a678": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/announced_work_guard.py",
+   "label": "outer-group closure signal dropped",
+   "anchor_sha256": "97fb3a222d651588773a1be259fa94c647461c8fba35e9c2e01bff3ff0e4020c",
+   "replacement_sha256": "88ba76a1525bfc068b19514713c5af119596b724b24218f8f410a878006592c5",
+   "selectors": [
+    "main string blocks an empty parenthetical from replacing the activity subject",
+    "main string blocks a spaced empty parenthetical from replacing the activity subject",
+    "main string blocks nested empty groups from replacing the activity subject",
+    "main string blocks empty brackets from replacing the activity subject",
+    "main string blocks empty straight-double quotes from replacing the activity subject",
+    "main string blocks empty straight-single quotes from replacing the activity subject",
+    "main string blocks empty inline code from replacing the activity subject",
+    "main content blocks an empty parenthetical from replacing the activity subject",
+    "main content blocks a spaced empty parenthetical from replacing the activity subject",
+    "main content blocks nested empty groups from replacing the activity subject",
+    "main content blocks empty brackets from replacing the activity subject",
+    "main content blocks empty straight-double quotes from replacing the activity subject",
+    "main content blocks empty straight-single quotes from replacing the activity subject",
+    "main content blocks empty inline code from replacing the activity subject",
+    "main bare blocks an empty parenthetical from replacing the activity subject",
+    "main bare blocks a spaced empty parenthetical from replacing the activity subject",
+    "main bare blocks nested empty groups from replacing the activity subject",
+    "main bare blocks empty brackets from replacing the activity subject",
+    "main bare blocks empty straight-double quotes from replacing the activity subject",
+    "main bare blocks empty straight-single quotes from replacing the activity subject",
+    "main bare blocks empty inline code from replacing the activity subject"
+   ],
+   "id": "5a16e5dce35da9e19f1c6dc2969ac61aa4440bdb9c73d5d6fa2c76452a65a678",
+   "outcome": "caught",
+   "reason": "selector-failure"
   },
   "5ab443f5c75bef0a151a815fe90b663d4018eb45884941c2310e8bf445a53352": {
    "version": 1,
@@ -1703,6 +1843,20 @@
    "outcome": "caught",
    "reason": "suite-failure"
   },
+  "7996041037cffa0417218aaf8de0e702cb038536de5cda5d1717e20933d61e44": {
+   "version": 1,
+   "kind": "site",
+   "module": "tools/repository_ownership.py",
+   "label": "effective core.worktree scalar lookup dropped",
+   "anchor_sha256": "2338d3d5901df0d8ca9c9dfdd0055a8ff2b96d858720caf968c5d8e13b28bcf5",
+   "replacement_sha256": "6cdcf6167e3db66eb6f5566b5fc22cccb9208c8badd45150db6ab730ff2ac48c",
+   "selectors": [
+    "a repeated core.worktree binds the effective candidate Git recognises"
+   ],
+   "id": "7996041037cffa0417218aaf8de0e702cb038536de5cda5d1717e20933d61e44",
+   "outcome": "caught",
+   "reason": "selector-failure"
+  },
   "7c09098415c80701a703c366af35f731bd1af858b7e1632feceb3060e2e53749": {
    "version": 1,
    "kind": "set-element",
@@ -1846,6 +2000,25 @@
    "outcome": "caught",
    "reason": "suite-failure"
   },
+  "897de4f32b0a507b795809e607546ef3dea9c63952c6bb78cadd01a885c57f16": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/announced_work_guard.py",
+   "label": "escaped group delimiter handling dropped",
+   "anchor_sha256": "44f09a209b661cd4fefe5116ba0697942c9589a2498c9be223970b40b2be83a2",
+   "replacement_sha256": "99842f33580fcc03b2df59fe95d0e05e60497a362affdbcfab3a799edf9119fb",
+   "selectors": [
+    "main string blocks a predicate after an escaped parenthesis",
+    "main string blocks a predicate after an escaped quote",
+    "main content blocks a predicate after an escaped parenthesis",
+    "main content blocks a predicate after an escaped quote",
+    "main bare blocks a predicate after an escaped parenthesis",
+    "main bare blocks a predicate after an escaped quote"
+   ],
+   "id": "897de4f32b0a507b795809e607546ef3dea9c63952c6bb78cadd01a885c57f16",
+   "outcome": "caught",
+   "reason": "selector-failure"
+  },
   "899db848a30f03e7a05b83b441b16534dac5f09e43545ab6ca49a08758f33e8f": {
    "version": 1,
    "kind": "set-element",
@@ -1934,6 +2107,31 @@
    "outcome": "survived",
    "reason": "survived"
   },
+  "8f1a0c1beaa4676d20796befe47f9a832ea09662a63fa01d01853da93653afcf": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/announced_work_guard.py",
+   "label": "open-group association dropped",
+   "anchor_sha256": "e997b588460c1b15d3f078ce5df339fc9022f2c91584b29df6b57ea103c148bf",
+   "replacement_sha256": "bae898bfa558f1ace9f68538184d31cf04d442a6569a252f983496446a27c920",
+   "selectors": [
+    "main string blocks a parenthetical nested report",
+    "main string blocks a parenthetical historical report",
+    "main string blocks a bracketed nested report",
+    "main string blocks a curly-quoted nested report",
+    "main content blocks a parenthetical nested report",
+    "main content blocks a parenthetical historical report",
+    "main content blocks a bracketed nested report",
+    "main content blocks a curly-quoted nested report",
+    "main bare blocks a parenthetical nested report",
+    "main bare blocks a parenthetical historical report",
+    "main bare blocks a bracketed nested report",
+    "main bare blocks a curly-quoted nested report"
+   ],
+   "id": "8f1a0c1beaa4676d20796befe47f9a832ea09662a63fa01d01853da93653afcf",
+   "outcome": "caught",
+   "reason": "selector-failure"
+  },
   "90fa72c2b6491bbf60850f1eb4813f4e2781b305224ed1dede2f209173e56fad": {
    "version": 1,
    "kind": "set-element",
@@ -1944,6 +2142,20 @@
    "id": "90fa72c2b6491bbf60850f1eb4813f4e2781b305224ed1dede2f209173e56fad",
    "outcome": "caught",
    "reason": "suite-failure"
+  },
+  "9187ad14ff2c09b6e461d6424baaa42668e7aabbc487e8e659069912a149af6d": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/announced_work_guard.py",
+   "label": "productive complement tokens dropped",
+   "anchor_sha256": "4f236388848cec35e2948a8eaba3f999892e4649be53a821074904093dfe0c07",
+   "replacement_sha256": "74c40c4ac845c13edf4c092a466b323a0fdd20b0c540b7a749df32adc1178ae6",
+   "selectors": [
+    "main blocks productive interrogative complements"
+   ],
+   "id": "9187ad14ff2c09b6e461d6424baaa42668e7aabbc487e8e659069912a149af6d",
+   "outcome": "caught",
+   "reason": "selector-failure"
   },
   "9194e74106308406d25327565dc756377a32a681dc47cacc9ceaccfd3534f172": {
    "version": 1,
@@ -2043,6 +2255,22 @@
    "id": "972d35559ea43d8186297a87e717b6e4b1cd7e60dbcfb8b496ff7f1f224f7d4f",
    "outcome": "caught",
    "reason": "suite-failure"
+  },
+  "97300eb6cff9ff8ca3a4c24e1bb3e4be24ae5144c365590cfce0624711283d1d": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/announced_work_guard.py",
+   "label": "URL prose-release boundary dropped",
+   "anchor_sha256": "8e0b4003a387d6972aa1992af99448d7775b337162c78512debcbc3a337333c6",
+   "replacement_sha256": "f17b247e39637e999a2bb9e18cce4309cf8638c98c7e784c19db52ae876b59bc",
+   "selectors": [
+    "main string keeps a URL closing backtick out of prose grouping",
+    "main content keeps a URL closing backtick out of prose grouping",
+    "main bare keeps a URL closing backtick out of prose grouping"
+   ],
+   "id": "97300eb6cff9ff8ca3a4c24e1bb3e4be24ae5144c365590cfce0624711283d1d",
+   "outcome": "caught",
+   "reason": "selector-failure"
   },
   "974406cf78f89524d098ba630d2afb1d52daf6eba3d158fe06629b82bff04281": {
    "version": 1,
@@ -2153,6 +2381,20 @@
    "id": "9b12e87bab347842634a58992b33551659da755d65d9d3f3ded496ad3de12ab6",
    "outcome": "survived",
    "reason": "survived"
+  },
+  "9d04af03d81c1c08d811744763ef72a47f402b403d1af02a198a5f8a4ebf0323": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/announced_work_guard.py",
+   "label": "whole report-token membership dropped",
+   "anchor_sha256": "261f1a06f2459d0ff93c53967865a02d0863be2115b2b20f77f5e128f067ad4f",
+   "replacement_sha256": "082a7b444fd6ab2fa9a0a73e0b4fb959d15de15398213b36e43a45b91257a75f",
+   "selectors": [
+    "main blocks embedded report substrings after a retained activity noun"
+   ],
+   "id": "9d04af03d81c1c08d811744763ef72a47f402b403d1af02a198a5f8a4ebf0323",
+   "outcome": "caught",
+   "reason": "selector-failure"
   },
   "9d0e773d15eab724f72000a882b8e5a18363380ec915a5d1a288bc1eec363066": {
    "version": 1,
@@ -2518,6 +2760,24 @@
    "outcome": "caught",
    "reason": "suite-failure"
   },
+  "b1f77f42c7b9436c3208d040eaae084ffd80e94df46ef8d90d151cab8abaaf69": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/announced_work_guard.py",
+   "label": "URL punctuation bypass dropped",
+   "anchor_sha256": "1df38db353dc829441d5e54a289915328e7c0915fc267d367da221a43422fb79",
+   "replacement_sha256": "db860c9b3dfbb078d519eecf1c02204b394305a2946d4896f20bb49f50d0932d",
+   "selectors": [
+    "main keeps URL query punctuation inside the direct report",
+    "main keeps uppercase URL hostname dots inside the direct report",
+    "main keeps URL semicolons opaque until whitespace",
+    "main keeps URL exclamations opaque until whitespace",
+    "main keeps mixed-case URL dots opaque until whitespace"
+   ],
+   "id": "b1f77f42c7b9436c3208d040eaae084ffd80e94df46ef8d90d151cab8abaaf69",
+   "outcome": "caught",
+   "reason": "selector-failure"
+  },
   "b2592bb00ba06db740f836dd25b6ecfcfb122357ebb5437b48f080d3af76aba4": {
    "version": 1,
    "kind": "set-element",
@@ -2881,6 +3141,20 @@
    "outcome": "caught",
    "reason": "suite-failure"
   },
+  "cd5e1cb90659218ab96e3088df7b8615679dd57041f71eb7aed428dd23b5f9c1": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/announced_work_guard.py",
+   "label": "hard separator classification dropped",
+   "anchor_sha256": "a186be07b90b9ea3fcdf8e365469fab3b2bb3fd8f7765385392ddce7a77e0bfd",
+   "replacement_sha256": "4ae871a9d7eb0d85838ea733ac68bd6b8cd7bac9e9eb31cd2f31b637752fbca8",
+   "selectors": [
+    "main blocks attached and decorated historical report clauses"
+   ],
+   "id": "cd5e1cb90659218ab96e3088df7b8615679dd57041f71eb7aed428dd23b5f9c1",
+   "outcome": "caught",
+   "reason": "selector-failure"
+  },
   "cd8f76f8bc1a53bca6bf14ce44487f602103e1059a52a43144b53de27b2fb0eb": {
    "version": 1,
    "kind": "set-element",
@@ -3068,6 +3342,25 @@
    "outcome": "survived",
    "reason": "survived"
   },
+  "d8c6c530c8e39ce9316190ba951770c059860b94cc74ba72c1b8fb8f29e31cbe": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/announced_work_guard.py",
+   "label": "comma predicate continuation dropped",
+   "anchor_sha256": "8bd7f51863acbadef00fc4f63ee1caf9b31d3714bbed279939b13ae4c86313cb",
+   "replacement_sha256": "1bf8829d3f85bbf14b1bf92732ab9a67f9c67ee8c616fd4c9cb478878a472bb2",
+   "selectors": [
+    "main preserves a participial comma result continuation",
+    "main preserves a terminal comma result adverb",
+    "main preserves a direct plural comma subject",
+    "main preserves an audit comma subject",
+    "main preserves a multiword integration-test comma subject",
+    "main preserves a hundred-test comma subject"
+   ],
+   "id": "d8c6c530c8e39ce9316190ba951770c059860b94cc74ba72c1b8fb8f29e31cbe",
+   "outcome": "caught",
+   "reason": "selector-failure"
+  },
   "daef6b224b7b5ab8d005159158e302e3df6071b5ffb788a666c777b6a0571941": {
    "version": 1,
    "kind": "set-element",
@@ -3166,6 +3459,21 @@
    "id": "ddb0c2498920609bb28acd84ed278a56e3b1f6125ba59e612db563b581f7c15b",
    "outcome": "caught",
    "reason": "suite-failure"
+  },
+  "df0a040a763d702ba5a22c9a4b0d88b1158f52d9e998f6d2b49743fdbc5ea442": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/announced_work_guard.py",
+   "label": "URL semantic-token bypass dropped",
+   "anchor_sha256": "cb0893fb167daad25b9bfa0cc339abb56f02483c229db622041d62f04a661e95",
+   "replacement_sha256": "a8d26d15783f712db7d48559f865cf759e31c1e36f80b7565b1776798b45e553",
+   "selectors": [
+    "main keeps URL complement words opaque",
+    "main ignores report words inside a URL"
+   ],
+   "id": "df0a040a763d702ba5a22c9a4b0d88b1158f52d9e998f6d2b49743fdbc5ea442",
+   "outcome": "caught",
+   "reason": "selector-failure"
   },
   "e0ab055170ef8179134de977261c88ccdf6c62a95cc2d96ec44b41a8ea659dcd": {
    "version": 1,
@@ -3287,6 +3595,25 @@
    "id": "e92b303fcbb84654f1c4f23a861637ced8509affcff51278301464ae359710fb",
    "outcome": "caught",
    "reason": "suite-failure"
+  },
+  "e97f831441e3aa146c182593ecfffc2c1593564bc434c417325b6bc5d3e7a0ba": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/announced_work_guard.py",
+   "label": "straight-single outer predicate closure dropped",
+   "anchor_sha256": "9700c45ffdf8cdd77481b18f43ca9481680f9fafced4487313d63ffc8f5e67cf",
+   "replacement_sha256": "eb0e10e44111836b12d9c54b2f89ddb6cf013de0de75979e6ea9d4f16e0e51cf",
+   "selectors": [
+    "main string preserves a predicate after a straight-single-quoted subject",
+    "main string preserves a modified predicate after a straight-single-quoted subject",
+    "main content preserves a predicate after a straight-single-quoted subject",
+    "main content preserves a modified predicate after a straight-single-quoted subject",
+    "main bare preserves a predicate after a straight-single-quoted subject",
+    "main bare preserves a modified predicate after a straight-single-quoted subject"
+   ],
+   "id": "e97f831441e3aa146c182593ecfffc2c1593564bc434c417325b6bc5d3e7a0ba",
+   "outcome": "caught",
+   "reason": "selector-failure"
   },
   "ea39a52eb29690c634d9e04d129f020ed1d940ca53231d251d5075922d5c634f": {
    "version": 1,
@@ -3563,6 +3890,22 @@
    "outcome": "survived",
    "reason": "survived"
   },
+  "ff7d644bb42efd3741d38a20428f3bdc4153c392a050bef186631b7fd9bf61a2": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/announced_work_guard.py",
+   "label": "comma adjective distinction dropped",
+   "anchor_sha256": "8bd7f51863acbadef00fc4f63ee1caf9b31d3714bbed279939b13ae4c86313cb",
+   "replacement_sha256": "9f9bdc7353a76abb4de0f5e250c23e20dd42d7a611e917945b3176890a651324",
+   "selectors": [
+    "main blocks a straight possessive comma modifier",
+    "main blocks an overseas comma modifier",
+    "main blocks a DevOps comma modifier"
+   ],
+   "id": "ff7d644bb42efd3741d38a20428f3bdc4153c392a050bef186631b7fd9bf61a2",
+   "outcome": "caught",
+   "reason": "selector-failure"
+  },
   "ffd1c1e0d13edbc114b455d949c5bf9967fa62d2b41d3779a0f767c47a33d9ec": {
    "version": 1,
    "kind": "set-element",
@@ -3658,6 +4001,6 @@
   "fc9390dabe1c6cf6562336aba3ff8721f0b5d6223760043abe75114363b7a027"
  ],
  "unasserted_kills": [],
- "caught": 242,
- "total": 322
+ "caught": 261,
+ "total": 341
 }

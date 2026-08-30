@@ -53,7 +53,17 @@ Swept sources: `hooks/announced_work_guard.py`, `hooks/bash_command_guard.py`, `
 | `announced_work_guard.py` | URL punctuation bypass dropped | caught |
 | `announced_work_guard.py` | URL semantic-token bypass dropped | caught |
 | `announced_work_guard.py` | URL trailing-punctuation trim dropped | caught |
+| `announced_work_guard.py` | adjectival group ambiguity guard dropped | caught |
+| `announced_work_guard.py` | adjectival group modifier state dropped | caught |
+| `announced_work_guard.py` | adjectival group subject-resume bridge dropped | caught |
 | `announced_work_guard.py` | attached period classification dropped | caught |
+| `announced_work_guard.py` | bounded post-group context bridge dropped | caught |
+| `announced_work_guard.py` | colon adjectival group deferral dropped | caught |
+| `announced_work_guard.py` | colon bridge same-line boundary dropped | caught |
+| `announced_work_guard.py` | colon grouped-result tail resolution dropped | caught |
+| `announced_work_guard.py` | colon predicate bridge classification dropped | caught |
+| `announced_work_guard.py` | colon predicate-modifier bridge dropped | caught |
+| `announced_work_guard.py` | colon-to-group predicate bridge dropped | caught |
 | `announced_work_guard.py` | comma adjective distinction dropped | caught |
 | `announced_work_guard.py` | comma predicate continuation dropped | caught |
 | `announced_work_guard.py` | decorated colon classification dropped | caught |
@@ -62,10 +72,12 @@ Swept sources: `hooks/announced_work_guard.py`, `hooks/bash_command_guard.py`, `
 | `announced_work_guard.py` | inline-code group recognition dropped | caught |
 | `announced_work_guard.py` | open-group association dropped | caught |
 | `announced_work_guard.py` | outer-group closure signal dropped | caught |
+| `announced_work_guard.py` | post-group context object validation dropped | caught |
 | `announced_work_guard.py` | post-group predicate modifier bridge dropped | caught |
 | `announced_work_guard.py` | post-group subject replacement guard dropped | caught |
 | `announced_work_guard.py` | productive complement tokens dropped | caught |
 | `announced_work_guard.py` | straight-single outer predicate closure dropped | caught |
+| `announced_work_guard.py` | unexpected judge exception block dropped | caught |
 | `announced_work_guard.py` | whole complement-token membership dropped | caught |
 | `announced_work_guard.py` | whole report-token membership dropped | caught |
 | `bash_command_guard.py` | merged guard function cache scope dropped | caught |
@@ -98,7 +110,7 @@ Swept sources: `hooks/announced_work_guard.py`, `hooks/bash_command_guard.py`, `
 | `git_grep_engine_guard.py` | process substitution loses typed operand | caught |
 | `git_grep_engine_guard.py` | repeat zero execution boundary dropped | caught |
 | `git_grep_engine_guard.py` | same-shell alias mutation wrapper resolution dropped | caught |
-| `git_grep_engine_guard.py` | shell alias cycle context reset | caught |
+| `git_grep_engine_guard.py` | shell alias depth context corrupted | caught |
 | `git_grep_engine_guard.py` | shell alias forwarding dropped | caught |
 | `git_grep_engine_guard.py` | source alias body traversal dropped | caught |
 | `git_grep_engine_guard.py` | source alias dynamic command detection dropped | caught |
@@ -117,7 +129,7 @@ Swept sources: `hooks/announced_work_guard.py`, `hooks/bash_command_guard.py`, `
 | `zsh_rev_modifier_guard.py` | zsh unmodelled modifier uncertainty dropped | caught |
 | `repository_ownership.py` | effective core.worktree scalar lookup dropped | caught |
 
-262 of 342 planned mutations are caught; 80 exact mutation IDs remain recorded coverage debt.
+274 of 354 planned mutations are caught; 80 exact mutation IDs remain recorded coverage debt.
 
 A kill scored only because the recorded check count moved is not evidence that the suites observe the change. That count is recorded per result and reported by the gate rather than shown here, because whether an assertion fires can differ between hosts and this file is compared across them.
 

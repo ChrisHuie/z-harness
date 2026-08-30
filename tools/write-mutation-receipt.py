@@ -50,7 +50,7 @@ UNASSERTED_KILL_REASON = "exact-check-count"
 UNASSERTED_KILL_CEILING = 1
 KILL_REASONS = frozenset({
     "suite-failure", "selector-failure", UNASSERTED_KILL_REASON, "survived",
-    "invalid-receipt", "timeout",
+    "timeout",
 })
 # Fields whose value is an observation of the host that produced it rather than a fact about
 # the guards. Whether an assertion fires can differ between environments -- deleting "W" from
@@ -223,8 +223,12 @@ SITE_MUTATIONS = (
     {
         "label": "URL punctuation bypass dropped", "module": STOP,
         "anchor": (
-            "        if not url_active and report_separator_breaks(outside_separator, original_word):"),
-        "replacement": "        if report_separator_breaks(outside_separator, original_word):",
+            "        if (not url_active\n"
+            "                and report_separator_breaks(outside_separator, original_word)\n"
+            "                and not colon_bridge):"),
+        "replacement": (
+            "        if (report_separator_breaks(outside_separator, original_word)\n"
+            "                and not colon_bridge):"),
         "selectors": (
             "main keeps URL query punctuation inside the direct report",
             "main keeps uppercase URL hostname dots inside the direct report",
@@ -343,6 +347,10 @@ SITE_MUTATIONS = (
         "selectors": (
             "a comma ending a URL is prose punctuation",
             "main blocks a report after a URL-ending comma",
+            "a colon ending a URL is prose punctuation",
+            "a semicolon ending a URL is prose punctuation",
+            "main string blocks a report after a URL-ending colon",
+            "main string blocks a report after a URL-ending semicolon",
         ),
         "allowed_statuses": (),
     },
@@ -388,8 +396,8 @@ SITE_MUTATIONS = (
     },
     {
         "label": "post-group subject replacement guard dropped", "module": STOP,
-        "anchor": "        if after_group and word not in REPORT_TERMS:",
-        "replacement": "        if False and after_group and word not in REPORT_TERMS:",
+        "anchor": "        if bridge_active and word not in REPORT_TERMS:",
+        "replacement": "        if False and bridge_active and word not in REPORT_TERMS:",
         "selectors": (
             "main string blocks a plural possessive inside a straight-single-quoted aside",
             "main string blocks a quoted noun from replacing the announced activity subject",
@@ -441,7 +449,186 @@ SITE_MUTATIONS = (
             "main string preserves a modified predicate after a straight-single-quoted subject",
             "main content preserves a modified predicate after a straight-single-quoted subject",
             "main bare preserves a modified predicate after a straight-single-quoted subject",
+            "main string preserves a common post-group predicate modifier",
+            "main content preserves a common post-group predicate modifier",
+            "main bare preserves a common post-group predicate modifier",
         ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "adjectival group ambiguity guard dropped", "module": STOP,
+        "anchor": "        if report_group_follows(remainder, report_end):",
+        "replacement": "        if False and report_group_follows(remainder, report_end):",
+        "selectors": (
+            "main string blocks a group-modified failure adjective before the activity noun",
+            "main content blocks a group-modified failure adjective before the activity noun",
+            "main bare blocks a group-modified failure adjective before the activity noun",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "colon adjectival group deferral dropped", "module": STOP,
+        "anchor": (
+            "            if grouped_adjective and pending_colon and "
+            "adjectival_predicate:"),
+        "replacement": (
+            "            if grouped_adjective and False and "
+            "adjectival_predicate:"),
+        "selectors": (
+            "main string blocks a colon group-modified failure adjective",
+            "main content blocks a colon group-modified failure adjective",
+            "main bare blocks a colon group-modified failure adjective",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "colon grouped-result tail resolution dropped", "module": STOP,
+        "anchor": (
+            "        if (colon_adjectival_candidate and after_group\n"
+            "                and word in REPORT_POSTGROUP_RESULT_TAILS):\n"
+            "            return True"),
+        "replacement": (
+            "        if (False and colon_adjectival_candidate and after_group\n"
+            "                and word in REPORT_POSTGROUP_RESULT_TAILS):\n"
+            "            return True"),
+        "selectors": (
+            "main string preserves a colon predicate result-group duration adjunct",
+            "main string preserves a colon predicate result-group timestamp adjunct",
+            "main string preserves a colon predicate result-group object adjunct",
+            "main content preserves a colon predicate result-group duration adjunct",
+            "main content preserves a colon predicate result-group timestamp adjunct",
+            "main content preserves a colon predicate result-group object adjunct",
+            "main bare preserves a colon predicate result-group duration adjunct",
+            "main bare preserves a colon predicate result-group timestamp adjunct",
+            "main bare preserves a colon predicate result-group object adjunct",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "colon-to-group predicate bridge dropped", "module": STOP,
+        "anchor": (
+            "            group_colon = soft_colon_predicate_bridge(\n"
+            "                outside_separator, core_last, core_incomplete)"),
+        "replacement": "            group_colon = False",
+        "selectors": (
+            "main string preserves a colon-deferred predicate after a subject aside",
+            "main content preserves a colon-deferred predicate after a subject aside",
+            "main bare preserves a colon-deferred predicate after a subject aside",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "colon bridge same-line boundary dropped", "module": STOP,
+        "anchor": (
+            "    return (\"\\r\" not in separator and \"\\n\" not in separator\n"
+            "            and core_last is not None and core_last not in REPORT_NONFINAL\n"
+            "            and not core_incomplete and colon_label_pending(separator, \"failed\"))"),
+        "replacement": (
+            "    return (core_last is not None and core_last not in REPORT_NONFINAL\n"
+            "            and not core_incomplete and colon_label_pending(separator, \"failed\"))"),
+        "selectors": ("a newline keeps a colon from deferring into a group",),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "colon predicate-modifier bridge dropped", "module": STOP,
+        "anchor": "        if colon_bridge:\n            colon_pending = True",
+        "replacement": "        if False and colon_bridge:\n            colon_pending = True",
+        "selectors": (
+            "main string blocks an unknown direct-colon context",
+            "main content blocks an unknown direct-colon context",
+            "main bare blocks an unknown direct-colon context",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "colon predicate bridge classification dropped", "module": STOP,
+        "anchor": (
+            "        colon_bridge = (not url_active\n"
+            "                        and soft_colon_predicate_bridge(\n"
+            "                            outside_separator, core_last, core_incomplete)\n"
+            "                        and (word in REPORT_POSTGROUP_MODIFIERS\n"
+            "                             or word in REPORT_POSTGROUP_CONTEXTS))"),
+        "replacement": (
+            "        colon_bridge = (False and not url_active\n"
+            "                        and soft_colon_predicate_bridge(\n"
+            "                            outside_separator, core_last, core_incomplete)\n"
+            "                        and (word in REPORT_POSTGROUP_MODIFIERS\n"
+            "                             or word in REPORT_POSTGROUP_CONTEXTS))"),
+        "selectors": (
+            "main string preserves a colon-deferred modifier after a subject aside",
+            "main string preserves a direct colon predicate modifier",
+            "main content preserves a colon-deferred modifier after a subject aside",
+            "main bare preserves a direct colon predicate modifier",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "adjectival group subject-resume bridge dropped", "module": STOP,
+        "anchor": "            if adjectival_group_modifier:",
+        "replacement": "            if False and adjectival_group_modifier:",
+        "selectors": (
+            "main string preserves a later predicate after an adjective group",
+            "main content preserves a later predicate after an adjective group",
+            "main bare preserves a later predicate after an adjective group",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "adjectival group modifier state dropped", "module": STOP,
+        "anchor": (
+            "                if report_group_follows(remainder, token.end()):\n"
+            "                    adjectival_group_modifier = True"),
+        "replacement": (
+            "                if False and report_group_follows(remainder, token.end()):\n"
+            "                    adjectival_group_modifier = True"),
+        "selectors": (
+            "main string preserves a later predicate after an adjective group",
+            "main content preserves a later predicate after an adjective group",
+            "main bare preserves a later predicate after an adjective group",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "bounded post-group context bridge dropped", "module": STOP,
+        "anchor": "            if word in REPORT_POSTGROUP_CONTEXTS:",
+        "replacement": "            if False and word in REPORT_POSTGROUP_CONTEXTS:",
+        "selectors": (
+            "main string preserves a bounded post-group CI adjunct",
+            "main content preserves a bounded post-group CI adjunct",
+            "main bare preserves a bounded post-group CI adjunct",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "post-group context object validation dropped", "module": STOP,
+        "anchor": "            if word not in REPORT_POSTGROUP_CONTEXTS[context_preposition]:",
+        "replacement": (
+            "            if False and word not in "
+            "REPORT_POSTGROUP_CONTEXTS[context_preposition]:"),
+        "selectors": (
+            "main string blocks an unknown post-group context",
+            "main content blocks an unknown post-group context",
+            "main bare blocks an unknown post-group context",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "unexpected judge exception block dropped", "module": STOP,
+        "anchor": (
+            "    except BaseException as exc:\n"
+            "        if off:\n"
+            "            return 0\n"
+            "        why = f\"internal guard error ({type(exc).__name__})\"\n"
+            "        print(DRIFT_MSG.format(v=VERSION, why=why), file=sys.stderr)\n"
+            "        return 2"),
+        "replacement": (
+            "    except Exception as exc:\n"
+            "        if off:\n"
+            "            return 0\n"
+            "        why = f\"internal guard error ({type(exc).__name__})\"\n"
+            "        print(DRIFT_MSG.format(v=VERSION, why=why), file=sys.stderr)\n"
+            "        return 2"),
+        "selectors": ("unexpected judge exceptions block through main",),
         "allowed_statuses": (),
     },
     {
@@ -819,10 +1006,12 @@ SITE_MUTATIONS = (
         "replacement": "    if False:", "allowed_statuses": (),
     },
     {
-        "label": "shell alias cycle context reset", "module": GREP,
+        "label": "shell alias depth context corrupted", "module": GREP,
         "anchor": "            resolution.items, resolution, deadline, aliases, seen, depth)",
-        "replacement": "            resolution.items, resolution, deadline, aliases, (), 0)",
-        "allowed_statuses": ("invalid-receipt",),
+        "replacement": (
+            "            resolution.items, resolution, deadline, aliases, seen, "
+            "MAX_ALIAS_DEPTH + 1)"),
+        "allowed_statuses": (),
     },
     {
         "label": "zsh shared resolver bypassed", "module": ZSH,
@@ -1129,7 +1318,7 @@ def mutation_plan() -> tuple[list[dict], dict[str, str]]:
                 descriptor = {
                     "version": 1, "kind": "set-element", "module": module,
                     "name": name, "collection_kind": kind, "element": element,
-                    "allowed_statuses": ["invalid-receipt"],
+                    "allowed_statuses": [],
                 }
                 descriptor["id"] = digest(descriptor)
                 mutations.append(descriptor)
@@ -1190,6 +1379,12 @@ def suite_name(relative: str) -> str:
     return Path(relative).stem
 
 
+def exit_receipt_agree(returncode: int, failures: int) -> bool:
+    """Accept only this repository's green or assertion-failure exit/receipt pairs."""
+    return ((returncode == 0 and failures == 0)
+            or (returncode == 1 and failures > 0))
+
+
 def run_suite(tree: Path, relative: str, timeout: int = 240,
               selectors=()) -> dict:
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
@@ -1209,6 +1404,14 @@ def run_suite(tree: Path, relative: str, timeout: int = 240,
             "status": "invalid-receipt", "returncode": done.returncode,
             "receipt_count": len(matches), "stderr_tail": done.stderr[-1000:],
         }
+    checks = int(matches[0].group("checks"))
+    failures = int(matches[0].group("failures"))
+    if not exit_receipt_agree(done.returncode, failures):
+        return {
+            "status": "invalid-receipt", "returncode": done.returncode,
+            "receipt_count": len(matches),
+            "stderr_tail": "process exit and receipt failures disagree",
+        }
     selected = {}
     for selector in selectors:
         pattern = re.compile(
@@ -1224,8 +1427,8 @@ def run_suite(tree: Path, relative: str, timeout: int = 240,
         selected[selector] = hits[0]
     result = {
         "status": "completed", "returncode": done.returncode,
-        "checks": int(matches[0].group("checks")),
-        "failures": int(matches[0].group("failures")),
+        "checks": checks,
+        "failures": failures,
     }
     if selectors:
         result["selectors"] = selected
@@ -1264,8 +1467,14 @@ def result_kill(result: dict, baseline: dict, allowed_statuses=(),
                 selectors=()) -> tuple[bool, str]:
     status = result.get("status")
     if status != "completed":
-        if status in allowed_statuses:
+        # A predeclared timeout can grade the dedicated performance mutant. Missing or
+        # malformed receipts never grade behavior: they are invalid measurements even if
+        # a compromised descriptor tries to list that status as allowed.
+        if status == "timeout" and status in allowed_statuses:
             return True, status
+        raise ValueError(f"mutation produced an invalid measurement: {result}")
+    if not exit_receipt_agree(
+            result.get("returncode"), result.get("failures", 0)):
         raise ValueError(f"mutation produced an invalid measurement: {result}")
     if selectors:
         expected = set(selectors)
@@ -1276,9 +1485,12 @@ def result_kill(result: dict, baseline: dict, allowed_statuses=(),
                 or set(selected) != expected):
             raise ValueError("mutation selector inventory differs from its green baseline")
         if all(selected[name] == "fail" for name in expected):
+            if result.get("returncode") != 1 or result.get("failures", 0) <= 0:
+                raise ValueError(
+                    "selector failure disagrees with terminal receipt")
             return True, "selector-failure"
         return False, "survived"
-    if result.get("returncode") != 0 or result.get("failures", 0) > 0:
+    if result.get("returncode") == 1 and result.get("failures", 0) > 0:
         return True, "suite-failure"
     if result.get("checks") != baseline.get("checks"):
         return True, "exact-check-count"
@@ -1454,6 +1666,8 @@ def suite_result_error(result: object, *, baseline: bool = False) -> str:
             return "completed suite result counters are not integers"
         if result["checks"] < 1 or result["failures"] < 0:
             return "completed suite result counters are outside their domain"
+        if not exit_receipt_agree(result["returncode"], result["failures"]):
+            return "completed suite exit and receipt failures disagree"
         if baseline and (result["returncode"] != 0 or result["failures"] != 0):
             return "baseline suite result is not green"
         if "selectors" in result:
@@ -1462,6 +1676,9 @@ def suite_result_error(result: object, *, baseline: bool = False) -> str:
                     or any(not isinstance(name, str) or status not in {"pass", "fail"}
                            for name, status in selected.items())):
                 return "completed suite selector evidence is malformed"
+            if ("fail" in selected.values()
+                    and (result["returncode"] != 1 or result["failures"] <= 0)):
+                return "completed suite selector failures disagree with terminal receipt"
     elif status == "timeout":
         if (not isinstance(result["timeout_seconds"], int)
                 or isinstance(result["timeout_seconds"], bool)
@@ -1822,10 +2039,34 @@ def selftest() -> int:
 
     equal("a green run at the baseline check count survives",
           result_kill(completed(), baseline), (False, "survived"))
-    equal("a nonzero exit is scored as a suite failure",
-          result_kill(completed(returncode=1), baseline), (True, "suite-failure"))
-    equal("a failed assertion is scored as a suite failure",
-          result_kill(completed(failures=3), baseline), (True, "suite-failure"))
+    raises("exit one with zero receipt failures is not a measurement",
+           ValueError,
+           "mutation produced an invalid measurement: "
+           "{'status': 'completed', 'returncode': 1, 'checks': 40, 'failures': 0}",
+           lambda: result_kill(completed(returncode=1), baseline))
+    raises("receipt failures with a zero exit are not a measurement",
+           ValueError,
+           "mutation produced an invalid measurement: "
+           "{'status': 'completed', 'returncode': 0, 'checks': 40, 'failures': 3}",
+           lambda: result_kill(completed(failures=3), baseline))
+    equal("consistent red exit and receipt channels are a suite failure",
+          result_kill(completed(returncode=1, failures=3), baseline),
+          (True, "suite-failure"))
+    for invalid_exit in (2, -9):
+        invalid_result = completed(returncode=invalid_exit, failures=1)
+        raises(f"exit {invalid_exit} with assertion failures is not a measurement",
+               ValueError,
+               f"mutation produced an invalid measurement: {invalid_result}",
+               lambda result=invalid_result: result_kill(result, baseline))
+        equal(f"raw validation rejects exit {invalid_exit} with assertion failures",
+              suite_result_error(invalid_result),
+              "completed suite exit and receipt failures disagree")
+    equal("raw validation rejects a nonzero exit with zero receipt failures",
+          suite_result_error(completed(returncode=1)),
+          "completed suite exit and receipt failures disagree")
+    equal("raw validation rejects receipt failures with a zero exit",
+          suite_result_error(completed(failures=3)),
+          "completed suite exit and receipt failures disagree")
     equal("a check count that rose with nothing failing is an unasserted kill",
           result_kill(completed(checks=41), baseline), (True, "exact-check-count"))
     equal("a check count that fell with nothing failing is an unasserted kill",
@@ -1833,19 +2074,32 @@ def selftest() -> int:
     # The distinction the receipt exists to make: a detection must not be filed as
     # arithmetic when the count also moved, or a real kill reads as a predetermined one.
     equal("a failed assertion outranks a moved check count",
-          result_kill(completed(failures=1, checks=39), baseline),
+          result_kill(completed(returncode=1, failures=1, checks=39), baseline),
           (True, "suite-failure"))
-    equal("a nonzero exit outranks a moved check count",
-          result_kill(completed(returncode=2, checks=39), baseline),
+    equal("exit one outranks a moved check count",
+          result_kill(completed(returncode=1, failures=1, checks=39), baseline),
           (True, "suite-failure"))
+    probe_descriptor = {"id": "probe", "module": BASH}
+    probe_baseline = {BASH: baseline}
+    for invalid_exit in (2, -9):
+        invalid_result = completed(returncode=invalid_exit, failures=1)
+        raw = {"owner": invalid_result, "merged": None,
+               "outcome": "caught", "reason": "suite-failure"}
+        raises(f"aggregation rejects exit {invalid_exit} with assertion failures",
+               ValueError,
+               "raw owner result probe: completed suite exit and receipt failures disagree",
+               lambda value=raw: recompute_raw_result(
+                   value, probe_descriptor, probe_baseline))
     timed_out = {"status": "timeout", "timeout_seconds": 240}
     unreadable = {"status": "invalid-receipt", "returncode": 1,
                   "receipt_count": 0, "stderr_tail": ""}
     equal("a timeout the plan declares is a kill carrying that status as its reason",
           result_kill(timed_out, baseline, ("timeout",)), (True, "timeout"))
-    equal("an unreadable receipt the plan declares is a kill carrying that status",
-          result_kill(unreadable, baseline, ("invalid-receipt",)),
-          (True, "invalid-receipt"))
+    raises("an unreadable receipt remains invalid even if a plan declares it",
+           ValueError,
+           "mutation produced an invalid measurement: {'status': 'invalid-receipt', "
+           "'returncode': 1, 'receipt_count': 0, 'stderr_tail': ''}",
+           lambda: result_kill(unreadable, baseline, ("invalid-receipt",)))
     raises("an undeclared timeout is not a measurement",
            ValueError,
            "mutation produced an invalid measurement: "
@@ -1867,6 +2121,25 @@ def selftest() -> int:
                    selectors={selector: "fail"}),
               selector_baseline, selectors=(selector,)),
           (True, "selector-failure"))
+    green_selector_failure = dict(completed(), selectors={selector: "fail"})
+    raises("a selected failure with a green terminal receipt is not a measurement",
+           ValueError, "selector failure disagrees with terminal receipt",
+           lambda: result_kill(
+               green_selector_failure, selector_baseline, selectors=(selector,)))
+    selector_probe_descriptor = {
+        "id": "selector-probe", "module": BASH, "selectors": (selector,),
+    }
+    selector_probe_raw = {
+        "owner": green_selector_failure, "merged": None,
+        "outcome": "caught", "reason": "selector-failure",
+    }
+    raises("aggregation rejects a selected failure with a green terminal receipt",
+           ValueError,
+           "raw owner result selector-probe: completed suite selector failures "
+           "disagree with terminal receipt",
+           lambda: recompute_raw_result(
+               selector_probe_raw, selector_probe_descriptor,
+               {BASH: selector_baseline}))
     equal("an unrelated suite failure cannot grade a passing declared selector",
           result_kill(
               dict(completed(returncode=1, failures=1),
@@ -1886,8 +2159,8 @@ def selftest() -> int:
           UNASSERTED_KILL_REASON, "exact-check-count")
     equal("the kill-reason vocabulary includes the selected assertion failure",
           set(KILL_REASONS),
-          {"suite-failure", "exact-check-count", "survived", "invalid-receipt",
-           "timeout", "selector-failure"})
+          {"suite-failure", "exact-check-count", "survived", "timeout",
+           "selector-failure"})
 
     # ---- needs_merged_run: where an arithmetic kill must not stop the measurement -----
     equal("the merged suite is not rerun against itself when it survives",
@@ -2109,11 +2382,10 @@ def selftest() -> int:
           {"guards/fixture_guard.py::ENUMWORD":
               "repeated characters identify an enum word, not a membership charset",
            "guards/fixture_guard.py::SKIPPED": "declared exclusion"})
-    equal("an element mutation may only crash the way the plan declares",
+    equal("element mutations cannot declare instrument failure as a kill",
           [item["allowed_statuses"] for item in plan
            if item["kind"] == "set-element"],
-          [["invalid-receipt"], ["invalid-receipt"], ["invalid-receipt"],
-           ["invalid-receipt"]])
+          [[], [], [], []])
     equal("a site descriptor records both halves of the edit by digest",
           [(item["module"], item["label"], item["anchor_sha256"],
             item["replacement_sha256"], item.get("selectors", []),

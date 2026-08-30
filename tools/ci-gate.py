@@ -56,7 +56,7 @@ EVAL_SKILL_FLOOR = 7
 SUITE_FLOORS = {
     "harness_check": 230,
     "render-packages": 192,
-    "bash_command_guard": 1366,
+    "bash_command_guard": 1367,
     "git_grep_engine_guard": 1149,
     "zsh_rev_modifier_guard": 487,
 }
@@ -1285,7 +1285,7 @@ def decision_golden_error(golden_data=None, decide=None, snapshot=None,
 MUTATION_RECEIPT = ROOT / "contracts/goldens/mutation-receipt.json"
 MUTATION_SUMMARY = ROOT / "contracts/goldens/mutation-summary.md"
 MUTATION_SURVIVOR_DEBT_CEILING = 80
-MUTATION_PLAN_FLOOR = 342
+MUTATION_PLAN_FLOOR = 351
 # Kills scored only because the recorded check count moved, with no assertion failing. A
 # guard that increments its counter once per element of the collection under mutation moves
 # that count on any removal, so such a kill is decided by loop structure before any probe
@@ -1373,7 +1373,17 @@ EXPECTED_MUTATION_COLLECTIONS = {
     ("hooks/guards/zsh_rev_modifier_guard.py", "MOD_UNMODELLED"): 1,
 }
 EXPECTED_MUTATION_SITES = {
+    ("hooks/announced_work_guard.py", "adjectival group ambiguity guard dropped"),
+    ("hooks/announced_work_guard.py", "adjectival group modifier state dropped"),
+    ("hooks/announced_work_guard.py", "adjectival group subject-resume bridge dropped"),
     ("hooks/announced_work_guard.py", "attached period classification dropped"),
+    ("hooks/announced_work_guard.py", "bounded post-group context bridge dropped"),
+    ("hooks/announced_work_guard.py", "colon bridge same-line boundary dropped"),
+    ("hooks/announced_work_guard.py", "colon adjectival group deferral dropped"),
+    ("hooks/announced_work_guard.py", "colon grouped-result tail resolution dropped"),
+    ("hooks/announced_work_guard.py", "colon predicate bridge classification dropped"),
+    ("hooks/announced_work_guard.py", "colon predicate-modifier bridge dropped"),
+    ("hooks/announced_work_guard.py", "colon-to-group predicate bridge dropped"),
     ("hooks/announced_work_guard.py", "comma adjective distinction dropped"),
     ("hooks/announced_work_guard.py", "comma predicate continuation dropped"),
     ("hooks/announced_work_guard.py", "decorated colon classification dropped"),
@@ -1383,9 +1393,11 @@ EXPECTED_MUTATION_SITES = {
     ("hooks/announced_work_guard.py", "open-group association dropped"),
     ("hooks/announced_work_guard.py", "outer-group closure signal dropped"),
     ("hooks/announced_work_guard.py", "post-group predicate modifier bridge dropped"),
+    ("hooks/announced_work_guard.py", "post-group context object validation dropped"),
     ("hooks/announced_work_guard.py", "post-group subject replacement guard dropped"),
     ("hooks/announced_work_guard.py", "productive complement tokens dropped"),
     ("hooks/announced_work_guard.py", "straight-single outer predicate closure dropped"),
+    ("hooks/announced_work_guard.py", "unexpected judge exception block dropped"),
     ("hooks/announced_work_guard.py", "whole complement-token membership dropped"),
     ("hooks/announced_work_guard.py", "whole report-token membership dropped"),
     ("hooks/announced_work_guard.py", "URL punctuation bypass dropped"),
@@ -1414,7 +1426,7 @@ EXPECTED_MUTATION_SITES = {
     ("hooks/guards/git_grep_engine_guard.py", "native command checked after alias"),
     ("hooks/guards/git_grep_engine_guard.py", "nested source shell identity dropped"),
     ("hooks/guards/git_grep_engine_guard.py", "process substitution loses typed operand"),
-    ("hooks/guards/git_grep_engine_guard.py", "shell alias cycle context reset"),
+    ("hooks/guards/git_grep_engine_guard.py", "shell alias depth context corrupted"),
     ("hooks/guards/git_grep_engine_guard.py", "shell alias forwarding dropped"),
     ("hooks/guards/git_grep_engine_guard.py", "source alias invocation dropped"),
     ("hooks/guards/git_grep_engine_guard.py", "source alias wrapper resolution dropped"),
@@ -1454,12 +1466,57 @@ EXPECTED_MUTATION_SITES = {
      "zsh unmodelled modifier prefix grammar dropped"),
 }
 EXPECTED_MUTATION_SELECTORS = {
+    ("hooks/announced_work_guard.py", "adjectival group ambiguity guard dropped"):
+        ("main string blocks a group-modified failure adjective before the activity noun",
+         "main content blocks a group-modified failure adjective before the activity noun",
+         "main bare blocks a group-modified failure adjective before the activity noun"),
+    ("hooks/announced_work_guard.py", "adjectival group modifier state dropped"):
+        ("main string preserves a later predicate after an adjective group",
+         "main content preserves a later predicate after an adjective group",
+         "main bare preserves a later predicate after an adjective group"),
+    ("hooks/announced_work_guard.py", "adjectival group subject-resume bridge dropped"):
+        ("main string preserves a later predicate after an adjective group",
+         "main content preserves a later predicate after an adjective group",
+         "main bare preserves a later predicate after an adjective group"),
     ("hooks/announced_work_guard.py", "attached period classification dropped"):
         ("main blocks an attached full-stop historical report clause",),
     ("hooks/announced_work_guard.py", "comma adjective distinction dropped"):
         ("main blocks a straight possessive comma modifier",
          "main blocks an overseas comma modifier",
          "main blocks a DevOps comma modifier"),
+    ("hooks/announced_work_guard.py", "bounded post-group context bridge dropped"):
+        ("main string preserves a bounded post-group CI adjunct",
+         "main content preserves a bounded post-group CI adjunct",
+         "main bare preserves a bounded post-group CI adjunct"),
+    ("hooks/announced_work_guard.py", "colon bridge same-line boundary dropped"):
+        ("a newline keeps a colon from deferring into a group",),
+    ("hooks/announced_work_guard.py", "colon adjectival group deferral dropped"):
+        ("main string blocks a colon group-modified failure adjective",
+         "main content blocks a colon group-modified failure adjective",
+         "main bare blocks a colon group-modified failure adjective"),
+    ("hooks/announced_work_guard.py", "colon grouped-result tail resolution dropped"):
+        ("main string preserves a colon predicate result-group duration adjunct",
+         "main string preserves a colon predicate result-group timestamp adjunct",
+         "main string preserves a colon predicate result-group object adjunct",
+         "main content preserves a colon predicate result-group duration adjunct",
+         "main content preserves a colon predicate result-group timestamp adjunct",
+         "main content preserves a colon predicate result-group object adjunct",
+         "main bare preserves a colon predicate result-group duration adjunct",
+         "main bare preserves a colon predicate result-group timestamp adjunct",
+         "main bare preserves a colon predicate result-group object adjunct"),
+    ("hooks/announced_work_guard.py", "colon predicate bridge classification dropped"):
+        ("main string preserves a colon-deferred modifier after a subject aside",
+         "main string preserves a direct colon predicate modifier",
+         "main content preserves a colon-deferred modifier after a subject aside",
+         "main bare preserves a direct colon predicate modifier"),
+    ("hooks/announced_work_guard.py", "colon predicate-modifier bridge dropped"):
+        ("main string blocks an unknown direct-colon context",
+         "main content blocks an unknown direct-colon context",
+         "main bare blocks an unknown direct-colon context"),
+    ("hooks/announced_work_guard.py", "colon-to-group predicate bridge dropped"):
+        ("main string preserves a colon-deferred predicate after a subject aside",
+         "main content preserves a colon-deferred predicate after a subject aside",
+         "main bare preserves a colon-deferred predicate after a subject aside"),
     ("hooks/announced_work_guard.py", "comma predicate continuation dropped"):
         ("main preserves a participial comma result continuation",
          "main preserves a terminal comma result adverb",
@@ -1526,7 +1583,14 @@ EXPECTED_MUTATION_SELECTORS = {
     ("hooks/announced_work_guard.py", "post-group predicate modifier bridge dropped"):
         ("main string preserves a modified predicate after a straight-single-quoted subject",
          "main content preserves a modified predicate after a straight-single-quoted subject",
-         "main bare preserves a modified predicate after a straight-single-quoted subject"),
+         "main bare preserves a modified predicate after a straight-single-quoted subject",
+         "main string preserves a common post-group predicate modifier",
+         "main content preserves a common post-group predicate modifier",
+         "main bare preserves a common post-group predicate modifier"),
+    ("hooks/announced_work_guard.py", "post-group context object validation dropped"):
+        ("main string blocks an unknown post-group context",
+         "main content blocks an unknown post-group context",
+         "main bare blocks an unknown post-group context"),
     ("hooks/announced_work_guard.py", "post-group subject replacement guard dropped"):
         ("main string blocks a plural possessive inside a straight-single-quoted aside",
          "main string blocks a quoted noun from replacing the announced activity subject",
@@ -1546,6 +1610,8 @@ EXPECTED_MUTATION_SELECTORS = {
          "main content preserves a modified predicate after a straight-single-quoted subject",
          "main bare preserves a predicate after a straight-single-quoted subject",
          "main bare preserves a modified predicate after a straight-single-quoted subject"),
+    ("hooks/announced_work_guard.py", "unexpected judge exception block dropped"):
+        ("unexpected judge exceptions block through main",),
     ("hooks/announced_work_guard.py", "whole complement-token membership dropped"):
         ("main keeps a hyphenated complement root inside the activity token",),
     ("hooks/announced_work_guard.py", "whole report-token membership dropped"):
@@ -1562,7 +1628,11 @@ EXPECTED_MUTATION_SELECTORS = {
          "main bare keeps a URL closing backtick out of prose grouping"),
     ("hooks/announced_work_guard.py", "URL trailing-punctuation trim dropped"):
         ("a comma ending a URL is prose punctuation",
-         "main blocks a report after a URL-ending comma"),
+         "main blocks a report after a URL-ending comma",
+         "a colon ending a URL is prose punctuation",
+         "a semicolon ending a URL is prose punctuation",
+         "main string blocks a report after a URL-ending colon",
+         "main string blocks a report after a URL-ending semicolon"),
     ("hooks/announced_work_guard.py", "URL semantic-token bypass dropped"):
         ("main keeps URL complement words opaque",
          "main ignores report words inside a URL"),
@@ -1570,7 +1640,7 @@ EXPECTED_MUTATION_SELECTORS = {
         ("a repeated core.worktree binds the effective candidate Git recognises",),
 }
 EXPECTED_MUTATION_SITE_DIGEST = (
-    "c0f052cf396310d1aaab5f26970be17f9b7020db76211c931e010c4d88751e9c"
+    "a953d9433c7f95efbf2c25f65a49e9a6b4e86e10d0da2b4dd708adb71282d262"
 )
 EXPECTED_MUTATION_EXCLUSIONS = {
     "hooks/guards/git_grep_engine_guard.py::ALIAS_GUARDED":
@@ -1644,6 +1714,9 @@ def mutation_policy_error(plan, exclusions, policy) -> str:
         if descriptor.get("kind") == "set-element":
             identity = (descriptor.get("module"), descriptor.get("name"))
             collection_counts[identity] = collection_counts.get(identity, 0) + 1
+            if descriptor.get("allowed_statuses") not in ([], ()):
+                problems.append(
+                    f"set-element descriptor permits a non-behavioral kill for {identity}")
         elif descriptor.get("kind") == "site":
             module = descriptor.get("module")
             label = descriptor.get("label")
@@ -1846,8 +1919,9 @@ def mutation_receipt_error(receipt_data=None, plan=None, exclusions=None,
             problems.append(
                 f"result {mutation_id} outcome {outcome!r} contradicts reason {reason!r}")
             continue
-        # A crash status is only a legitimate kill where the plan declared it tolerable.
-        if reason in {"timeout", "invalid-receipt"} and reason not in allowed_statuses:
+        # Only the predeclared performance timeout is a legitimate non-receipt kill.
+        # An invalid receipt is absent from the reason vocabulary and fails above.
+        if reason == "timeout" and reason not in allowed_statuses:
             problems.append(
                 f"result {mutation_id} records status {reason!r} its plan does not allow")
             continue
@@ -3680,7 +3754,8 @@ def selftest() -> int:
 
     set_mutation = {
         "version": 1, "kind": "set-element", "module": "guard-a.py",
-        "name": "TOKENS", "collection_kind": "set", "element": "x", "id": "set-id",
+        "name": "TOKENS", "collection_kind": "set", "element": "x",
+        "allowed_statuses": [], "id": "set-id",
     }
     site_mutation = {
         "version": 1, "kind": "site", "module": "guard-b.py", "label": "site probe",
@@ -3705,15 +3780,18 @@ def selftest() -> int:
         ),
         "guards": ("guard-a.py", "guard-b.py", "guard-c.py"),
         "kill_reasons": frozenset({
-            "suite-failure", "exact-check-count", "survived", "invalid-receipt",
-            "timeout", "selector-failure",
+            "suite-failure", "exact-check-count", "survived", "timeout",
+            "selector-failure",
         }),
         "unasserted_reason": "exact-check-count",
         "unasserted_ceiling": 1,
     }
     mutation_sources = {name: str(index) * 64 for index, name in enumerate(
         mutation_contract["guards"], 1)}
-    set_result = dict(set_mutation, outcome="survived", reason="survived")
+    set_result = {key: value for key, value in set_mutation.items()
+                  if key != "allowed_statuses"}
+    set_result["outcome"] = "survived"
+    set_result["reason"] = "survived"
     site_result = {key: value for key, value in site_mutation.items()
                    if key != "allowed_statuses"}
     site_result["outcome"] = "caught"
@@ -3785,7 +3863,7 @@ def selftest() -> int:
     }
     raw_descriptor = {
         "id": "raw-probe", "kind": "set-element", "module": writer.GREP,
-        "allowed_statuses": ["invalid-receipt"],
+        "allowed_statuses": [],
     }
     raw_survivor = {
         "owner": raw_baseline[writer.GREP],
@@ -3823,15 +3901,20 @@ def selftest() -> int:
         "status": "invalid-receipt", "returncode": 1,
         "receipt_count": 0, "stderr_tail": "mutated receipt",
     }
-    expect(
-        "a declared set mutation may be killed by an invalid terminal receipt",
+    try:
         writer.recompute_raw_result(
             {
                 "owner": invalid_receipt, "merged": None,
                 "outcome": "caught", "reason": "invalid-receipt",
             },
             raw_descriptor, raw_baseline,
-        ) == ("caught", "invalid-receipt"),
+        )
+        invalid_owner_rejected = False
+    except ValueError:
+        invalid_owner_rejected = True
+    expect(
+        "fragment aggregation rejects an invalid terminal receipt",
+        invalid_owner_rejected,
     )
     original_apply_mutation = writer.apply_mutation
     original_run_suite = writer.run_suite
@@ -3851,14 +3934,10 @@ def selftest() -> int:
             writer.apply_mutation = original_apply_mutation
             writer.run_suite = original_run_suite
         expect(
-            "declared kill modes propagate to the merged public-envelope suite",
-            propagated_kill is not None
-            and propagated_kill["outcome"] == "caught"
-            and propagated_kill["reason"] == "invalid-receipt"
-            and propagated_kill["merged"] == invalid_receipt,
+            "an invalid merged-suite receipt aborts mutation scoring",
+            propagated_kill is None,
         )
-    expect(
-        "aggregation preserves declared kill modes for the merged suite",
+    try:
         writer.recompute_raw_result(
             {
                 "owner": raw_baseline[writer.GREP],
@@ -3866,7 +3945,13 @@ def selftest() -> int:
                 "outcome": "caught", "reason": "invalid-receipt",
             },
             raw_descriptor, raw_baseline,
-        ) == ("caught", "invalid-receipt"),
+        )
+        invalid_merged_rejected = False
+    except ValueError:
+        invalid_merged_rejected = True
+    expect(
+        "aggregation rejects an invalid merged-suite receipt",
+        invalid_merged_rejected,
     )
     context_fragment = {"head_sha": "head-a", "baseline": raw_baseline}
     expect(
@@ -4180,6 +4265,14 @@ def selftest() -> int:
         mutation_policy_error(
             [set_mutation, site_mutation,
              dict(addition_mutation, allowed_statuses=["timeout"])],
+            mutation_probe["sweep_exclusions"], mutation_args["policy"],
+        ) != "",
+    )
+    expect(
+        "set-element mutations cannot declare invalid receipts as kills",
+        mutation_policy_error(
+            [dict(set_mutation, allowed_statuses=["invalid-receipt"]),
+             site_mutation, addition_mutation],
             mutation_probe["sweep_exclusions"], mutation_args["policy"],
         ) != "",
     )

@@ -36,6 +36,10 @@
 !tools/**
 !instruments/
 !instruments/**
+# Diagnostic output is machine evidence, not authored plugin content. The instruments
+# write JSON to stdout; these rules also contain legacy/manual redirections in this tree.
+instruments/*.results.json
+instruments/*.fuzz.json
 
 !skills/
 !skills/**

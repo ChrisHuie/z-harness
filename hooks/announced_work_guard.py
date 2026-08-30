@@ -57,6 +57,8 @@ input and return success while it's true" and caps consecutive blocks
 Exit codes: 0 allow (no announcement, or out of scope) · 2 block, with the
 reason on stderr · 1 selftest failure.
 """
+import contextlib
+import io
 import json
 import os
 import re
@@ -146,10 +148,28 @@ REPORT_MODIFIERS = frozenset({
     "already", "earlier", "formerly", "last", "previously", "prior", "recently",
 })
 REPORT_POSTGROUP_MODIFIERS = frozenset({
-    "abruptly", "already", "consistently", "eventually", "immediately", "partially",
-    "previously", "recently", "repeatedly", "successfully", "ultimately", "unexpectedly",
+    "abruptly", "already", "cleanly", "consistently", "correctly", "eventually",
+    "finally", "fully", "gracefully", "immediately", "locally", "normally",
+    "partially", "previously", "quickly", "recently", "reliably", "repeatedly",
+    "silently", "slowly", "successfully", "ultimately", "unexpectedly",
     "unsuccessfully",
 })
+# After a closed aside, accept only bounded environment adjuncts before the activity's
+# predicate. Accepting arbitrary prepositional objects would let ``(nightly) in tests
+# failed`` replace the announced activity's subject and turn the guard fail-open.
+REPORT_POSTGROUP_CONTEXTS = {
+    "in": frozenset({
+        "ci", "dev", "development", "linux", "macos", "prod", "production",
+        "staging", "windows",
+    }),
+    "on": frozenset({"ci", "github", "linux", "macos", "runners", "windows"}),
+}
+# These result-tail introducers resolve an otherwise ambiguous grouped adjectival result:
+# ``audit: failed (three errors) after 4m`` reports the audit's result, while a bare noun
+# after the group (``failed (quarantined) tests``) still replaces the announced subject and
+# must not excuse it. ``in`` and ``on`` stay in the bounded context table above because
+# their object, unlike these adjunct shapes, is load-bearing to the distinction.
+REPORT_POSTGROUP_RESULT_TAILS = frozenset({"after", "at", "with"})
 REPORT_NONFINAL = frozenset({
     "a", "an", "the", "of", "for", "with", "on", "in", "from", "to", "by",
     "against", "because", "since", "after", "before", "when", "while", "although",
@@ -296,6 +316,13 @@ def report_group_separator(separator, group_stack):
 def adjectival_report_is_predicate(remainder, report_end, core_words):
     """Return whether an adjectival report token has a predicate-shaped continuation."""
     if REPORT_RESULT_TAIL.match(remainder, report_end):
+        # A group opener is also a valid result tail (``sweep failed (three errors)``),
+        # but after an unknown/count head it can instead modify a later activity noun:
+        # ``three failed (quarantined) tests``. Require the activity head before treating
+        # this ambiguous spelling as a predicate; the outer parser can then resume at
+        # ``tests`` and still accept a later direct predicate.
+        if report_group_follows(remainder, report_end):
+            return comma_subject_is_clear(core_words)
         return True
     comma = REPORT_COMMA_TAIL.match(remainder, report_end)
     if not comma:
@@ -304,6 +331,22 @@ def adjectival_report_is_predicate(remainder, report_end, core_words):
     # word was a predicate (``returning errors``) or another prenominal modifier
     # (``quarantined in CI tests``). Require the evidence before the report instead.
     return comma_subject_is_clear(core_words)
+
+
+def report_group_follows(remainder, position):
+    """Return whether the next undecorated character opens a supported group."""
+    while position < len(remainder) and remainder[position] in " \t\r\n*_":
+        position += 1
+    if position >= len(remainder) or remainder[position] == "\\":
+        return False
+    return remainder[position] == "`" or remainder[position] in REPORT_GROUP_PAIRS
+
+
+def soft_colon_predicate_bridge(separator, core_last, core_incomplete):
+    """Return whether a same-line colon may defer a complete activity's predicate."""
+    return ("\r" not in separator and "\n" not in separator
+            and core_last is not None and core_last not in REPORT_NONFINAL
+            and not core_incomplete and colon_label_pending(separator, "failed"))
 
 
 def reports_this_activity(unit, found):
@@ -325,6 +368,10 @@ def reports_this_activity(unit, found):
     url_active = False
     group_stack = []
     after_group = False
+    adjectival_group_modifier = False
+    colon_adjectival_candidate = False
+    colon_pending = False
+    context_preposition = None
     for token in REPORT_TOKEN.finditer(remainder):
         original_word = token.group(0)
         word = original_word.casefold()
@@ -358,9 +405,11 @@ def reports_this_activity(unit, found):
             # outer prose, and an in-group separator carries no outside text, so this
             # fires only on what precedes the opener. A pending colon label also stands,
             # because a token inside an aside cannot be the activity's direct predicate.
-            if report_separator_breaks(outside_separator, original_word):
+            group_colon = soft_colon_predicate_bridge(
+                outside_separator, core_last, core_incomplete)
+            if report_separator_breaks(outside_separator, original_word) and not group_colon:
                 return False
-            if colon_label_pending(outside_separator, original_word):
+            if colon_label_pending(outside_separator, original_word) and not group_colon:
                 return False
             # Tokens inside an aside cannot replace the announced activity's subject or
             # provide its completed-work predicate. Once the group closes, the next token
@@ -375,35 +424,78 @@ def reports_this_activity(unit, found):
             previous_word = word
             previous_end = token.end()
             continue
-        if not url_active and report_separator_breaks(outside_separator, original_word):
+        colon_bridge = (not url_active
+                        and soft_colon_predicate_bridge(
+                            outside_separator, core_last, core_incomplete)
+                        and (word in REPORT_POSTGROUP_MODIFIERS
+                             or word in REPORT_POSTGROUP_CONTEXTS))
+        if (not url_active
+                and report_separator_breaks(outside_separator, original_word)
+                and not colon_bridge):
+            if colon_adjectival_candidate and after_group:
+                return True
             return False
-        pending_colon = (not url_active
-                         and colon_label_pending(outside_separator, original_word))
+        if colon_bridge:
+            colon_pending = True
+        pending_colon = (colon_pending or (not url_active
+                         and colon_label_pending(outside_separator, original_word)))
         if url_active:
             # Locator tokens are neither clause words nor completed-work predicates.
             # Only the first whitespace-bearing separator releases prose parsing.
             previous_word = word
             previous_end = token.end()
             continue
+        if (colon_adjectival_candidate and after_group
+                and word in REPORT_POSTGROUP_RESULT_TAILS):
+            return True
         if word in REPORT_CLAUSE_WORDS:
             return False
-        if after_group and word not in REPORT_TERMS:
+        bridge_active = after_group or colon_pending
+        if context_preposition is not None:
+            if word not in REPORT_POSTGROUP_CONTEXTS[context_preposition]:
+                return False
+            context_preposition = None
+            previous_word = word
+            previous_end = token.end()
+            continue
+        if bridge_active and word not in REPORT_TERMS:
             if word in REPORT_POSTGROUP_MODIFIERS:
                 previous_word = word
                 previous_end = token.end()
                 continue
-            return False
+            if word in REPORT_POSTGROUP_CONTEXTS:
+                context_preposition = word
+                previous_word = word
+                previous_end = token.end()
+                continue
+            if adjectival_group_modifier:
+                # The group modified an earlier adjective, not the announced subject.
+                # Resume ordinary subject parsing at the following noun so a later direct
+                # predicate can still prove that the announced activity ran.
+                after_group = False
+                adjectival_group_modifier = False
+            else:
+                return False
         if word in REPORT_TERMS:
             if core_last is None or core_last in REPORT_NONFINAL or core_incomplete:
                 if pending_colon:
                     return False
                 previous_end = token.end()
                 continue
-            if (word in REPORT_ADJECTIVAL
-                    and not adjectival_report_is_predicate(
-                        remainder, token.end(), core_words)):
+            grouped_adjective = (word in REPORT_ADJECTIVAL
+                                 and report_group_follows(remainder, token.end()))
+            adjectival_predicate = (word in REPORT_ADJECTIVAL
+                                    and adjectival_report_is_predicate(
+                                        remainder, token.end(), core_words))
+            if grouped_adjective and pending_colon and adjectival_predicate:
+                colon_adjectival_candidate = True
+                previous_end = token.end()
+                continue
+            if word in REPORT_ADJECTIVAL and not adjectival_predicate:
                 if pending_colon:
                     return False
+                if report_group_follows(remainder, token.end()):
+                    adjectival_group_modifier = True
                 previous_end = token.end()
                 continue
             return True
@@ -418,6 +510,10 @@ def reports_this_activity(unit, found):
                 core_words.append(word)
         previous_word = word
         previous_end = token.end()
+    if colon_adjectival_candidate:
+        _, trailing_group_closed = report_group_separator(
+            remainder[previous_end:], group_stack)
+        return not group_stack and (after_group or trailing_group_closed)
     return False
 
 HANDBACK = re.compile(
@@ -705,6 +801,15 @@ def judge(payload):
 
 
 def selftest():
+    def graded_judge(payload, target=judge):
+        """Keep the terminal receipt when a production mutation raises."""
+        try:
+            return "completed", target(payload)
+        except EnvelopeDrift as exc:
+            return "drift", str(exc)
+        except BaseException as exc:
+            return "error", f"{type(exc).__name__}: {exc}"
+
     cases = [
         ("real violation, session 2026-08-12",
          {"last_assistant_message": "…needs the finding corrected, not the corpus.\n\n"
@@ -782,6 +887,155 @@ def selftest():
     ]
     failures = 0
     checks = 0
+    def exploding_judge(_payload):
+        raise RuntimeError("planted judge failure")
+
+    status, detail = graded_judge({}, exploding_judge)
+    ok = status == "error" and "planted judge failure" in detail
+    failures += 0 if ok else 1
+    checks += 1
+    print(f"  {'PASS' if ok else 'FAIL'} receipt-integrity  "
+          "a judge exception becomes a failed case, not a missing receipt")
+    original_judge, original_stdin = globals()["judge"], sys.stdin
+    internal_results = []
+    for planted in (
+            RuntimeError("planted runtime failure"),
+            SystemExit(0),
+            KeyboardInterrupt("planted interrupt")):
+        internal_stderr = io.StringIO()
+
+        def planted_judge(_payload, error=planted):
+            raise error
+
+        try:
+            globals()["judge"] = planted_judge
+            sys.stdin = io.StringIO(json.dumps({
+                "hook_event_name": "Stop", "last_assistant_message": "status",
+            }))
+            try:
+                with contextlib.redirect_stderr(internal_stderr):
+                    internal_exit = main([os.path.abspath(__file__)])
+                internal_error = ""
+            except BaseException as exc:
+                internal_exit = None
+                internal_error = f"{type(exc).__name__}: {exc}"
+        finally:
+            globals()["judge"] = original_judge
+            sys.stdin = original_stdin
+        receipt = internal_stderr.getvalue()
+        internal_results.append(
+            not internal_error and internal_exit == 2
+            and f"internal guard error ({type(planted).__name__})" in receipt
+            and (not str(planted).startswith("planted")
+                 or str(planted) not in receipt)
+            and "Traceback" not in receipt)
+    ok = all(internal_results)
+    failures += 0 if ok else 1
+    checks += 1
+    print(f"  {'PASS' if ok else 'FAIL'} unexpected judge exceptions block through main")
+    # Every supported delimiter must preserve both sides of the ambiguous group seam:
+    # a group after a prenominal report adjective cannot turn that adjective into a
+    # predicate, while the same group after a colon can defer a complete activity's
+    # predicate. Keeping the matrix generated from an explicit inventory makes a new
+    # delimiter a visible test-count change rather than an untested parser expansion.
+    group_spellings = (
+        ("parenthetical", "(", ")"),
+        ("bracketed", "[", "]"),
+        ("braced", "{", "}"),
+        ("curly-double", "“", "”"),
+        ("curly-single", "‘", "’"),
+        ("straight-double", '"', '"'),
+        ("straight-single", "'", "'"),
+        ("inline-code", "`", "`"),
+        ("double-inline-code", "``", "``"),
+    )
+    for spelling, opened, closed in group_spellings:
+        cases.extend((
+            (f"a {spelling} modifier cannot promote a failure adjective",
+             {"last_assistant_message":
+              f"Running the three failed {opened}quarantined{closed} tests."}, True),
+            (f"a colon can defer a predicate across a {spelling} subject aside",
+             {"last_assistant_message":
+              f"Running the checks: {opened}three tests{closed} failed, returning errors."},
+             False),
+            (f"a colon cannot promote a {spelling} group-modified failure adjective",
+             {"last_assistant_message":
+              f"Starting the audit: failed {opened}quarantined{closed} tests were found earlier."},
+             True),
+            (f"a colon retains a {spelling} predicate result group",
+             {"last_assistant_message":
+              f"Starting the audit: failed {opened}three errors{closed}."}, False),
+        ))
+    cases += [
+        ("a colon predicate result group can contain a nested group",
+         {"last_assistant_message":
+          "Starting the audit: failed (three [known] errors)."}, False),
+        ("a colon predicate result group can be empty",
+         {"last_assistant_message": "Starting the audit: failed ()."}, False),
+        ("an unclosed colon predicate result group is not evidence",
+         {"last_assistant_message": "Starting the audit: failed (three errors."}, True),
+        ("a colon predicate result group retains a terminal modifier",
+         {"last_assistant_message":
+          "Starting the audit: failed (three errors) unexpectedly."}, False),
+        ("a colon predicate result group retains a duration adjunct",
+         {"last_assistant_message":
+          "Starting the audit: failed (three errors) after 4m."}, False),
+        ("a colon predicate result group retains a timestamp adjunct",
+         {"last_assistant_message":
+          "Starting the audit: failed (three errors) at 12:04."}, False),
+        ("a colon predicate result group retains a result-object adjunct",
+         {"last_assistant_message":
+          "Starting the audit: failed (three errors) with a traceback."}, False),
+        ("a closed colon predicate result group survives a hard clause boundary",
+         {"last_assistant_message":
+          "Starting the audit: failed (three errors); recorded earlier."}, False),
+        ("a colon modifier cannot promote a grouped failure adjective",
+         {"last_assistant_message":
+          "Starting the audit: finally failed (quarantined) tests were found earlier."},
+         True),
+        ("a grouped pass adjective cannot replace the colon-labelled activity",
+         {"last_assistant_message":
+          "Running the audit: passed [archived] checks were found earlier."}, True),
+        ("an adjective group can resume at its noun before a later predicate",
+         {"last_assistant_message":
+          "Running the three failed (quarantined) tests completed in 4m."}, False),
+        ("a common post-group adverb preserves the activity predicate",
+         {"last_assistant_message": "Running the audit (nightly) finally completed."},
+         False),
+        ("a second common post-group adverb preserves the activity predicate",
+         {"last_assistant_message": "Running the audit (nightly) quickly failed."}, False),
+        ("a third common post-group adverb preserves the activity predicate",
+         {"last_assistant_message": "Running the audit (nightly) reliably passed."}, False),
+        ("a silent post-group adverb preserves the activity predicate",
+         {"last_assistant_message": "Running the audit (nightly) silently completed."},
+         False),
+        ("a graceful post-group adverb preserves the activity predicate",
+         {"last_assistant_message": "Running the audit (nightly) gracefully failed."},
+         False),
+        ("a local colon adverb preserves the activity predicate",
+         {"last_assistant_message": "Starting the audit: locally completed."}, False),
+        ("a bounded CI adjunct preserves the post-group predicate",
+         {"last_assistant_message": "Running the audit (nightly) in CI failed."}, False),
+        ("a colon after a group can defer across a predicate modifier",
+         {"last_assistant_message":
+          "Running the audit (nightly): unexpectedly failed."}, False),
+        ("a direct colon can defer across a predicate modifier",
+         {"last_assistant_message": "Starting the audit: finally completed."}, False),
+        ("an unknown post-group context cannot replace the activity subject",
+         {"last_assistant_message": "Running the audit (nightly) in tests failed."}, True),
+        ("an unknown direct-colon context cannot replace the activity subject",
+         {"last_assistant_message": "Starting the audit: in tests failed."}, True),
+        ("a newline keeps a colon from deferring into a group",
+         {"last_assistant_message": "Starting the audit:\n(three tests) failed."}, True),
+        ("a noun after a colon group cannot replace the activity subject",
+         {"last_assistant_message": "Starting the audit: (prior) tests failed."}, True),
+        ("a colon ending a URL is prose punctuation",
+         {"last_assistant_message":
+          "Starting the audit at https://x.test: failed checks were found earlier."}, True),
+        ("a semicolon ending a URL is prose punctuation",
+         {"last_assistant_message":
+          "Starting the audit at https://x.test; failed checks were found earlier."}, True),
+    ]
     cases += [
         # Envelope drift. Silently allowing here would make the gate pass every
         # turn forever while reading as a healthy hook - the exact
@@ -1443,8 +1697,8 @@ def selftest():
         ("a clause trigger carries the lead that anchored it",
          "The gate is green; starting the IR-38 audit.", "; starting the"),
     ):
-        got = judge({"last_assistant_message": message})
-        ok = got == trigger
+        status, got = graded_judge({"last_assistant_message": message})
+        ok = status == "completed" and got == trigger
         failures += 0 if ok else 1
         checks += 1
         print(f"  {'PASS' if ok else 'FAIL'} {label} -> {got!r}")
@@ -1477,10 +1731,11 @@ def selftest():
             checks += 1
             print(f"  {'PASS' if got == want else 'FAIL'} {name} -> {got}")
             continue
-        try:
-            got = judge(payload) is not None
-        except EnvelopeDrift:
-            got = "drift"
+        status, value = graded_judge(payload)
+        if status == "completed":
+            got = value is not None
+        else:
+            got = status
         if got != want:
             failures += 1
         checks += 1
@@ -1954,6 +2209,47 @@ def selftest():
          "Running the checks 'three tests' failed, returning errors.", 0, None),
         ("preserves a modified predicate after a straight-single-quoted subject",
          "Running the audit 'Nightly' unexpectedly failed.", 0, None),
+        ("blocks a group-modified failure adjective before the activity noun",
+         "Running the three failed (quarantined) tests.", 2, "Running the"),
+        ("preserves a colon-deferred predicate after a subject aside",
+         "Running the checks: (three tests) failed, returning errors.", 0, None),
+        ("blocks a colon group-modified failure adjective",
+         "Starting the audit: failed (quarantined) tests were found earlier.", 2,
+         "Starting the"),
+        ("preserves a colon predicate result group",
+         "Starting the audit: failed (three errors).", 0, None),
+        ("preserves a colon predicate result-group duration adjunct",
+         "Starting the audit: failed (three errors) after 4m.", 0, None),
+        ("preserves a colon predicate result-group timestamp adjunct",
+         "Starting the audit: failed (three errors) at 12:04.", 0, None),
+        ("preserves a colon predicate result-group object adjunct",
+         "Starting the audit: failed (three errors) with a traceback.", 0, None),
+        ("preserves a colon-deferred modifier after a subject aside",
+         "Running the audit (nightly): unexpectedly failed.", 0, None),
+        ("preserves a direct colon predicate modifier",
+         "Starting the audit: finally completed.", 0, None),
+        ("preserves a later predicate after an adjective group",
+         "Running the three failed (quarantined) tests completed in 4m.", 0, None),
+        ("preserves a common post-group predicate modifier",
+         "Running the audit (nightly) finally completed.", 0, None),
+        ("preserves a silent post-group predicate modifier",
+         "Running the audit (nightly) silently completed.", 0, None),
+        ("preserves a graceful post-group predicate modifier",
+         "Running the audit (nightly) gracefully failed.", 0, None),
+        ("preserves a local direct-colon predicate modifier",
+         "Starting the audit: locally completed.", 0, None),
+        ("preserves a bounded post-group CI adjunct",
+         "Running the audit (nightly) in CI failed.", 0, None),
+        ("blocks an unknown post-group context",
+         "Running the audit (nightly) in tests failed.", 2, "Running the"),
+        ("blocks an unknown direct-colon context",
+         "Starting the audit: in tests failed.", 2, "Starting the"),
+        ("blocks a report after a URL-ending colon",
+         "Starting the audit at https://x.test: failed checks were found earlier.", 2,
+         "Starting the"),
+        ("blocks a report after a URL-ending semicolon",
+         "Starting the audit at https://x.test; failed checks were found earlier.", 2,
+         "Starting the"),
     )
     for shape in ("string", "content", "bare"):
         for label, message, want, trigger in group_process_cases:
@@ -2195,6 +2491,12 @@ def main(argv):
         if off:
             return 0
         print(DRIFT_MSG.format(v=VERSION, why=str(exc)), file=sys.stderr)
+        return 2
+    except BaseException as exc:
+        if off:
+            return 0
+        why = f"internal guard error ({type(exc).__name__})"
+        print(DRIFT_MSG.format(v=VERSION, why=why), file=sys.stderr)
         return 2
     if not trigger or off:
         return 0

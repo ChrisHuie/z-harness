@@ -132,9 +132,9 @@ DESC_CAP = 400                # house cap (spec ceiling is 1024)
 # checks=111, so a suite can be gutted with nothing failing. Raise a floor in the same
 # commit that adds the checks; lowering one is a deliberate, reviewable edit.
 SELFTEST_SUITES = [
-    ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"], 1366),
+    ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"], 1367),
     ("askq_timeout_guard", ["hooks/askq_timeout_guard.py", "--selftest"], 13),
-    ("announced_work_guard", ["hooks/announced_work_guard.py", "--selftest"], 569),
+    ("announced_work_guard", ["hooks/announced_work_guard.py", "--selftest"], 690),
     ("harness_report", ["hooks/harness_report.py", "--selftest"], 12),
     ("cc-cost", ["tools/cc-cost.py", "--selftest"], 8),
     ("codex-cost", ["tools/codex-cost.py", "--selftest"], 28),
@@ -145,10 +145,12 @@ SELFTEST_SUITES = [
      ["tools/verify-review-publication.py", "--selftest"], 94),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
-    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 354),
+    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 355),
     ("write-mutation-receipt",
-     ["tools/write-mutation-receipt.py", "--selftest"], 65),
+     ["tools/write-mutation-receipt.py", "--selftest"], 76),
     ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 65),
+    ("enumerate-survivors", ["instruments/enumerate_survivors.py", "--selftest"], 28),
+    ("fuzz-judge-diff", ["instruments/fuzz_judge_diff.py", "--selftest"], 26),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
     ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 88),
     ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 1149),
@@ -159,14 +161,17 @@ SELFTEST_SUITES = [
 def expected_selftest_checks(name):
     """Exact execution-derived counts for suites whose former formulas hid probes."""
     fixed = {
-        "ci-gate": 354,
+        "announced_work_guard": 690,
+        "ci-gate": 355,
+        "enumerate-survivors": 28,
+        "fuzz-judge-diff": 26,
         "spawn_preflight_guard": 88,
         "verify-review-publication": 94,
     }
     if name in fixed:
         return fixed[name]
     if name == "bash_command_guard":
-        return 1366
+        return 1367
     if name == "zsh_rev_modifier_guard":
         return 487
     if name != "git_grep_engine_guard":
@@ -191,7 +196,7 @@ def expected_selftest_checks(name):
 # Registered where the 15 s default leaves no headroom for a slower runner. Measured
 # on the authoring host: bash_command_guard 27 s, git_grep_engine_guard 7.3 s (its
 # byte-cap, token and subcommand fixtures parse real megabyte-scale sources, and it
-# probes the installed git and zsh), announced_work_guard 10.9 s (553 proofs include
+# probes the installed git and zsh), announced_work_guard 10.9 s (690 proofs include
 # real Stop-process envelopes), ci-gate 20.8 s. C1 requires each to finish inside
 # SELFTEST_TIMEOUT_MARGIN of its budget, so these are ceilings with room, not targets.
 SELFTEST_TIMEOUTS = {
@@ -986,7 +991,7 @@ class Run:
         exemptions = SELFTEST_EXEMPTIONS if exemptions is None else exemptions
         aggregated = {cmd[0] for _name, cmd, _floor in suites}
         actual = set()
-        for rel_root in ("hooks", "tools"):
+        for rel_root in ("hooks", "tools", "instruments"):
             base = os.path.join(self.root, rel_root)
             if not os.path.isdir(base):
                 continue
@@ -1988,7 +1993,7 @@ def selftest():
             observed_timeouts.append(kwargs.get("timeout"))
             return subprocess.CompletedProcess(
                 args[0], 0,
-                b"SELFTEST-SUMMARY suite=bash_command_guard checks=1366 failures=0\n",
+                b"SELFTEST-SUMMARY suite=bash_command_guard checks=1367 failures=0\n",
                 b"")
         subprocess.run = record_c1_timeout
         try:
@@ -2019,13 +2024,13 @@ def selftest():
             announced_timeouts.append(kwargs.get("timeout"))
             return subprocess.CompletedProcess(
                 args[0], 0,
-                b"SELFTEST-SUMMARY suite=announced_work_guard checks=553 failures=0\n",
+                b"SELFTEST-SUMMARY suite=announced_work_guard checks=690 failures=0\n",
                 b"")
         subprocess.run = record_announced_timeout
         try:
             c1_announced_timeout = Run(td, ci=True)
             c1_announced_timeout.c1_selftests(
-                [("announced_work_guard", [stub_suite], 553)],
+                [("announced_work_guard", [stub_suite], 690)],
                 sources=planted_sources("announced_work_guard", stub_suite))
         finally:
             subprocess.run = original_subprocess_run
@@ -2041,7 +2046,7 @@ def selftest():
             time.sleep(0.05)
             return subprocess.CompletedProcess(
                 args[0], 0,
-                b"SELFTEST-SUMMARY suite=bash_command_guard checks=1366 failures=0\n",
+                b"SELFTEST-SUMMARY suite=bash_command_guard checks=1367 failures=0\n",
                 b"")
         subprocess.run = slow_run
         try:

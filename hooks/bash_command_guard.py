@@ -227,6 +227,32 @@ def _budget_note(faults, runs):
 def selftest():
     """Run every sub-guard's own suite. Fails if any fails, or if a suite is empty."""
     total = failures = 0
+
+    def graded_decide(command, target=decide):
+        """Turn a production exception into a failed case without losing the receipt."""
+        try:
+            return target(command)
+        except BaseException as exc:
+            return "<error>", f"{type(exc).__name__}: {exc}"
+
+    def graded_payload(payload, runtime="claude"):
+        """Keep envelope assertions running when their production path raises."""
+        try:
+            return evaluate_payload(payload, runtime=runtime)
+        except BaseException:
+            return None
+
+    class ExplodingFixture:
+        @staticmethod
+        def decide(_command):
+            raise RuntimeError("planted fixture failure")
+
+    got, reason = graded_decide("echo safe", ExplodingFixture.decide)
+    ok = got == "<error>" and "planted fixture failure" in reason
+    total += 1
+    failures += (not ok)
+    print(f"  {'PASS' if ok else 'FAIL'} receipt-integrity  "
+          "a fixture exception becomes a failed case, not a missing receipt")
     for name, mod in GUARDS:
         fixtures = getattr(mod, "FIXTURES", None)
         if not fixtures:
@@ -234,13 +260,13 @@ def selftest():
             failures += 1
             continue
         for label, cmd, want in fixtures:          # (label, command, expected)
-            got, _ = mod.decide(cmd)
+            got, _ = graded_decide(cmd, mod.decide)
             ok = got == want
             total += 1
             failures += (not ok)
             print(f"  {'PASS' if ok else 'FAIL'} {name:<18} want={want:<5} got={got:<5} {label}")
     for label, cmd, want in COMPOSITE_FIXTURES:
-        got, _ = decide(cmd)
+        got, _ = graded_decide(cmd)
         ok = got == want
         total += 1
         failures += (not ok)
@@ -248,7 +274,7 @@ def selftest():
               f"got={got:<5} {label}")
     # the merge itself must be exercised, not just the parts
     both = 'git show $sha:src/x.py && git grep -nE "def \\bfoo"'
-    got, reason = decide(both)
+    got, reason = graded_decide(both)
     ok = got == "deny" and reason.count("\n\n") >= 1
     total += 1
     failures += (not ok)
@@ -256,7 +282,7 @@ def selftest():
           f"both predicates fire, both reasons returned")
     payload = {"hook_event_name": "PreToolUse", "model": "gpt-test",
                "tool_name": "Bash", "tool_input": {"command": "git show $sha:tests/x"}}
-    output = evaluate_payload(payload)
+    output = graded_payload(payload)
     ok = (output is not None and
           output["hookSpecificOutput"]["permissionDecision"] == "deny")
     total += 1
@@ -267,7 +293,7 @@ def selftest():
         "tool_name": "Bash",
         "tool_input": {"command": "git grep -nE -f patterns.txt -- src/"},
     }
-    output = evaluate_payload(ask_payload, runtime="codex")
+    output = graded_payload(ask_payload, runtime="codex")
     decision = (output or {}).get("hookSpecificOutput", {}).get("permissionDecision")
     reason = (output or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
     ok = decision == "deny" and "fails closed" in reason
@@ -1269,7 +1295,7 @@ def selftest():
 
     grep_guard.annotate_function_declarations = counting_annotate
     try:
-        public_cache_ok = (decide(cache_probe_source)[0] == "allow"
+        public_cache_ok = (graded_decide(cache_probe_source)[0] == "allow"
                            and len(annotation_calls) == 1)
     finally:
         grep_guard.annotate_function_declarations = original_annotate
@@ -1287,7 +1313,7 @@ def selftest():
     original_guards = list(GUARDS)
     GUARDS[:] = [("first", DeadlineGuard), ("second", DeadlineGuard)]
     try:
-        shared_deadline_ok = decide("/bin/echo safe")[0] == "allow"
+        shared_deadline_ok = graded_decide("/bin/echo safe")[0] == "allow"
     finally:
         GUARDS[:] = original_guards
     shared_deadline_ok = (shared_deadline_ok and len(seen_deadlines) == 2
@@ -1299,7 +1325,7 @@ def selftest():
           "both predicates receive one outer monotonic deadline")
 
     oversized = "echo " + ("x" * grep_guard.MAX_COMMAND_CHARS)
-    got, reason = decide(oversized)
+    got, reason = graded_decide(oversized)
     ok = got == "ask" and "parse limit" in reason
     total += 1
     failures += (not ok)
@@ -1311,7 +1337,7 @@ def selftest():
             raise RuntimeError("planted predicate fault")
     GUARDS.append(("planted_broken_guard", BrokenGuard))
     try:
-        got, reason = decide("echo safe")
+        got, reason = graded_decide("echo safe")
     finally:
         GUARDS.pop()
     ok = got == "deny" and "predicate failed" in reason
@@ -1328,7 +1354,7 @@ def selftest():
             raise grep_guard.CommandParseError("planted escaping parse error")
     GUARDS.append(("planted_parse_error_guard", ParseErrorGuard))
     try:
-        got, reason = decide("echo safe")
+        got, reason = graded_decide("echo safe")
     finally:
         GUARDS.pop()
     ok = got == "deny" and "predicate failed" in reason
@@ -1343,7 +1369,7 @@ def selftest():
     GUARDS.append(("planted_exiting_guard", ExitingGuard))
     try:
         try:
-            got, reason = decide("echo safe")
+            got, reason = graded_decide("echo safe")
         except BaseException as exc:
             got, reason = "propagated", repr(exc)
     finally:

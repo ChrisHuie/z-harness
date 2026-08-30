@@ -151,6 +151,8 @@ python3 tools/run-skill-evals.py --selftest
 python3 tools/run-skill-evals.py --validate
 python3 tools/render-packages.py --selftest
 python3 tools/verify-review-publication.py --selftest
+python3 instruments/enumerate_survivors.py --selftest
+python3 instruments/fuzz_judge_diff.py --selftest
 python3 tools/ci-gate.py --selftest
 python3 tools/ci-gate.py
 ```
@@ -196,6 +198,42 @@ headless model scenarios and spends API budget, so it remains manual.
 
 Document quote/citation scans are also manual because they require the target document, artifact
 root, and session transcript. Their detector selftest is blocking through C1.
+
+The mutation-development instruments are also bound into C1 by source digest and exact selftest
+count, while their full exploratory runs remain explicit. Keep their JSON outside the checkout:
+
+```text
+python3 instruments/enumerate_survivors.py hooks/announced_work_guard.py hooks/fixtures_stop \
+  > /tmp/announced-work-survivors.json
+python3 instruments/fuzz_judge_diff.py /path/to/oracle.py hooks/announced_work_guard.py 17 10000 \
+  > /tmp/announced-work-fuzz.json
+```
+
+`enumerate_survivors.py` first requires one complete green pristine receipt, then mutates each
+top-level function except the selftest and CLI runner. It records target, fixture-tree, plan, and
+instrument hashes. A semantic kill requires the same suite and check count, a positive failure
+count, and assertion-failure exit 1; a timeout, crash, missing receipt, count drift, source drift,
+any other exit, or setup failure exits 2 as an instrument error. Fixture roots and descendants
+containing symlinks are rejected, as are Python bytecode caches. The completed private destination
+is checked against the recorded digest before an isolated interpreter executes it and checked again
+afterward. This binds the starting and ending private snapshots, not transient changes restored by
+the code under test or arbitrary files it reads outside those declared copies. A complete
+measurement exits 0 and reports survivors in JSON rather than treating coverage debt as tool
+failure.
+
+`fuzz_judge_diff.py` captures the instrument, oracle, and candidate bytes once, creates and
+post-verifies a separate private worker snapshot for each guard, and compiles each guard directly
+without import bytecode. Runtime `__file__` reads resolve to that private guard while the original
+path is retained only as the compile filename for tracebacks. It deterministically covers every
+grammar production and supported group
+spelling before random generation, and retains every case in the JSON report with source, grammar,
+message-corpus, and instrument hashes. It exits 1 only when the candidate changes a block into an
+allow, exits 2 on instrument failure, and reports allow-to-block and block-reason changes separately
+without collapsing them into that safety verdict. The accepted count range is 12–100,000; the
+mandatory prefix includes every production and renders every supported delimiter spelling. Use
+multiple recorded seeds instead of one unbounded worker allocation. Source symlinks are rejected;
+source hashes bind the two top-level guard files and their runtime `__file__` reads, not imported
+standard-library or installed-package code.
 
 ## Mechanics worth knowing
 

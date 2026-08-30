@@ -2,6 +2,8 @@
 
 Swept sources: `hooks/announced_work_guard.py`, `hooks/bash_command_guard.py`, `hooks/guards/git_grep_engine_guard.py`, `hooks/guards/zsh_rev_modifier_guard.py`, `tools/repository_ownership.py`. No other repository file is mutated by this sweep, so the exclusions listed at the end enumerate symbols inside these sources only.
 
+Collections are enumerated for `hooks/bash_command_guard.py`, `hooks/guards/git_grep_engine_guard.py`, `hooks/guards/zsh_rev_modifier_guard.py`. `hooks/announced_work_guard.py`, `tools/repository_ownership.py` carry site mutations only: no collection in them is enumerated, so none appears in the exclusions below -- and for a collection in these sources, absence from that list is not evidence it was mutated.
+
 | module | guarded set | elements | caught | survived |
 |---|---|---:|---:|---:|
 | `bash_command_guard.py` | `GUARDS` | 2 | 2 | 0 |

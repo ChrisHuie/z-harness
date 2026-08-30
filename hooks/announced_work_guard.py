@@ -33,6 +33,28 @@ the break is; that asymmetry is in the anchor set, not in a rule about colons.
 Blocking here costs one turn; missing costs the user's trust in every status
 line, which is why it is tuned to fire.
 
+One more limit, stated because the list above does not imply it. A
+postnominal relative clause can supply a subject other than the announced
+activity and still excuse the announcement, because the relativizer that would
+mark the clause is optional in English. `Continuing with the checks that the
+sweep produced.` blocks, since `that` is a clause word; drop it and
+`Continuing with the checks the sweep produced.` allows. This holds for ALL
+fourteen completed-work tokens, including the four that also work as prenominal
+adjectives: their extra follow-test does run here, and passes -- the relative clause
+supplies a predicate-shaped continuation, so the test that separates them elsewhere
+sees nothing wrong. That four/ten
+split bites in a different position: `Running the audit completed tests.`
+blocks while `Running the audit produced tests.` allows. Closing the relative
+clause needs a reading of coordinated predicates and zero-relativizer
+complements that this heuristic does not have: a bare lookahead for a following
+finite verb blocks `Running the migration landed and is now green.` instead,
+which reports finished work. No turn in the local corpus has taken this path --
+and none has taken any other completed-work path either, so that bounds the
+whole mechanism rather than this branch. `--sweep` prints the corpus size
+behind that; the zero itself needs `reports_this_activity` instrumented,
+which is a procedure rather than a command. Both move with every session, so
+what regenerates them is recorded here and no figure is.
+
 CONTRACT, VERIFIED THREE WAYS rather than read once. (1) In-binary against
 Claude Code 2.1.227. (2) Against a REAL captured Stop envelope, shipped as
 hooks/fixtures_stop/S1_stop_real_envelope.json and asserted field-by-field in the

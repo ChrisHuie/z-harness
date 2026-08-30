@@ -1,7 +1,7 @@
 {
   "note": "sha256 of each aggregated selftest suite's source. The check count in a receipt is self-reported, so an eight-line stub printing a passing receipt satisfied the floor and the whole gate went green. Under a workflow that invokes the authentic harness/ci-gate pair, this binding detects an isolated suite or runner replacement that merely claims to have run. It is not independent attestation against an in-repository workflow edit that bypasses those runners; reviewer diff inspection or an externally administered required workflow remains that trust root. Update an entry in the same commit that changes its tool, and review the diff: this file is authored, never generated from whatever is on disk.",
   "suites": {
-    "announced_work_guard": "20dd523cc10215d359b14ebb985eb98e08e865b2cb9a166cbab7658c70a41884",
+    "announced_work_guard": "59b777b49dedded7c04e666c9c68f6acaca2a7e28f590811ebee24201ccd280e",
     "askq_timeout_guard": "85c136dc24f3b4f41a60987b8abecb97779e209e49c4e29e74a5d46174d695ef",
     "bash_command_guard": "4dbd2f3857241ace4d7ae588775ce8e07267b3943cda59c5bcaabde4a40993d5",
     "cc-cost": "972b0122b5f84de10f41915a133132f555b943c46061d91b07e3f7b534a4d003",
@@ -10,9 +10,9 @@
     "codex-cost": "fc46c95da8babd276e705c9578c5857a6563588b588da540ea4222c2c6ca793c",
     "codex_session_start": "b9dbedba94d623304ef97ca1b13a14b2f7b000cc98f35e016448ed4c85030567",
     "enumerate-survivors": "77993a5bf38e672a47723abe4bf28d12ff87e215de1d2687787aeb58d5d58f03",
-    "fuzz-judge-diff": "8f4ff1b8e214877a436019b72680754db7df5b316f1898482d3dc212557efcd1",
+    "fuzz-judge-diff": "215481134f96ac2332401645c6020aaa602a50008c0a2716751402616f14d93f",
     "git_grep_engine_guard": "2fa728eb17d041bdf1c4f38fc6416f0bbf90df7d122ba3b1da15b1aa4c254bd0",
-    "harness_check": "be52143aa8d22a030b704b210f3571ec2f4a1808fdc27f46ce3b87c1a8eea47e",
+    "harness_check": "55a50ea25408eed56cba6aa78f447e3328b0aafb10d6c1ccae5a141c7ba6354b",
     "harness_report": "eec022de9c2f7dec81c612e751dac472f2f8b695029d627784e7e5d840312cbc",
     "portable-conformance": "8eb48510971d0e4f7371cd7a4d16c41850e8e1324a739b70b71d3b85c5823606",
     "pr-delivery-state": "da5293b7134b159c1b6bb91b67c40193550076c908db8e185ddcb9d82011fe6b",
@@ -21,7 +21,7 @@
     "run-skill-evals": "38115603816e7698926a290d401179c3db2f4f5ffa12b49e2bfe04b3f294a508",
     "spawn_preflight_guard": "8febf4d3e9e47061d31dc8ed45ed9ac60cccf0b22b360cd100854e8ad87c19b6",
     "verify-review-publication": "fb7a4b95248de1f664180ad0598a54778591f321963b2265e734b37ff7bcd455",
-    "write-mutation-receipt": "a9bbe8e5d9ef90feabc779c518238b3aef439ec87cfdc27da396755e55b80011",
+    "write-mutation-receipt": "648314d615c31c72690b3b5e979714ed1657f235d66b3b194fe9be9a37af3e64",
     "zsh_rev_modifier_guard": "a056e1f8375467c6c7a6b878aff858c257b44c10faaeb0fa3bb685d073c0fb9c"
   }
 }

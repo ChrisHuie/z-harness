@@ -227,9 +227,15 @@ without import bytecode. Runtime `__file__` reads resolve to that private guard 
 path is retained only as the compile filename for tracebacks. It deterministically covers every
 grammar production and supported group
 spelling before random generation, and retains every case in the JSON report with source, grammar,
-message-corpus, and instrument hashes. It exits 1 only when the candidate changes a block into an
-allow, exits 2 on instrument failure, and reports allow-to-block and block-reason changes separately
-without collapsing them into that safety verdict. The accepted count range is 12–100,000; the
+message-corpus, and instrument hashes. In comparison mode it exits 1 only when the candidate changes a block into an
+allow, exits 2 on instrument failure -- including a run whose oracle blocked nothing, which could only
+have classified every case as agreement or allow-to-block -- and reports allow-to-block and block-reason changes separately
+without collapsing them into that safety verdict. Its grammar carries near-miss tokens drawn from
+outside the guard's tables. The mandatory prefix pins every one, so a widening that admits
+one of those tokens diverges at the minimum case count rather than needing a large run. That
+guarantee covers three of the guard's collections; a widening elsewhere may still diverge by
+chance, and a clean run over an unpinned collection is not evidence of coverage. The accepted count range runs from the
+mandatory-case count to 100,000; the
 mandatory prefix includes every production and renders every supported delimiter spelling. Use
 multiple recorded seeds instead of one unbounded worker allocation. Source symlinks are rejected;
 source hashes bind the two top-level guard files and their runtime `__file__` reads, not imported

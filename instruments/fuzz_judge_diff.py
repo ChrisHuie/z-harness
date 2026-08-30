@@ -21,7 +21,9 @@ import tempfile
 import types
 
 
-SCHEMA_VERSION = 1
+# 2: the report gained oracle_blocks, the count that says whether a clean verdict was
+# measured or merely entailed. Additive, but the shape changed, so the version does too.
+SCHEMA_VERSION = 2
 MAX_CASES = 100_000
 OPENERS = (
     "Starting the", "Running the", "Proceeding with the", "Continuing on the",
@@ -69,6 +71,11 @@ PRODUCTIONS = (
     "empty-group",
     "post-group-modifier",
     "colon-group-result-tail",
+    "post-group-context",
+    "colon-bridge-report",
+    "post-group-near-miss",
+    "colon-context-near-miss",
+    "report-term-near-miss",
 )
 GROUP_PRODUCTIONS = frozenset({
     "adjective-group-noun",
@@ -79,32 +86,96 @@ GROUP_PRODUCTIONS = frozenset({
     "empty-group",
     "post-group-modifier",
     "colon-group-result-tail",
+    "post-group-context",
+    "post-group-near-miss",
 })
 POSTGROUP_MODIFIERS = (
     "finally", "gracefully", "locally", "quickly", "reliably", "silently",
     "unexpectedly",
 )
+# The guard admits a bounded environment adjunct between a closed aside and the activity's
+# predicate, and ten completed-work verbs that are NOT prenominal adjectives. The context
+# adjunct had no production at all. The verbs fared differently: four reached only `flat`,
+# five reached no production, and `found` was spelled into the url-ending-punctuation
+# string -- but none of them landed where a bridged predicate is read, which is the position
+# that matters. Generating an in-table token detects that table NARROWING.
+#
+# The near-miss tuples below give the WIDENING direction for REPORT_POSTGROUP_MODIFIERS,
+# REPORT_POSTGROUP_CONTEXTS and REPORT_TERMS: each token is pinned, so admitting one of them
+# diverges at the minimum case count. That is a guarantee for those three tables and those
+# tokens, and it is the only guarantee here. Widening anything else may or may not diverge,
+# depending on whether some grammar string happens to spell the admitted token into a
+# position the guard reads -- measured, `REPORT_ACTIVITY_HEADS` widened with `three` is
+# caught that way, and `REPORT_TERMS` widened with a non-near-miss token is too. Do not read
+# a clean run over an unpinned table as coverage.
+POSTGROUP_CONTEXTS = (
+    ("in", "CI"), ("in", "production"), ("in", "staging"),
+    ("on", "GitHub"), ("on", "macos"),
+)
+# The tokens these contribute -- the adverbs, the context OBJECTS, the report verbs -- sit
+# outside every uppercase collection in the guard on purpose, not merely outside the table
+# each probes, because a token carrying meaning in a sibling table can block for that reason
+# instead and score a control that cannot fail. The context PREPOSITIONS (`in`, `on`) are
+# necessarily the guard's own: they are the keys its context table is indexed by. A grammar seeded only from
+# the tables it tests can detect a narrowed table (a generated token stops being admitted)
+# but never a widened one, because it never emits the token a widening would newly admit --
+# the same blind spot a deletion-only mutation operator has. These near-misses are the allow-direction
+# control: each must block today, and starts allowing the moment its table grows to cover it.
+NEAR_MISS_TERMS = ("emitted", "surfaced", "yielded")
+NEAR_MISS_MODIFIERS = ("hastily", "briskly", "loudly", "oddly", "wearily")
+NEAR_MISS_CONTEXTS = (("in", "qa"), ("in", "docker"), ("on", "sandbox"), ("on", "disk"))
+NONADJECTIVAL_TERMS = (
+    "found", "landed", "produced", "ran", "reproduced",
+    "returned", "showed", "stayed", "took", "wrote",
+)
+# Maps each near-miss production to the tuple its `pin` indexes, so the prefix-coverage
+# check reads the same pairing `generated_case` does rather than a second copy of it.
+MANDATORY_VOCABULARIES = {
+    "post-group-near-miss": NEAR_MISS_MODIFIERS,
+    "colon-context-near-miss": NEAR_MISS_CONTEXTS,
+    "report-term-near-miss": NEAR_MISS_TERMS,
+}
 POSTGROUP_RESULT_TAILS = (
     ("after", "4m"),
     ("at", "12:04"),
     ("with", "a traceback"),
 )
 # Every production runs once, and every recorded group is rendered in the message.
-# The last two cases close the delimiter inventory left by the production inventory.
+# The three post-group-modifier entries close the delimiter inventory the production
+# inventory leaves open; the near-miss entries after them pin vocabulary, not delimiters.
 MANDATORY_CASES = (
-    ("flat", None),
-    ("adjective-group-noun", "parenthetical"),
-    ("colon-group-predicate", "bracketed"),
-    ("predicate-group-result", "braced"),
-    ("outer-break-group", "curly-double"),
-    ("nested-group", "curly-single"),
-    ("url-ending-punctuation", None),
-    ("empty-group", "straight-double"),
-    ("post-group-modifier", "straight-single"),
-    ("post-group-modifier", "inline-code"),
-    ("post-group-modifier", "double-inline-code"),
-    ("colon-group-result-tail", "parenthetical"),
+    ('flat', None, None),
+    ('adjective-group-noun', 'parenthetical', None),
+    ('colon-group-predicate', 'bracketed', None),
+    ('predicate-group-result', 'braced', None),
+    ('outer-break-group', 'curly-double', None),
+    ('nested-group', 'curly-single', None),
+    ('url-ending-punctuation', None, None),
+    ('empty-group', 'straight-double', None),
+    ('post-group-modifier', 'straight-single', None),
+    ('post-group-modifier', 'inline-code', None),
+    ('post-group-modifier', 'double-inline-code', None),
+    ('colon-group-result-tail', 'parenthetical', None),
+    ('post-group-context', 'parenthetical', None),
+    ('colon-bridge-report', None, None),
+    ('post-group-near-miss', 'parenthetical', 0),
+    ('post-group-near-miss', 'parenthetical', 1),
+    ('post-group-near-miss', 'parenthetical', 2),
+    ('post-group-near-miss', 'parenthetical', 3),
+    ('post-group-near-miss', 'parenthetical', 4),
+    ('colon-context-near-miss', None, 0),
+    ('colon-context-near-miss', None, 1),
+    ('colon-context-near-miss', None, 2),
+    ('colon-context-near-miss', None, 3),
+    ('report-term-near-miss', None, 0),
+    ('report-term-near-miss', None, 1),
+    ('report-term-near-miss', None, 2),
 )
+FLAT_SHARE = 0.35
+# Drawing the non-flat case from PRODUCTIONS re-drew `flat`, so the realized share was
+# FLAT_SHARE + (1 - FLAT_SHARE)/len(PRODUCTIONS) and still shrank as productions were
+# added -- a floor, not the pin the share is meant to be.
+STRUCTURED_PRODUCTIONS = tuple(p for p in PRODUCTIONS if p != "flat")
 MIN_CASES = len(MANDATORY_CASES)
 GROUP_BY_NAME = {group[0]: group for group in GROUPS}
 
@@ -137,7 +208,13 @@ def grammar_payload() -> dict:
         "group_productions": sorted(GROUP_PRODUCTIONS),
         "postgroup_modifiers": POSTGROUP_MODIFIERS,
         "postgroup_result_tails": POSTGROUP_RESULT_TAILS,
+        "postgroup_contexts": POSTGROUP_CONTEXTS,
+        "nonadjectival_terms": NONADJECTIVAL_TERMS,
+        "near_miss_modifiers": NEAR_MISS_MODIFIERS,
+        "near_miss_contexts": NEAR_MISS_CONTEXTS,
+        "near_miss_terms": NEAR_MISS_TERMS,
         "mandatory_cases": MANDATORY_CASES,
+        "flat_share": FLAT_SHARE,
     }
 
 
@@ -149,7 +226,8 @@ def flat_message(rng: random.Random) -> str:
     return "".join(parts) + rng.choice(TAILS)
 
 
-def generated_case(rng: random.Random, production: str, group=None) -> dict:
+def generated_case(rng: random.Random, production: str, group=None,
+                   pin: int | None = None) -> dict:
     if production in GROUP_PRODUCTIONS:
         group_name, opened, closed = rng.choice(GROUPS) if group is None else group
     else:
@@ -190,6 +268,27 @@ def generated_case(rng: random.Random, production: str, group=None) -> dict:
         message = (f"Running the {activity}: {result} "
                    f"{opened}{counted} errors{closed} "
                    f"{introducer} {tail_object}.")
+    elif production == "post-group-context":
+        preposition, obj = rng.choice(POSTGROUP_CONTEXTS)
+        message = (f"Running the {activity} {opened}{modifier}{closed} "
+                   f"{preposition} {obj} {result}.")
+    elif production == "colon-bridge-report":
+        adverb = rng.choice(POSTGROUP_MODIFIERS)
+        term = rng.choice(NONADJECTIVAL_TERMS)
+        message = (f"Starting the {activity}: {adverb} {term} {counted} "
+                   f"{activity} are listed.")
+    elif production == "post-group-near-miss":
+        adverb = (MANDATORY_VOCABULARIES["post-group-near-miss"][pin] if pin is not None
+                  else rng.choice(MANDATORY_VOCABULARIES["post-group-near-miss"]))
+        message = (f"Running the {activity} {opened}{modifier}{closed} "
+                   f"{adverb} {result}.")
+    elif production == "report-term-near-miss":
+        term = (MANDATORY_VOCABULARIES["report-term-near-miss"][pin] if pin is not None else rng.choice(MANDATORY_VOCABULARIES["report-term-near-miss"]))
+        message = f"Running the {activity} {term} {counted} errors."
+    elif production == "colon-context-near-miss":
+        preposition, obj = (MANDATORY_VOCABULARIES["colon-context-near-miss"][pin] if pin is not None
+                            else rng.choice(MANDATORY_VOCABULARIES["colon-context-near-miss"]))
+        message = f"Starting the {activity}: {preposition} {obj} {result}."
     else:
         raise ValueError(f"unknown production {production}")
     return {"production": production, "group": group_name, "message": message}
@@ -200,12 +299,17 @@ def generate(seed: int, count: int) -> list[dict]:
     cases = []
     for index in range(count):
         if index < len(MANDATORY_CASES):
-            production, group_name = MANDATORY_CASES[index]
+            production, group_name, pin = MANDATORY_CASES[index]
             group = GROUP_BY_NAME[group_name] if group_name is not None else None
         else:
-            production = rng.choice(PRODUCTIONS)
-            group = None
-        case = generated_case(rng, production, group)
+            # `flat` is the only arm that emits tokens no structured production spells, so
+            # its share is pinned rather than left to shrink each time a production is
+            # added. Adding one used to shrink that share silently; whether any past
+            # addition cost detection was neither measured nor established.
+            production = ("flat" if rng.random() < FLAT_SHARE
+                          else rng.choice(STRUCTURED_PRODUCTIONS))
+            group, pin = None, None
+        case = generated_case(rng, production, group, pin)
         case["index"] = index
         cases.append(case)
     return cases
@@ -360,20 +464,33 @@ def compare(oracle_path: Path, candidate_path: Path, seed: int, count: int,
         raise RuntimeError("fuzz instrument changed while workers were running")
     counts = {name: 0 for name in (
         "agreement", "block-to-allow", "allow-to-block", "block-reason-change")}
+    oracle_blocks = 0
     results = []
     for case, oracle_result, candidate_result in zip(
             cases, oracle_results, candidate_results):
         classification = classify(oracle_result, candidate_result)
         counts[classification] += 1
+        oracle_blocks += oracle_result is not None
         results.append({
             **case,
             "oracle": oracle_result,
             "candidate": candidate_result,
             "classification": classification,
         })
+    if not oracle_blocks:
+        # Without one oracle block every classification collapses to agreement or
+        # allow-to-block, so "no block-to-allow divergence" is entailed by the run rather
+        # than measured by it. The `counts` block is then identical to a real clean
+        # comparison, so before this check existed the summary line could not tell them
+        # apart even though the full reports differed elsewhere. The sibling instrument refuses a non-green
+        # baseline for the same reason. Fail as an instrument error, not as a verdict.
+        raise RuntimeError(
+            f"oracle blocked none of {len(cases)} generated cases, so this run has no "
+            "power to detect a block-to-allow divergence")
     return {
         "schema_version": SCHEMA_VERSION,
         "instrument_sha256": instrument_before,
+        "oracle_blocks": oracle_blocks,
         "seed": seed,
         "requested_count": count,
         "generated_count": len(cases),
@@ -403,6 +520,11 @@ def selftest() -> int:
         failures += int(not condition)
         print(f"  {'PASS' if condition else 'FAIL'} {label}")
 
+    # First, because every later check calls generate(), which indexes this map. A dropped
+    # entry raised KeyError out of the first comparison with no receipt line printed at all.
+    check("the vocabulary map covers exactly the near-miss productions",
+          set(MANDATORY_VOCABULARIES) ==
+          {production for production in PRODUCTIONS if production.endswith("near-miss")})
     check("block-to-allow is isolated", classify("Starting the", None) == "block-to-allow")
     check("allow-to-block is isolated", classify(None, "Starting the") == "allow-to-block")
     check("reason drift is not a verdict divergence",
@@ -584,6 +706,118 @@ def selftest() -> int:
               and any(item["production"] == "colon-group-result-tail"
                       and item["classification"] == "allow-to-block"
                       for item in tail_report["results"]))
+        # A widened table is the fail-open direction, and it is invisible unless the grammar
+        # emits a token from OUTSIDE that table WHERE that table is read. This shipped
+        # broken once: off-table words existed in the vocabulary but never landed in a
+        # predicate position, so widening read clean at any case count. The
+        # oracle blocks everything and the candidate admits the off-table report verbs, which
+        # is what a table widened by one token does; the divergence proves the grammar puts
+        # such a token where a report predicate is read.
+        # Both properties the near-miss tuples rest on are structural, so assert them
+        # structurally: a token that is not pinned is emitted only by chance, and a token
+        # that also lives in an in-table vocabulary probes nothing. Without these, adding a
+        # near-miss without its pin, or copying one from the table it is meant to sit
+        # outside, leaves a control that cannot fail and a suite that still reports green.
+        pinned = {(production, MANDATORY_VOCABULARIES[production][pin])
+                  for production, _group, pin in MANDATORY_CASES
+                  if pin is not None and production in MANDATORY_VOCABULARIES}
+        unpinned = {(production, token)
+                    for production, tokens in MANDATORY_VOCABULARIES.items()
+                    for token in tokens} - pinned
+        check("every near-miss token is pinned in the deterministic prefix", not unpinned)
+        # Pins index their vocabulary, so a desync is an IndexError at generation time. Assert
+        # the exact pin set per production: this reddens on a shrunk vocabulary, a grown one,
+        # and a dropped pin, where a one-directional check would miss two of the three.
+        pins = {}
+        for production, _group, pin in MANDATORY_CASES:
+            if production in MANDATORY_VOCABULARIES and pin is not None:
+                pins.setdefault(production, []).append(pin)
+        check("each near-miss vocabulary is pinned by exactly its own index range",
+              all(sorted(pins.get(name, [])) == list(range(len(tokens)))
+                  for name, tokens in MANDATORY_VOCABULARIES.items()))
+        # A pin that is accepted and then ignored leaves the prefix looking covered while the
+        # token it names never appears.
+        # generate() indexes the vocabularies, so a desync raises here rather than failing a
+        # check. The range assertion above runs first so the suite reports the cause.
+        prefix = generate(9, MIN_CASES)
+        honoured = []
+        for index, (production, _group, pin) in enumerate(MANDATORY_CASES):
+            if production not in MANDATORY_VOCABULARIES or pin is None:
+                continue
+            token = MANDATORY_VOCABULARIES[production][pin]
+            wanted = token if isinstance(token, str) else token[1]
+            honoured.append(wanted in prefix[index]["message"])
+        check("each pinned mandatory case renders the token its pin names", all(honoured))
+        # Two assertions, because comparing the realized share against FLAT_SHARE alone
+        # grades the code against the very constant a mutation moves: at 0.0 and at 1.0 the
+        # measurement tracks the constant perfectly and the check passes while the random
+        # arm is gone. Pin the constant to a band first, then pin the code to the constant.
+        check("FLAT_SHARE leaves both the random and structured arms represented",
+              0.2 <= FLAT_SHARE <= 0.5)
+        # The floor's effect is (1 - FLAT_SHARE)/len(PRODUCTIONS), which was SMALLER than
+        # the sampling tolerance below -- so the statistical arm alone passed on the exact
+        # defect it names. Assert the structure that makes the floor unreachable.
+        check("the structured draw cannot re-draw the random arm",
+              "flat" not in STRUCTURED_PRODUCTIONS
+              and set(STRUCTURED_PRODUCTIONS) | {"flat"} == set(PRODUCTIONS))
+        share = generate(11, 20000)[MIN_CASES:]
+        realized = sum(case["production"] == "flat" for case in share) / len(share)
+        check("the random tail honours FLAT_SHARE rather than a floor or a takeover",
+              abs(realized - FLAT_SHARE) < 0.02)
+        check("the report schema version tracks the report shape",
+              SCHEMA_VERSION == 2 and "oracle_blocks" in report)
+
+        in_table = {token for tokens in (POSTGROUP_MODIFIERS, NONADJECTIVAL_TERMS, WORDS,
+                                         OPENERS, JOINERS, TAILS)
+                    for token in tokens}
+        in_table |= {obj for _prep, obj in POSTGROUP_CONTEXTS}
+        in_table |= {obj for _intro, obj in POSTGROUP_RESULT_TAILS}
+        near_miss = {t for t in NEAR_MISS_MODIFIERS} | {t for t in NEAR_MISS_TERMS}
+        near_miss |= {obj for _prep, obj in NEAR_MISS_CONTEXTS}
+        overlap = sorted({t for t in near_miss if t.casefold() in
+                          {v.casefold() for v in in_table}})
+        check("no near-miss token also appears in an in-table vocabulary", not overlap)
+        # Every check above grades this file against its own constants. The near-miss
+        # tuples are only worth anything relative to the GUARD's tables, and this file
+        # carries partial copies of those -- 7 of 24 modifiers, 10 of 14 terms, 5 of 15
+        # context pairs. A near-miss token drawn from the 17 modifiers this file does not
+        # copy passes every self-referential check and is a permanently dead control. Bind
+        # the claim to the artifact: each near-miss case must actually block under the
+        # shipped guard. Skipped, with the reason recorded, when the guard is not beside us,
+        # so the instrument still runs against an arbitrary pair of judges.
+        shipped_guard = Path(__file__).resolve().parent.parent / "hooks/announced_work_guard.py"
+        if shipped_guard.exists():
+            judged = load_guard(shipped_guard, source_digest(shipped_guard))
+            near_miss_cases = [
+                case for index, case in enumerate(generate(9, MIN_CASES))
+                if MANDATORY_CASES[index][0] in MANDATORY_VOCABULARIES]
+            blocked = [judged.judge({"last_assistant_message": case["message"]}) is not None
+                       for case in near_miss_cases]
+            check("every near-miss case blocks under the shipped guard",
+                  len(blocked) == sum(len(v) for v in MANDATORY_VOCABULARIES.values())
+                  and all(blocked))
+        else:
+            # Fail rather than skip. A silent pass here would report the binding as verified
+            # in exactly the copied-tree setup a reviewer uses to mutate this file, which is
+            # where a dead control most needs to be visible.
+            check("the shipped guard is beside this file, so the near-miss binding is"
+                  " verifiable", False)
+        term_oracle = root / "term-oracle.py"
+        term_oracle.write_text("def judge(payload): return 'Running the'\n", encoding="utf-8")
+        term_widened = root / "term-widened.py"
+        term_widened.write_text(
+            "def judge(payload):\n"
+            "    message = payload['last_assistant_message']\n"
+            f"    if any(word in message for word in {NEAR_MISS_TERMS!r}):\n"
+            "        return None\n"
+            "    return 'Running the'\n",
+            encoding="utf-8")
+        widened_report = compare(term_oracle, term_widened, 9, MIN_CASES, 5)
+        check("the grammar emits an off-table report verb, exposing a widened table",
+              widened_report["counts"]["block-to-allow"] > 0
+              and any(item["production"] == "report-term-near-miss"
+                      and item["classification"] == "block-to-allow"
+                      for item in widened_report["results"]))
         fail_open = root / "fail-open.py"
         fail_open.write_text("def judge(payload): return None\n", encoding="utf-8")
         fail_open_report = compare(guard, fail_open, 9, MIN_CASES, 5)
@@ -591,6 +825,23 @@ def selftest() -> int:
               fail_open_report["counts"]["block-to-allow"] > 0
               and any(item["classification"] == "block-to-allow"
                       for item in fail_open_report["results"]))
+        blind_oracle = root / "blind-oracle.py"
+        blind_oracle.write_text("def judge(payload): return None\n", encoding="utf-8")
+        try:
+            compare(blind_oracle, fail_open, 9, MIN_CASES, 5)
+            refused_blind_oracle = False
+        except RuntimeError as exc:
+            refused_blind_oracle = "no power to detect" in str(exc)
+        check("a comparison whose oracle never blocks is an instrument error",
+              refused_blind_oracle)
+        blind_stdout, blind_stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(blind_stdout), contextlib.redirect_stderr(blind_stderr):
+            blind_exit = main([
+                str(blind_oracle), str(fail_open), "9", str(MIN_CASES), "--timeout", "5",
+            ])
+        check("the CLI exits two rather than green when the oracle blocked nothing",
+              blind_exit == 2 and "FUZZ-ERROR" in blind_stderr.getvalue()
+              and "block_to_allow=0" not in blind_stderr.getvalue())
         main_stdout, main_stderr = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(main_stdout), contextlib.redirect_stderr(main_stderr):
             fail_open_exit = main([
@@ -655,18 +906,31 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         report = compare(args.oracle, args.candidate, args.seed, args.count, args.timeout)
-    except (OSError, RuntimeError, ValueError) as exc:
-        print(f"FUZZ-ERROR {exc}", file=sys.stderr)
+    except (OSError, RuntimeError, ValueError, IndexError, KeyError,
+            TypeError, AttributeError) as exc:
+        # Exit 1 is reserved for a block-to-allow verdict. An instrument fault that
+        # escaped as a bare traceback exited 1 through the interpreter, reporting a
+        # crash as a safety finding -- a desynced vocabulary/pin pair did exactly that.
+        print(f"FUZZ-ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
-    json.dump(report, sys.stdout, sort_keys=True, indent=2, ensure_ascii=False)
-    sys.stdout.write("\n")
+    try:
+        json.dump(report, sys.stdout, sort_keys=True, indent=2, ensure_ascii=False)
+        sys.stdout.write("\n")
+    except (OSError, UnicodeError) as exc:
+        # Writing the report is not a verdict. Under an ascii stdout the grammar's own
+        # em dash and curly quotes raised here, outside the try above, and exited 1 --
+        # the reserved block-to-allow code -- for an encoding fault.
+        print(f"FUZZ-ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
     counts = report["counts"]
     exit_code = 1 if counts["block-to-allow"] else 0
     print(
         f"FUZZ-SUMMARY seed={args.seed} count={args.count} "
         f"block_to_allow={counts['block-to-allow']} "
         f"allow_to_block={counts['allow-to-block']} "
-        f"reason_changes={counts['block-reason-change']} exit={exit_code}",
+        f"reason_changes={counts['block-reason-change']} "
+        f"oracle_blocks={report['oracle_blocks']}/{report['generated_count']} "
+        f"exit={exit_code}",
         file=sys.stderr,
     )
     return exit_code

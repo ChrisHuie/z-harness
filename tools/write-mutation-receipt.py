@@ -1829,6 +1829,90 @@ def normalized_receipt(fragments: list[dict]) -> dict:
     }
 
 
+def collection_scope_sentence(payload: dict) -> str:
+    """State which swept sources had their collections enumerated, and which did not.
+
+    The sentence above bounds the exclusion list by FILE: nothing outside the swept sources
+    is mutated. It does not bound it by KIND, and only some swept sources take automatic
+    collection removal -- the rest carry whatever mutations were authored for them, so
+    their collections are never enumerated and therefore never appear as exclusions. Without this, a source
+    listed as swept with no exclusion entry reads as "every collection in it was mutated",
+    which is the opposite of what happened.
+
+    Enumeration is evidenced by an element DELETION or by an exclusion entry, because both
+    come from the same walk. A set-addition is authored per element, so on its own it does
+    not show which collections the walk reached -- ``mutation_plan`` does require the
+    addition's collection to have been discovered, but a collection discovered empty yields
+    no deletion and no exclusion, which is the case this arm separates. A swept source with no mutations at all is reported as its own case:
+    calling it site-only would assert mutations it does not have.
+    """
+    swept = set(payload["source_digests"])
+    kinds: dict[str, set] = {}
+    for entry in payload["results"].values():
+        kinds.setdefault(entry["module"], set()).add(entry["kind"])
+    walked = {name.split("::", 1)[0] for name in payload.get("sweep_exclusions", {})}
+    enumerated = sorted(name for name in swept
+                        if "set-element" in kinds.get(name, ()) or name in walked)
+    # Name only the kind a source actually carries. "site mutations only" was asserted of
+    # anything unenumerated-but-mutated, which is false for a source carrying, say, only
+    # authored additions -- the same shape of false statement this sentence exists to stop.
+    site_only = sorted(name for name in swept
+                       if name not in enumerated and kinds.get(name) == {"site"})
+    other_kinds = sorted(name for name in swept
+                         if name not in enumerated and kinds.get(name)
+                         and kinds.get(name) != {"site"})
+    unmutated = sorted(name for name in swept if not kinds.get(name))
+    # A result whose module is not a swept source contradicts the receipt's own digest map.
+    # Say so rather than dropping it, which would hide exactly the disagreement this
+    # sentence exists to prevent.
+    stray = sorted(set(kinds) - swept)
+
+    def listing(names):
+        return ", ".join(f"`{name}`" for name in names)
+
+    if not swept:
+        empty = ("No source was swept, so the exclusions below enumerate nothing and their "
+                 "content is not evidence about any file.")
+        # Results with no swept source at all is a contradiction of the same kind as a
+        # stray one, and returning early used to drop it -- the defect this clause exists
+        # to prevent, reintroduced one branch over.
+        if stray:
+            empty += (" Results nonetheless reference " + listing(stray) + ".")
+        return empty
+    parts = []
+    if enumerated:
+        parts.append("Collections are enumerated for " + listing(enumerated) + ".")
+    else:
+        parts.append("No swept source had its collections enumerated.")
+    if site_only:
+        parts.append(listing(site_only)
+                     + (" carries" if len(site_only) == 1 else " carry")
+                     + " site mutations only: no collection in "
+                     + ("it" if len(site_only) == 1 else "them")
+                     + " is enumerated, so none appears in the exclusions below -- and for "
+                       "a collection in these sources, absence from that list is not "
+                       "evidence it was mutated.")
+    if other_kinds:
+        parts.append(listing(other_kinds)
+                     + (" carries" if len(other_kinds) == 1 else " carry")
+                     + " no enumerated collection: only "
+                     + ", ".join(sorted(
+                         {kind for name in other_kinds for kind in kinds[name]}))
+                     + " mutations, so nothing in "
+                     + ("it" if len(other_kinds) == 1 else "them")
+                     + " appears in the exclusions below.")
+    if unmutated:
+        parts.append(listing(unmutated)
+                     + (" carries" if len(unmutated) == 1 else " carry")
+                     + " no mutation of any kind in this sweep.")
+    if stray:
+        parts.append("Results reference " + listing(stray)
+                     + ", which the digest map does not list as swept.")
+    if not site_only and not other_kinds and not unmutated and not stray:
+        parts.append("The exclusions below are therefore complete for every swept source.")
+    return " ".join(parts)
+
+
 def summary_text(payload: dict) -> str:
     # Consume only the projection. The summary is compared byte for byte against a CI
     # re-measurement, so a field derived from a host observation would make it unequal on a
@@ -1847,6 +1931,8 @@ def summary_text(payload: dict) -> str:
         + ", ".join(f"`{name}`" for name in sorted(payload["source_digests"]))
         + ". No other repository file is mutated by this sweep, so the exclusions listed "
           "at the end enumerate symbols inside these sources only.",
+        "",
+        collection_scope_sentence(payload),
         "",
         "| module | guarded set | elements | caught | survived |",
         "|---|---|---:|---:|---:|",
@@ -2428,6 +2514,110 @@ def selftest() -> int:
            ValueError, "mutation plan has duplicate IDs or is empty",
            planning(source='"""fixture guard with no guarded collections"""\n',
                     sites=(), additions=(), exclusions={}))
+
+    # collection_scope_sentence is the summary's only statement about which swept sources
+    # had their collections walked. Its only gate is a byte comparison against a CI
+    # re-measurement, and a deterministic falsehood passes that forever, so each arm's truth
+    # is asserted here on message content rather than on the call not raising.
+    def scope(sources, results, exclusions=None) -> str:
+        return collection_scope_sentence({
+            "source_digests": {name: "0" * 64 for name in sources},
+            "results": {str(index): entry for index, entry in enumerate(results)},
+            "sweep_exclusions": exclusions or {}})
+
+    quiet = scope(["walked.py", "quiet.py"],
+                  [{"module": "walked.py", "kind": "set-element"}])
+    record("a swept source with no mutations is not reported as site-only",
+           "`quiet.py` carries no mutation of any kind" in quiet
+           and "quiet.py` carries site mutations" not in quiet, quiet)
+    addition_only = scope(["added.py"], [{"module": "added.py", "kind": "set-addition"}])
+    record("an authored set-addition is not evidence the collection walk ran",
+           "No swept source had its collections enumerated" in addition_only, addition_only)
+    excluded = scope(["walked.py"], [{"module": "walked.py", "kind": "site"}],
+                     {"walked.py::TABLE": "why"})
+    record("an exclusion entry counts as evidence the collection walk ran",
+           "enumerated for `walked.py`" in excluded, excluded)
+    stray = scope(["walked.py"], [{"module": "outside.py", "kind": "site"},
+                                  {"module": "walked.py", "kind": "set-element"}])
+    record("a result outside the digest map is named, not silently dropped",
+           "`outside.py`, which the digest map does not list as swept" in stray, stray)
+    site_only = scope(["walked.py", "sited.py"],
+                      [{"module": "walked.py", "kind": "set-element"},
+                       {"module": "sited.py", "kind": "site"}])
+    record("a site-only source is named as unenumerated",
+           "`sited.py` carries site mutations only" in site_only
+           and "absence from that list is not evidence" in site_only, site_only)
+    complete = scope(["walked.py"], [{"module": "walked.py", "kind": "set-element"}])
+    record("a fully enumerated sweep says the exclusions are complete",
+           "complete for every swept source" in complete, complete)
+    record("an empty enumeration never renders a dangling list",
+           "enumerated for ." not in scope(
+               ["sited.py"], [{"module": "sited.py", "kind": "site"}]))
+    record("no swept source at all is stated rather than implied complete",
+           scope([], []).startswith("No source was swept"))
+    # The completeness clause is the sentence's only unconditional claim, so it needs
+    # assertions in the WITHHELD direction too. Asserted positively alone, an operand can be
+    # dropped from its guard and the summary then claims completeness over an incomplete
+    # sweep -- a falsehood the byte-comparison gate passes forever because it is stable.
+    complete_phrase = "complete for every swept source"
+    record("completeness is withheld when a swept source carried no mutation",
+           complete_phrase not in scope(
+               ["walked.py", "quiet.py"], [{"module": "walked.py", "kind": "set-element"}]))
+    record("completeness is withheld when a swept source is site-only",
+           complete_phrase not in scope(
+               ["walked.py", "sited.py"], [{"module": "walked.py", "kind": "set-element"},
+                                           {"module": "sited.py", "kind": "site"}]))
+    record("completeness is withheld when a result is off the digest map",
+           complete_phrase not in scope(
+               ["walked.py"], [{"module": "walked.py", "kind": "set-element"},
+                               {"module": "outside.py", "kind": "site"}]))
+    addition_only = scope(["walked.py", "added.py"],
+                          [{"module": "walked.py", "kind": "set-element"},
+                           {"module": "added.py", "kind": "set-addition"}])
+    record("a source carrying only additions is not described as site-only",
+           "`added.py` carries no enumerated collection" in addition_only
+           and "added.py` carries site mutations" not in addition_only
+           and complete_phrase not in addition_only, addition_only)
+    duplicate_kinds = scope(["walked.py", "one.py", "two.py"],
+                            [{"module": "walked.py", "kind": "set-element"},
+                             {"module": "one.py", "kind": "set-addition"},
+                             {"module": "two.py", "kind": "set-addition"}])
+    record("a kind shared by two sources is named once, not once per source",
+           "only set-addition mutations" in duplicate_kinds
+           and "set-addition, set-addition" not in duplicate_kinds, duplicate_kinds)
+    record("an empty sweep still names a result that references a file",
+           "`ghost.py`" in scope([], [{"module": "ghost.py", "kind": "set-element"}]))
+    # `mixed.py` carries site AND another kind, so it must land in other_kinds rather than
+    # site_only. Without it the fixture leaves other_kinds empty and a predicate weakened to
+    # `"site" in kinds` passes every check and the golden while emitting the falsehood this
+    # sentence exists to stop.
+    every_group = scope(["walked.py", "sited.py", "quiet.py", "mixed.py"],
+                        [{"module": "walked.py", "kind": "set-element"},
+                         {"module": "sited.py", "kind": "site"},
+                         {"module": "mixed.py", "kind": "site"},
+                         {"module": "mixed.py", "kind": "set-addition"},
+                         {"module": "outside.py", "kind": "site"}])
+    equal("each swept source is named exactly once when all groups are populated",
+          [every_group.count(f"`{name}`") for name in
+           ("walked.py", "sited.py", "quiet.py", "mixed.py", "outside.py")], [1, 1, 1, 1, 1])
+    # Locate the site-only CLAUSE and assert the source is absent from it, rather than
+    # grepping one inflection: the weakening that puts `mixed.py` there also pluralises
+    # "carries" to "carry", so an inflection-bound negative conjunct passed on it.
+    site_clause = next((part for part in every_group.split(". ")
+                        if "site mutations only" in part), "")
+    record("a source carrying site plus another kind is not called site-only",
+           "`mixed.py` carries no enumerated collection" in every_group
+           and "`mixed.py`" not in site_clause, every_group)
+    # W2 — deleting the call from summary_text left this suite green; only the golden byte
+    # comparison caught it, and a suite that cannot see its own output is not a control.
+    sample = {"source_digests": {"walked.py": "0" * 64, "sited.py": "0" * 64},
+              "results": {"a": {"module": "walked.py", "kind": "set-element",
+                                "name": "TABLE", "element": "x", "outcome": "caught"},
+                          "b": {"module": "sited.py", "kind": "site",
+                                "label": "a site", "outcome": "caught"}},
+              "sweep_exclusions": {}, "caught": 2, "total": 2, "survivors": []}
+    record("the generated summary actually carries the scope sentence",
+           collection_scope_sentence(sample) in summary_text(sample))
 
     print(f"\n  {checks} checks, {failures} failure(s)")
     print(f"SELFTEST-SUMMARY suite=write-mutation-receipt "

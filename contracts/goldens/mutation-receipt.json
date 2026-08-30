@@ -2,12 +2,12 @@
  "schema_version": 3,
  "generated_by": "tools/write-mutation-receipt.py --aggregate",
  "note": "which guard mutations the shipped suites catch; each result's reason is an observation from the host that generated it, not a cross-platform fact",
- "generator_sha256": "a9bbe8e5d9ef90feabc779c518238b3aef439ec87cfdc27da396755e55b80011",
+ "generator_sha256": "648314d615c31c72690b3b5e979714ed1657f235d66b3b194fe9be9a37af3e64",
  "source_digests": {
   "hooks/guards/git_grep_engine_guard.py": "2fa728eb17d041bdf1c4f38fc6416f0bbf90df7d122ba3b1da15b1aa4c254bd0",
   "hooks/guards/zsh_rev_modifier_guard.py": "a056e1f8375467c6c7a6b878aff858c257b44c10faaeb0fa3bb685d073c0fb9c",
   "hooks/bash_command_guard.py": "4dbd2f3857241ace4d7ae588775ce8e07267b3943cda59c5bcaabde4a40993d5",
-  "hooks/announced_work_guard.py": "20dd523cc10215d359b14ebb985eb98e08e865b2cb9a166cbab7658c70a41884",
+  "hooks/announced_work_guard.py": "59b777b49dedded7c04e666c9c68f6acaca2a7e28f590811ebee24201ccd280e",
   "tools/repository_ownership.py": "d72b23ef0e037f81bb0c1eefc93c2198a5355c1820b542ce285a83d8661f35ca"
  },
  "plan_sha256": "1ee47b43ac195cd7da0602d69c3e892e555d6284bee424409ebfb234ec06c429",

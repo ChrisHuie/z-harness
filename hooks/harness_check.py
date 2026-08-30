@@ -147,10 +147,10 @@ SELFTEST_SUITES = [
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
     ("ci-gate", ["tools/ci-gate.py", "--selftest"], 355),
     ("write-mutation-receipt",
-     ["tools/write-mutation-receipt.py", "--selftest"], 76),
+     ["tools/write-mutation-receipt.py", "--selftest"], 93),
     ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 65),
     ("enumerate-survivors", ["instruments/enumerate_survivors.py", "--selftest"], 28),
-    ("fuzz-judge-diff", ["instruments/fuzz_judge_diff.py", "--selftest"], 26),
+    ("fuzz-judge-diff", ["instruments/fuzz_judge_diff.py", "--selftest"], 39),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
     ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 88),
     ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 1149),
@@ -164,7 +164,7 @@ def expected_selftest_checks(name):
         "announced_work_guard": 690,
         "ci-gate": 355,
         "enumerate-survivors": 28,
-        "fuzz-judge-diff": 26,
+        "fuzz-judge-diff": 39,
         "spawn_preflight_guard": 88,
         "verify-review-publication": 94,
     }
@@ -196,13 +196,21 @@ def expected_selftest_checks(name):
 # Registered where the 15 s default leaves no headroom for a slower runner. Measured
 # on the authoring host: bash_command_guard 27 s, git_grep_engine_guard 7.3 s (its
 # byte-cap, token and subcommand fixtures parse real megabyte-scale sources, and it
-# probes the installed git and zsh), announced_work_guard 10.9 s (690 proofs include
-# real Stop-process envelopes), ci-gate 20.8 s. C1 requires each to finish inside
-# SELFTEST_TIMEOUT_MARGIN of its budget, so these are ceilings with room, not targets.
+# probes the installed git and zsh), announced_work_guard 15-16 s run alone and longer under
+# this gate's own concurrency (690 proofs include real Stop-process envelopes), ci-gate
+# 20.8 s. C1 requires each to finish inside SELFTEST_TIMEOUT_MARGIN of its budget, so these
+# are ceilings with room, not targets -- and the figure that decides the verdict is the
+# loaded one, which none of these are. They are not regenerable from a green run either:
+# C1 prints a suite's elapsed time only when it exceeds its margin, so a number here is a
+# hand-timing on one host and drifts silently until the day it reddens. announced_work_guard
+# was raised from 30 s the day that happened, on a run that changed none of its checks. The
+# ratios these figures imply are not quoted here: the loaded and unloaded numbers give
+# different answers, and the earlier attempt to state one contradicted the ci-gate figure
+# three lines above it.
 SELFTEST_TIMEOUTS = {
     "bash_command_guard": 90,
     "git_grep_engine_guard": 60,
-    "announced_work_guard": 30,
+    "announced_work_guard": 60,
     "ci-gate": 60,
 }
 DEFAULT_SELFTEST_TIMEOUT = 15
@@ -2036,8 +2044,8 @@ def selftest():
             subprocess.run = original_subprocess_run
         expect_red(
             "C1 gives the process-level announced-work suite measured timeout headroom",
-            lambda: SELFTEST_TIMEOUTS["announced_work_guard"] == 30
-            and announced_timeouts == [30] and not c1_announced_timeout.failures,
+            lambda: SELFTEST_TIMEOUTS["announced_work_guard"] == 60
+            and announced_timeouts == [60] and not c1_announced_timeout.failures,
         )
 
         slow_timeouts = []

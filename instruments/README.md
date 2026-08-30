@@ -32,11 +32,41 @@ resolve to that private snapshot; the original path remains only the compile fil
 in tracebacks. The deterministic prefix
 covers every production and renders every supported delimiter before random cases begin.
 JSON on stdout retains every case; stderr summarizes block-to-allow, allow-to-block, and
-block-reason changes separately. A block-to-allow divergence exits 1 and an instrument
-failure exits 2. The vocabulary bounds what a null result proves; extend it with the tokens
-a change touches. Source symlinks are rejected. The report binds the two top-level guard
+block-reason changes separately, and reports how many cases the oracle blocked. A
+block-to-allow divergence exits 1 and an instrument failure exits 2.
+
+A run whose oracle blocked nothing exits 2 rather than green: with no oracle block every
+case can only classify as agreement or allow-to-block, so a clean verdict would be entailed
+by the run instead of measured by it.
+
+The vocabulary bounds what a null result proves; extend it with the tokens a change touches.
+Two vocabularies do different jobs. Tokens drawn from the guard's own tables detect a
+NARROWED table -- a generated token stops being admitted. They cannot detect a WIDENED one,
+because the grammar never emits the token a widening would newly admit. `NEAR_MISS_MODIFIERS`,
+`NEAR_MISS_CONTEXTS` and `NEAR_MISS_TERMS` are drawn from outside every uppercase collection in
+the guard for
+that direction -- not merely outside the table each one probes, since a token with meaning in a
+sibling table can block for that reason instead and score a control that cannot fail. Each must
+block today and starts allowing the moment a table grows to cover THAT TOKEN. The mandatory
+prefix pins every one of them, so such a widening diverges at the minimum case count. Three
+of the guard's collections are covered that way. A widening elsewhere may still diverge --
+whether it does depends on whether a grammar string spells the admitted token into a position
+the guard reads -- so a clean run over an unpinned collection proves nothing. Adding a token to
+a guard table means adding a near-miss beside it, or the next widening is a null result. Source symlinks are rejected. The report binds the two top-level guard
 sources and their runtime `__file__` reads, not modules they import from the interpreter
 environment.
+
+Adding a production is not free. `FLAT_SHARE` pins the random arm, but the remaining share
+is split across the structured productions, so every existing one loses coverage per case
+when a new one lands -- the near-miss additions roughly halved the per-production share of
+the productions that predate them. The pinned mandatory prefix is unaffected; only the
+random tail thins. Raise the case count, or check the realized split, with:
+
+    python3 -c "import importlib.util,sys,collections; \
+      s=importlib.util.spec_from_file_location('f','fuzz_judge_diff.py'); \
+      f=importlib.util.module_from_spec(s); sys.modules['f']=f; s.loader.exec_module(f); \
+      t=f.generate(9,20000)[f.MIN_CASES:]; \
+      print(collections.Counter(c['production'] for c in t))"
 
 Both figures move with the enumeration and the grammar. Publish the invocation with the
 number.

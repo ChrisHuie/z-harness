@@ -877,25 +877,48 @@ def publication_workflow_error(data: str) -> str:
     return ""
 
 
-CHILD_TIMEOUT_SECONDS = 120
+DEFAULT_CHILD_TIMEOUT_SECONDS = 120
+# A hosted macOS run measured the full harness at about 138 seconds before
+# this gate launched it a second time.  A shared 120-second ceiling therefore killed a
+# passing harness and converted it into a missing receipt.  Keep the exceptional budget
+# attached to the exact expensive command; the 240-second ceiling is bounded headroom over
+# that observation, not a validated performance target for every host.
+HARNESS_CI_TIMEOUT_SECONDS = 240
+
+
+def child_timeout_seconds(argv: Sequence[str]) -> float:
+    """Return the bounded deadline for one exact registered child command."""
+    if tuple(argv) == (sys.executable, "hooks/harness_check.py", "--ci"):
+        return HARNESS_CI_TIMEOUT_SECONDS
+    return DEFAULT_CHILD_TIMEOUT_SECONDS
+
+
+def _timeout_stderr_tail(value) -> str:
+    """Normalize TimeoutExpired stderr from text and byte subprocess implementations."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")[-2000:]
+    return str(value)[-2000:]
 
 
 def run_command(argv: Sequence[str]) -> Result:
+    timeout_seconds = child_timeout_seconds(argv)
     try:
         completed = subprocess.run(
             list(argv),
             cwd=ROOT,
             capture_output=True,
             text=True,
-            timeout=CHILD_TIMEOUT_SECONDS,
+            timeout=timeout_seconds,
         )
     except subprocess.TimeoutExpired as expired:
         # Uncaught, this left the gate with a traceback and no receipt, which reads as a
         # tooling crash rather than as the child that ran out of time.
         return Result(
             1, "",
-            f"child exceeded {CHILD_TIMEOUT_SECONDS}s: {' '.join(argv)}\n"
-            f"{(expired.stderr or b'').decode('utf-8', 'replace')[-2000:]}")
+            f"child exceeded {timeout_seconds}s: {' '.join(argv)}\n"
+            f"{_timeout_stderr_tail(expired.stderr)}")
     return Result(completed.returncode, completed.stdout, completed.stderr)
 
 
@@ -3664,19 +3687,116 @@ def selftest() -> int:
         and retime_bash_hook(reordered, 4) == 1
         and hook_budget_error(settings_data=reordered) != "",
     )
+    registered_commands = command_specs(ROOT / "selftest-render")
+    harness_commands = [
+        (argv, spec) for argv, spec in registered_commands
+        if spec.name == "harness-ci"
+    ]
+    observed_child_timeouts = []
+    original_subprocess_run = subprocess.run
+
+    def record_child_timeout(argv, **kwargs):
+        observed_child_timeouts.append((tuple(argv), kwargs.get("timeout")))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    subprocess.run = record_child_timeout
+    try:
+        for argv, _spec in registered_commands:
+            run_command(argv)
+    finally:
+        subprocess.run = original_subprocess_run
+    expect(
+        "the production registry contains exactly one full harness child",
+        len(harness_commands) == 1,
+    )
+    harness_argv = (
+        harness_commands[0][0]
+        if len(harness_commands) == 1
+        else [sys.executable, "hooks/harness_check.py", "--ci"]
+    )
+    harness_spec = harness_commands[0][1] if len(harness_commands) == 1 else None
+    observed_timeout_by_argv = dict(observed_child_timeouts)
+    expect(
+        "the registered full harness child receives its measured 240-second budget",
+        observed_timeout_by_argv.get(tuple(harness_argv)) == 240,
+    )
+    expect(
+        "every other registered child retains the 120-second default budget",
+        all(
+            timeout == 120
+            for argv, timeout in observed_child_timeouts
+            if argv != tuple(harness_argv)
+        ),
+    )
+    expect(
+        "a foreign executable with the harness argument tail retains the default budget",
+        child_timeout_seconds(
+            ["/not-the-python-runtime", "hooks/harness_check.py", "--ci"]
+        ) == 120,
+    )
+    expect(
+        "extra harness arguments retain the default budget",
+        child_timeout_seconds([*harness_argv, "--extra"]) == 120,
+    )
     timed_out = run_command([sys.executable, "-c",
                              "import time; time.sleep(0.3)"])
     expect("a child that runs to completion is not reported as a timeout",
            timed_out.returncode == 0 and "exceeded" not in timed_out.stderr)
-    original_child_timeout = CHILD_TIMEOUT_SECONDS
-    globals()["CHILD_TIMEOUT_SECONDS"] = 0.2
+    original_child_timeout = DEFAULT_CHILD_TIMEOUT_SECONDS
+    globals()["DEFAULT_CHILD_TIMEOUT_SECONDS"] = 0.2
     try:
         slow = run_command([sys.executable, "-c", "import time; time.sleep(3)"])
     finally:
-        globals()["CHILD_TIMEOUT_SECONDS"] = original_child_timeout
+        globals()["DEFAULT_CHILD_TIMEOUT_SECONDS"] = original_child_timeout
     expect(
         "a child that exceeds its timeout becomes a receipt failure, not a traceback",
         slow.returncode != 0 and "exceeded" in slow.stderr,
+    )
+
+    def text_timeout(_argv, **_kwargs):
+        raise subprocess.TimeoutExpired(
+            cmd="probe", timeout=1, stderr="partial text stderr")
+
+    subprocess.run = text_timeout
+    try:
+        text_timeout_result = run_command([sys.executable, "probe.py"])
+    finally:
+        subprocess.run = original_subprocess_run
+    expect(
+        "a text-mode timeout stderr remains a receipt failure instead of raising",
+        text_timeout_result.returncode == 1
+        and "partial text stderr" in text_timeout_result.stderr,
+    )
+
+    def byte_timeout(_argv, **_kwargs):
+        raise subprocess.TimeoutExpired(
+            cmd="harness-ci", timeout=240, stderr=b"\xffpartial bytes")
+
+    subprocess.run = byte_timeout
+    try:
+        byte_timeout_result = run_command(harness_argv)
+    finally:
+        subprocess.run = original_subprocess_run
+    expect(
+        "the registered harness timeout returns a failed child result",
+        byte_timeout_result.returncode == 1,
+    )
+    expect(
+        "the registered harness timeout cannot forge child stdout",
+        byte_timeout_result.stdout == "",
+    )
+    expect(
+        "the registered harness timeout reports its exceptional deadline",
+        "child exceeded 240s" in byte_timeout_result.stderr,
+    )
+    expect(
+        "invalid timeout stderr bytes are retained with replacement decoding",
+        "\ufffdpartial bytes" in byte_timeout_result.stderr,
+    )
+    expect(
+        "receipt validation rejects the registered harness timeout",
+        harness_spec is not None
+        and validate_receipt(byte_timeout_result, harness_spec) is not None,
     )
     expect("recorded guard decisions match the guards", decision_golden_error() == "")
     decision_contract = {
@@ -5138,6 +5258,26 @@ def selftest() -> int:
         gate(fake_runner, emit_child_output=False) == 0,
     )
     expect("production registry is non-empty", len(fake_calls) == 9)
+
+    def timeout_subprocess(argv, **_kwargs):
+        if tuple(argv) == tuple(harness_argv):
+            raise subprocess.TimeoutExpired(
+                cmd=argv, timeout=240, stderr=b"\xffpartial bytes")
+        if tuple(argv) not in {tuple(command) for command, _spec in registered_commands}:
+            return original_subprocess_run(argv, **_kwargs)
+        result = fake_runner(argv)
+        return subprocess.CompletedProcess(
+            argv, result.returncode, result.stdout, result.stderr)
+
+    subprocess.run = timeout_subprocess
+    try:
+        default_runner_timeout_code = gate(emit_child_output=False)
+    finally:
+        subprocess.run = original_subprocess_run
+    expect(
+        "the production gate turns red when its default harness runner times out",
+        default_runner_timeout_code != 0,
+    )
     # The fake runner above emits the very constants the production check compares against,
     # so a floor change can never redden it -- the comparison is FLOOR < FLOOR. These arms
     # emit a corpus one below each floor instead, so the error path executes at least once.

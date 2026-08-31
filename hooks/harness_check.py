@@ -145,7 +145,7 @@ SELFTEST_SUITES = [
      ["tools/verify-review-publication.py", "--selftest"], 94),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
-    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 357),
+    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 369),
     ("write-mutation-receipt",
      ["tools/write-mutation-receipt.py", "--selftest"], 99),
     ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 65),
@@ -162,7 +162,7 @@ def expected_selftest_checks(name):
     """Exact execution-derived counts for suites whose former formulas hid probes."""
     fixed = {
         "announced_work_guard": 916,
-        "ci-gate": 357,
+        "ci-gate": 369,
         "enumerate-survivors": 28,
         "fuzz-judge-diff": 65,
         "spawn_preflight_guard": 88,

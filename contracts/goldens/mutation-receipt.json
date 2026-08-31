@@ -2,15 +2,15 @@
  "schema_version": 3,
  "generated_by": "tools/write-mutation-receipt.py --aggregate",
  "note": "which guard mutations the shipped suites catch; each result's reason is an observation from the host that generated it, not a cross-platform fact",
- "generator_sha256": "648314d615c31c72690b3b5e979714ed1657f235d66b3b194fe9be9a37af3e64",
+ "generator_sha256": "d4eb9dd4202fda4a862d30f2f7eb88ecfcb826375d2de1adb903ad1edebe0ad3",
  "source_digests": {
   "hooks/guards/git_grep_engine_guard.py": "2fa728eb17d041bdf1c4f38fc6416f0bbf90df7d122ba3b1da15b1aa4c254bd0",
   "hooks/guards/zsh_rev_modifier_guard.py": "a056e1f8375467c6c7a6b878aff858c257b44c10faaeb0fa3bb685d073c0fb9c",
   "hooks/bash_command_guard.py": "4dbd2f3857241ace4d7ae588775ce8e07267b3943cda59c5bcaabde4a40993d5",
-  "hooks/announced_work_guard.py": "59b777b49dedded7c04e666c9c68f6acaca2a7e28f590811ebee24201ccd280e",
+  "hooks/announced_work_guard.py": "f946244e1599c3a0af4656d93437e290e16235b8b58d15237330c015f3eb4661",
   "tools/repository_ownership.py": "d72b23ef0e037f81bb0c1eefc93c2198a5355c1820b542ce285a83d8661f35ca"
  },
- "plan_sha256": "1ee47b43ac195cd7da0602d69c3e892e555d6284bee424409ebfb234ec06c429",
+ "plan_sha256": "d90f7363b108bcdfb596f977e1b2f2f9ade3332de7ca335862a03b86599f7e2d",
  "baseline": {
   "hooks/guards/git_grep_engine_guard.py": "passed",
   "hooks/guards/zsh_rev_modifier_guard.py": "passed",
@@ -227,6 +227,25 @@
    "id": "0f0f4d11ffdd5a4dcf447a9e3166a65d7ea1caf33d2050bc8c21c569054b9e19",
    "outcome": "caught",
    "reason": "suite-failure"
+  },
+  "0f33b7e00ea001355a0149c3c7fc608844478289e19deb335a09f7b9c992d369": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/announced_work_guard.py",
+   "label": "straight-single outer predicate closure dropped",
+   "anchor_sha256": "a59dff8a3d22cddbdf5363321376745460f86a5f1a672b5853a4021d4d9151cd",
+   "replacement_sha256": "54f43227f425b400337ff7fbe2f8aceba4f3bbefbc9f6b9306c3ab0a0ccb84ce",
+   "selectors": [
+    "main string preserves a predicate after a straight-single-quoted subject",
+    "main string preserves a modified predicate after a straight-single-quoted subject",
+    "main content preserves a predicate after a straight-single-quoted subject",
+    "main content preserves a modified predicate after a straight-single-quoted subject",
+    "main bare preserves a predicate after a straight-single-quoted subject",
+    "main bare preserves a modified predicate after a straight-single-quoted subject"
+   ],
+   "id": "0f33b7e00ea001355a0149c3c7fc608844478289e19deb335a09f7b9c992d369",
+   "outcome": "caught",
+   "reason": "selector-failure"
   },
   "0fcda5a13c00c505caad3ce437edce37c33e9d85438cf2aff2e228107d96c949": {
    "version": 1,
@@ -603,6 +622,25 @@
    "id": "259e09865006abfb1c3c05b590d902f059579ed274ae85fe8dea0456804128c0",
    "outcome": "survived",
    "reason": "survived"
+  },
+  "26763f7f8cab4e9060165d663dfa160d69e3f18dce6e4bfed8017fee2c34a15b": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/announced_work_guard.py",
+   "label": "grouped historical subject ownership dropped",
+   "anchor_sha256": "0f278b00ec3fd33ab51c02926214b928993169aa318b0c1a6254758cff53427d",
+   "replacement_sha256": "f3cc596c498affb5cc531cd2e3c0bc8aae563bf0a64e82b0ef03db5def74be7a",
+   "selectors": [
+    "a parenthetical historical subject cannot lend its predicate to the activity",
+    "a parenthetical historical subject retains ownership through a modifier",
+    "a parenthetical historical subject retains ownership through a context",
+    "main string blocks a parenthetical historical subject before its predicate",
+    "main string blocks a parenthetical historical subject through a predicate modifier",
+    "main string blocks a parenthetical historical subject through a bounded context"
+   ],
+   "id": "26763f7f8cab4e9060165d663dfa160d69e3f18dce6e4bfed8017fee2c34a15b",
+   "outcome": "caught",
+   "reason": "selector-failure"
   },
   "26b99b08b062ed77a8aafc9614abbaabff61c500d37d4aa869da20f5fde8882e": {
    "version": 1,
@@ -1401,40 +1439,6 @@
    "outcome": "caught",
    "reason": "suite-failure"
   },
-  "5a16e5dce35da9e19f1c6dc2969ac61aa4440bdb9c73d5d6fa2c76452a65a678": {
-   "version": 1,
-   "kind": "site",
-   "module": "hooks/announced_work_guard.py",
-   "label": "outer-group closure signal dropped",
-   "anchor_sha256": "97fb3a222d651588773a1be259fa94c647461c8fba35e9c2e01bff3ff0e4020c",
-   "replacement_sha256": "88ba76a1525bfc068b19514713c5af119596b724b24218f8f410a878006592c5",
-   "selectors": [
-    "main string blocks an empty parenthetical from replacing the activity subject",
-    "main string blocks a spaced empty parenthetical from replacing the activity subject",
-    "main string blocks nested empty groups from replacing the activity subject",
-    "main string blocks empty brackets from replacing the activity subject",
-    "main string blocks empty straight-double quotes from replacing the activity subject",
-    "main string blocks empty straight-single quotes from replacing the activity subject",
-    "main string blocks empty inline code from replacing the activity subject",
-    "main content blocks an empty parenthetical from replacing the activity subject",
-    "main content blocks a spaced empty parenthetical from replacing the activity subject",
-    "main content blocks nested empty groups from replacing the activity subject",
-    "main content blocks empty brackets from replacing the activity subject",
-    "main content blocks empty straight-double quotes from replacing the activity subject",
-    "main content blocks empty straight-single quotes from replacing the activity subject",
-    "main content blocks empty inline code from replacing the activity subject",
-    "main bare blocks an empty parenthetical from replacing the activity subject",
-    "main bare blocks a spaced empty parenthetical from replacing the activity subject",
-    "main bare blocks nested empty groups from replacing the activity subject",
-    "main bare blocks empty brackets from replacing the activity subject",
-    "main bare blocks empty straight-double quotes from replacing the activity subject",
-    "main bare blocks empty straight-single quotes from replacing the activity subject",
-    "main bare blocks empty inline code from replacing the activity subject"
-   ],
-   "id": "5a16e5dce35da9e19f1c6dc2969ac61aa4440bdb9c73d5d6fa2c76452a65a678",
-   "outcome": "caught",
-   "reason": "selector-failure"
-  },
   "5a1c951e8ca2678955a34c022ec7539618128d2fad15788674498c3b3a49ed71": {
    "version": 1,
    "kind": "set-element",
@@ -1946,6 +1950,40 @@
    "id": "7635b227b8052d062e0c629ac5004a3a15b2d5399eded7d50d3b4c02fa7f8094",
    "outcome": "caught",
    "reason": "suite-failure"
+  },
+  "76a6abf16a4986100e60502a15ed7e0cf4dd574ba522349ab715766bf08c53e1": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/announced_work_guard.py",
+   "label": "outer-group closure signal dropped",
+   "anchor_sha256": "1167151f8d234653f466ae5f97dd1a5060a80e00729397746e018158e9e90052",
+   "replacement_sha256": "cfb2e182c8537e60bf3519689a7f662c1522238da4060a5461220afde8e202b5",
+   "selectors": [
+    "main string blocks an empty parenthetical from replacing the activity subject",
+    "main string blocks a spaced empty parenthetical from replacing the activity subject",
+    "main string blocks nested empty groups from replacing the activity subject",
+    "main string blocks empty brackets from replacing the activity subject",
+    "main string blocks empty straight-double quotes from replacing the activity subject",
+    "main string blocks empty straight-single quotes from replacing the activity subject",
+    "main string blocks empty inline code from replacing the activity subject",
+    "main content blocks an empty parenthetical from replacing the activity subject",
+    "main content blocks a spaced empty parenthetical from replacing the activity subject",
+    "main content blocks nested empty groups from replacing the activity subject",
+    "main content blocks empty brackets from replacing the activity subject",
+    "main content blocks empty straight-double quotes from replacing the activity subject",
+    "main content blocks empty straight-single quotes from replacing the activity subject",
+    "main content blocks empty inline code from replacing the activity subject",
+    "main bare blocks an empty parenthetical from replacing the activity subject",
+    "main bare blocks a spaced empty parenthetical from replacing the activity subject",
+    "main bare blocks nested empty groups from replacing the activity subject",
+    "main bare blocks empty brackets from replacing the activity subject",
+    "main bare blocks empty straight-double quotes from replacing the activity subject",
+    "main bare blocks empty straight-single quotes from replacing the activity subject",
+    "main bare blocks empty inline code from replacing the activity subject"
+   ],
+   "id": "76a6abf16a4986100e60502a15ed7e0cf4dd574ba522349ab715766bf08c53e1",
+   "outcome": "caught",
+   "reason": "selector-failure"
   },
   "76c794b9d211f89478963926f3d8119d45882c17f1bf7dbb7ba832108ffb2742": {
    "version": 1,
@@ -3752,25 +3790,6 @@
    "outcome": "caught",
    "reason": "suite-failure"
   },
-  "e97f831441e3aa146c182593ecfffc2c1593564bc434c417325b6bc5d3e7a0ba": {
-   "version": 1,
-   "kind": "site",
-   "module": "hooks/announced_work_guard.py",
-   "label": "straight-single outer predicate closure dropped",
-   "anchor_sha256": "9700c45ffdf8cdd77481b18f43ca9481680f9fafced4487313d63ffc8f5e67cf",
-   "replacement_sha256": "eb0e10e44111836b12d9c54b2f89ddb6cf013de0de75979e6ea9d4f16e0e51cf",
-   "selectors": [
-    "main string preserves a predicate after a straight-single-quoted subject",
-    "main string preserves a modified predicate after a straight-single-quoted subject",
-    "main content preserves a predicate after a straight-single-quoted subject",
-    "main content preserves a modified predicate after a straight-single-quoted subject",
-    "main bare preserves a predicate after a straight-single-quoted subject",
-    "main bare preserves a modified predicate after a straight-single-quoted subject"
-   ],
-   "id": "e97f831441e3aa146c182593ecfffc2c1593564bc434c417325b6bc5d3e7a0ba",
-   "outcome": "caught",
-   "reason": "selector-failure"
-  },
   "ec48aa911fbbed00c5474b4e26d8c88afca0bce4a7de001f691e8776f54dbc79": {
    "version": 1,
    "kind": "set-element",
@@ -4218,6 +4237,6 @@
   "ffc1c94b7cea5f3c3c6fe3ed1a8467bd1748e0b906434e9fb8621863f86bdbd6"
  ],
  "unasserted_kills": [],
- "caught": 274,
- "total": 354
+ "caught": 275,
+ "total": 355
 }

@@ -307,7 +307,9 @@ python3 tools/pr-delivery-state.py --pr <number> --repo <owner/repo>
 The command exits zero only when there are no workspace changes, local HEAD equals the GitHub PR
 head, the PR is non-conflicting, and both exact-head check and workflow-run lists are non-empty and
 successful. Pending CI exits 3; unpublished, conflicting, or failed state exits 1; missing evidence
-exits 2. This generic command does not require a workflow by name or enumerate mutation shard jobs
+exits 2. `pr_commit_count` is the GraphQL `commits.totalCount` observed with that response's PR head;
+a head change during collection is an evidence error rather than a mixed snapshot. This generic
+command does not require a workflow by name or enumerate mutation shard jobs
 and artifacts. Before publication, separately require the final-head `mutation-proof` run, all six
 successful shard jobs, exactly six nonempty shard artifacts, and its successful aggregate job.
 

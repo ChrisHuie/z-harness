@@ -374,16 +374,8 @@ SITE_MUTATIONS = (
     },
     {
         "label": "straight-single outer predicate closure dropped", "module": STOP,
-        "anchor": (
-            "            if group_stack[-1] == \"'\" and original_word.endswith(\"'\"):\n"
-            "                group_stack.pop()\n"
-            "                if not group_stack:\n"
-            "                    after_group = True"),
-        "replacement": (
-            "            if False and group_stack[-1] == \"'\" and original_word.endswith(\"'\"):\n"
-            "                group_stack.pop()\n"
-            "                if not group_stack:\n"
-            "                    after_group = True"),
+        "anchor": "            if group_stack[-1] == \"'\" and original_word.endswith(\"'\"):",
+        "replacement": "            if False and group_stack[-1] == \"'\" and original_word.endswith(\"'\"):",
         "selectors": (
             "main string preserves a predicate after a straight-single-quoted subject",
             "main string preserves a modified predicate after a straight-single-quoted subject",
@@ -412,10 +404,29 @@ SITE_MUTATIONS = (
         "allowed_statuses": (),
     },
     {
-        "label": "outer-group closure signal dropped", "module": STOP,
-        "anchor": "            if outer_group_closed:\n                after_group = True",
+        "label": "grouped historical subject ownership dropped", "module": STOP,
+        "anchor": (
+            "        if word in REPORT_TERMS:\n"
+            "            if grouped_historical_subject:\n"
+            "                return False"),
         "replacement": (
-            "            if False and outer_group_closed:\n                after_group = True"),
+            "        if word in REPORT_TERMS:\n"
+            "            if False and grouped_historical_subject:\n"
+            "                return False"),
+        "selectors": (
+            "a parenthetical historical subject cannot lend its predicate to the activity",
+            "a parenthetical historical subject retains ownership through a modifier",
+            "a parenthetical historical subject retains ownership through a context",
+            "main string blocks a parenthetical historical subject before its predicate",
+            "main string blocks a parenthetical historical subject through a predicate modifier",
+            "main string blocks a parenthetical historical subject through a bounded context",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "outer-group closure signal dropped", "module": STOP,
+        "anchor": "            if outer_group_closed:",
+        "replacement": "            if False and outer_group_closed:",
         "selectors": (
             "main string blocks an empty parenthetical from replacing the activity subject",
             "main string blocks a spaced empty parenthetical from replacing the activity subject",

@@ -1389,6 +1389,7 @@ EXPECTED_MUTATION_SITES = {
     ("hooks/announced_work_guard.py", "decorated colon classification dropped"),
     ("hooks/announced_work_guard.py", "escaped group delimiter handling dropped"),
     ("hooks/announced_work_guard.py", "hard separator classification dropped"),
+    ("hooks/announced_work_guard.py", "grouped historical subject ownership dropped"),
     ("hooks/announced_work_guard.py", "inline-code group recognition dropped"),
     ("hooks/announced_work_guard.py", "open-group association dropped"),
     ("hooks/announced_work_guard.py", "outer-group closure signal dropped"),
@@ -1535,6 +1536,13 @@ EXPECTED_MUTATION_SELECTORS = {
          "main bare blocks a predicate after an escaped quote"),
     ("hooks/announced_work_guard.py", "hard separator classification dropped"):
         ("main blocks attached and decorated historical report clauses",),
+    ("hooks/announced_work_guard.py", "grouped historical subject ownership dropped"):
+        ("a parenthetical historical subject cannot lend its predicate to the activity",
+         "a parenthetical historical subject retains ownership through a modifier",
+         "a parenthetical historical subject retains ownership through a context",
+         "main string blocks a parenthetical historical subject before its predicate",
+         "main string blocks a parenthetical historical subject through a predicate modifier",
+         "main string blocks a parenthetical historical subject through a bounded context"),
     ("hooks/announced_work_guard.py", "inline-code group recognition dropped"):
         ("main string blocks a single-backtick nested report",
          "main string blocks a double-backtick nested report",
@@ -1640,7 +1648,7 @@ EXPECTED_MUTATION_SELECTORS = {
         ("a repeated core.worktree binds the effective candidate Git recognises",),
 }
 EXPECTED_MUTATION_SITE_DIGEST = (
-    "a953d9433c7f95efbf2c25f65a49e9a6b4e86e10d0da2b4dd708adb71282d262"
+    "48832b66dbba2ed8dd9b81ad0872045c234f92cfa45bb79001ba70a85e342b3a"
 )
 EXPECTED_MUTATION_EXCLUSIONS = {
     "hooks/guards/git_grep_engine_guard.py::ALIAS_GUARDED":

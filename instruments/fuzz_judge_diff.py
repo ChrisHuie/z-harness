@@ -8,10 +8,13 @@ grammar, generated messages, and both compared sources by SHA-256.
 from __future__ import annotations
 
 import argparse
+import ast
+import copy
 import contextlib
 import hashlib
 import io
 import json
+import math
 import os
 from pathlib import Path
 import random
@@ -76,6 +79,7 @@ PRODUCTIONS = (
     "post-group-near-miss",
     "colon-context-near-miss",
     "report-term-near-miss",
+    "grouped-historical-subject",
 )
 GROUP_PRODUCTIONS = frozenset({
     "adjective-group-noun",
@@ -88,6 +92,7 @@ GROUP_PRODUCTIONS = frozenset({
     "colon-group-result-tail",
     "post-group-context",
     "post-group-near-miss",
+    "grouped-historical-subject",
 })
 POSTGROUP_MODIFIERS = (
     "finally", "gracefully", "locally", "quickly", "reliably", "silently",
@@ -140,6 +145,7 @@ POSTGROUP_RESULT_TAILS = (
     ("at", "12:04"),
     ("with", "a traceback"),
 )
+GROUPED_HISTORICAL_SUFFIXES = ("", " unexpectedly", " in CI")
 # Every production runs once, and every recorded group is rendered in the message.
 # The three post-group-modifier entries close the delimiter inventory the production
 # inventory leaves open; the near-miss entries after them pin vocabulary, not delimiters.
@@ -170,6 +176,10 @@ MANDATORY_CASES = (
     ('report-term-near-miss', None, 0),
     ('report-term-near-miss', None, 1),
     ('report-term-near-miss', None, 2),
+) + tuple(
+    ('grouped-historical-subject', group_name, suffix_index)
+    for group_name, _opened, _closed in GROUPS
+    for suffix_index in range(len(GROUPED_HISTORICAL_SUFFIXES))
 )
 FLAT_SHARE = 0.35
 # Drawing the non-flat case from PRODUCTIONS re-drew `flat`, so the realized share was
@@ -213,6 +223,7 @@ def grammar_payload() -> dict:
         "near_miss_modifiers": NEAR_MISS_MODIFIERS,
         "near_miss_contexts": NEAR_MISS_CONTEXTS,
         "near_miss_terms": NEAR_MISS_TERMS,
+        "grouped_historical_suffixes": GROUPED_HISTORICAL_SUFFIXES,
         "mandatory_cases": MANDATORY_CASES,
         "flat_share": FLAT_SHARE,
     }
@@ -289,6 +300,11 @@ def generated_case(rng: random.Random, production: str, group=None,
         preposition, obj = (MANDATORY_VOCABULARIES["colon-context-near-miss"][pin] if pin is not None
                             else rng.choice(MANDATORY_VOCABULARIES["colon-context-near-miss"]))
         message = f"Starting the {activity}: {preposition} {obj} {result}."
+    elif production == "grouped-historical-subject":
+        suffix = (GROUPED_HISTORICAL_SUFFIXES[pin] if pin is not None
+                  else rng.choice(GROUPED_HISTORICAL_SUFFIXES))
+        message = (f"Starting the {activity}: {opened}the prior run{closed}"
+                   f"{suffix} {result}.")
     else:
         raise ValueError(f"unknown production {production}")
     return {"production": production, "group": group_name, "message": message}
@@ -336,6 +352,7 @@ def load_guard(path: Path, expected_sha256: str, logical_path: Path | None = Non
 
 
 def worker(path: Path, expected_sha256: str, logical_path: Path) -> int:
+    exit_code = 0
     try:
         guard = load_guard(path, expected_sha256, logical_path)
         messages = json.load(sys.stdin)
@@ -348,15 +365,14 @@ def worker(path: Path, expected_sha256: str, logical_path: Path) -> int:
                 raise RuntimeError(
                     f"judge result {index} is {type(value).__name__}, expected None/nonempty str")
             results.append(value)
-        json.dump({"status": "completed", "source_sha256": expected_sha256,
-                   "results": results}, sys.stdout,
-                  ensure_ascii=False, separators=(",", ":"))
-        return 0
-    except Exception as exc:
-        json.dump({"status": "instrument-error", "reason": type(exc).__name__,
-                   "detail": str(exc)}, sys.stdout, ensure_ascii=False,
-                  separators=(",", ":"))
-        return 2
+        payload = {"status": "completed", "source_sha256": expected_sha256,
+                   "results": results}
+    except BaseException as exc:
+        payload = {"status": "instrument-error", "reason": type(exc).__name__,
+                   "detail": str(exc)}
+        exit_code = 2
+    emitted, _output_error = emit_report(sys.stdout, payload, pretty=False)
+    return exit_code if emitted else 2
 
 
 def run_worker(instrument: Path, path: Path, expected_sha256: str,
@@ -429,6 +445,125 @@ def classify(oracle: str | None, candidate: str | None) -> str:
     if oracle_blocks and candidate_blocks and oracle != candidate:
         return "block-reason-change"
     return "agreement"
+
+
+def guard_table_literal(tree: ast.Module, table_name: str,
+                        context_key: str | None = None) -> ast.Set:
+    """Return one parsed frozenset literal owned by a named guard table."""
+    assignments = [
+        node for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == table_name
+                for target in node.targets)
+    ]
+    if len(assignments) != 1:
+        raise RuntimeError(f"expected one assignment for {table_name}, got {len(assignments)}")
+    value = assignments[0].value
+    if context_key is not None:
+        if not isinstance(value, ast.Dict):
+            raise RuntimeError(f"{table_name} is not a literal dictionary")
+        matches = [item for key, item in zip(value.keys, value.values)
+                   if isinstance(key, ast.Constant) and key.value == context_key]
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"expected one {table_name}[{context_key!r}] entry, got {len(matches)}")
+        value = matches[0]
+    if (not isinstance(value, ast.Call) or not isinstance(value.func, ast.Name)
+            or value.func.id != "frozenset" or len(value.args) != 1
+            or not isinstance(value.args[0], ast.Set)):
+        raise RuntimeError(f"{table_name} target is not a literal frozenset")
+    return value.args[0]
+
+
+def widen_guard_table(source: bytes, table_name: str, token: str,
+                      context_key: str | None = None) -> bytes:
+    """Add one literal to one shipped guard table using its parsed source span."""
+    text = source.decode("utf-8")
+    tree = ast.parse(text)
+    literal_set = guard_table_literal(tree, table_name, context_key)
+    members = [item.value for item in literal_set.elts
+               if isinstance(item, ast.Constant) and isinstance(item.value, str)]
+    if len(members) != len(literal_set.elts) or token in members:
+        raise RuntimeError(f"{table_name} cannot be widened with {token!r}")
+    lines = text.splitlines(keepends=True)
+    line_index = literal_set.end_lineno - 1
+    closing = literal_set.end_col_offset - 1
+    if lines[line_index][closing] != "}":
+        raise RuntimeError(f"{table_name} parsed span does not end at its set closer")
+    offset = sum(len(line) for line in lines[:line_index]) + closing
+    separator = "" if text[:offset].rstrip().endswith(",") else ","
+    widened = text[:offset] + f"{separator} {token!r}," + text[offset:]
+    widened_tree = ast.parse(widened)
+    widened_set = guard_table_literal(widened_tree, table_name, context_key)
+    added = [item for item in widened_set.elts
+             if isinstance(item, ast.Constant) and item.value == token]
+    if len(added) != 1 or len(widened_set.elts) != len(literal_set.elts) + 1:
+        raise RuntimeError(f"{table_name} widening did not add exactly one literal")
+    normalized = copy.deepcopy(widened_tree)
+    normalized_set = guard_table_literal(normalized, table_name, context_key)
+    normalized_set.elts = [item for item in normalized_set.elts
+                           if not (isinstance(item, ast.Constant)
+                                   and item.value == token)]
+    if ast.dump(normalized, include_attributes=False) != ast.dump(
+            tree, include_attributes=False):
+        raise RuntimeError(f"{table_name} widening changed more than one AST literal")
+    return widened.encode("utf-8")
+
+
+def silence_failed_stream(stream) -> None:
+    """Prevent interpreter-shutdown retries from turning a handled pipe fault into 120."""
+    try:
+        descriptor = stream.fileno()
+        replacement = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(replacement, descriptor)
+        finally:
+            os.close(replacement)
+    except (AttributeError, OSError, ValueError):
+        pass
+
+
+def write_all(stream, content: str) -> None:
+    """Write and flush one prebuilt payload, honoring short-write semantics."""
+    offset = 0
+    while offset < len(content):
+        written = stream.write(content[offset:])
+        remaining = len(content) - offset
+        if (not isinstance(written, int) or isinstance(written, bool)
+                or written <= 0 or written > remaining):
+            raise OSError(f"stream accepted invalid character count {written!r}")
+        offset += written
+    stream.flush()
+
+
+def emit_line(stream, message: str) -> bool:
+    if stream is None or getattr(stream, "closed", False):
+        return False
+    try:
+        write_all(stream, message + "\n")
+        return True
+    except (OSError, UnicodeError, ValueError):
+        silence_failed_stream(stream)
+        return False
+
+
+def emit_report(stream, report: dict,
+                pretty: bool = True) -> tuple[bool, Exception | None]:
+    if stream is None or getattr(stream, "closed", False):
+        return False, RuntimeError("stdout is unavailable")
+    try:
+        serialized = json.dumps(
+            report,
+            sort_keys=pretty,
+            indent=2 if pretty else None,
+            ensure_ascii=False,
+            separators=None if pretty else (",", ":"),
+        ) + "\n"
+        write_all(stream, serialized)
+        return True, None
+    except (OSError, UnicodeError, ValueError, TypeError, AttributeError) as exc:
+        silence_failed_stream(stream)
+        return False, exc
 
 
 def compare(oracle_path: Path, candidate_path: Path, seed: int, count: int,
@@ -786,6 +921,9 @@ def selftest() -> int:
         # shipped guard. Skipped, with the reason recorded, when the guard is not beside us,
         # so the instrument still runs against an arbitrary pair of judges.
         shipped_guard = Path(__file__).resolve().parent.parent / "hooks/announced_work_guard.py"
+        widening_results = {"modifiers": [], "contexts": [], "terms": []}
+        grouped_historical_blocks = []
+        grouped_historical_mutant_exposed = False
         if shipped_guard.exists():
             judged = load_guard(shipped_guard, source_digest(shipped_guard))
             near_miss_cases = [
@@ -796,28 +934,85 @@ def selftest() -> int:
             check("every near-miss case blocks under the shipped guard",
                   len(blocked) == sum(len(v) for v in MANDATORY_VOCABULARIES.values())
                   and all(blocked))
+            grouped_historical = [
+                case for index, case in enumerate(generate(9, MIN_CASES))
+                if MANDATORY_CASES[index][0] == "grouped-historical-subject"
+            ]
+            grouped_historical_blocks = [
+                judged.judge({"last_assistant_message": case["message"]}) is not None
+                for case in grouped_historical
+            ]
+
+            shipped_source = shipped_guard.read_bytes()
+
+            def exercises_actual_widening(table, token, production, context_key=None):
+                candidate = root / f"widened-{table.lower()}-{token}.py"
+                candidate.write_bytes(widen_guard_table(
+                    shipped_source, table, token, context_key))
+                widened = compare(shipped_guard, candidate, 9, MIN_CASES, 5)
+                return any(
+                    item["production"] == production
+                    and token.casefold() in item["message"].casefold()
+                    and item["classification"] == "block-to-allow"
+                    for item in widened["results"]
+                )
+
+            widening_results["modifiers"] = [
+                exercises_actual_widening(
+                    "REPORT_POSTGROUP_MODIFIERS", token, "post-group-near-miss")
+                for token in NEAR_MISS_MODIFIERS
+            ]
+            widening_results["contexts"] = [
+                exercises_actual_widening(
+                    "REPORT_POSTGROUP_CONTEXTS", obj, "colon-context-near-miss", prep)
+                for prep, obj in NEAR_MISS_CONTEXTS
+            ]
+            widening_results["terms"] = [
+                exercises_actual_widening(
+                    "REPORT_TERMS", token, "report-term-near-miss")
+                for token in NEAR_MISS_TERMS
+            ]
+            historical_anchor = (
+                b"        if word in REPORT_TERMS:\n"
+                b"            if grouped_historical_subject:\n"
+                b"                return False"
+            )
+            historical_replacement = (
+                b"        if word in REPORT_TERMS:\n"
+                b"            if False and grouped_historical_subject:\n"
+                b"                return False"
+            )
+            if shipped_source.count(historical_anchor) == 1:
+                historical_mutant = root / "grouped-historical-subject-mutant.py"
+                historical_mutant.write_bytes(
+                    shipped_source.replace(historical_anchor, historical_replacement, 1))
+                historical_report = compare(
+                    shipped_guard, historical_mutant, 9, MIN_CASES, 5)
+                grouped_historical_mutant_exposed = any(
+                    item["production"] == "grouped-historical-subject"
+                    and item["classification"] == "block-to-allow"
+                    for item in historical_report["results"]
+                )
         else:
             # Fail rather than skip. A silent pass here would report the binding as verified
             # in exactly the copied-tree setup a reviewer uses to mutate this file, which is
             # where a dead control most needs to be visible.
             check("the shipped guard is beside this file, so the near-miss binding is"
                   " verifiable", False)
-        term_oracle = root / "term-oracle.py"
-        term_oracle.write_text("def judge(payload): return 'Running the'\n", encoding="utf-8")
-        term_widened = root / "term-widened.py"
-        term_widened.write_text(
-            "def judge(payload):\n"
-            "    message = payload['last_assistant_message']\n"
-            f"    if any(word in message for word in {NEAR_MISS_TERMS!r}):\n"
-            "        return None\n"
-            "    return 'Running the'\n",
-            encoding="utf-8")
-        widened_report = compare(term_oracle, term_widened, 9, MIN_CASES, 5)
-        check("the grammar emits an off-table report verb, exposing a widened table",
-              widened_report["counts"]["block-to-allow"] > 0
-              and any(item["production"] == "report-term-near-miss"
-                      and item["classification"] == "block-to-allow"
-                      for item in widened_report["results"]))
+        check("grouped historical-subject productions block under the shipped guard",
+              len(grouped_historical_blocks)
+              == len(GROUPS) * len(GROUPED_HISTORICAL_SUFFIXES)
+              and all(grouped_historical_blocks))
+        check("grouped historical-subject productions expose the ownership mutant",
+              grouped_historical_mutant_exposed)
+        for token, exposed in zip(NEAR_MISS_MODIFIERS,
+                                  widening_results["modifiers"]):
+            check(f"actual modifier-table widening exposes {token!r}", exposed)
+        for (_prep, obj), exposed in zip(NEAR_MISS_CONTEXTS,
+                                         widening_results["contexts"]):
+            check(f"actual context-table widening exposes {obj!r}", exposed)
+        for token, exposed in zip(NEAR_MISS_TERMS, widening_results["terms"]):
+            check(f"actual report-table widening exposes {token!r}", exposed)
         fail_open = root / "fail-open.py"
         fail_open.write_text("def judge(payload): return None\n", encoding="utf-8")
         fail_open_report = compare(guard, fail_open, 9, MIN_CASES, 5)
@@ -850,6 +1045,190 @@ def selftest() -> int:
         check("the CLI exits one when a fail-open divergence is retained",
               fail_open_exit == 1 and "block_to_allow=" in main_stderr.getvalue()
               and "exit=1" in main_stderr.getvalue())
+        instrument = Path(__file__).resolve()
+        cli = [str(instrument), str(guard), str(guard), "9", str(MIN_CASES),
+               "--timeout", "5"]
+        nonfinite = [
+            subprocess.run(
+                [sys.executable, str(instrument), str(guard), str(guard), "9",
+                 str(MIN_CASES), f"--timeout={value}"],
+                capture_output=True, text=True, timeout=10)
+            for value in ("inf", "nan", "-inf")
+        ]
+        check("non-finite worker timeouts are usage errors, never safety findings",
+              all(done.returncode == 2 and not done.stdout
+                  and "positive finite" in done.stderr
+                  and "Traceback" not in done.stderr for done in nonfinite))
+
+        descriptor_probe = root / "descriptor-probe.py"
+        descriptor_probe.write_text(
+            "import os, sys\n"
+            "mode, descriptor, command = sys.argv[1], int(sys.argv[2]), sys.argv[3:]\n"
+            "if mode == 'close':\n"
+            "    os.close(descriptor)\n"
+            "else:\n"
+            "    read_fd, write_fd = os.pipe()\n"
+            "    os.close(read_fd)\n"
+            "    os.dup2(write_fd, descriptor)\n"
+            "    if write_fd != descriptor:\n"
+            "        os.close(write_fd)\n"
+            "os.execv(sys.executable, [sys.executable, *command])\n",
+            encoding="utf-8",
+        )
+
+        def probe_descriptor(mode, descriptor, command=None, input_text=None):
+            return subprocess.run(
+                [sys.executable, str(descriptor_probe), mode, str(descriptor),
+                 *(cli if command is None else command)],
+                input=input_text, capture_output=True, text=True, timeout=15)
+
+        def complete_json(raw):
+            try:
+                payload = json.loads(raw)
+            except (TypeError, ValueError):
+                return False
+            return (isinstance(payload, dict)
+                    and payload.get("generated_count") == MIN_CASES)
+
+        closed_stdout = probe_descriptor("close", 1)
+        check("a closed stdout is an instrument error without a traceback or exit one",
+              closed_stdout.returncode == 2 and not closed_stdout.stdout
+              and "FUZZ-ERROR" in closed_stdout.stderr
+              and "Traceback" not in closed_stdout.stderr)
+        closed_stderr = probe_descriptor("close", 2)
+        check("a closed stderr cannot redirect the summary into machine output",
+              closed_stderr.returncode == 2 and not closed_stderr.stderr
+              and complete_json(closed_stderr.stdout)
+              and "FUZZ-SUMMARY" not in closed_stderr.stdout)
+        broken_stdout = probe_descriptor("broken", 1)
+        check("a broken stdout pipe remains an instrument error rather than exit 120",
+              broken_stdout.returncode == 2 and not broken_stdout.stdout
+              and "FUZZ-ERROR" in broken_stdout.stderr
+              and "Traceback" not in broken_stdout.stderr)
+        broken_stderr = probe_descriptor("broken", 2)
+        check("a broken stderr pipe preserves one JSON report and exits two",
+              broken_stderr.returncode == 2 and not broken_stderr.stderr
+              and complete_json(broken_stderr.stdout)
+              and "FUZZ-SUMMARY" not in broken_stderr.stdout)
+
+        divergent_cli = [str(instrument), str(guard), str(fail_open), "9",
+                         str(MIN_CASES), "--timeout", "5"]
+        healthy_divergence = subprocess.run(
+            [sys.executable, *divergent_cli],
+            capture_output=True, text=True, timeout=15)
+        try:
+            healthy_divergence_report = json.loads(healthy_divergence.stdout)
+        except ValueError:
+            healthy_divergence_report = None
+        divergent_faults = {
+            (mode, descriptor): probe_descriptor(
+                mode, descriptor, divergent_cli)
+            for mode in ("close", "broken") for descriptor in (1, 2)
+        }
+        check("output faults outrank a real block-to-allow verdict",
+              healthy_divergence.returncode == 1
+              and isinstance(healthy_divergence_report, dict)
+              and healthy_divergence_report.get("counts", {}).get("block-to-allow", 0) > 0
+              and all(done.returncode == 2 for done in divergent_faults.values())
+              and all(not divergent_faults[(mode, 1)].stdout
+                      for mode in ("close", "broken"))
+              and all(complete_json(divergent_faults[(mode, 2)].stdout)
+                      and not divergent_faults[(mode, 2)].stderr
+                      for mode in ("close", "broken")))
+
+        def probe_both(mode, command):
+            return probe_descriptor(
+                mode, 1,
+                [str(descriptor_probe), mode, "2", *command])
+
+        both_faults = [
+            probe_both(mode, command)
+            for mode in ("close", "broken")
+            for command in (cli, divergent_cli)
+        ]
+        check("simultaneous stdout and stderr faults remain instrument errors",
+              all(done.returncode == 2 and not done.stdout and not done.stderr
+                  for done in both_faults))
+
+        worker_cli = [
+            str(instrument), "--worker", str(guard),
+            "--expected-sha256", source_digest(guard),
+            "--logical-path", str(guard),
+        ]
+        worker_input = json.dumps(["Starting the audit."])
+        broken_worker = probe_descriptor(
+            "broken", 1, worker_cli, worker_input)
+        check("a worker's broken stdout exits two rather than 120 or partial JSON",
+              broken_worker.returncode == 2 and not broken_worker.stdout
+              and "Traceback" not in broken_worker.stderr)
+
+        exceptional_workers = []
+        for exception in ("SystemExit(1)", "KeyboardInterrupt('planted')"):
+            exceptional_guard = root / f"worker-{exception.split('(')[0].lower()}.py"
+            exceptional_guard.write_text(
+                "def judge(payload):\n"
+                f"    raise {exception}\n",
+                encoding="utf-8",
+            )
+            done = subprocess.run(
+                [sys.executable, str(instrument), "--worker", str(exceptional_guard),
+                 "--expected-sha256", source_digest(exceptional_guard),
+                 "--logical-path", str(exceptional_guard)],
+                input=worker_input, capture_output=True, text=True, timeout=10)
+            try:
+                worker_payload = json.loads(done.stdout)
+            except ValueError:
+                worker_payload = None
+            exceptional_workers.append(
+                done.returncode == 2 and not done.stderr
+                and isinstance(worker_payload, dict)
+                and worker_payload.get("status") == "instrument-error"
+                and worker_payload.get("reason") == exception.split("(")[0]
+            )
+        check("worker BaseException faults are instrument errors, never reserved exit one",
+              all(exceptional_workers))
+
+        class ShortWriter:
+            def __init__(self):
+                self.parts = []
+
+            def write(self, value):
+                accepted = max(1, len(value) // 2)
+                self.parts.append(value[:accepted])
+                return accepted
+
+            def flush(self):
+                return None
+
+        short_writer = ShortWriter()
+        short_ok, short_error = emit_report(short_writer, {"value": "abc"})
+        check("pre-serialized report output completes across explicit short writes",
+              short_ok and short_error is None
+              and json.loads("".join(short_writer.parts)) == {"value": "abc"})
+        short_summary = ShortWriter()
+        check("summary output completes across explicit short writes",
+              emit_line(short_summary, "FUZZ-SUMMARY planted")
+              and "".join(short_summary.parts) == "FUZZ-SUMMARY planted\n")
+
+        class ZeroWriter:
+            def __init__(self):
+                self.content = ""
+
+            def write(self, value):
+                self.content += value[:0]
+                return 0
+
+            def flush(self):
+                return None
+
+        zero_writer = ZeroWriter()
+        zero_ok, _zero_error = emit_report(zero_writer, {"value": "abc"})
+        unserializable_writer = io.StringIO()
+        serial_ok, _serial_error = emit_report(
+            unserializable_writer, {"bad": object()})
+        check("invalid write counts and serialization faults fail before a false verdict",
+              not zero_ok and not zero_writer.content
+              and not serial_ok and not unserializable_writer.getvalue())
         invalid = root / "invalid.py"
         invalid.write_text("def judge(payload): return False\n", encoding="utf-8")
         try:
@@ -885,24 +1264,31 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    stdout, stderr = sys.stdout, sys.stderr
     if args.worker is not None:
         if args.expected_sha256 is None or args.logical_path is None:
-            print("--worker requires --expected-sha256 and --logical-path", file=sys.stderr)
+            emit_line(stderr, "--worker requires --expected-sha256 and --logical-path")
+            return 2
+        if stdout is None or getattr(stdout, "closed", False):
+            emit_line(stderr, "FUZZ-ERROR RuntimeError: stdout is unavailable")
             return 2
         return worker(args.worker, args.expected_sha256, args.logical_path)
     if args.selftest:
         return 1 if selftest() else 0
     if None in (args.oracle, args.candidate, args.seed, args.count):
-        print("oracle, candidate, seed, and count are required", file=sys.stderr)
+        emit_line(stderr, "oracle, candidate, seed, and count are required")
         return 2
     if not 0 <= args.seed < 2 ** 64:
-        print("seed must be an unsigned 64-bit integer", file=sys.stderr)
+        emit_line(stderr, "seed must be an unsigned 64-bit integer")
         return 2
     if not MIN_CASES <= args.count <= MAX_CASES:
-        print(f"count must be between {MIN_CASES} and {MAX_CASES}", file=sys.stderr)
+        emit_line(stderr, f"count must be between {MIN_CASES} and {MAX_CASES}")
         return 2
-    if args.timeout <= 0:
-        print("--timeout must be positive", file=sys.stderr)
+    if not math.isfinite(args.timeout) or args.timeout <= 0:
+        emit_line(stderr, "--timeout must be a positive finite number")
+        return 2
+    if stdout is None or getattr(stdout, "closed", False):
+        emit_line(stderr, "FUZZ-ERROR RuntimeError: stdout is unavailable")
         return 2
     try:
         report = compare(args.oracle, args.candidate, args.seed, args.count, args.timeout)
@@ -911,28 +1297,30 @@ def main(argv: list[str] | None = None) -> int:
         # Exit 1 is reserved for a block-to-allow verdict. An instrument fault that
         # escaped as a bare traceback exited 1 through the interpreter, reporting a
         # crash as a safety finding -- a desynced vocabulary/pin pair did exactly that.
-        print(f"FUZZ-ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
+        emit_line(stderr, f"FUZZ-ERROR {type(exc).__name__}: {exc}")
         return 2
-    try:
-        json.dump(report, sys.stdout, sort_keys=True, indent=2, ensure_ascii=False)
-        sys.stdout.write("\n")
-    except (OSError, UnicodeError) as exc:
+    emitted, output_error = emit_report(stdout, report)
+    if not emitted:
         # Writing the report is not a verdict. Under an ascii stdout the grammar's own
         # em dash and curly quotes raised here, outside the try above, and exited 1 --
         # the reserved block-to-allow code -- for an encoding fault.
-        print(f"FUZZ-ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
+        emit_line(
+            stderr,
+            f"FUZZ-ERROR {type(output_error).__name__}: {output_error}",
+        )
         return 2
     counts = report["counts"]
     exit_code = 1 if counts["block-to-allow"] else 0
-    print(
+    summary = (
         f"FUZZ-SUMMARY seed={args.seed} count={args.count} "
         f"block_to_allow={counts['block-to-allow']} "
         f"allow_to_block={counts['allow-to-block']} "
         f"reason_changes={counts['block-reason-change']} "
         f"oracle_blocks={report['oracle_blocks']}/{report['generated_count']} "
-        f"exit={exit_code}",
-        file=sys.stderr,
+        f"exit={exit_code}"
     )
+    if not emit_line(stderr, summary):
+        return 2
     return exit_code
 
 

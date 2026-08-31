@@ -63,11 +63,53 @@ def repo_name(cwd, requested):
     return name
 
 
+def parse_commit_total(payload, expected_head):
+    if not isinstance(payload, dict) or payload.get("errors"):
+        raise RuntimeError("GitHub GraphQL returned errors or a non-object response")
+    try:
+        pull = payload["data"]["repository"]["pullRequest"]
+        graph_head = pull["headRefOid"]
+        total = pull["commits"]["totalCount"]
+    except (KeyError, TypeError) as exc:
+        raise RuntimeError("GitHub GraphQL returned incomplete PR commit state") from exc
+    if not isinstance(graph_head, str) or not graph_head:
+        raise RuntimeError("GitHub GraphQL returned an invalid PR headRefOid")
+    if graph_head != expected_head:
+        raise RuntimeError("PR head moved while collecting GitHub delivery state")
+    if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+        raise RuntimeError("GitHub GraphQL returned an invalid PR commit totalCount")
+    return total
+
+
+def github_commit_count(cwd, repo, number, expected_head):
+    parts = repo.split("/")
+    if len(parts) != 2 or not all(parts):
+        raise RuntimeError("repository must be in owner/name form")
+    if not isinstance(number, int) or isinstance(number, bool) or number < 1:
+        raise RuntimeError("gh pr view returned an invalid PR number")
+    owner, name = parts
+    query = (
+        "query($owner:String!,$name:String!,$number:Int!){"
+        "repository(owner:$owner,name:$name){pullRequest(number:$number){"
+        "headRefOid commits{totalCount}}}}"
+    )
+    payload = json_command([
+        "gh", "api", "graphql",
+        "-f", f"owner={owner}",
+        "-f", f"name={name}",
+        "-F", f"number={number}",
+        "-f", f"query={query}",
+    ], cwd)
+    return parse_commit_total(payload, expected_head)
+
+
 def github_state(cwd, pr, repo):
-    fields = "number,url,headRefName,headRefOid,commits,mergeStateStatus,statusCheckRollup"
+    fields = "number,url,headRefName,headRefOid,mergeStateStatus,statusCheckRollup"
     view = json_command(
         ["gh", "pr", "view", pr, "--repo", repo, "--json", fields], cwd
     )
+    if not isinstance(view, dict):
+        raise RuntimeError("gh pr view output is not an object")
     head = view.get("headRefOid")
     if not head:
         raise RuntimeError("gh pr view returned no headRefOid")
@@ -77,6 +119,8 @@ def github_state(cwd, pr, repo):
     ], cwd)
     if not isinstance(runs, list):
         raise RuntimeError("gh run list output is not an array")
+    view["commitCount"] = github_commit_count(
+        cwd, repo, view.get("number"), head)
     return view, runs
 
 
@@ -124,7 +168,9 @@ def evaluate(local, pr, runs):
     if checks["failed"] or run_counts["failed"]:
         reasons.append("one or more exact-head checks failed")
 
-    if not pr.get("commits"):
+    commit_count = pr.get("commitCount")
+    if (not isinstance(commit_count, int) or isinstance(commit_count, bool)
+            or commit_count < 1):
         evidence_errors.append("GitHub returned zero PR commits")
     if checks["total"] == 0 or run_counts["total"] == 0:
         evidence_errors.append("exact-head check and workflow-run lists must both be non-empty")
@@ -151,7 +197,7 @@ def evaluate(local, pr, runs):
         "pr_url": pr.get("url"),
         "remote_pr_branch": pr.get("headRefName"),
         "pr_head": pr.get("headRefOid"),
-        "pr_commit_count": len(pr.get("commits") or []),
+        "pr_commit_count": commit_count,
         "merge_state": pr.get("mergeStateStatus"),
         "checks": checks,
         "exact_head_runs": run_counts,
@@ -183,7 +229,7 @@ def fixture():
     local = {"branch": "feature/review", "head": head, "workspace_changes": 0}
     pr = {
         "number": 7, "url": "https://github.com/o/r/pull/7", "headRefName": "feature/review",
-        "headRefOid": head, "commits": [{}, {}, {}], "mergeStateStatus": "CLEAN",
+        "headRefOid": head, "commitCount": 147, "mergeStateStatus": "CLEAN",
         "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
     }
     runs = [{"status": "completed", "conclusion": "success", "headSha": head}]
@@ -202,7 +248,8 @@ def selftest():
     local, pr, runs = fixture()
     report, code = evaluate(local, pr, runs)
     check("matching local, PR, and exact-head CI passes", code == 0 and
-          report["verdict"] == "PUBLISHED_AND_GREEN")
+          report["verdict"] == "PUBLISHED_AND_GREEN"
+          and report["pr_commit_count"] == 147)
 
     local, pr, runs = fixture()
     local["head"] = "b" * 40
@@ -233,7 +280,7 @@ def selftest():
     check("failed exact-head check fails", code == 1)
 
     local, pr, runs = fixture()
-    pr["commits"] = []
+    pr["commitCount"] = 0
     _report, code = evaluate(local, pr, runs)
     check("zero PR commits is an evidence error", code == 2)
 
@@ -241,6 +288,151 @@ def selftest():
     runs[0]["headSha"] = "c" * 40
     _report, code = evaluate(local, pr, runs)
     check("wrong-head workflow run is an evidence error", code == 2)
+
+    invalid_totals_rejected = []
+    for payload in (
+            {},
+            {"data": {"repository": {"pullRequest": {"commits": {"totalCount": True}}}}},
+            {"data": {"repository": {"pullRequest": {"commits": {"totalCount": -1}}}}},
+    ):
+        try:
+            parse_commit_total(payload, "a" * 40)
+            invalid_totals_rejected.append(False)
+        except RuntimeError:
+            invalid_totals_rejected.append(True)
+    check("missing, boolean, and negative GraphQL commit totals are rejected",
+          all(invalid_totals_rejected))
+
+    invalid_states_rejected = []
+    for payload in (
+            {"errors": [{"message": "denied"}], "data": {"repository": {
+                "pullRequest": {
+                    "headRefOid": "a" * 40, "commits": {"totalCount": 147},
+                },
+            }}},
+            {"data": {"repository": {"pullRequest": {
+                "headRefOid": "b" * 40, "commits": {"totalCount": 147},
+            }}}},
+            {"data": {"repository": {"pullRequest": {
+                "commits": {"totalCount": 147},
+            }}}},
+    ):
+        try:
+            parse_commit_total(payload, "a" * 40)
+            invalid_states_rejected.append(False)
+        except RuntimeError:
+            invalid_states_rejected.append(True)
+    check("GraphQL errors, head movement, and missing heads are rejected",
+          all(invalid_states_rejected))
+
+    invalid_query_inputs_rejected = []
+    invalid_query_called = False
+
+    def reject_invalid_query(_args, _cwd):
+        nonlocal invalid_query_called
+        invalid_query_called = True
+        raise AssertionError("invalid query input reached gh")
+
+    original_json_command = globals()["json_command"]
+    try:
+        globals()["json_command"] = reject_invalid_query
+        for repo, number in (("owner", 7), ("/repo", 7), ("owner/repo/extra", 7),
+                             ("owner/repo", 0), ("owner/repo", True)):
+            try:
+                github_commit_count(".", repo, number, "a" * 40)
+                invalid_query_inputs_rejected.append(False)
+            except RuntimeError:
+                invalid_query_inputs_rejected.append(True)
+    finally:
+        globals()["json_command"] = original_json_command
+    check("malformed repositories and PR numbers fail before a GraphQL query",
+          all(invalid_query_inputs_rejected) and not invalid_query_called)
+
+    calls = []
+
+    def fake_json_command(args, cwd):
+        calls.append(args)
+        if args[:3] == ["gh", "pr", "view"]:
+            return {
+                "number": 7, "url": "https://github.com/o/r/pull/7",
+                "headRefName": "feature/review", "headRefOid": "a" * 40,
+                "mergeStateStatus": "CLEAN", "statusCheckRollup": [],
+            }
+        if args[:3] == ["gh", "api", "graphql"]:
+            return {"data": {"repository": {"pullRequest": {
+                "headRefOid": "a" * 40, "commits": {"totalCount": 147},
+            }}}}
+        if args[:3] == ["gh", "run", "list"]:
+            return []
+        raise AssertionError(args)
+
+    try:
+        globals()["json_command"] = fake_json_command
+        queried_pr, queried_runs = github_state(".", "7", "o/r")
+    finally:
+        globals()["json_command"] = original_json_command
+    view_call = next(args for args in calls if args[:3] == ["gh", "pr", "view"])
+    graphql_call = next(args for args in calls if args[:3] == ["gh", "api", "graphql"])
+    expected_query = (
+        "query($owner:String!,$name:String!,$number:Int!){"
+        "repository(owner:$owner,name:$name){pullRequest(number:$number){"
+        "headRefOid commits{totalCount}}}}"
+    )
+    check("GitHub state uses GraphQL totalCount rather than the capped commit-node list",
+          queried_pr["commitCount"] == 147 and queried_runs == []
+          and calls[0][:3] == ["gh", "pr", "view"]
+          and calls[1][:3] == ["gh", "run", "list"]
+          and calls[2] == [
+              "gh", "api", "graphql", "-f", "owner=o", "-f", "name=r",
+              "-F", "number=7", "-f", f"query={expected_query}",
+          ]
+          and view_call[-1]
+          == "number,url,headRefName,headRefOid,mergeStateStatus,statusCheckRollup"
+          and "headRefOid commits{totalCount}" in graphql_call[-1])
+
+    def graphql_error_after_view(args, _cwd):
+        if args[:3] == ["gh", "pr", "view"]:
+            return {
+                "number": 7, "url": "https://github.com/o/r/pull/7",
+                "headRefName": "feature/review", "headRefOid": "a" * 40,
+                "mergeStateStatus": "CLEAN", "statusCheckRollup": [],
+            }
+        if args[:3] == ["gh", "run", "list"]:
+            return []
+        if args[:3] == ["gh", "api", "graphql"]:
+            return {"errors": [{"message": "denied"}], "data": {"repository": {
+                "pullRequest": {
+                    "headRefOid": "a" * 40, "commits": {"totalCount": 100},
+                },
+            }}}
+        raise AssertionError(args)
+
+    try:
+        globals()["json_command"] = graphql_error_after_view
+        try:
+            github_state(".", "7", "o/r")
+            graphql_error_rejected = False
+        except RuntimeError:
+            graphql_error_rejected = True
+    finally:
+        globals()["json_command"] = original_json_command
+    check("GraphQL errors never fall back to a capped commit count",
+          graphql_error_rejected)
+
+    def malformed_view(_args, _cwd):
+        return []
+
+    try:
+        globals()["json_command"] = malformed_view
+        try:
+            github_state(".", "7", "o/r")
+            malformed_view_rejected = False
+        except RuntimeError:
+            malformed_view_rejected = True
+    finally:
+        globals()["json_command"] = original_json_command
+    check("a malformed PR-view response is an instrument error",
+          malformed_view_rejected)
 
     print(f"\n  {checks} checks, {failures} failure(s)")
     print(f"SELFTEST-SUMMARY suite=pr-delivery-state checks={checks} failures={failures}")

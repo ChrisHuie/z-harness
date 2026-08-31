@@ -134,13 +134,13 @@ DESC_CAP = 400                # house cap (spec ceiling is 1024)
 SELFTEST_SUITES = [
     ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"], 1367),
     ("askq_timeout_guard", ["hooks/askq_timeout_guard.py", "--selftest"], 13),
-    ("announced_work_guard", ["hooks/announced_work_guard.py", "--selftest"], 690),
+    ("announced_work_guard", ["hooks/announced_work_guard.py", "--selftest"], 889),
     ("harness_report", ["hooks/harness_report.py", "--selftest"], 12),
     ("cc-cost", ["tools/cc-cost.py", "--selftest"], 8),
     ("codex-cost", ["tools/codex-cost.py", "--selftest"], 28),
     ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 83),
     ("repository-ownership", ["tools/repository_ownership.py", "--selftest"], 78),
-    ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 8),
+    ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 14),
     ("verify-review-publication",
      ["tools/verify-review-publication.py", "--selftest"], 94),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
@@ -150,7 +150,7 @@ SELFTEST_SUITES = [
      ["tools/write-mutation-receipt.py", "--selftest"], 93),
     ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 65),
     ("enumerate-survivors", ["instruments/enumerate_survivors.py", "--selftest"], 28),
-    ("fuzz-judge-diff", ["instruments/fuzz_judge_diff.py", "--selftest"], 39),
+    ("fuzz-judge-diff", ["instruments/fuzz_judge_diff.py", "--selftest"], 64),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
     ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 88),
     ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 1149),
@@ -161,10 +161,10 @@ SELFTEST_SUITES = [
 def expected_selftest_checks(name):
     """Exact execution-derived counts for suites whose former formulas hid probes."""
     fixed = {
-        "announced_work_guard": 690,
+        "announced_work_guard": 889,
         "ci-gate": 355,
         "enumerate-survivors": 28,
-        "fuzz-judge-diff": 39,
+        "fuzz-judge-diff": 64,
         "spawn_preflight_guard": 88,
         "verify-review-publication": 94,
     }
@@ -2032,13 +2032,13 @@ def selftest():
             announced_timeouts.append(kwargs.get("timeout"))
             return subprocess.CompletedProcess(
                 args[0], 0,
-                b"SELFTEST-SUMMARY suite=announced_work_guard checks=690 failures=0\n",
+                b"SELFTEST-SUMMARY suite=announced_work_guard checks=889 failures=0\n",
                 b"")
         subprocess.run = record_announced_timeout
         try:
             c1_announced_timeout = Run(td, ci=True)
             c1_announced_timeout.c1_selftests(
-                [("announced_work_guard", [stub_suite], 690)],
+                [("announced_work_guard", [stub_suite], 889)],
                 sources=planted_sources("announced_work_guard", stub_suite))
         finally:
             subprocess.run = original_subprocess_run

@@ -233,7 +233,8 @@ have classified every case as agreement or allow-to-block -- and reports allow-t
 without collapsing them into that safety verdict. Its grammar carries near-miss tokens drawn from
 outside the guard's tables. The mandatory prefix pins every one, so a widening that admits
 one of those tokens diverges at the minimum case count rather than needing a large run. That
-guarantee covers three of the guard's collections; a widening elsewhere may still diverge by
+guarantee is exercised with actual one-literal private-copy widenings and covers three of the
+guard's collections; a widening elsewhere may still diverge by
 chance, and a clean run over an unpinned collection is not evidence of coverage. The accepted count range runs from the
 mandatory-case count to 100,000; the
 mandatory prefix includes every production and renders every supported delimiter spelling. Use

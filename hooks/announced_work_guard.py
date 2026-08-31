@@ -218,6 +218,48 @@ REPORT_GROUP_PAIRS = {
 }
 REPORT_GROUP_ESCAPES = frozenset(
     {*REPORT_GROUP_PAIRS, *REPORT_GROUP_PAIRS.values(), "`", "\\"})
+# A closed aside may elaborate the announced activity (``checks (three tests) failed``)
+# or name a different, historical activity whose following predicate must not excuse the
+# announcement (``audit: (the prior run) failed``). Retain only the bounded semantic fact
+# needed to separate those readings; the group remains opaque for every other purpose.
+REPORT_HISTORICAL_SUBJECT_MARKERS = frozenset({
+    "earlier", "former", "last", "latest", "older", "past", "previous", "prior",
+    "recent",
+})
+REPORT_GROUP_SUBJECT_LEADS = frozenset({
+    "a", "an", "another", "different", "its", "my", "one", "other", "our", "that",
+    "the", "their", "these", "this", "those", "your",
+}) | REPORT_HISTORICAL_SUBJECT_MARKERS
+REPORT_GROUP_NONSUBJECT_LINKS = frozenset({
+    "after", "at", "before", "by", "for", "from", "in", "of", "on", "to",
+    "with", "without", "because", "during",
+})
+REPORT_GROUP_SUBJECT_TAILS = frozenset({"earlier", "nightly", "yesterday"})
+REPORT_GROUP_SUBJECT_NOUN_TAILS = frozenset({
+    "artifact", "artifacts", "attempt", "attempts", "case", "cases", "report",
+    "reports", "result", "results", "output", "outputs",
+})
+REPORT_GROUP_ACTIVITY_MODIFIERS = frozenset({"integration", "workflow"})
+REPORT_GROUP_TEMPORAL_POSSESSIVES = frozenset({
+    "earlier's", "friday's", "monday's", "nightly's", "saturday's", "sunday's",
+    "thursday's", "tuesday's", "wednesday's", "yesterday's",
+})
+REPORT_GROUP_WEEKDAYS = frozenset({
+    "friday", "monday", "saturday", "sunday", "thursday", "tuesday", "wednesday",
+})
+REPORT_GROUP_TIME_COUNTS = frozenset({
+    "a", "an", "one", "two", "three", "four", "five", "six", "seven", "eight",
+    "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
+    "seventeen", "eighteen", "nineteen", "twenty",
+})
+REPORT_GROUP_TIME_UNITS = frozenset({
+    "day", "days", "hour", "hours", "minute", "minutes", "month", "months", "week",
+    "weeks", "year", "years",
+})
+REPORT_GROUP_SUBJECT_CONTEXTS = {
+    **REPORT_POSTGROUP_CONTEXTS,
+    "from": frozenset({"ci", "github", "today", "yesterday"}),
+}
 # These forms can modify a following noun: a count before "failed tests" is not a
 # completed activity. Accept result tails and determiner/quantifier-led result objects,
 # not an ambiguous bare following noun. "completed the migration" is a result predicate;
@@ -335,6 +377,126 @@ def report_group_separator(separator, group_stack):
     return "".join(outside), outer_group_closed
 
 
+def report_group_names_historical_activity(words):
+    """Return whether a closed group clearly names a different, earlier activity."""
+    if not words:
+        return False
+
+    def historical_compound(word):
+        parts = word.split("-")
+        return (len(parts) == 2 and parts[0] in REPORT_HISTORICAL_SUBJECT_MARKERS
+                and parts[1] in REPORT_ACTIVITY_HEADS)
+
+    first = words[0]
+    if (first not in REPORT_GROUP_SUBJECT_LEADS
+            and first not in REPORT_GROUP_TEMPORAL_POSSESSIVES
+            and not (first.endswith("'s") and first != "today's")
+            and not historical_compound(first)):
+        return False
+
+    def activity_base(word):
+        return word[:-2] if word.endswith("'s") else word
+
+    activity_indexes = [
+        index for index, word in enumerate(words)
+        if activity_base(word) in REPORT_ACTIVITY_HEADS or historical_compound(word)
+    ]
+    if not activity_indexes:
+        return False
+    # The rightmost activity token is the grouped noun phrase's head in every supported
+    # shape (``integration test case``, ``workflow run attempt``). Considering every
+    # earlier activity token rebuilt overlapping prefixes and made one long group cubic.
+    index = activity_indexes[-1]
+    word = words[index]
+    prefix = words[:index]
+    tail = words[index + 1:]
+    if not REPORT_GROUP_NONSUBJECT_LINKS.isdisjoint(prefix):
+        return False
+
+    marker_cursor = len(prefix) - 1
+    while (marker_cursor >= 0
+           and prefix[marker_cursor] in REPORT_GROUP_ACTIVITY_MODIFIERS):
+        marker_cursor -= 1
+    marker_scopes_activity = (
+        bool(prefix) and prefix[-1] in REPORT_HISTORICAL_SUBJECT_MARKERS
+    ) or (
+        marker_cursor >= 0 and prefix[marker_cursor] in {"previous", "prior"}
+    ) or (
+        len(prefix) >= 2 and prefix[-2] == "last" and prefix[-1].endswith("'s")
+        and prefix[-1][:-2] in REPORT_GROUP_TIME_UNITS
+    )
+    distinct_quantifier = any(
+        item in {"another", "different", "other"} for item in prefix
+    )
+    historical = (historical_compound(word) or marker_scopes_activity
+                  or not REPORT_GROUP_TEMPORAL_POSSESSIVES.isdisjoint(prefix)
+                  or distinct_quantifier)
+
+    def temporal_length(items, start=0):
+        if start >= len(items):
+            return 0
+        if items[start] in REPORT_GROUP_WEEKDAYS:
+            return 1
+        if items[start] in REPORT_GROUP_SUBJECT_TAILS:
+            return (2 if start + 1 < len(items)
+                    and items[start + 1] in {"morning", "afternoon", "evening", "night"}
+                    else 1)
+        if start + 1 < len(items) and items[start] == "last" and items[start + 1] in (
+                REPORT_GROUP_TIME_UNITS | {"night"}):
+            return 2
+        if (start + 2 < len(items)
+                and (items[start] in REPORT_GROUP_TIME_COUNTS or items[start].isdigit())
+                and items[start + 1] in REPORT_GROUP_TIME_UNITS
+                and items[start + 2] == "ago"):
+            return 3
+        return 0
+
+    tail_time = temporal_length(tail)
+    from_time = (len(tail) > 1 and tail[0] == "from"
+                 and temporal_length(tail, 1) > 0)
+    if not historical and not tail_time and not from_time:
+        return False
+
+    tail_index = 0
+    while tail_index < len(tail):
+        current = tail[tail_index]
+        if current in REPORT_GROUP_SUBJECT_NOUN_TAILS:
+            tail_index += 1
+            continue
+        length = temporal_length(tail, tail_index)
+        if length:
+            tail_index += length
+            continue
+        if current == "from":
+            length = temporal_length(tail, tail_index + 1)
+            if not length:
+                if (tail_index + 1 >= len(tail)
+                        or tail[tail_index + 1] not in REPORT_GROUP_SUBJECT_CONTEXTS["from"]):
+                    break
+                length = 1
+            tail_index += length + 1
+            continue
+        if current in REPORT_POSTGROUP_CONTEXTS:
+            if (tail_index + 1 >= len(tail)
+                    or tail[tail_index + 1] not in REPORT_POSTGROUP_CONTEXTS[current]):
+                break
+            tail_index += 2
+            continue
+        if current in {"after", "before"}:
+            tail_index += 1
+            if tail_index < len(tail) and tail[tail_index] in {"a", "an", "the"}:
+                tail_index += 1
+            if tail_index >= len(tail):
+                break
+            tail_index += 1
+            continue
+        if current == "at" and tail_index + 1 < len(tail):
+            tail_index += 2
+            continue
+        break
+    return tail_index == len(tail)
+
+
 def adjectival_report_is_predicate(remainder, report_end, core_words):
     """Return whether an adjectival report token has a predicate-shaped continuation."""
     if REPORT_RESULT_TAIL.match(remainder, report_end):
@@ -389,6 +551,8 @@ def reports_this_activity(unit, found):
     previous_word = None
     url_active = False
     group_stack = []
+    group_words = []
+    grouped_historical_subject = False
     after_group = False
     adjectival_group_modifier = False
     colon_adjectival_candidate = False
@@ -417,9 +581,16 @@ def reports_this_activity(unit, found):
                 locator = separator[:cut]
                 prose_tail = len(locator) - len(locator.rstrip(".,;:!?"))
                 separator = separator[cut - prose_tail:]
+            was_in_group = bool(group_stack)
             outside_separator, outer_group_closed = report_group_separator(
                 separator, group_stack)
+            if not was_in_group and group_stack:
+                group_words = []
             if outer_group_closed:
+                grouped_historical_subject = (
+                    grouped_historical_subject
+                    or report_group_names_historical_activity(group_words))
+                group_words = []
                 after_group = True
         if not url_active and group_stack:
             # An outside break mark before this group's opener ends the activity clause
@@ -439,9 +610,14 @@ def reports_this_activity(unit, found):
             # A straight single closing quote is part of REPORT_TOKEN (for contractions
             # and possessives), so consume it from the token. The post-group rule below
             # prevents a following noun from replacing the outer activity subject.
+            group_words.append(word.strip("'"))
             if group_stack[-1] == "'" and original_word.endswith("'"):
                 group_stack.pop()
                 if not group_stack:
+                    grouped_historical_subject = (
+                        grouped_historical_subject
+                        or report_group_names_historical_activity(group_words))
+                    group_words = []
                     after_group = True
             previous_word = word
             previous_end = token.end()
@@ -496,9 +672,12 @@ def reports_this_activity(unit, found):
                 # predicate can still prove that the announced activity ran.
                 after_group = False
                 adjectival_group_modifier = False
+                grouped_historical_subject = False
             else:
                 return False
         if word in REPORT_TERMS:
+            if grouped_historical_subject:
+                return False
             if core_last is None or core_last in REPORT_NONFINAL or core_incomplete:
                 if pending_colon:
                     return False
@@ -987,6 +1166,24 @@ def selftest():
             (f"a colon retains a {spelling} predicate result group",
              {"last_assistant_message":
               f"Starting the audit: failed {opened}three errors{closed}."}, False),
+            (f"a {spelling} historical subject cannot lend its predicate to the activity",
+             {"last_assistant_message":
+              f"Starting the audit: {opened}the prior run{closed} failed."}, True),
+            (f"a {spelling} historical subject retains ownership through a modifier",
+             {"last_assistant_message":
+              f"Starting the audit: {opened}the prior run{closed} unexpectedly failed."},
+             True),
+            (f"a {spelling} historical subject retains ownership through a context",
+             {"last_assistant_message":
+             f"Starting the audit: {opened}the prior run{closed} in CI failed."}, True),
+        ))
+    for report_term in sorted(REPORT_TERMS):
+        report_tail = "" if report_term in REPORT_ADJECTIVAL else " output"
+        cases.append((
+            f"a grouped historical subject owns the {report_term!r} predicate",
+            {"last_assistant_message":
+             f"Starting the audit: (the prior run) {report_term}{report_tail}."},
+            True,
         ))
     cases += [
         ("a colon predicate result group can contain a nested group",
@@ -1687,6 +1884,198 @@ def selftest():
         ("a straight-single-quoted subject can close before a modified predicate",
          {"last_assistant_message":
           "Running the audit 'Nightly' unexpectedly failed."}, False),
+        ("a leading preposition keeps a historical activity phrase adjunct-shaped",
+         {"last_assistant_message":
+          "Running the audit: (for the prior run) failed."}, False),
+        ("a trailing non-activity head keeps a historical phrase from becoming a subject",
+         {"last_assistant_message":
+          "Running the audit: (the prior run details) failed."}, False),
+        ("a historical phrase ending in a dataset stays adjunct-shaped",
+         {"last_assistant_message":
+          "Running the audit: (the prior run dataset) failed."}, False),
+        ("an activity word inside a longer adjunct is not its terminal subject head",
+         {"last_assistant_message":
+          "Running the audit: (previously run in CI) failed."}, False),
+        ("a grouped historical subject needs no colon to retain its predicate",
+         {"last_assistant_message":
+          "Starting the audit (the prior run) failed."}, True),
+        ("a grouped historical subject retains a bounded in-context adjunct",
+         {"last_assistant_message":
+          "Starting the audit: (the prior run in CI) failed."}, True),
+        ("a grouped historical subject retains a temporal adjunct",
+         {"last_assistant_message":
+          "Starting the audit: (the prior run yesterday) failed."}, True),
+        ("a postpositive temporal marker makes the grouped run historical",
+         {"last_assistant_message":
+          "Starting the audit: (the run yesterday) failed."}, True),
+        ("a possessive temporal marker makes the grouped run historical",
+         {"last_assistant_message":
+          "Starting the audit: (yesterday's run) failed."}, True),
+        ("a quantifier can lead a grouped historical subject",
+         {"last_assistant_message":
+          "Starting the audit: (another prior run) failed."}, True),
+        ("a grouped historical subject retains a bounded on-context adjunct",
+         {"last_assistant_message":
+          "Starting the audit: (the prior run on GitHub) failed."}, True),
+        ("a grouped historical subject retains a source-context adjunct",
+         {"last_assistant_message":
+          "Starting the audit: (the prior run from CI) failed."}, True),
+        ("a grouped historical subject retains context and temporal adjuncts",
+         {"last_assistant_message":
+          "Starting the audit: (the prior run in CI yesterday) failed."}, True),
+        ("a grouped historical subject retains a comma-style nightly adjunct",
+         {"last_assistant_message":
+          "Starting the audit: (the prior run, nightly) failed."}, True),
+        ("a hyphenated grouped historical subject retains its predicate",
+         {"last_assistant_message":
+          "Starting the audit: (the prior-run) failed."}, True),
+        ("the latest grouped activity retains its predicate",
+         {"last_assistant_message":
+          "Starting the audit: (the latest run) failed."}, True),
+        ("a past grouped activity retains its predicate",
+         {"last_assistant_message":
+          "Starting the audit: (the past run) failed."}, True),
+        ("a historical multiword test-case subject retains its predicate",
+         {"last_assistant_message":
+          "Starting the audit: (the previous integration test case) failed."}, True),
+        ("a historical workflow-run attempt retains its predicate",
+         {"last_assistant_message":
+          "Starting the audit: (the prior workflow run attempt) failed."}, True),
+        ("a historical run result retains its predicate",
+         {"last_assistant_message":
+          "Starting the audit: (the prior run result) failed."}, True),
+        ("a postpositive source-time phrase makes the audit historical",
+         {"last_assistant_message":
+          "Starting the audit: (the audit from yesterday) failed."}, True),
+        ("a last-night phrase makes the grouped run historical",
+         {"last_assistant_message":
+          "Starting the audit: (the run last night) failed."}, True),
+        ("a weekday possessive makes the grouped run historical",
+         {"last_assistant_message":
+          "Starting the audit: (Monday's run) failed."}, True),
+        ("a historical run retains an after-context adjunct",
+         {"last_assistant_message":
+          "Starting the audit: (the prior run after deployment) failed."}, True),
+        ("a historical audit report retains its predicate",
+         {"last_assistant_message":
+          "Starting the audit: (the previous audit report) failed."}, True),
+        ("a historical activity possessive retains its subject object",
+         {"last_assistant_message":
+          "Starting the audit: (the previous run's artifact) failed."}, True),
+        ("another grouped activity owns its predicate",
+         {"last_assistant_message":
+          "Starting the audit: (another audit) failed."}, True),
+        ("a historical test result retains its predicate",
+         {"last_assistant_message":
+          "Starting the audit: (the prior test result) failed."}, True),
+        ("an elapsed-time phrase makes the grouped run historical",
+         {"last_assistant_message":
+          "Starting the audit: (the run two hours ago) failed."}, True),
+        ("a Friday possessive makes the grouped run historical",
+         {"last_assistant_message":
+          "Starting the audit: (Friday's run) failed."}, True),
+        ("a last-week possessive makes the grouped run historical",
+         {"last_assistant_message":
+          "Starting the audit: (last week's run) failed."}, True),
+        ("an eleven-hour phrase makes the grouped run historical",
+         {"last_assistant_message":
+          "Starting the audit: (the run eleven hours ago) failed."}, True),
+        ("a numeric-hour phrase makes the grouped run historical",
+         {"last_assistant_message":
+          "Starting the audit: (the run 11 hours ago) failed."}, True),
+        ("a month phrase makes the grouped run historical",
+         {"last_assistant_message":
+          "Starting the audit: (the run two months ago) failed."}, True),
+        ("a weekday source-time phrase makes the audit historical",
+         {"last_assistant_message":
+          "Starting the audit: (the audit from Monday) failed."}, True),
+        ("a historical run retains an article-led after-context",
+         {"last_assistant_message":
+          "Starting the audit: (the prior run after the deployment) failed."}, True),
+        ("a historical run retains consecutive bounded contexts",
+         {"last_assistant_message":
+          "Starting the audit: (the prior run in CI at noon) failed."}, True),
+        ("a historical run output retains its predicate",
+         {"last_assistant_message":
+          "Starting the audit: (the prior run output) failed."}, True),
+        ("a generic possessive can lead an explicit historical run",
+         {"last_assistant_message":
+          "Starting the audit: (CI's prior run) failed."}, True),
+        ("a different grouped activity owns its predicate",
+         {"last_assistant_message":
+          "Starting the audit: (a different audit) failed."}, True),
+        ("a numeric determiner can lead an explicit historical run",
+         {"last_assistant_message":
+          "Starting the audit: (one prior run) failed."}, True),
+        ("a historical activity possessive retains its output object",
+         {"last_assistant_message":
+          "Starting the audit: (the prior run's output) failed."}, True),
+        ("a yesterday-morning phrase makes the grouped run historical",
+         {"last_assistant_message":
+          "Starting the audit: (the run yesterday morning) failed."}, True),
+        ("a last-week source phrase makes the grouped audit historical",
+         {"last_assistant_message":
+          "Starting the audit: (the audit from last week) failed."}, True),
+        ("a during-phrase remains an adjunct to the announced activity",
+         {"last_assistant_message":
+          "Running the audit: (during the prior run) failed."}, False),
+        ("a causal historical phrase remains an adjunct to the announced activity",
+         {"last_assistant_message":
+          "Running the audit: (because of the prior run) failed."}, False),
+        ("a previously-run phrase remains an adjunct to the announced activity",
+         {"last_assistant_message":
+          "Running the audit: (previously run) failed."}, False),
+        ("a previously-run activity modifier remains attached to the outer activity",
+         {"last_assistant_message":
+          "Running the audit: (the previously run audit) failed."}, False),
+        ("a labelled note about a historical run remains an adjunct",
+         {"last_assistant_message":
+          "Running the audit: (note: for the prior run) failed."}, False),
+        ("a last-mile compound stays an outer-activity appositive",
+         {"last_assistant_message":
+          "Running the audit: (a last-mile audit) failed."}, False),
+        ("a past-due compound stays an outer-activity appositive",
+         {"last_assistant_message":
+          "Running the audit: (a past-due audit) failed."}, False),
+        ("a recent-incident compound stays an outer-activity appositive",
+         {"last_assistant_message":
+          "Running the audit: (a recent-incident audit) failed."}, False),
+        ("a latest-version compound stays an outer-activity appositive",
+         {"last_assistant_message":
+          "Running the audit: (the latest-version test) failed."}, False),
+        ("a recent incident appositive still describes the outer activity",
+         {"last_assistant_message":
+          "Running the audit: (a recent incident audit) failed."}, False),
+        ("a latest version appositive still describes the outer activity",
+         {"last_assistant_message":
+          "Running the audit: (the latest version test) failed."}, False),
+        ("a past due appositive still describes the outer activity",
+         {"last_assistant_message":
+          "Running the audit: (a past due audit) failed."}, False),
+        ("a former employee appositive still describes the outer activity",
+         {"last_assistant_message":
+          "Running the audit: (a former employee check) failed."}, False),
+        ("an older version appositive still describes the outer activity",
+         {"last_assistant_message":
+          "Running the audit: (an older version test) failed."}, False),
+        ("a last mile appositive still describes the outer activity",
+         {"last_assistant_message":
+          "Running the audit: (a last mile audit) failed."}, False),
+        ("a today appositive still describes the outer audit",
+         {"last_assistant_message":
+          "Running the audit: (the audit today) failed."}, False),
+        ("a today possessive can describe the outer audit",
+         {"last_assistant_message":
+          "Running the audit: (today's audit) failed."}, False),
+        ("a today appositive still describes the outer test",
+         {"last_assistant_message":
+          "Running the test: (a test today) failed."}, False),
+        ("a recent integration appositive still describes the outer test",
+         {"last_assistant_message":
+          "Running the test: (a recent integration test) failed."}, False),
+        ("a latest workflow appositive still describes the outer test",
+         {"last_assistant_message":
+          "Running the test: (the latest workflow test) failed."}, False),
         # The declared out-of-scope boundary, pinned as a case so widening it is a
         # deliberate edit rather than a drift. A colon labels what follows instead of
         # ending a clause, and the shape below is the cost of treating it as a terminator.
@@ -1846,6 +2235,26 @@ def selftest():
         failures += 0 if ok else 1
         checks += 1
         print(f"  {'PASS' if ok else 'FAIL'} {label}")
+    # A grouped-subject classifier once reconsidered every activity token against every
+    # preceding marker and rescanned overlapping slices. This supported-token shape took
+    # more than the hook budget even though the surrounding report scan was linear.
+    grouped_scale_message = (
+        "Starting the audit: (the " + "prior " * 1600 + "run " * 1600
+        + ") failed."
+    )
+    try:
+        grouped_scale = subprocess.run(
+            [sys.executable, os.path.abspath(__file__)],
+            input=json.dumps({"hook_event_name": "Stop",
+                              "last_assistant_message": grouped_scale_message}),
+            capture_output=True, text=True, timeout=5, env=environment)
+        ok = (grouped_scale.returncode == 0 and not grouped_scale.stdout
+              and not grouped_scale.stderr)
+    except subprocess.TimeoutExpired:
+        ok = False
+    failures += 0 if ok else 1
+    checks += 1
+    print(f"  {'PASS' if ok else 'FAIL'} main answers the grouped activity flood in budget")
     for label, message, want, trigger in (
         ("main blocks a semicolon-separated historical report",
          "Starting the audit; the prior run failed.", 2, "Starting the"),
@@ -2272,6 +2681,27 @@ def selftest():
         ("blocks a report after a URL-ending semicolon",
          "Starting the audit at https://x.test; failed checks were found earlier.", 2,
          "Starting the"),
+    ) + tuple(
+        (f"blocks a {spelling} historical subject {label}",
+         f"Starting the audit: {opened}the prior run{closed}{suffix}.", 2,
+         "Starting the")
+        for spelling, opened, closed in group_spellings
+        for label, suffix in (
+            ("before its predicate", " failed"),
+            ("through a predicate modifier", " unexpectedly failed"),
+            ("through a bounded context", " in CI failed"),
+        )
+    ) + (
+        ("blocks a grouped historical subject after a predicate modifier bridge",
+         "Starting the audit: finally (the prior run) failed.", 2, "Starting the"),
+        ("blocks a grouped historical subject after a context bridge",
+         "Starting the audit: in CI (the prior run) failed.", 2, "Starting the"),
+        ("blocks a second grouped historical subject after a predicate modifier",
+         "Running the audit (nightly) finally (the prior run) failed.", 2,
+         "Running the"),
+        ("blocks a second grouped historical subject after a context bridge",
+         "Running the audit (nightly) in CI (the prior run) failed.", 2,
+         "Running the"),
     )
     for shape in ("string", "content", "bare"):
         for label, message, want, trigger in group_process_cases:

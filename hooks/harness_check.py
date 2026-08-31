@@ -134,23 +134,23 @@ DESC_CAP = 400                # house cap (spec ceiling is 1024)
 SELFTEST_SUITES = [
     ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"], 1367),
     ("askq_timeout_guard", ["hooks/askq_timeout_guard.py", "--selftest"], 13),
-    ("announced_work_guard", ["hooks/announced_work_guard.py", "--selftest"], 889),
+    ("announced_work_guard", ["hooks/announced_work_guard.py", "--selftest"], 916),
     ("harness_report", ["hooks/harness_report.py", "--selftest"], 12),
     ("cc-cost", ["tools/cc-cost.py", "--selftest"], 8),
     ("codex-cost", ["tools/codex-cost.py", "--selftest"], 28),
     ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 83),
     ("repository-ownership", ["tools/repository_ownership.py", "--selftest"], 78),
-    ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 14),
+    ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 24),
     ("verify-review-publication",
      ["tools/verify-review-publication.py", "--selftest"], 94),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
-    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 355),
+    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 357),
     ("write-mutation-receipt",
-     ["tools/write-mutation-receipt.py", "--selftest"], 93),
+     ["tools/write-mutation-receipt.py", "--selftest"], 99),
     ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 65),
     ("enumerate-survivors", ["instruments/enumerate_survivors.py", "--selftest"], 28),
-    ("fuzz-judge-diff", ["instruments/fuzz_judge_diff.py", "--selftest"], 64),
+    ("fuzz-judge-diff", ["instruments/fuzz_judge_diff.py", "--selftest"], 65),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
     ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 88),
     ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 1149),
@@ -161,10 +161,10 @@ SELFTEST_SUITES = [
 def expected_selftest_checks(name):
     """Exact execution-derived counts for suites whose former formulas hid probes."""
     fixed = {
-        "announced_work_guard": 889,
-        "ci-gate": 355,
+        "announced_work_guard": 916,
+        "ci-gate": 357,
         "enumerate-survivors": 28,
-        "fuzz-judge-diff": 64,
+        "fuzz-judge-diff": 65,
         "spawn_preflight_guard": 88,
         "verify-review-publication": 94,
     }
@@ -197,7 +197,7 @@ def expected_selftest_checks(name):
 # on the authoring host: bash_command_guard 27 s, git_grep_engine_guard 7.3 s (its
 # byte-cap, token and subcommand fixtures parse real megabyte-scale sources, and it
 # probes the installed git and zsh), announced_work_guard 15-16 s run alone and longer under
-# this gate's own concurrency (690 proofs include real Stop-process envelopes), ci-gate
+# this gate's own concurrency (the suite includes real Stop-process envelopes), ci-gate
 # 20.8 s. C1 requires each to finish inside SELFTEST_TIMEOUT_MARGIN of its budget, so these
 # are ceilings with room, not targets -- and the figure that decides the verdict is the
 # loaded one, which none of these are. They are not regenerable from a green run either:
@@ -2032,13 +2032,13 @@ def selftest():
             announced_timeouts.append(kwargs.get("timeout"))
             return subprocess.CompletedProcess(
                 args[0], 0,
-                b"SELFTEST-SUMMARY suite=announced_work_guard checks=889 failures=0\n",
+                b"SELFTEST-SUMMARY suite=announced_work_guard checks=916 failures=0\n",
                 b"")
         subprocess.run = record_announced_timeout
         try:
             c1_announced_timeout = Run(td, ci=True)
             c1_announced_timeout.c1_selftests(
-                [("announced_work_guard", [stub_suite], 889)],
+                [("announced_work_guard", [stub_suite], 916)],
                 sources=planted_sources("announced_work_guard", stub_suite))
         finally:
             subprocess.run = original_subprocess_run

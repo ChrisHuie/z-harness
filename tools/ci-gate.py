@@ -1285,7 +1285,7 @@ def decision_golden_error(golden_data=None, decide=None, snapshot=None,
 MUTATION_RECEIPT = ROOT / "contracts/goldens/mutation-receipt.json"
 MUTATION_SUMMARY = ROOT / "contracts/goldens/mutation-summary.md"
 MUTATION_SURVIVOR_DEBT_CEILING = 80
-MUTATION_PLAN_FLOOR = 351
+MUTATION_PLAN_FLOOR = 358
 # Kills scored only because the recorded check count moved, with no assertion failing. A
 # guard that increments its counter once per element of the collection under mutation moves
 # that count on any removal, so such a kill is decided by loop structure before any probe
@@ -1390,6 +1390,9 @@ EXPECTED_MUTATION_SITES = {
     ("hooks/announced_work_guard.py", "escaped group delimiter handling dropped"),
     ("hooks/announced_work_guard.py", "hard separator classification dropped"),
     ("hooks/announced_work_guard.py", "grouped historical subject ownership dropped"),
+    ("hooks/announced_work_guard.py", "grouped historical compound traversal dropped"),
+    ("hooks/announced_work_guard.py", "grouped historical compound bound dropped"),
+    ("hooks/announced_work_guard.py", "grouped latest-run distinction dropped"),
     ("hooks/announced_work_guard.py", "inline-code group recognition dropped"),
     ("hooks/announced_work_guard.py", "open-group association dropped"),
     ("hooks/announced_work_guard.py", "outer-group closure signal dropped"),
@@ -1543,6 +1546,20 @@ EXPECTED_MUTATION_SELECTORS = {
          "main string blocks a parenthetical historical subject before its predicate",
          "main string blocks a parenthetical historical subject through a predicate modifier",
          "main string blocks a parenthetical historical subject through a bounded context"),
+    ("hooks/announced_work_guard.py", "grouped historical compound traversal dropped"):
+        ("a latest CI run retains its grouped predicate",
+         "a previous CI run retains its grouped predicate",
+         "a prior test suite retains its grouped predicate",
+         "a last GitHub Actions run retains its grouped predicate",
+         "main string blocks a latest CI run historical subject",
+         "main string blocks a previous CI run historical subject",
+         "main string blocks a prior test-suite historical subject",
+         "main string blocks a last GitHub Actions run historical subject"),
+    ("hooks/announced_work_guard.py", "grouped historical compound bound dropped"):
+        ("four activity-compound words exceed the ownership bound",),
+    ("hooks/announced_work_guard.py", "grouped latest-run distinction dropped"):
+        ("a latest workflow appositive still describes the outer test",
+         "main string preserves a latest workflow-test appositive"),
     ("hooks/announced_work_guard.py", "inline-code group recognition dropped"):
         ("main string blocks a single-backtick nested report",
          "main string blocks a double-backtick nested report",
@@ -1648,7 +1665,7 @@ EXPECTED_MUTATION_SELECTORS = {
         ("a repeated core.worktree binds the effective candidate Git recognises",),
 }
 EXPECTED_MUTATION_SITE_DIGEST = (
-    "48832b66dbba2ed8dd9b81ad0872045c234f92cfa45bb79001ba70a85e342b3a"
+    "5d72b8fdb3c017fdfddd2c35e8463cf1d89bde5d26af3ad6852a0dc301270d6d"
 )
 EXPECTED_MUTATION_EXCLUSIONS = {
     "hooks/guards/git_grep_engine_guard.py::ALIAS_GUARDED":
@@ -1932,6 +1949,15 @@ def mutation_receipt_error(receipt_data=None, plan=None, exclusions=None,
         if reason == "timeout" and reason not in allowed_statuses:
             problems.append(
                 f"result {mutation_id} records status {reason!r} its plan does not allow")
+            continue
+        selectors = tuple(expected.get("selectors", ()) or ())
+        reachable_reasons = ({"selector-failure"} if selectors else {
+            "suite-failure", unasserted_reason,
+        }) | allowed_statuses
+        if outcome == "caught" and reason not in reachable_reasons:
+            problems.append(
+                f"result {mutation_id} records reason {reason!r}, which is unreachable "
+                f"for a descriptor with {len(selectors)} selector(s)")
             continue
         expected["outcome"] = outcome
         expected["reason"] = reason
@@ -3803,7 +3829,7 @@ def selftest() -> int:
     site_result = {key: value for key, value in site_mutation.items()
                    if key != "allowed_statuses"}
     site_result["outcome"] = "caught"
-    site_result["reason"] = "suite-failure"
+    site_result["reason"] = "selector-failure"
     addition_result = {key: value for key, value in addition_mutation.items()
                        if key != "allowed_statuses"}
     addition_result["outcome"] = "caught"
@@ -4025,6 +4051,12 @@ def selftest() -> int:
                   "module": "guard-a.py", "name": "T", "element": "y"}},
         "survivors": ["b"], "unasserted_kills": [], "caught": 1, "total": 2,
     }
+    stable_plan = [
+        {"id": "a", "kind": "set-element", "module": "guard-a.py",
+         "name": "T", "element": "x", "allowed_statuses": []},
+        {"id": "b", "kind": "set-element", "module": "guard-a.py",
+         "name": "T", "element": "y", "allowed_statuses": []},
+    ]
     # The receipt and its summary are compared byte for byte against a CI re-measurement, so
     # neither may depend on a value only one host can observe. These pin the RULE rather than
     # the two fields that broke it: every declared host-observed field must be invisible to
@@ -4061,12 +4093,13 @@ def selftest() -> int:
     _over_ceiling["caught"] = 2
     expect(
         "fresh host-observed kills are derived and bounded before projection",
-        writer.fresh_observation_error(_under_ceiling) == ""
-        and writer.fresh_observation_error(_over_ceiling) != "",
+        writer.fresh_observation_error(_under_ceiling, stable_plan) == ""
+        and writer.fresh_observation_error(_over_ceiling, stable_plan) != "",
     )
     _saved_receipt = writer.RECEIPT
     _saved_summary = writer.SUMMARY
     _saved_normalized_receipt = writer.normalized_receipt
+    _saved_mutation_plan = writer.mutation_plan
     with tempfile.TemporaryDirectory(prefix="z-harness-fresh-observation-") as raw:
         writer.RECEIPT = Path(raw) / "receipt.json"
         writer.SUMMARY = Path(raw) / "summary.md"
@@ -4075,12 +4108,14 @@ def selftest() -> int:
         writer.SUMMARY.write_text(
             writer.summary_text(_over_ceiling), encoding="utf-8")
         writer.normalized_receipt = lambda _fragments: _over_ceiling
+        writer.mutation_plan = lambda: (stable_plan, {})
         try:
             _fresh_aggregate_rc = writer.aggregate([], False)
         finally:
             writer.RECEIPT = _saved_receipt
             writer.SUMMARY = _saved_summary
             writer.normalized_receipt = _saved_normalized_receipt
+            writer.mutation_plan = _saved_mutation_plan
     expect(
         "fresh aggregation enforces the kill ceiling before a stable projection can pass",
         _fresh_aggregate_rc == 2,
@@ -4137,19 +4172,19 @@ def selftest() -> int:
     # A kill scored only by a moved check count inflates `caught` without any assertion
     # having failed. The receipt records those separately so the distinction survives into
     # the artifact; these probe that the tally is derived, bounded, and cannot be forged.
-    unasserted_site = dict(site_result, reason="exact-check-count")
+    unasserted_addition = dict(addition_result, reason="exact-check-count")
     unasserted_probe = dict(
         mutation_probe,
-        results={"set-id": set_result, "site-id": unasserted_site,
-                 "add-id": addition_result},
-        unasserted_kills=["site-id"],
+        results={"set-id": set_result, "site-id": site_result,
+                 "add-id": unasserted_addition},
+        unasserted_kills=["add-id"],
     )
     expect(
         "a kill scored only by a moved check count is recorded as unasserted",
         mutation_receipt_error(
             unasserted_probe,
             **dict(mutation_args,
-                   unasserted_identities={("guard-b.py", None, None)})) == "",
+                   unasserted_identities={("guard-a.py", "TOKENS", "z")})) == "",
     )
     expect(
         "an unasserted kill outside the reviewed set fails",
@@ -4177,6 +4212,28 @@ def selftest() -> int:
                  results={"set-id": set_result, "add-id": addition_result,
                           "site-id": dict(site_result, reason="looks-fine")}),
             **mutation_args) != "",
+    )
+    impossible_selector_reason = dict(set_result, outcome="caught",
+                                      reason="selector-failure")
+    impossible_selector_probe = dict(
+        mutation_probe,
+        results={"set-id": impossible_selector_reason,
+                 "add-id": addition_result, "site-id": site_result},
+        survivors=[], caught=3,
+    )
+    expect(
+        "a selectorless mutation cannot claim a selector-failure kill",
+        "unreachable" in mutation_receipt_error(
+            impossible_selector_probe, **mutation_args),
+    )
+    impossible_suite_reason = dict(site_result, reason="suite-failure")
+    expect(
+        "a selected mutation cannot claim a whole-suite kill",
+        "unreachable" in mutation_receipt_error(
+            dict(mutation_probe,
+                 results={"set-id": set_result, "add-id": addition_result,
+                          "site-id": impossible_suite_reason}),
+            **mutation_args),
     )
     expect(
         "a caught result claiming the survived reason fails",

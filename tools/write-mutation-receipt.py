@@ -12,6 +12,7 @@ import argparse
 import ast
 import contextlib
 import hashlib
+import io
 import json
 import os
 import re
@@ -420,6 +421,51 @@ SITE_MUTATIONS = (
             "main string blocks a parenthetical historical subject before its predicate",
             "main string blocks a parenthetical historical subject through a predicate modifier",
             "main string blocks a parenthetical historical subject through a bounded context",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "grouped historical compound traversal dropped", "module": STOP,
+        "anchor": (
+            "    while (marker_cursor >= 0\n"
+            "           and marker_distance < REPORT_GROUP_ACTIVITY_PREFIX_LIMIT\n"
+            "           and (prefix[marker_cursor] in REPORT_GROUP_ACTIVITY_MODIFIERS\n"
+            "                or prefix[marker_cursor] in REPORT_ACTIVITY_HEADS)):\n"
+            "        marker_cursor -= 1\n"
+            "        marker_distance += 1"),
+        "replacement": (
+            "    while False:\n"
+            "        marker_cursor -= 1\n"
+            "        marker_distance += 1"),
+        "selectors": (
+            "a latest CI run retains its grouped predicate",
+            "a previous CI run retains its grouped predicate",
+            "a prior test suite retains its grouped predicate",
+            "a last GitHub Actions run retains its grouped predicate",
+            "main string blocks a latest CI run historical subject",
+            "main string blocks a previous CI run historical subject",
+            "main string blocks a prior test-suite historical subject",
+            "main string blocks a last GitHub Actions run historical subject",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "grouped historical compound bound dropped", "module": STOP,
+        "anchor": "           and marker_distance < REPORT_GROUP_ACTIVITY_PREFIX_LIMIT",
+        "replacement": "           and marker_distance >= 0",
+        "selectors": ("four activity-compound words exceed the ownership bound",),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "grouped latest-run distinction dropped", "module": STOP,
+        "anchor": (
+            "             or (word in {\"run\", \"runs\"}\n"
+            "                 and prefix[marker_cursor] in {\"last\", \"latest\"}))"),
+        "replacement": (
+            "             or prefix[marker_cursor] in {\"last\", \"latest\"})"),
+        "selectors": (
+            "a latest workflow appositive still describes the outer test",
+            "main string preserves a latest workflow-test appositive",
         ),
         "allowed_statuses": (),
     },
@@ -2028,13 +2074,47 @@ def platform_stable(payload):
     return reduced
 
 
-def fresh_observation_error(payload: dict) -> str:
+def result_reason_error(result: object, descriptor: dict) -> str:
+    """Reject kill mechanisms that production scoring cannot emit for a descriptor."""
+    if not isinstance(result, dict):
+        return "mutation result is not an object"
+    outcome, reason = result.get("outcome"), result.get("reason")
+    if outcome == "survived":
+        return "" if reason == "survived" else "survived outcome has a kill reason"
+    if outcome != "caught":
+        return f"mutation outcome {outcome!r} is invalid"
+    selectors = tuple(descriptor.get("selectors", ()) or ())
+    allowed_statuses = set(descriptor.get("allowed_statuses", ()) or ())
+    reachable = ({"selector-failure"} if selectors else {
+        "suite-failure", UNASSERTED_KILL_REASON,
+    }) | allowed_statuses
+    if reason not in reachable:
+        return (
+            f"caught reason {reason!r} is unreachable for a descriptor "
+            f"with {len(selectors)} selector(s)"
+        )
+    return ""
+
+
+def fresh_observation_error(payload: dict, plan=None) -> str:
     """Validate host-observed kill evidence before projecting it away."""
     if not isinstance(payload, dict):
         return "fresh mutation receipt root is not an object"
     results = payload.get("results")
     if not isinstance(results, dict):
         return "fresh mutation results are not an object"
+    if plan is None:
+        try:
+            plan, _exclusions = mutation_plan()
+        except (OSError, ValueError) as exc:
+            return f"cannot bind fresh reasons to the mutation plan: {exc}"
+    plan_by_id = {item["id"]: item for item in plan}
+    if set(results) != set(plan_by_id):
+        return "fresh reason inventory differs from the mutation plan"
+    for mutation_id in sorted(results):
+        problem = result_reason_error(results[mutation_id], plan_by_id[mutation_id])
+        if problem:
+            return f"fresh result {mutation_id}: {problem}"
     observed = sorted(
         mutation_id for mutation_id, result in results.items()
         if isinstance(result, dict)
@@ -2052,13 +2132,22 @@ def fresh_observation_error(payload: dict) -> str:
 
 def aggregate(paths: list[Path], accept: bool) -> int:
     payload = normalized_receipt([load_json(path) for path in paths])
-    observation_problem = fresh_observation_error(payload)
+    plan, _exclusions = mutation_plan()
+    observation_problem = fresh_observation_error(payload, plan)
     if observation_problem:
         print(f"refusing mutation receipt: {observation_problem}", file=sys.stderr)
         return 2
     summary = summary_text(payload)
     existing = load_json(RECEIPT) if RECEIPT.is_file() else None
     existing_summary = SUMMARY.read_text(encoding="utf-8") if SUMMARY.is_file() else None
+    if existing is not None and not accept:
+        existing_problem = fresh_observation_error(existing, plan)
+        if existing_problem:
+            print(
+                f"refusing tracked mutation receipt: {existing_problem}",
+                file=sys.stderr,
+            )
+            return 2
     # `reason` answers whether an assertion fired, which legitimately differs by platform:
     # deleting "W" from MOD_UNMODELLED reddens a probe on a zsh that consumes that letter as
     # a modifier and only moves the check count on a zsh that does not. The outcome is the
@@ -2258,6 +2347,72 @@ def selftest() -> int:
           set(KILL_REASONS),
           {"suite-failure", "exact-check-count", "survived", "timeout",
            "selector-failure"})
+
+    selectorless_descriptor = {
+        "id": "selectorless", "module": GREP, "kind": "set-element",
+        "allowed_statuses": [],
+    }
+    selector_descriptor = {
+        "id": "selected", "module": STOP, "kind": "site",
+        "selectors": [selector], "allowed_statuses": [],
+    }
+    equal("a selectorless descriptor cannot claim a selector-failure kill",
+          result_reason_error(
+              {"outcome": "caught", "reason": "selector-failure"},
+              selectorless_descriptor),
+          "caught reason 'selector-failure' is unreachable for a descriptor with 0 selector(s)")
+    equal("a selected descriptor can claim a selector-failure kill",
+          result_reason_error(
+              {"outcome": "caught", "reason": "selector-failure"},
+              selector_descriptor), "")
+    equal("a selected descriptor cannot claim an exact-check-count kill",
+          result_reason_error(
+              {"outcome": "caught", "reason": UNASSERTED_KILL_REASON},
+              selector_descriptor),
+          "caught reason 'exact-check-count' is unreachable for a descriptor with 1 selector(s)")
+
+    reason_plan = [selectorless_descriptor, selector_descriptor]
+    truthful_reason_payload = {
+        "results": {
+            "selectorless": {"outcome": "caught", "reason": "suite-failure"},
+            "selected": {"outcome": "caught", "reason": "selector-failure"},
+        },
+        "unasserted_kills": [],
+    }
+    forged_reason_payload = json.loads(json.dumps(truthful_reason_payload))
+    forged_reason_payload["results"]["selectorless"]["reason"] = "selector-failure"
+    equal("fresh observation validation accepts reachable kill mechanisms",
+          fresh_observation_error(truthful_reason_payload, reason_plan), "")
+    record("fresh observation validation rejects a structurally impossible kill mechanism",
+           "unreachable" in fresh_observation_error(forged_reason_payload, reason_plan))
+
+    with tempfile.TemporaryDirectory(prefix="z-harness-reason-selftest-") as raw:
+        reason_root = Path(raw)
+        tracked_receipt = reason_root / "receipt.json"
+        tracked_summary = reason_root / "summary.md"
+        fragment = reason_root / "fragment.json"
+        tracked_receipt.write_text(
+            json.dumps(forged_reason_payload), encoding="utf-8")
+        tracked_summary.write_text("stable\n", encoding="utf-8")
+        fragment.write_text("{}", encoding="utf-8")
+        patched = {
+            "RECEIPT": tracked_receipt,
+            "SUMMARY": tracked_summary,
+            "mutation_plan": lambda: (reason_plan, {}),
+            "normalized_receipt": lambda _fragments: truthful_reason_payload,
+            "summary_text": lambda _payload: "stable\n",
+        }
+        restored = {name: globals()[name] for name in patched}
+        globals().update(patched)
+        try:
+            aggregate_stderr = io.StringIO()
+            with contextlib.redirect_stderr(aggregate_stderr):
+                aggregate_exit = aggregate([fragment], accept=False)
+        finally:
+            globals().update(restored)
+        record("verification aggregation rejects an impossibly relabelled tracked reason",
+               aggregate_exit == 2
+               and "refusing tracked mutation receipt" in aggregate_stderr.getvalue())
 
     # ---- needs_merged_run: where an arithmetic kill must not stop the measurement -----
     equal("the merged suite is not rerun against itself when it survives",

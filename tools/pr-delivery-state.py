@@ -16,6 +16,8 @@ import subprocess
 import sys
 
 VERSION = "1.0.0"
+PAGE_SIZE = 100
+MAX_PAGES = 1000
 PASS_CONCLUSIONS = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 FAIL_CONCLUSIONS = {
     "ACTION_REQUIRED", "CANCELLED", "FAILURE", "STALE", "STARTUP_FAILURE", "TIMED_OUT"
@@ -63,65 +65,272 @@ def repo_name(cwd, requested):
     return name
 
 
-def parse_commit_total(payload, expected_head):
-    if not isinstance(payload, dict) or payload.get("errors"):
-        raise RuntimeError("GitHub GraphQL returned errors or a non-object response")
-    try:
-        pull = payload["data"]["repository"]["pullRequest"]
-        graph_head = pull["headRefOid"]
-        total = pull["commits"]["totalCount"]
-    except (KeyError, TypeError) as exc:
-        raise RuntimeError("GitHub GraphQL returned incomplete PR commit state") from exc
-    if not isinstance(graph_head, str) or not graph_head:
-        raise RuntimeError("GitHub GraphQL returned an invalid PR headRefOid")
-    if graph_head != expected_head:
-        raise RuntimeError("PR head moved while collecting GitHub delivery state")
-    if not isinstance(total, int) or isinstance(total, bool) or total < 0:
-        raise RuntimeError("GitHub GraphQL returned an invalid PR commit totalCount")
-    return total
-
-
-def github_commit_count(cwd, repo, number, expected_head):
+def repo_parts(repo, number):
     parts = repo.split("/")
     if len(parts) != 2 or not all(parts):
         raise RuntimeError("repository must be in owner/name form")
     if not isinstance(number, int) or isinstance(number, bool) or number < 1:
         raise RuntimeError("gh pr view returned an invalid PR number")
-    owner, name = parts
-    query = (
-        "query($owner:String!,$name:String!,$number:Int!){"
-        "repository(owner:$owner,name:$name){pullRequest(number:$number){"
-        "headRefOid commits{totalCount}}}}"
-    )
-    payload = json_command([
+    return parts
+
+
+def graphql_args(owner, name, number, query, cursor=None):
+    args = [
         "gh", "api", "graphql",
+    ]
+    args.extend([
         "-f", f"owner={owner}",
         "-f", f"name={name}",
         "-F", f"number={number}",
-        "-f", f"query={query}",
-    ], cwd)
-    return parse_commit_total(payload, expected_head)
+    ])
+    if cursor is not None:
+        args.extend(["-f", f"endCursor={cursor}"])
+    args.extend(["-f", f"query={query}"])
+    return args
+
+
+def pr_identity(pull):
+    try:
+        identity = {
+            "number": pull["number"],
+            "url": pull["url"],
+            "headRefName": pull["headRefName"],
+            "headRefOid": pull["headRefOid"],
+            "baseRefOid": pull["baseRefOid"],
+            "mergeStateStatus": pull["mergeStateStatus"],
+            "isDraft": pull["isDraft"],
+            "commitCount": pull["commits"]["totalCount"],
+        }
+    except (KeyError, TypeError) as exc:
+        raise RuntimeError("GitHub GraphQL returned incomplete PR identity state") from exc
+    for key in ("url", "headRefName", "headRefOid", "baseRefOid"):
+        if not isinstance(identity[key], str) or not identity[key]:
+            raise RuntimeError(f"GitHub GraphQL returned an invalid PR {key}")
+    if (not isinstance(identity["number"], int)
+            or isinstance(identity["number"], bool) or identity["number"] < 1):
+        raise RuntimeError("GitHub GraphQL returned an invalid PR number")
+    if not isinstance(identity["isDraft"], bool):
+        raise RuntimeError("GitHub GraphQL returned an invalid PR isDraft value")
+    total = identity["commitCount"]
+    if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+        raise RuntimeError("GitHub GraphQL returned an invalid PR commit totalCount")
+    merge_state = identity["mergeStateStatus"]
+    if merge_state is not None and not isinstance(merge_state, str):
+        raise RuntimeError("GitHub GraphQL returned an invalid PR mergeStateStatus")
+    return identity
+
+
+def parse_graphql_payload(payload):
+    if not isinstance(payload, dict) or payload.get("errors"):
+        raise RuntimeError("GitHub GraphQL returned errors or a non-object response")
+    try:
+        pull = payload["data"]["repository"]["pullRequest"]
+    except (KeyError, TypeError) as exc:
+        raise RuntimeError("GitHub GraphQL returned incomplete PR state") from exc
+    if not isinstance(pull, dict):
+        raise RuntimeError("GitHub GraphQL returned no pull request")
+    return pull
+
+
+def same_identity(left, right):
+    keys = (
+        "number", "url", "headRefName", "headRefOid", "baseRefOid",
+        "mergeStateStatus", "isDraft", "commitCount",
+    )
+    return all(left.get(key) == right.get(key) for key in keys)
+
+
+def github_checks(cwd, repo, number):
+    owner, name = repo_parts(repo, number)
+    query = (
+        "query($owner:String!,$name:String!,$number:Int!,$endCursor:String){"
+        "repository(owner:$owner,name:$name){pullRequest(number:$number){"
+        "number url headRefName headRefOid baseRefOid mergeStateStatus isDraft "
+        "commits{totalCount} statusCheckRollup{contexts(first:100,after:$endCursor){"
+        "totalCount pageInfo{hasNextPage endCursor} nodes{__typename "
+        "... on CheckRun{id name status conclusion detailsUrl} "
+        "... on StatusContext{id context state targetUrl}}}}}}}"
+    )
+    identity = None
+    total = None
+    signals = []
+    signal_ids = set()
+    cursors = set()
+    cursor = None
+    page = 1
+    while True:
+        payload = json_command(
+            graphql_args(owner, name, number, query, cursor=cursor), cwd)
+        pull = parse_graphql_payload(payload)
+        page_identity = pr_identity(pull)
+        if identity is None:
+            identity = page_identity
+        elif not same_identity(identity, page_identity):
+            raise RuntimeError("PR state moved while paginating exact-head checks")
+
+        rollup = pull.get("statusCheckRollup")
+        if rollup is None:
+            page_total, nodes = 0, []
+            page_info = {"hasNextPage": False, "endCursor": None}
+        else:
+            try:
+                connection = rollup["contexts"]
+                page_total = connection["totalCount"]
+                nodes = connection["nodes"]
+                page_info = connection["pageInfo"]
+            except (KeyError, TypeError) as exc:
+                raise RuntimeError("GitHub GraphQL returned incomplete check pagination") from exc
+        if (not isinstance(page_total, int) or isinstance(page_total, bool)
+                or page_total < 0 or not isinstance(nodes, list)):
+            raise RuntimeError("GitHub GraphQL returned invalid check pagination counts")
+        if total is None:
+            total = page_total
+        elif total != page_total:
+            raise RuntimeError("exact-head check total changed during pagination")
+        if not isinstance(page_info, dict) or not isinstance(
+                page_info.get("hasNextPage"), bool):
+            raise RuntimeError("GitHub GraphQL returned invalid check pageInfo")
+        has_next = page_info["hasNextPage"]
+        for node in nodes:
+            if not isinstance(node, dict):
+                raise RuntimeError("GitHub GraphQL returned a malformed check node")
+            signal_id = node.get("id")
+            if not isinstance(signal_id, str) or not signal_id:
+                raise RuntimeError("GitHub GraphQL returned a check without an id")
+            if signal_id in signal_ids:
+                raise RuntimeError("GitHub GraphQL returned a duplicate check id")
+            signal_ids.add(signal_id)
+            signals.append(node)
+        if not has_next:
+            break
+        next_cursor = page_info.get("endCursor")
+        if not isinstance(next_cursor, str) or not next_cursor:
+            raise RuntimeError("GitHub GraphQL returned no cursor for the next check page")
+        if next_cursor in cursors:
+            raise RuntimeError("GitHub GraphQL repeated a check-page cursor")
+        cursors.add(next_cursor)
+        cursor = next_cursor
+        page += 1
+        if page > MAX_PAGES:
+            raise RuntimeError("GitHub GraphQL pagination exceeded its safety bound")
+
+    if len(signals) != total:
+        raise RuntimeError(
+            f"GitHub returned {len(signals)} of {total} exact-head checks")
+    identity["statusCheckRollup"] = signals
+    return identity
+
+
+def parse_run_page(payload):
+    if not isinstance(payload, dict):
+        raise RuntimeError("GitHub Actions returned a non-object response")
+    total = payload.get("total_count")
+    runs = payload.get("workflow_runs")
+    if (not isinstance(total, int) or isinstance(total, bool) or total < 0
+            or not isinstance(runs, list)):
+        raise RuntimeError("GitHub Actions returned invalid pagination state")
+    return total, runs
+
+
+def run_page_args(repo, head, page):
+    return [
+        "gh", "api", "-X", "GET", f"repos/{repo}/actions/runs",
+        "-f", f"head_sha={head}", "-F", f"per_page={PAGE_SIZE}",
+        "-F", f"page={page}",
+    ]
+
+
+def github_workflow_runs(cwd, repo, head):
+    page = 1
+    expected_total = None
+    raw_runs = []
+    run_ids = set()
+    first_page_ids = None
+    while True:
+        payload = json_command(run_page_args(repo, head, page), cwd)
+        total, page_runs = parse_run_page(payload)
+        if expected_total is None:
+            expected_total = total
+        elif total != expected_total:
+            raise RuntimeError("exact-head workflow-run total changed during pagination")
+        page_ids = []
+        for run in page_runs:
+            if not isinstance(run, dict):
+                raise RuntimeError("GitHub Actions returned a malformed workflow run")
+            run_id = run.get("id")
+            if not isinstance(run_id, int) or isinstance(run_id, bool) or run_id < 1:
+                raise RuntimeError("GitHub Actions returned a workflow run without a valid id")
+            if run_id in run_ids:
+                raise RuntimeError("GitHub Actions returned a duplicate workflow-run id")
+            run_ids.add(run_id)
+            page_ids.append(run_id)
+            raw_runs.append(run)
+        if page == 1:
+            first_page_ids = page_ids
+        if len(raw_runs) >= expected_total:
+            break
+        if not page_runs:
+            raise RuntimeError("GitHub Actions pagination stopped before its last page")
+        page += 1
+        if page > MAX_PAGES:
+            raise RuntimeError("GitHub Actions pagination exceeded its safety bound")
+    if len(raw_runs) != expected_total:
+        raise RuntimeError(
+            f"GitHub returned {len(raw_runs)} of {expected_total} exact-head workflow runs")
+
+    replay_total, replay_runs = parse_run_page(
+        json_command(run_page_args(repo, head, 1), cwd))
+    replay_ids = [run.get("id") for run in replay_runs if isinstance(run, dict)]
+    if replay_total != expected_total or replay_ids != first_page_ids:
+        raise RuntimeError("exact-head workflow runs changed during pagination")
+
+    normalized = []
+    for run in raw_runs:
+        normalized.append({
+            "databaseId": run["id"],
+            "workflowName": run.get("name"),
+            "status": run.get("status"),
+            "conclusion": run.get("conclusion"),
+            "headSha": run.get("head_sha"),
+            "url": run.get("html_url"),
+        })
+    return normalized
+
+
+def github_snapshot(cwd, repo, number):
+    owner, name = repo_parts(repo, number)
+    query = (
+        "query($owner:String!,$name:String!,$number:Int!){"
+        "repository(owner:$owner,name:$name){pullRequest(number:$number){"
+        "number url headRefName headRefOid baseRefOid mergeStateStatus isDraft "
+        "commits{totalCount}}}}"
+    )
+    return pr_identity(parse_graphql_payload(json_command(
+        graphql_args(owner, name, number, query), cwd)))
 
 
 def github_state(cwd, pr, repo):
-    fields = "number,url,headRefName,headRefOid,mergeStateStatus,statusCheckRollup"
+    fields = "number,url,headRefName,headRefOid,baseRefOid"
     view = json_command(
         ["gh", "pr", "view", pr, "--repo", repo, "--json", fields], cwd
     )
     if not isinstance(view, dict):
         raise RuntimeError("gh pr view output is not an object")
-    head = view.get("headRefOid")
-    if not head:
-        raise RuntimeError("gh pr view returned no headRefOid")
-    runs = json_command([
-        "gh", "run", "list", "--repo", repo, "--commit", head,
-        "--json", "databaseId,workflowName,status,conclusion,headSha,url",
-    ], cwd)
-    if not isinstance(runs, list):
-        raise RuntimeError("gh run list output is not an array")
-    view["commitCount"] = github_commit_count(
-        cwd, repo, view.get("number"), head)
-    return view, runs
+    number = view.get("number")
+    repo_parts(repo, number)
+    for key in ("url", "headRefName", "headRefOid", "baseRefOid"):
+        if not isinstance(view.get(key), str) or not view[key]:
+            raise RuntimeError(f"gh pr view returned an invalid {key}")
+
+    graph = github_checks(cwd, repo, number)
+    for key in ("number", "url", "headRefName", "headRefOid", "baseRefOid"):
+        if view.get(key) != graph.get(key):
+            raise RuntimeError(f"PR {key} moved while collecting GitHub delivery state")
+    runs = github_workflow_runs(cwd, repo, graph["headRefOid"])
+    final = github_snapshot(cwd, repo, number)
+    if not same_identity(graph, final):
+        raise RuntimeError("PR state moved while collecting GitHub delivery state")
+    return graph, runs
 
 
 def signal_bucket(signal):
@@ -163,8 +372,21 @@ def evaluate(local, pr, runs):
         )
     if local["head"] != pr.get("headRefOid"):
         reasons.append("local HEAD differs from the GitHub PR head")
-    if pr.get("mergeStateStatus") == "DIRTY":
-        reasons.append("GitHub reports a conflicting merge state")
+    merge_state = pr.get("mergeStateStatus")
+    known_merge_states = {
+        "BEHIND", "BLOCKED", "CLEAN", "DIRTY", "DRAFT", "HAS_HOOKS",
+        "UNKNOWN", "UNSTABLE",
+    }
+    if (not isinstance(merge_state, str) or not merge_state.strip()
+            or merge_state.upper() not in known_merge_states
+            or merge_state.upper() == "UNKNOWN"):
+        evidence_errors.append("GitHub returned no usable PR merge state")
+    elif merge_state.upper() != "CLEAN":
+        reasons.append(f"GitHub merge state is {merge_state.upper()}, not CLEAN")
+    if pr.get("isDraft") is True:
+        reasons.append("GitHub reports that the pull request is a draft")
+    elif pr.get("isDraft") is not False:
+        evidence_errors.append("GitHub returned no usable PR draft state")
     if checks["failed"] or run_counts["failed"]:
         reasons.append("one or more exact-head checks failed")
 
@@ -172,6 +394,9 @@ def evaluate(local, pr, runs):
     if (not isinstance(commit_count, int) or isinstance(commit_count, bool)
             or commit_count < 1):
         evidence_errors.append("GitHub returned zero PR commits")
+    base = pr.get("baseRefOid")
+    if not isinstance(base, str) or not base:
+        evidence_errors.append("GitHub returned no PR base OID")
     if checks["total"] == 0 or run_counts["total"] == 0:
         evidence_errors.append("exact-head check and workflow-run lists must both be non-empty")
     wrong_head_runs = [run for run in runs if run.get("headSha") != pr.get("headRefOid")]
@@ -197,8 +422,10 @@ def evaluate(local, pr, runs):
         "pr_url": pr.get("url"),
         "remote_pr_branch": pr.get("headRefName"),
         "pr_head": pr.get("headRefOid"),
+        "pr_base": base,
         "pr_commit_count": commit_count,
-        "merge_state": pr.get("mergeStateStatus"),
+        "merge_state": merge_state,
+        "is_draft": pr.get("isDraft"),
         "checks": checks,
         "exact_head_runs": run_counts,
         "verdict": verdict,
@@ -210,7 +437,8 @@ def print_report(report):
     print("PR DELIVERY STATE")
     for key in (
         "workspace_changes", "local_branch", "local_head", "pr_number", "pr_url",
-        "remote_pr_branch", "pr_head", "pr_commit_count", "merge_state",
+        "remote_pr_branch", "pr_head", "pr_base", "pr_commit_count", "merge_state",
+        "is_draft",
     ):
         print(f"  {key}: {report[key]}")
     for key in ("checks", "exact_head_runs"):
@@ -226,10 +454,12 @@ def print_report(report):
 
 def fixture():
     head = "a" * 40
+    base = "b" * 40
     local = {"branch": "feature/review", "head": head, "workspace_changes": 0}
     pr = {
         "number": 7, "url": "https://github.com/o/r/pull/7", "headRefName": "feature/review",
-        "headRefOid": head, "commitCount": 147, "mergeStateStatus": "CLEAN",
+        "headRefOid": head, "baseRefOid": base, "commitCount": 147,
+        "mergeStateStatus": "CLEAN", "isDraft": False,
         "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
     }
     runs = [{"status": "completed", "conclusion": "success", "headSha": head}]
@@ -245,17 +475,54 @@ def selftest():
         print(f"  {'PASS' if condition else 'FAIL'} {name}")
         failures += not condition
 
+    original_json_command = globals()["json_command"]
+
+    def graph_payload(nodes, total=None, has_next=False, cursor=None,
+                      head="a" * 40, base="b" * 40, merge="CLEAN",
+                      draft=False, commits=147):
+        if total is None:
+            total = len(nodes)
+        return {"data": {"repository": {"pullRequest": {
+            "number": 7,
+            "url": "https://github.com/o/r/pull/7",
+            "headRefName": "feature/review",
+            "headRefOid": head,
+            "baseRefOid": base,
+            "mergeStateStatus": merge,
+            "isDraft": draft,
+            "commits": {"totalCount": commits},
+            "statusCheckRollup": {"contexts": {
+                "totalCount": total,
+                "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
+                "nodes": nodes,
+            }},
+        }}}}
+
+    def check_node(index, conclusion="SUCCESS"):
+        return {
+            "__typename": "CheckRun", "id": f"C{index}",
+            "name": f"check-{index}", "status": "COMPLETED",
+            "conclusion": conclusion, "detailsUrl": f"https://ci/{index}",
+        }
+
+    def raw_run(index, conclusion="success", head="a" * 40):
+        return {
+            "id": index, "name": f"workflow-{index}", "status": "completed",
+            "conclusion": conclusion, "head_sha": head,
+            "html_url": f"https://ci/run/{index}",
+        }
+
     local, pr, runs = fixture()
     report, code = evaluate(local, pr, runs)
     check("matching local, PR, and exact-head CI passes", code == 0 and
           report["verdict"] == "PUBLISHED_AND_GREEN"
-          and report["pr_commit_count"] == 147)
+          and report["pr_commit_count"] == 147 and report["pr_base"] == "b" * 40)
 
     local, pr, runs = fixture()
-    local["head"] = "b" * 40
+    local["head"] = "c" * 40
     report, code = evaluate(local, pr, runs)
-    check("local-only commit state fails", code == 1 and "local HEAD differs" in " ".join(
-        report["reasons"]))
+    check("local-only commit state fails", code == 1 and
+          "local HEAD differs" in " ".join(report["reasons"]))
 
     local, pr, runs = fixture()
     local["workspace_changes"] = 2
@@ -289,135 +556,241 @@ def selftest():
     _report, code = evaluate(local, pr, runs)
     check("wrong-head workflow run is an evidence error", code == 2)
 
-    invalid_totals_rejected = []
-    for payload in (
-            {},
-            {"data": {"repository": {"pullRequest": {"commits": {"totalCount": True}}}}},
-            {"data": {"repository": {"pullRequest": {"commits": {"totalCount": -1}}}}},
-    ):
-        try:
-            parse_commit_total(payload, "a" * 40)
-            invalid_totals_rejected.append(False)
-        except RuntimeError:
-            invalid_totals_rejected.append(True)
-    check("missing, boolean, and negative GraphQL commit totals are rejected",
-          all(invalid_totals_rejected))
+    merge_evidence_results = []
+    for state in (None, "", "UNKNOWN", "FUTURE"):
+        local, pr, runs = fixture()
+        pr["mergeStateStatus"] = state
+        _report, code = evaluate(local, pr, runs)
+        merge_evidence_results.append(code == 2)
+    check("missing, empty, UNKNOWN, and unrecognized merge states are evidence errors",
+          all(merge_evidence_results))
 
-    invalid_states_rejected = []
-    for payload in (
-            {"errors": [{"message": "denied"}], "data": {"repository": {
-                "pullRequest": {
-                    "headRefOid": "a" * 40, "commits": {"totalCount": 147},
-                },
-            }}},
-            {"data": {"repository": {"pullRequest": {
-                "headRefOid": "b" * 40, "commits": {"totalCount": 147},
-            }}}},
-            {"data": {"repository": {"pullRequest": {
-                "commits": {"totalCount": 147},
-            }}}},
-    ):
-        try:
-            parse_commit_total(payload, "a" * 40)
-            invalid_states_rejected.append(False)
-        except RuntimeError:
-            invalid_states_rejected.append(True)
-    check("GraphQL errors, head movement, and missing heads are rejected",
-          all(invalid_states_rejected))
+    nonclean_results = []
+    for state in ("DIRTY", "BLOCKED", "UNSTABLE", "BEHIND"):
+        local, pr, runs = fixture()
+        pr["mergeStateStatus"] = state
+        _report, code = evaluate(local, pr, runs)
+        nonclean_results.append(code == 1)
+    check("known non-CLEAN merge states cannot pass", all(nonclean_results))
+
+    local, pr, runs = fixture()
+    pr["isDraft"] = True
+    _report, code = evaluate(local, pr, runs)
+    check("draft pull requests cannot pass", code == 1)
+
+    local, pr, runs = fixture()
+    pr["baseRefOid"] = ""
+    _report, code = evaluate(local, pr, runs)
+    check("a missing base OID is an evidence error", code == 2)
 
     invalid_query_inputs_rejected = []
-    invalid_query_called = False
+    for repo, number in (("owner", 7), ("/repo", 7), ("owner/repo/extra", 7),
+                         ("owner/repo", 0), ("owner/repo", True)):
+        try:
+            repo_parts(repo, number)
+            invalid_query_inputs_rejected.append(False)
+        except RuntimeError:
+            invalid_query_inputs_rejected.append(True)
+    check("malformed repositories and PR numbers fail before a GitHub query",
+          all(invalid_query_inputs_rejected))
 
-    def reject_invalid_query(_args, _cwd):
-        nonlocal invalid_query_called
-        invalid_query_called = True
-        raise AssertionError("invalid query input reached gh")
+    invalid_graphql_rejected = []
+    for payload in ({}, {"errors": [{"message": "denied"}]},
+                    {"data": {"repository": {"pullRequest": None}}}):
+        try:
+            parse_graphql_payload(payload)
+            invalid_graphql_rejected.append(False)
+        except RuntimeError:
+            invalid_graphql_rejected.append(True)
+    check("malformed, errored, and absent GraphQL PR payloads are rejected",
+          all(invalid_graphql_rejected))
 
-    original_json_command = globals()["json_command"]
+    check_calls = []
+
+    def paginated_checks(args, _cwd):
+        check_calls.append(args)
+        if "endCursor=cursor-1" in args:
+            return graph_payload([check_node(100, "FAILURE")], 101)
+        return graph_payload(
+            [check_node(i) for i in range(100)], 101, True, "cursor-1")
+
     try:
-        globals()["json_command"] = reject_invalid_query
-        for repo, number in (("owner", 7), ("/repo", 7), ("owner/repo/extra", 7),
-                             ("owner/repo", 0), ("owner/repo", True)):
-            try:
-                github_commit_count(".", repo, number, "a" * 40)
-                invalid_query_inputs_rejected.append(False)
-            except RuntimeError:
-                invalid_query_inputs_rejected.append(True)
+        globals()["json_command"] = paginated_checks
+        collected = github_checks(".", "o/r", 7)
     finally:
         globals()["json_command"] = original_json_command
-    check("malformed repositories and PR numbers fail before a GraphQL query",
-          all(invalid_query_inputs_rejected) and not invalid_query_called)
+    check("the 101st exact-head check is collected and can fail the verdict",
+          len(collected["statusCheckRollup"]) == 101
+          and summarize_signals(collected["statusCheckRollup"])["failed"] == 1
+          and len(check_calls) == 2 and "endCursor=cursor-1" in check_calls[1])
 
-    calls = []
+    def truncated_checks(_args, _cwd):
+        return graph_payload([check_node(i) for i in range(100)], 101)
 
-    def fake_json_command(args, cwd):
-        calls.append(args)
+    try:
+        globals()["json_command"] = truncated_checks
+        try:
+            github_checks(".", "o/r", 7)
+            truncated_checks_rejected = False
+        except RuntimeError:
+            truncated_checks_rejected = True
+    finally:
+        globals()["json_command"] = original_json_command
+    check("an incomplete exact-head check total is rejected", truncated_checks_rejected)
+
+    def moving_check_base(args, _cwd):
+        if "endCursor=cursor-1" in args:
+            return graph_payload([check_node(2)], 2, base="c" * 40)
+        return graph_payload([check_node(1)], 2, True, "cursor-1")
+
+    try:
+        globals()["json_command"] = moving_check_base
+        try:
+            github_checks(".", "o/r", 7)
+            moving_check_base_rejected = False
+        except RuntimeError:
+            moving_check_base_rejected = True
+    finally:
+        globals()["json_command"] = original_json_command
+    check("a base change between check pages is rejected", moving_check_base_rejected)
+
+    run_calls = []
+    raw_runs = [raw_run(i) for i in range(1, 101)] + [raw_run(101, "failure")]
+
+    def paginated_runs(args, _cwd):
+        run_calls.append(args)
+        page = int(next(value.split("=", 1)[1] for value in args if value.startswith("page=")))
+        page_runs = raw_runs[:100] if page == 1 else raw_runs[100:] if page == 2 else []
+        return {"total_count": 101, "workflow_runs": page_runs}
+
+    try:
+        globals()["json_command"] = paginated_runs
+        collected_runs = github_workflow_runs(".", "o/r", "a" * 40)
+    finally:
+        globals()["json_command"] = original_json_command
+    run_pages = [int(next(value.split("=", 1)[1] for value in args
+                          if value.startswith("page="))) for args in run_calls]
+    check("workflow-run pagination collects and evaluates the 101st run",
+          len(collected_runs) == 101 and summarize_signals(collected_runs)["failed"] == 1
+          and run_pages == [1, 2, 1])
+
+    twenty_one = [raw_run(i) for i in range(1, 21)] + [raw_run(21, "failure")]
+
+    def twenty_one_runs(_args, _cwd):
+        return {"total_count": 21, "workflow_runs": twenty_one}
+
+    try:
+        globals()["json_command"] = twenty_one_runs
+        collected_runs = github_workflow_runs(".", "o/r", "a" * 40)
+    finally:
+        globals()["json_command"] = original_json_command
+    check("a failing 21st workflow run cannot disappear behind a default cap",
+          len(collected_runs) == 21 and summarize_signals(collected_runs)["failed"] == 1)
+
+    def incomplete_runs(args, _cwd):
+        page = int(next(value.split("=", 1)[1] for value in args if value.startswith("page=")))
+        return {"total_count": 101,
+                "workflow_runs": [raw_run(i) for i in range(1, 101)] if page == 1 else []}
+
+    try:
+        globals()["json_command"] = incomplete_runs
+        try:
+            github_workflow_runs(".", "o/r", "a" * 40)
+            incomplete_runs_rejected = False
+        except RuntimeError:
+            incomplete_runs_rejected = True
+    finally:
+        globals()["json_command"] = original_json_command
+    check("an incomplete workflow-run total is rejected", incomplete_runs_rejected)
+
+    replay_calls = 0
+
+    def changing_runs(_args, _cwd):
+        nonlocal replay_calls
+        replay_calls += 1
+        item = raw_run(1 if replay_calls == 1 else 2)
+        return {"total_count": 1, "workflow_runs": [item]}
+
+    try:
+        globals()["json_command"] = changing_runs
+        try:
+            github_workflow_runs(".", "o/r", "a" * 40)
+            changing_runs_rejected = False
+        except RuntimeError:
+            changing_runs_rejected = True
+    finally:
+        globals()["json_command"] = original_json_command
+    check("workflow-run churn during collection is rejected", changing_runs_rejected)
+
+    state_calls = []
+
+    def complete_state(args, _cwd):
+        state_calls.append(args)
         if args[:3] == ["gh", "pr", "view"]:
             return {
                 "number": 7, "url": "https://github.com/o/r/pull/7",
                 "headRefName": "feature/review", "headRefOid": "a" * 40,
-                "mergeStateStatus": "CLEAN", "statusCheckRollup": [],
+                "baseRefOid": "b" * 40,
             }
         if args[:3] == ["gh", "api", "graphql"]:
-            return {"data": {"repository": {"pullRequest": {
-                "headRefOid": "a" * 40, "commits": {"totalCount": 147},
-            }}}}
-        if args[:3] == ["gh", "run", "list"]:
-            return []
+            payload = graph_payload([check_node(1)])
+            return payload
+        if args[:5] == ["gh", "api", "-X", "GET", "repos/o/r/actions/runs"]:
+            return {"total_count": 1, "workflow_runs": [raw_run(1)]}
         raise AssertionError(args)
 
     try:
-        globals()["json_command"] = fake_json_command
+        globals()["json_command"] = complete_state
         queried_pr, queried_runs = github_state(".", "7", "o/r")
     finally:
         globals()["json_command"] = original_json_command
-    view_call = next(args for args in calls if args[:3] == ["gh", "pr", "view"])
-    graphql_call = next(args for args in calls if args[:3] == ["gh", "api", "graphql"])
-    expected_query = (
-        "query($owner:String!,$name:String!,$number:Int!){"
-        "repository(owner:$owner,name:$name){pullRequest(number:$number){"
-        "headRefOid commits{totalCount}}}}"
-    )
-    check("GitHub state uses GraphQL totalCount rather than the capped commit-node list",
-          queried_pr["commitCount"] == 147 and queried_runs == []
-          and calls[0][:3] == ["gh", "pr", "view"]
-          and calls[1][:3] == ["gh", "run", "list"]
-          and calls[2] == [
-              "gh", "api", "graphql", "-f", "owner=o", "-f", "name=r",
-              "-F", "number=7", "-f", f"query={expected_query}",
-          ]
-          and view_call[-1]
-          == "number,url,headRefName,headRefOid,mergeStateStatus,statusCheckRollup"
-          and "headRefOid commits{totalCount}" in graphql_call[-1])
+    view_call = state_calls[0]
+    check_call = next(args for args in state_calls
+                      if any("$endCursor" in value for value in args))
+    rest_calls = [args for args in state_calls if args[:5]
+                  == ["gh", "api", "-X", "GET", "repos/o/r/actions/runs"]]
+    check("GitHub state binds base and head around complete check and run pagination",
+          queried_pr["commitCount"] == 147 and len(queried_runs) == 1
+          and view_call[-1] == "number,url,headRefName,headRefOid,baseRefOid"
+          and any("contexts(first:100,after:$endCursor)" in value
+                  for value in check_call)
+          and len(rest_calls) == 2
+          and all("per_page=100" in args and "head_sha=" + "a" * 40 in args
+                  for args in rest_calls)
+          and all(value.count("{") == value.count("}")
+                  for args in state_calls for value in args if value.startswith("query="))
+          and not any(args[:3] == ["gh", "run", "list"] for args in state_calls))
 
-    def graphql_error_after_view(args, _cwd):
+    final_snapshot_calls = 0
+
+    def moved_base_after_collection(args, _cwd):
+        nonlocal final_snapshot_calls
         if args[:3] == ["gh", "pr", "view"]:
             return {
                 "number": 7, "url": "https://github.com/o/r/pull/7",
                 "headRefName": "feature/review", "headRefOid": "a" * 40,
-                "mergeStateStatus": "CLEAN", "statusCheckRollup": [],
+                "baseRefOid": "b" * 40,
             }
-        if args[:3] == ["gh", "run", "list"]:
-            return []
         if args[:3] == ["gh", "api", "graphql"]:
-            return {"errors": [{"message": "denied"}], "data": {"repository": {
-                "pullRequest": {
-                    "headRefOid": "a" * 40, "commits": {"totalCount": 100},
-                },
-            }}}
+            if any("$endCursor" in value for value in args):
+                return graph_payload([check_node(1)])
+            final_snapshot_calls += 1
+            return graph_payload([check_node(1)], base="c" * 40)
+        if args[:5] == ["gh", "api", "-X", "GET", "repos/o/r/actions/runs"]:
+            return {"total_count": 1, "workflow_runs": [raw_run(1)]}
         raise AssertionError(args)
 
     try:
-        globals()["json_command"] = graphql_error_after_view
+        globals()["json_command"] = moved_base_after_collection
         try:
             github_state(".", "7", "o/r")
-            graphql_error_rejected = False
+            moved_base_rejected = False
         except RuntimeError:
-            graphql_error_rejected = True
+            moved_base_rejected = True
     finally:
         globals()["json_command"] = original_json_command
-    check("GraphQL errors never fall back to a capped commit count",
-          graphql_error_rejected)
+    check("a base change after green checks and runs is rejected",
+          moved_base_rejected and final_snapshot_calls == 1)
 
     def malformed_view(_args, _cwd):
         return []

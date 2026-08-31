@@ -239,7 +239,15 @@ REPORT_GROUP_SUBJECT_NOUN_TAILS = frozenset({
     "artifact", "artifacts", "attempt", "attempts", "case", "cases", "report",
     "reports", "result", "results", "output", "outputs",
 })
-REPORT_GROUP_ACTIVITY_MODIFIERS = frozenset({"integration", "workflow"})
+REPORT_GROUP_ACTIVITY_MODIFIERS = frozenset({
+    "actions", "ci", "github", "integration", "workflow",
+})
+# A marker may scope a bounded compound activity name (``previous integration test
+# suite``, ``last GitHub Actions run``). The bound is semantic as well as defensive:
+# traversing arbitrary noun chains turns ``former employee check`` into a historical
+# check even though ``former`` modifies ``employee``. Activity heads may themselves be
+# compound modifiers, but no more than three supported words may intervene.
+REPORT_GROUP_ACTIVITY_PREFIX_LIMIT = 3
 REPORT_GROUP_TEMPORAL_POSSESSIVES = frozenset({
     "earlier's", "friday's", "monday's", "nightly's", "saturday's", "sunday's",
     "thursday's", "tuesday's", "wednesday's", "yesterday's",
@@ -414,13 +422,20 @@ def report_group_names_historical_activity(words):
         return False
 
     marker_cursor = len(prefix) - 1
+    marker_distance = 0
     while (marker_cursor >= 0
-           and prefix[marker_cursor] in REPORT_GROUP_ACTIVITY_MODIFIERS):
+           and marker_distance < REPORT_GROUP_ACTIVITY_PREFIX_LIMIT
+           and (prefix[marker_cursor] in REPORT_GROUP_ACTIVITY_MODIFIERS
+                or prefix[marker_cursor] in REPORT_ACTIVITY_HEADS)):
         marker_cursor -= 1
+        marker_distance += 1
     marker_scopes_activity = (
         bool(prefix) and prefix[-1] in REPORT_HISTORICAL_SUBJECT_MARKERS
     ) or (
-        marker_cursor >= 0 and prefix[marker_cursor] in {"previous", "prior"}
+        marker_cursor >= 0
+        and (prefix[marker_cursor] in {"previous", "prior"}
+             or (word in {"run", "runs"}
+                 and prefix[marker_cursor] in {"last", "latest"}))
     ) or (
         len(prefix) >= 2 and prefix[-2] == "last" and prefix[-1].endswith("'s")
         and prefix[-1][:-2] in REPORT_GROUP_TIME_UNITS
@@ -1941,6 +1956,25 @@ def selftest():
         ("a historical workflow-run attempt retains its predicate",
          {"last_assistant_message":
           "Starting the audit: (the prior workflow run attempt) failed."}, True),
+        ("a latest CI run retains its grouped predicate",
+         {"last_assistant_message":
+          "Starting the audit: (the latest CI run) failed."}, True),
+        ("a previous CI run retains its grouped predicate",
+         {"last_assistant_message":
+          "Starting the audit: (the previous CI run) failed."}, True),
+        ("a prior test suite retains its grouped predicate",
+         {"last_assistant_message":
+          "Starting the audit: (the prior test suite) failed."}, True),
+        ("a last GitHub Actions run retains its grouped predicate",
+         {"last_assistant_message":
+          "Starting the audit: (the last GitHub Actions run) failed."}, True),
+        ("three activity-compound words retain marker ownership",
+         {"last_assistant_message":
+          "Starting the audit: (the previous CI integration workflow run) failed."}, True),
+        ("four activity-compound words exceed the ownership bound",
+         {"last_assistant_message":
+          "Running the audit: (the previous CI integration workflow test run) failed."},
+         False),
         ("a historical run result retains its predicate",
          {"last_assistant_message":
           "Starting the audit: (the prior run result) failed."}, True),
@@ -2702,6 +2736,22 @@ def selftest():
         ("blocks a second grouped historical subject after a context bridge",
          "Running the audit (nightly) in CI (the prior run) failed.", 2,
          "Running the"),
+        ("blocks a latest CI run historical subject",
+         "Starting the audit: (the latest CI run) failed.", 2, "Starting the"),
+        ("blocks a previous CI run historical subject",
+         "Starting the audit: (the previous CI run) failed.", 2, "Starting the"),
+        ("blocks a prior test-suite historical subject",
+         "Starting the audit: (the prior test suite) failed.", 2, "Starting the"),
+        ("blocks a last GitHub Actions run historical subject",
+         "Starting the audit: (the last GitHub Actions run) failed.", 2,
+         "Starting the"),
+        ("preserves an over-bound grouped appositive",
+         "Running the audit: (the previous CI integration workflow test run) failed.",
+         0, None),
+        ("preserves a latest workflow-test appositive",
+         "Running the test: (the latest workflow test) failed.", 0, None),
+        ("preserves a former-employee-check appositive",
+         "Running the audit: (a former employee check) failed.", 0, None),
     )
     for shape in ("string", "content", "bare"):
         for label, message, want, trigger in group_process_cases:

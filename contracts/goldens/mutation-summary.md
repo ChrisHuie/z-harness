@@ -70,7 +70,10 @@ Collections are enumerated for `hooks/bash_command_guard.py`, `hooks/guards/git_
 | `announced_work_guard.py` | comma predicate continuation dropped | caught |
 | `announced_work_guard.py` | decorated colon classification dropped | caught |
 | `announced_work_guard.py` | escaped group delimiter handling dropped | caught |
+| `announced_work_guard.py` | grouped historical compound bound dropped | caught |
+| `announced_work_guard.py` | grouped historical compound traversal dropped | caught |
 | `announced_work_guard.py` | grouped historical subject ownership dropped | caught |
+| `announced_work_guard.py` | grouped latest-run distinction dropped | caught |
 | `announced_work_guard.py` | hard separator classification dropped | caught |
 | `announced_work_guard.py` | inline-code group recognition dropped | caught |
 | `announced_work_guard.py` | open-group association dropped | caught |
@@ -132,7 +135,7 @@ Collections are enumerated for `hooks/bash_command_guard.py`, `hooks/guards/git_
 | `zsh_rev_modifier_guard.py` | zsh unmodelled modifier uncertainty dropped | caught |
 | `repository_ownership.py` | effective core.worktree scalar lookup dropped | caught |
 
-275 of 355 planned mutations are caught; 80 exact mutation IDs remain recorded coverage debt.
+278 of 358 planned mutations are caught; 80 exact mutation IDs remain recorded coverage debt.
 
 A kill scored only because the recorded check count moved is not evidence that the suites observe the change. That count is recorded per result and reported by the gate rather than shown here, because whether an assertion fires can differ between hosts and this file is compared across them.
 

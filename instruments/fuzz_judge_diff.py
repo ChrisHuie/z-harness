@@ -146,6 +146,13 @@ POSTGROUP_RESULT_TAILS = (
     ("with", "a traceback"),
 )
 GROUPED_HISTORICAL_SUFFIXES = ("", " unexpectedly", " in CI")
+GROUPED_HISTORICAL_SUBJECTS = (
+    ("audit", "the prior run"),
+    ("audit", "the latest CI run"),
+    ("audit", "the previous CI run"),
+    ("audit", "the prior test suite"),
+    ("audit", "the last GitHub Actions run"),
+)
 # Every production runs once, and every recorded group is rendered in the message.
 # The three post-group-modifier entries close the delimiter inventory the production
 # inventory leaves open; the near-miss entries after them pin vocabulary, not delimiters.
@@ -177,8 +184,10 @@ MANDATORY_CASES = (
     ('report-term-near-miss', None, 1),
     ('report-term-near-miss', None, 2),
 ) + tuple(
-    ('grouped-historical-subject', group_name, suffix_index)
+    ('grouped-historical-subject', group_name, subject_index *
+     len(GROUPED_HISTORICAL_SUFFIXES) + suffix_index)
     for group_name, _opened, _closed in GROUPS
+    for subject_index in range(len(GROUPED_HISTORICAL_SUBJECTS))
     for suffix_index in range(len(GROUPED_HISTORICAL_SUFFIXES))
 )
 FLAT_SHARE = 0.35
@@ -224,6 +233,7 @@ def grammar_payload() -> dict:
         "near_miss_contexts": NEAR_MISS_CONTEXTS,
         "near_miss_terms": NEAR_MISS_TERMS,
         "grouped_historical_suffixes": GROUPED_HISTORICAL_SUFFIXES,
+        "grouped_historical_subjects": GROUPED_HISTORICAL_SUBJECTS,
         "mandatory_cases": MANDATORY_CASES,
         "flat_share": FLAT_SHARE,
     }
@@ -301,9 +311,17 @@ def generated_case(rng: random.Random, production: str, group=None,
                             else rng.choice(MANDATORY_VOCABULARIES["colon-context-near-miss"]))
         message = f"Starting the {activity}: {preposition} {obj} {result}."
     elif production == "grouped-historical-subject":
-        suffix = (GROUPED_HISTORICAL_SUFFIXES[pin] if pin is not None
-                  else rng.choice(GROUPED_HISTORICAL_SUFFIXES))
-        message = (f"Starting the {activity}: {opened}the prior run{closed}"
+        if pin is None:
+            outer_activity, historical_subject = rng.choice(
+                GROUPED_HISTORICAL_SUBJECTS)
+            suffix = rng.choice(GROUPED_HISTORICAL_SUFFIXES)
+        else:
+            subject_index, suffix_index = divmod(
+                pin, len(GROUPED_HISTORICAL_SUFFIXES))
+            outer_activity, historical_subject = GROUPED_HISTORICAL_SUBJECTS[
+                subject_index]
+            suffix = GROUPED_HISTORICAL_SUFFIXES[suffix_index]
+        message = (f"Starting the {outer_activity}: {opened}{historical_subject}{closed}"
                    f"{suffix} {result}.")
     else:
         raise ValueError(f"unknown production {production}")
@@ -1020,10 +1038,40 @@ def selftest() -> int:
                   " verifiable", False)
         check("grouped historical-subject productions block under the shipped guard",
               len(grouped_historical_blocks)
-              == len(GROUPS) * len(GROUPED_HISTORICAL_SUFFIXES)
+              == (len(GROUPS) * len(GROUPED_HISTORICAL_SUBJECTS)
+                  * len(GROUPED_HISTORICAL_SUFFIXES))
               and all(grouped_historical_blocks))
         check("grouped historical-subject productions expose the ownership mutant",
               grouped_historical_mutant_exposed)
+        compound_anchor = (
+            b"           and (prefix[marker_cursor] in REPORT_GROUP_ACTIVITY_MODIFIERS\n"
+            b"                or prefix[marker_cursor] in REPORT_ACTIVITY_HEADS))"
+        )
+        compound_replacement = (
+            b"           and prefix[marker_cursor] in REPORT_GROUP_ACTIVITY_MODIFIERS)"
+        )
+        compound_mutant_exposed = False
+        if shipped_source.count(compound_anchor) == 1:
+            compound_mutant = root / "grouped-historical-compound-mutant.py"
+            compound_source = shipped_source.replace(
+                compound_anchor, compound_replacement, 1)
+            compound_mutant.write_bytes(compound_source)
+            compound_sha256 = source_bytes_digest(compound_source)
+            compound_judge = load_guard(
+                compound_mutant, compound_sha256, shipped_guard)
+            compound_mutant_exposed = any(
+                "prior test suite" in case["message"]
+                and classify(
+                    judged.judge({"last_assistant_message": case["message"]}),
+                    compound_judge.judge(
+                        {"last_assistant_message": case["message"]}),
+                ) == "block-to-allow"
+                for case in grouped_historical
+            )
+            if source_digest(compound_mutant) != compound_sha256:
+                raise RuntimeError("compound historical guard changed during evaluation")
+        check("grouped historical-subject productions expose activity-head traversal loss",
+              compound_mutant_exposed)
         for token, exposed in zip(NEAR_MISS_MODIFIERS,
                                   widening_results["modifiers"]):
             check(f"actual modifier-table widening exposes {token!r}", exposed)

@@ -140,7 +140,7 @@ SELFTEST_SUITES = [
     ("codex-cost", ["tools/codex-cost.py", "--selftest"], 28),
     ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 83),
     ("repository-ownership", ["tools/repository_ownership.py", "--selftest"], 78),
-    ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 24),
+    ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 25),
     ("verify-review-publication",
      ["tools/verify-review-publication.py", "--selftest"], 94),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),

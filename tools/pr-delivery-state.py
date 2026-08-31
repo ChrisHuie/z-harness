@@ -381,7 +381,9 @@ def evaluate(local, pr, runs):
             or merge_state.upper() not in known_merge_states
             or merge_state.upper() == "UNKNOWN"):
         evidence_errors.append("GitHub returned no usable PR merge state")
-    elif merge_state.upper() != "CLEAN":
+    elif (merge_state.upper() != "CLEAN"
+          and not (merge_state.upper() == "UNSTABLE"
+                   and (checks["pending"] or run_counts["pending"]))):
         reasons.append(f"GitHub merge state is {merge_state.upper()}, not CLEAN")
     if pr.get("isDraft") is True:
         reasons.append("GitHub reports that the pull request is a draft")
@@ -540,6 +542,15 @@ def selftest():
     report, code = evaluate(local, pr, runs)
     check("pending exact-head run is distinct", code == 3 and
           report["verdict"] == "EXACT_HEAD_CI_PENDING")
+
+    local, pr, runs = fixture()
+    pr["mergeStateStatus"] = "UNSTABLE"
+    runs[0]["status"] = "in_progress"
+    runs[0]["conclusion"] = ""
+    report, code = evaluate(local, pr, runs)
+    check("UNSTABLE during pending exact-head CI remains a pending verdict",
+          code == 3 and report["verdict"] == "EXACT_HEAD_CI_PENDING"
+          and report["merge_state"] == "UNSTABLE")
 
     local, pr, runs = fixture()
     pr["statusCheckRollup"][0]["conclusion"] = "FAILURE"

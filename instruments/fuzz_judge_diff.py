@@ -946,16 +946,28 @@ def selftest() -> int:
             shipped_source = shipped_guard.read_bytes()
 
             def exercises_actual_widening(table, token, production, context_key=None):
+                # Mutation power and worker isolation are separate contracts. The worker
+                # path is exercised below; loading each private one-literal mutant here
+                # avoids two fresh interpreter starts per token while retaining the exact
+                # generated-case and block-to-allow classification used by the report.
                 candidate = root / f"widened-{table.lower()}-{token}.py"
-                candidate.write_bytes(widen_guard_table(
-                    shipped_source, table, token, context_key))
-                widened = compare(shipped_guard, candidate, 9, MIN_CASES, 5)
-                return any(
-                    item["production"] == production
-                    and token.casefold() in item["message"].casefold()
-                    and item["classification"] == "block-to-allow"
-                    for item in widened["results"]
+                candidate_source = widen_guard_table(
+                    shipped_source, table, token, context_key)
+                candidate.write_bytes(candidate_source)
+                candidate_sha256 = source_bytes_digest(candidate_source)
+                widened = load_guard(candidate, candidate_sha256, shipped_guard)
+                exposed = any(
+                    case["production"] == production
+                    and token.casefold() in case["message"].casefold()
+                    and classify(
+                        judged.judge({"last_assistant_message": case["message"]}),
+                        widened.judge({"last_assistant_message": case["message"]}),
+                    ) == "block-to-allow"
+                    for case in prefix
                 )
+                if source_digest(candidate) != candidate_sha256:
+                    raise RuntimeError(f"widened guard changed during {table} evaluation")
+                return exposed
 
             widening_results["modifiers"] = [
                 exercises_actual_widening(
@@ -984,15 +996,22 @@ def selftest() -> int:
             )
             if shipped_source.count(historical_anchor) == 1:
                 historical_mutant = root / "grouped-historical-subject-mutant.py"
-                historical_mutant.write_bytes(
-                    shipped_source.replace(historical_anchor, historical_replacement, 1))
-                historical_report = compare(
-                    shipped_guard, historical_mutant, 9, MIN_CASES, 5)
+                historical_source = shipped_source.replace(
+                    historical_anchor, historical_replacement, 1)
+                historical_mutant.write_bytes(historical_source)
+                historical_sha256 = source_bytes_digest(historical_source)
+                historical_judge = load_guard(
+                    historical_mutant, historical_sha256, shipped_guard)
                 grouped_historical_mutant_exposed = any(
-                    item["production"] == "grouped-historical-subject"
-                    and item["classification"] == "block-to-allow"
-                    for item in historical_report["results"]
+                    classify(
+                        judged.judge({"last_assistant_message": case["message"]}),
+                        historical_judge.judge(
+                            {"last_assistant_message": case["message"]}),
+                    ) == "block-to-allow"
+                    for case in grouped_historical
                 )
+                if source_digest(historical_mutant) != historical_sha256:
+                    raise RuntimeError("historical guard changed during evaluation")
         else:
             # Fail rather than skip. A silent pass here would report the binding as verified
             # in exactly the copied-tree setup a reviewer uses to mutate this file, which is

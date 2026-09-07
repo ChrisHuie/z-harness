@@ -142,10 +142,10 @@ SELFTEST_SUITES = [
     ("repository-ownership", ["tools/repository_ownership.py", "--selftest"], 78),
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 25),
     ("verify-review-publication",
-     ["tools/verify-review-publication.py", "--selftest"], 94),
+     ["tools/verify-review-publication.py", "--selftest"], 96),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
-    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 369),
+    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 371),
     ("write-mutation-receipt",
      ["tools/write-mutation-receipt.py", "--selftest"], 99),
     ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 65),
@@ -162,11 +162,11 @@ def expected_selftest_checks(name):
     """Exact execution-derived counts for suites whose former formulas hid probes."""
     fixed = {
         "announced_work_guard": 916,
-        "ci-gate": 369,
+        "ci-gate": 371,
         "enumerate-survivors": 28,
         "fuzz-judge-diff": 65,
         "spawn_preflight_guard": 88,
-        "verify-review-publication": 94,
+        "verify-review-publication": 96,
     }
     if name in fixed:
         return fixed[name]

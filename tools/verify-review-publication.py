@@ -38,6 +38,11 @@ COMMENT_URL = re.compile(
     r"^https://github\.com/([^/]+/[^/]+)/pull/([1-9][0-9]*)#issuecomment-([1-9][0-9]*)$")
 SNAPSHOT_SCHEMA_VERSION = 1
 SNAPSHOT_KIND = "pull-request-frozen-publication"
+# The note a generated snapshot fixture carries. It is NOT the note every manifest must
+# carry: the field is that manifest's own provenance prose, and a publication frozen at
+# creation cannot truthfully say it was frozen when the rule was adopted. Its exact bytes are
+# pinned per manifest by FROZEN_PUBLICATIONS in tools/ci-gate.py, so requiring one wording
+# here was a second source of truth for the same text and rejected an accurate note.
 SNAPSHOT_NOTE = (
     "The body and title bytes were frozen when the append-only publication rule was adopted "
     "at this observed head. Later review narrative, corrections, and exact-head evidence are "
@@ -483,11 +488,12 @@ def _snapshot_error(snapshot: dict, repo: str, pr: int, body: bytes,
         "kind": SNAPSHOT_KIND,
         "repo": repo,
         "pr": pr,
-        "note": SNAPSHOT_NOTE,
     }
     for field, expected in expected_scalars.items():
         if snapshot.get(field) != expected:
             return f"snapshot {field} is {snapshot.get(field)!r}, expected {expected!r}"
+    if not isinstance(snapshot.get("note"), str) or not snapshot["note"].strip():
+        return "snapshot note is missing or empty"
     if not re.fullmatch(r"[0-9a-f]{40}", snapshot.get("frozen_at_head") or ""):
         return "snapshot frozen_at_head is not a full lowercase commit SHA"
     for label, published in (("body", body), ("title", title)):
@@ -1320,6 +1326,11 @@ def selftest() -> int:
             lambda: verify_pr_snapshot(
                 repo, pr, head, manifest, runner_for(pull_data=changed_title)),
             'published title digest is', 1))
+        expect("a manifest may carry its own frozen-publication note", _snapshot_error(
+            dict(snapshot, note="Frozen at creation under the append-only rule."),
+            repo, pr, body_bytes, title.encode()) == "")
+        expect("a blank frozen-publication note fails", _snapshot_error(
+            dict(snapshot, note="   "), repo, pr, body_bytes, title.encode()) != "")
         changed_title_problem = _snapshot_error(
             snapshot, repo, pr, body_bytes, changed_title["title"].encode())
         expect(

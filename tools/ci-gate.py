@@ -289,6 +289,10 @@ class ReceiptSpec:
     name: str
     pattern: re.Pattern[str]
     validate: Callable[[re.Match[str], int], Optional[str]]
+    # None means the shared default. A child that needs more says so here, beside the
+    # receipt contract it is registered with, so the budget cannot be attached to one
+    # command and read back by matching another's argv.
+    timeout_seconds: Optional[float] = None
 
 
 def _success_receipt(match: re.Match[str], returncode: int) -> Optional[str]:
@@ -886,13 +890,6 @@ DEFAULT_CHILD_TIMEOUT_SECONDS = 120
 HARNESS_CI_TIMEOUT_SECONDS = 240
 
 
-def child_timeout_seconds(argv: Sequence[str]) -> float:
-    """Return the bounded deadline for one exact registered child command."""
-    if tuple(argv) == (sys.executable, "hooks/harness_check.py", "--ci"):
-        return HARNESS_CI_TIMEOUT_SECONDS
-    return DEFAULT_CHILD_TIMEOUT_SECONDS
-
-
 def _timeout_stderr_tail(value) -> str:
     """Normalize TimeoutExpired stderr from text and byte subprocess implementations."""
     if value is None:
@@ -902,8 +899,16 @@ def _timeout_stderr_tail(value) -> str:
     return str(value)[-2000:]
 
 
-def run_command(argv: Sequence[str]) -> Result:
-    timeout_seconds = child_timeout_seconds(argv)
+def run_command(argv: Sequence[str], spec: Optional[ReceiptSpec] = None) -> Result:
+    """Run one child under the budget its registry entry declares.
+
+    Reading the budget from the spec rather than from the argv removes the failure this
+    used to be tested for: an entry whose command changed kept matching nothing and
+    silently dropped to the default. There is no argv to disagree with any more.
+    """
+    timeout_seconds = (
+        DEFAULT_CHILD_TIMEOUT_SECONDS if spec is None or spec.timeout_seconds is None
+        else spec.timeout_seconds)
     try:
         completed = subprocess.run(
             list(argv),
@@ -937,6 +942,7 @@ def command_specs(render_root: Path) -> List[Tuple[List[str], ReceiptSpec]]:
                     "zero harness checks" if int(match.group("checks")) == 0
                     else _success_receipt(match, code)
                 ),
+                HARNESS_CI_TIMEOUT_SECONDS,
             ),
         ),
         ([python, "hooks/harness_check.py", "--selftest"],
@@ -2055,7 +2061,6 @@ def mutation_summary_error(receipt_data=None, summary_bytes=None) -> str:
 
 
 REVIEW_ROOT = ROOT / "contracts/review"
-FROZEN_PUBLICATION = REVIEW_ROOT / "pr-8/frozen-publication.json"
 INCLUDE_OPEN = "<!-- include: "
 INCLUDE_CLOSE = "<!-- end include -->"
 FENCE_MARKERS = ("```", "~~~")
@@ -2063,6 +2068,7 @@ REQUIRED_REVIEW_INCLUDES = {}
 REGISTERED_REVIEW_PATHS = frozenset({
     "README.md",
     "pr-8/frozen-publication.json",
+    "pr-18/frozen-publication.json",
 })
 HANDOFF_DOCTRINE = {
     "AGENTS.md": (
@@ -2167,21 +2173,45 @@ RUNTIME_PATHS_FORBIDDEN_IN_SHARED_POLICY = (
     ".claude/skills",
     ".codex/tmp",
 )
-EXPECTED_FROZEN_PUBLICATION = {
-    "schema_version": 1,
-    "kind": "pull-request-frozen-publication",
-    "repo": "ChrisHuie/z-harness",
-    "pr": 8,
-    "frozen_at_head": "695563715187810cf0dcfa9e52985974ee343831",
-    "body_bytes": 33954,
-    "body_sha256": "eb4115200a3dc487c9af24d727c871cfc203a5dbe6723aa41a6e7dac18e00e9e",
-    "title_bytes": 91,
-    "title_sha256": "e47233e8b50dad03d41ce2309f90e7c47328dfa12435f52a4fcdc30de33db8ac",
-    "note": (
-        "The body and title bytes were frozen when the append-only publication rule was "
-        "adopted at this observed head. Later review narrative, corrections, and exact-head "
-        "evidence are append-only pull-request comments."
-    ),
+# One entry per published pull request, pinned by value so a manifest edit and a gate edit
+# have to arrive together. The set was a single manifest while one pull request carried a
+# frozen body; a second one is not a special case, and the selftest requires every
+# registered frozen-publication path to appear here.
+FROZEN_PUBLICATIONS = {
+    "pr-8/frozen-publication.json": {
+        "schema_version": 1,
+        "kind": "pull-request-frozen-publication",
+        "repo": "ChrisHuie/z-harness",
+        "pr": 8,
+        "frozen_at_head": "695563715187810cf0dcfa9e52985974ee343831",
+        "body_bytes": 33954,
+        "body_sha256": "eb4115200a3dc487c9af24d727c871cfc203a5dbe6723aa41a6e7dac18e00e9e",
+        "title_bytes": 91,
+        "title_sha256": "e47233e8b50dad03d41ce2309f90e7c47328dfa12435f52a4fcdc30de33db8ac",
+        "note": (
+            "The body and title bytes were frozen when the append-only publication rule was "
+            "adopted at this observed head. Later review narrative, corrections, and exact-head "
+            "evidence are append-only pull-request comments."
+        ),
+    },
+    "pr-18/frozen-publication.json": {
+        "schema_version": 1,
+        "kind": "pull-request-frozen-publication",
+        "repo": "ChrisHuie/z-harness",
+        "pr": 18,
+        "frozen_at_head": "1dd8629f78a0afba3fb8fbddf8ccae5c2937cc0f",
+        "body_bytes": 3049,
+        "body_sha256":
+            "4de6e4795bb91be51ea48d073da99ba9d635281f7478654540b96735727db3d9",
+        "title_bytes": 42,
+        "title_sha256":
+            "9789169886ba9bf0dec37ec179862f20b2e42bef4f3677fcf734b9d3b9300a9c",
+        "note": (
+            "Frozen at creation under the append-only publication rule, so these are the "
+            "bytes first published rather than bytes adopted later. Corrections and "
+            "exact-head evidence are append-only pull-request comments."
+        ),
+    },
 }
 
 
@@ -2383,27 +2413,38 @@ def review_document_inventory_error(review_root=None, expected_paths=None) -> st
     return "review document inventory: " + " ".join(problems) if problems else ""
 
 
-def review_publication_manifest_error(data=None) -> str:
-    """Require the frozen PR publication snapshot to match its reviewed contract."""
-    try:
-        if data is None:
-            data = _json_without_duplicate_keys(FROZEN_PUBLICATION)
-    except (OSError, ValueError) as exc:
-        return f"cannot read frozen PR publication manifest: {exc}"
+def _frozen_manifest_error(data, expected) -> str:
+    """Compare one frozen publication manifest against its pinned snapshot."""
     if not isinstance(data, dict):
         return "frozen PR publication manifest is not an object"
-    if data != EXPECTED_FROZEN_PUBLICATION:
-        missing = sorted(set(EXPECTED_FROZEN_PUBLICATION) - set(data))
-        unexpected = sorted(set(data) - set(EXPECTED_FROZEN_PUBLICATION))
-        changed = sorted(
-            key for key in set(data) & set(EXPECTED_FROZEN_PUBLICATION)
-            if data[key] != EXPECTED_FROZEN_PUBLICATION[key]
-        )
-        return (
-            "frozen PR publication manifest differs from the reviewed snapshot: "
-            f"missing={missing} unexpected={unexpected} changed={changed}"
-        )
-    return ""
+    if data == expected:
+        return ""
+    missing = sorted(set(expected) - set(data))
+    unexpected = sorted(set(data) - set(expected))
+    changed = sorted(key for key in set(data) & set(expected)
+                     if data[key] != expected[key])
+    return ("frozen PR publication manifest differs from the reviewed snapshot: "
+            f"missing={missing} unexpected={unexpected} changed={changed}")
+
+
+def review_publication_manifest_error(data=None, expected=None, root=None) -> str:
+    """Require every frozen PR publication snapshot to match its reviewed contract."""
+    if data is not None:
+        return _frozen_manifest_error(
+            data, expected or FROZEN_PUBLICATIONS["pr-8/frozen-publication.json"])
+    root = REVIEW_ROOT if root is None else root
+    problems = []
+    for relative in sorted(FROZEN_PUBLICATIONS):
+        try:
+            loaded = _json_without_duplicate_keys(root / relative)
+        except (OSError, ValueError) as exc:
+            problems.append(
+                f"{relative}: cannot read frozen PR publication manifest: {exc}")
+            continue
+        problem = _frozen_manifest_error(loaded, FROZEN_PUBLICATIONS[relative])
+        if problem:
+            problems.append(f"{relative}: {problem}")
+    return "; ".join(problems)
 
 
 def spawn_guard_activation_error(source=None):
@@ -2704,7 +2745,7 @@ def gated_environment(which=None, runner=None) -> str:
 
 
 def gate(
-    runner: Callable[[Sequence[str]], Result] = run_command,
+    runner: Callable[..., Result] = run_command,
     *,
     emit_child_output: bool = True,
 ) -> int:
@@ -2826,7 +2867,7 @@ def gate(
     with tempfile.TemporaryDirectory(prefix="z-harness-ci-gate-") as raw:
         render_root = Path(raw) / "rendered"
         for argv, spec in command_specs(render_root):
-            result = runner(argv)
+            result = runner(argv, spec)
             problem = validate_receipt(result, spec)
             if emit_child_output:
                 if problem:
@@ -3705,10 +3746,17 @@ def selftest() -> int:
         observed_child_timeouts.append((tuple(argv), kwargs.get("timeout")))
         return subprocess.CompletedProcess(argv, 0, "", "")
 
+    other_spec = next(spec for _argv, spec in registered_commands
+                      if spec.name != "harness-ci")
     subprocess.run = record_child_timeout
     try:
-        for argv, _spec in registered_commands:
-            run_command(argv)
+        for argv, spec in registered_commands:
+            run_command(argv, spec)
+        unregistered_timeout = (run_command([sys.executable, "-c", "pass"]),
+                                observed_child_timeouts[-1][1])
+        borrowed_argv_timeout = (run_command(
+            [sys.executable, "hooks/harness_check.py", "--ci"], other_spec),
+            observed_child_timeouts[-1][1])
     finally:
         subprocess.run = original_subprocess_run
     expect(
@@ -3721,28 +3769,35 @@ def selftest() -> int:
         else [sys.executable, "hooks/harness_check.py", "--ci"]
     )
     harness_spec = harness_commands[0][1] if len(harness_commands) == 1 else None
-    observed_timeout_by_argv = dict(observed_child_timeouts)
+    # Keyed by the spec, because the spec is what owns the budget now. Keying these by
+    # argv is what the change removes, and doing it here read the harness command's later
+    # borrowed-spec run as though it were the registered one.
+    observed_by_spec = {
+        spec.name: timeout
+        for (_recorded_argv, timeout), (_argv, spec)
+        in zip(observed_child_timeouts[:len(registered_commands)], registered_commands)
+    }
     expect(
         "the registered full harness child receives its measured 240-second budget",
-        observed_timeout_by_argv.get(tuple(harness_argv)) == 240,
+        observed_by_spec.get("harness-ci") == 240,
     )
     expect(
         "every other registered child retains the 120-second default budget",
-        all(
-            timeout == 120
-            for argv, timeout in observed_child_timeouts
-            if argv != tuple(harness_argv)
-        ),
+        all(timeout == 120 for name, timeout in observed_by_spec.items()
+            if name != "harness-ci"),
     )
     expect(
-        "a foreign executable with the harness argument tail retains the default budget",
-        child_timeout_seconds(
-            ["/not-the-python-runtime", "hooks/harness_check.py", "--ci"]
-        ) == 120,
+        "a child with no registered spec runs on the shared default budget",
+        unregistered_timeout[1] == 120,
     )
+    # The replaced lookup keyed the exceptional budget off an argv literal, so the two
+    # checks here used to ask whether a near-miss argv fell back to the default. The
+    # budget is spec-owned now, so the sharper question is the one that design makes
+    # answerable: the harness command itself, carried under another entry's spec, must
+    # not bring its 240 seconds along.
     expect(
-        "extra harness arguments retain the default budget",
-        child_timeout_seconds([*harness_argv, "--extra"]) == 120,
+        "the budget travels with the spec, not with the argv",
+        borrowed_argv_timeout[1] == 120,
     )
     timed_out = run_command([sys.executable, "-c",
                              "import time; time.sleep(0.3)"])
@@ -3780,7 +3835,7 @@ def selftest() -> int:
 
     subprocess.run = byte_timeout
     try:
-        byte_timeout_result = run_command(harness_argv)
+        byte_timeout_result = run_command(harness_argv, harness_spec)
     finally:
         subprocess.run = original_subprocess_run
     expect(
@@ -4980,24 +5035,62 @@ def selftest() -> int:
     # Deriving the wrong digest from the real one keeps the control valid whatever the
     # real digest becomes. A fixed sentinel silently stops discriminating on the day the
     # manifest happens to carry it.
-    forged_digest = ("1" if EXPECTED_FROZEN_PUBLICATION["body_sha256"][0] == "0"
-                     else "0") + EXPECTED_FROZEN_PUBLICATION["body_sha256"][1:]
+    # Registering a manifest file without pinning its bytes here would leave the new
+    # publication unreviewed while the inventory still read as closed.
     expect(
-        "the forged-digest control differs from the digest it must reject",
-        forged_digest != EXPECTED_FROZEN_PUBLICATION["body_sha256"],
+        "every registered frozen publication path is pinned by value",
+        {path for path in REGISTERED_REVIEW_PATHS
+         if path.endswith("/frozen-publication.json")} == set(FROZEN_PUBLICATIONS),
+    )
+    # Deriving the wrong digest from the real one keeps the control valid whatever the real
+    # digest becomes. A fixed sentinel silently stops discriminating on the day the manifest
+    # happens to carry it. Each arm stays its own check: folding them into one conjunction
+    # would report a single failure without naming which half stopped discriminating.
+    pinned_manifests = sorted(FROZEN_PUBLICATIONS.items())
+    forged_digests = {
+        relative: ("1" if pinned["body_sha256"][0] == "0" else "0")
+        + pinned["body_sha256"][1:]
+        for relative, pinned in pinned_manifests
+    }
+    expect(
+        "the forged-digest control differs from every digest it must reject",
+        len(forged_digests) == len(FROZEN_PUBLICATIONS)
+        and all(forged_digests[relative] != pinned["body_sha256"]
+                for relative, pinned in pinned_manifests),
     )
     expect(
         "changing a frozen PR body digest turns the manifest check red",
-        review_publication_manifest_error(dict(
-            EXPECTED_FROZEN_PUBLICATION, body_sha256=forged_digest)) != "",
+        all(review_publication_manifest_error(
+            dict(pinned, body_sha256=forged_digests[relative]), pinned) != ""
+            for relative, pinned in pinned_manifests),
     )
     expect(
         "removing frozen PR publication metadata turns the manifest check red",
-        review_publication_manifest_error({
-            key: value for key, value in EXPECTED_FROZEN_PUBLICATION.items()
-            if key != "frozen_at_head"
-        }) != "",
+        all(review_publication_manifest_error(
+            {key: value for key, value in pinned.items() if key != "frozen_at_head"},
+            pinned) != ""
+            for relative, pinned in pinned_manifests),
     )
+    # Every arm above hands the comparison its data directly, so none of them enters the
+    # walk that reads the manifests off disk. Narrowing that walk to one entry survived
+    # them all. Planting one wrong manifest at a time proves the walk reaches each.
+    with tempfile.TemporaryDirectory(prefix="z-harness-frozen-walk-") as raw:
+        walk_root = Path(raw)
+        walk_named = []
+        for corrupt, _pinned in pinned_manifests:
+            for relative, pinned in pinned_manifests:
+                target = walk_root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                payload = dict(pinned)
+                if relative == corrupt:
+                    payload["body_bytes"] = payload["body_bytes"] + 1
+                target.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+            walk_named.append(
+                corrupt in review_publication_manifest_error(root=walk_root))
+        expect(
+            "the manifest walk reaches and names every pinned publication",
+            len(walk_named) == len(FROZEN_PUBLICATIONS) and all(walk_named),
+        )
     missing_append_only = dict(handoff_sources)
     missing_append_only["skills/outbound-drafts/SKILL.md"] = (
         missing_append_only["skills/outbound-drafts/SKILL.md"].replace(
@@ -5057,10 +5150,15 @@ def selftest() -> int:
                     path.unlink()
                 elif path.is_dir():
                     path.rmdir()
-            (inventory_root / "pr-8").mkdir(exist_ok=True)
-            (inventory_root / "README.md").write_text("policy\n", encoding="utf-8")
-            (inventory_root / "pr-8/frozen-publication.json").write_text(
-                "{}\n", encoding="utf-8")
+            # Built from the registered set rather than from a second copy of it: a
+            # fixture that lists the paths itself goes stale the moment another pull
+            # request is registered, and reads as an inventory defect when it does.
+            for relative in sorted(REGISTERED_REVIEW_PATHS):
+                target = inventory_root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(
+                    "{}\n" if target.suffix == ".json" else "policy\n",
+                    encoding="utf-8")
 
         reset_review_inventory()
         expect("an exact review-document relative-path inventory clears",
@@ -5237,7 +5335,7 @@ def selftest() -> int:
     )
 
     fake_calls: List[Sequence[str]] = []
-    def fake_runner(argv: Sequence[str]) -> Result:
+    def fake_runner(argv: Sequence[str], _spec=None) -> Result:
         fake_calls.append(argv)
         joined = " ".join(argv)
         if "harness_check.py --ci" in joined:
@@ -5287,13 +5385,13 @@ def selftest() -> int:
     # The fake runner above emits the very constants the production check compares against,
     # so a floor change can never redden it -- the comparison is FLOOR < FLOOR. These arms
     # emit a corpus one below each floor instead, so the error path executes at least once.
-    def shrunken_scenario_runner(argv):
+    def shrunken_scenario_runner(argv, _spec=None):
         if "run-skill-evals.py" in " ".join(argv):
             return Result(0, f"EVAL-VALIDATE-SUMMARY scenarios={EVAL_SCENARIO_FLOOR - 1} "
                           f"skills={EVAL_SKILL_FLOOR} failures=0 scope=shape-only exit=0\n")
         return fake_runner(argv)
 
-    def shrunken_skill_runner(argv):
+    def shrunken_skill_runner(argv, _spec=None):
         if "run-skill-evals.py" in " ".join(argv):
             return Result(0, f"EVAL-VALIDATE-SUMMARY scenarios={EVAL_SCENARIO_FLOOR} "
                           f"skills={EVAL_SKILL_FLOOR - 1} failures=0 scope=shape-only exit=0\n")
@@ -5387,7 +5485,7 @@ def selftest() -> int:
         )
     finally:
         globals()["retired_dispatch_claim_error"] = original_retired_claim
-    def invalid_child_runner(argv: Sequence[str]) -> Result:
+    def invalid_child_runner(argv: Sequence[str], _spec=None) -> Result:
         result = fake_runner(argv)
         if "harness_check.py --ci" in " ".join(argv):
             return Result(

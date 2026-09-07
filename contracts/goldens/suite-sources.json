@@ -12,7 +12,7 @@
     "enumerate-survivors": "77993a5bf38e672a47723abe4bf28d12ff87e215de1d2687787aeb58d5d58f03",
     "fuzz-judge-diff": "69c1877f874e7172810cacb691034fe3e452d392132895bc05b0f259976aa671",
     "git_grep_engine_guard": "0cb753ee36560f5000b1d9e2ff405714b8c1fe2390963c55d8b38682f6880938",
-    "harness_check": "c6c5a0119afe60110c891b484051c01406792ba4994f4d4629f7603eb07b65f4",
+    "harness_check": "5660fbae436415d91de3d1cc8f23775569195e587f72b7d591f2ea96eedb4fbf",
     "harness_report": "eec022de9c2f7dec81c612e751dac472f2f8b695029d627784e7e5d840312cbc",
     "portable-conformance": "8eb48510971d0e4f7371cd7a4d16c41850e8e1324a739b70b71d3b85c5823606",
     "pr-delivery-state": "4fa74be86a09a0047c3d960fda37a87930d7a6b8dfd39361a8850e3d0f4ef9b5",
@@ -20,7 +20,7 @@
     "repository-ownership": "d72b23ef0e037f81bb0c1eefc93c2198a5355c1820b542ce285a83d8661f35ca",
     "run-skill-evals": "38115603816e7698926a290d401179c3db2f4f5ffa12b49e2bfe04b3f294a508",
     "spawn_preflight_guard": "8febf4d3e9e47061d31dc8ed45ed9ac60cccf0b22b360cd100854e8ad87c19b6",
-    "verify-review-publication": "fb7a4b95248de1f664180ad0598a54778591f321963b2265e734b37ff7bcd455",
+    "verify-review-publication": "fdab9779ebccbd8d408abc17b2f46a18aaa79c801d51ead8589160412786e1da",
     "write-mutation-receipt": "ede22fc6749dab7bd7f0cde597a48400e4b12f5739adeca098708b84ac4d4f92",
     "zsh_rev_modifier_guard": "aff5149a02c6eed2a9a986d31e728305f926d83486ec0cd66c747114d9523c96"
   }

@@ -142,7 +142,7 @@ SELFTEST_SUITES = [
     ("repository-ownership", ["tools/repository_ownership.py", "--selftest"], 78),
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 25),
     ("verify-review-publication",
-     ["tools/verify-review-publication.py", "--selftest"], 94),
+     ["tools/verify-review-publication.py", "--selftest"], 96),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
     ("ci-gate", ["tools/ci-gate.py", "--selftest"], 371),
@@ -166,7 +166,7 @@ def expected_selftest_checks(name):
         "enumerate-survivors": 28,
         "fuzz-judge-diff": 65,
         "spawn_preflight_guard": 88,
-        "verify-review-publication": 94,
+        "verify-review-publication": 96,
     }
     if name in fixed:
         return fixed[name]

@@ -64,7 +64,22 @@ from typing import NamedTuple
 # atoms and the controls. Keep the locally grounded alphabet explicit, scan every run,
 # and classify an unknown live alphabetic escape as uncertain rather than safe.
 PCRE_ESCAPE_LETTERS = frozenset("bBdDsSwWAZzhHvVRQEXNK")
-UNRESOLVED = re.compile(r"\$[A-Za-z_{(]|`")
+# A brace group is a shell expansion like any other, and the tokenizer keeps an expanding
+# one as a single token -- so the text a guard scans is not the text Git receives. Expansion
+# cannot invent a character, but it can put two next to each other that were never adjacent:
+# zsh hands `harness{\\,x}b` to Git as `harness\b`, a PCRE-only atom under the ERE engine,
+# out of a token in which `\b` does not occur. Scanning that token for atoms found nothing
+# and ALLOWED a live silent-wrong-result. Naming it here rather than in a private check lets
+# every existing consumer of "unresolved" answer for it: the executable, the hazard hint, the
+# pattern, and the raw-source scan.
+#
+# Only the comma and range forms expand; `{a}` is literal, and so are `'{a,b}'`, `"{a,b}"`
+# and `\{a,b\}`. Each alternative excludes its own delimiter from the leading class so the
+# match is decided without backtracking on a megabyte-scale token.
+UNRESOLVED = re.compile(
+    r"\$[A-Za-z_{(]|`"
+    r"|\{[^{},\s;|&()]*,[^{}\s;|&()]*\}"
+    r"|\{[^{}.\s;|&()]*\.\.[^{}\s;|&()]*\}")
 
 MAX_COMMAND_CHARS = 1024 * 1024
 MAX_SUBCOMMANDS = 16384
@@ -5783,6 +5798,14 @@ FIXTURES = [
      "{ git grep -nE a}harness\\\\b -- README.md; }", "deny"),
     ("GREEN BRACE: a literal brace keeps an explicit PCRE engine clean",
      "git grep -nP {a}'harness\\b' -- README.md", "allow"),
+    ("ASK  BRACE EXPANSION: an atom the expansion assembles is not in the token scanned",
+     "git grep -nE harness{\\\\,x}b", "ask"),
+    ("ASK  BRACE EXPANSION: the range form assembles one the same way",
+     "git grep -nE harness{\\\\..\\\\}b", "ask"),
+    ("GREEN BRACE EXPANSION: a group with no comma or range does not expand",
+     "git grep -nE 'harness{x}b' -- README.md", "allow"),
+    ("GREEN BRACE EXPANSION: an explicit PCRE engine is the intended one either way",
+     "git grep -nP harness{\\\\,x}b", "allow"),
     ("RED  ENV-S GRAMMAR: a comment cannot end the string before the guarded tail",
      "env -S 'git\\_grep\\_-nE\\_harness\\\\b\\_#\\_ignored'", "deny"),
     ("GREEN ENV-S GRAMMAR: a terminator drops the guarded tail env never receives",

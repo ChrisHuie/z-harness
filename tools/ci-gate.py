@@ -56,8 +56,8 @@ EVAL_SKILL_FLOOR = 7
 SUITE_FLOORS = {
     "harness_check": 230,
     "render-packages": 192,
-    "bash_command_guard": 1391,
-    "git_grep_engine_guard": 1171,
+    "bash_command_guard": 1395,
+    "git_grep_engine_guard": 1175,
     "zsh_rev_modifier_guard": 489,
 }
 EXPECTED_WORKFLOW = """name: harness-check

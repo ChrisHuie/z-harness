@@ -4,7 +4,7 @@
  "note": "which guard mutations the shipped suites catch; each result's reason is an observation from the host that generated it, not a cross-platform fact",
  "generator_sha256": "ede22fc6749dab7bd7f0cde597a48400e4b12f5739adeca098708b84ac4d4f92",
  "source_digests": {
-  "hooks/guards/git_grep_engine_guard.py": "79f50fbd261bbba2e592d6b01a6fd031fc955cd84236663fe9d534d541795308",
+  "hooks/guards/git_grep_engine_guard.py": "0cb753ee36560f5000b1d9e2ff405714b8c1fe2390963c55d8b38682f6880938",
   "hooks/guards/zsh_rev_modifier_guard.py": "aff5149a02c6eed2a9a986d31e728305f926d83486ec0cd66c747114d9523c96",
   "hooks/bash_command_guard.py": "4dbd2f3857241ace4d7ae588775ce8e07267b3943cda59c5bcaabde4a40993d5",
   "hooks/announced_work_guard.py": "2075db2aa7ee281666327b1d5686d5e342cfa79a61132fba1b1852aa9c8832d7",

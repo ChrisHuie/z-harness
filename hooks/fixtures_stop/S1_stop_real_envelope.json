@@ -1,0 +1,16 @@
+{
+  "session_id": "00000000-0000-0000-0000-000000000000",
+  "transcript_path": "/PATH/TO/TRANSCRIPT.jsonl",
+  "cwd": "/PATH/TO/CWD",
+  "prompt_id": "00000000-0000-0000-0000-000000000000",
+  "permission_mode": "auto",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "Stop",
+  "stop_hook_active": false,
+  "last_assistant_message": "ok",
+  "background_tasks": [],
+  "session_crons": [],
+  "_note": "Captured from a real Claude Code 2.1.227 Stop event on 2026-08-12 via `claude -p ... --settings <hook that tees stdin>`. Host-bound values are scrubbed; every key and every type is verbatim. This is what makes the guard's field access a checked contract rather than a reading of the binary."
+}

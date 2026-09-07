@@ -1,20 +1,27 @@
 {
-  "note": "sha256 of each aggregated selftest suite's source. The check count in a receipt is self-reported, so an eight-line stub printing a passing receipt satisfied the floor and the whole gate went green. Binding the source means a suite cannot be replaced by something that merely claims to have run. Update an entry in the same commit that changes its tool, and review the diff: this file is authored, never generated from whatever is on disk.",
+  "note": "sha256 of each aggregated selftest suite's source. The check count in a receipt is self-reported, so an eight-line stub printing a passing receipt satisfied the floor and the whole gate went green. Under a workflow that invokes the authentic harness/ci-gate pair, this binding detects an isolated suite or runner replacement that merely claims to have run. It is not independent attestation against an in-repository workflow edit that bypasses those runners; reviewer diff inspection or an externally administered required workflow remains that trust root. Update an entry in the same commit that changes its tool, and review the diff: this file is authored, never generated from whatever is on disk.",
   "suites": {
+    "announced_work_guard": "2075db2aa7ee281666327b1d5686d5e342cfa79a61132fba1b1852aa9c8832d7",
     "askq_timeout_guard": "85c136dc24f3b4f41a60987b8abecb97779e209e49c4e29e74a5d46174d695ef",
-    "bash_command_guard": "ec2444a33fe366affccf438acb865aa88d338ba1f17ca0b4669705327c425f4d",
+    "bash_command_guard": "4dbd2f3857241ace4d7ae588775ce8e07267b3943cda59c5bcaabde4a40993d5",
     "cc-cost": "972b0122b5f84de10f41915a133132f555b943c46061d91b07e3f7b534a4d003",
-    "ci-gate": "d7c452b5488f98a2fd9e6218d6ab1eb5c9c0577ada010317acb7a4e9d63ab4cd",
-    "claim-provenance": "7b88bdb3792fb65e146b3a9ab2357a81585cd9824043cc9fa8bc835dc4b6e1ff",
+    "ci-gate": "de2609a3d70581b6a52fa886364376e7e7ab7db177209407855d719883b9a314",
+    "claim-provenance": "4552d3a8ec1da9b90e47a2dcd36abb0c3b1ad49a873731f50effb9268635e67f",
     "codex-cost": "fc46c95da8babd276e705c9578c5857a6563588b588da540ea4222c2c6ca793c",
     "codex_session_start": "b9dbedba94d623304ef97ca1b13a14b2f7b000cc98f35e016448ed4c85030567",
-    "git_grep_engine_guard": "c47c9871c3cb4c6bdb03fb89b6c3798d17f797549b276d5f02e580c71ae8fb0a",
+    "enumerate-survivors": "77993a5bf38e672a47723abe4bf28d12ff87e215de1d2687787aeb58d5d58f03",
+    "fuzz-judge-diff": "69c1877f874e7172810cacb691034fe3e452d392132895bc05b0f259976aa671",
+    "git_grep_engine_guard": "0cb753ee36560f5000b1d9e2ff405714b8c1fe2390963c55d8b38682f6880938",
+    "harness_check": "8d8e314d21cbc4431fd67ed349367a3be71b4f697f5549cb3572cf51534a244f",
     "harness_report": "eec022de9c2f7dec81c612e751dac472f2f8b695029d627784e7e5d840312cbc",
-    "portable-conformance": "649c5ee12eafcf86fecc3e3ae06e95188e97b48b7b9b603a1aa7eb22ec4ccace",
-    "pr-delivery-state": "da5293b7134b159c1b6bb91b67c40193550076c908db8e185ddcb9d82011fe6b",
+    "portable-conformance": "8eb48510971d0e4f7371cd7a4d16c41850e8e1324a739b70b71d3b85c5823606",
+    "pr-delivery-state": "4fa74be86a09a0047c3d960fda37a87930d7a6b8dfd39361a8850e3d0f4ef9b5",
     "render-packages": "6b05aa44c351651202e8a5e720bd1a13ed8d2301705367cea0dc198d7f5a178e",
-    "run-skill-evals": "3fc8bc86c67ccec70b09255e332b2828eb1e8db1e5467c9ada6ee7142ba68961",
-    "spawn_preflight_guard": "b2a0fc907102ab997cd10a7bad6c6cf4f3a5cd4cfd18cf4fc2e7807f81db1a54",
-    "zsh_rev_modifier_guard": "da8ff5e25c3f3fe62c4b8e9eb96de1393e958b930c24565b0b4f25658bc01a8d"
+    "repository-ownership": "d72b23ef0e037f81bb0c1eefc93c2198a5355c1820b542ce285a83d8661f35ca",
+    "run-skill-evals": "38115603816e7698926a290d401179c3db2f4f5ffa12b49e2bfe04b3f294a508",
+    "spawn_preflight_guard": "8febf4d3e9e47061d31dc8ed45ed9ac60cccf0b22b360cd100854e8ad87c19b6",
+    "verify-review-publication": "fb7a4b95248de1f664180ad0598a54778591f321963b2265e734b37ff7bcd455",
+    "write-mutation-receipt": "ede22fc6749dab7bd7f0cde597a48400e4b12f5739adeca098708b84ac4d4f92",
+    "zsh_rev_modifier_guard": "aff5149a02c6eed2a9a986d31e728305f926d83486ec0cd66c747114d9523c96"
   }
 }

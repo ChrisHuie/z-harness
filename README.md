@@ -115,8 +115,9 @@ same shared policy at both user and project scope.
 | `hooks/hooks.json` | Codex | SessionStart/SubagentStart policy injection and PreToolUse guard wiring |
 | `settings.json` | Claude | Claude hooks, permissions, model, status line, and UI settings |
 | `hooks/bash_command_guard.py` | shared adapter | shared predicates; Codex maps unsupported `ask` results to fail-closed `deny` |
-| `hooks/spawn_preflight_guard.py` | shared adapter | disk-capacity gate; maps unsupported Codex `ask` decisions to fail-closed `deny` |
+| `hooks/spawn_preflight_guard.py` | shared adapter | disk-capacity gate plus required fresh scratch reservation; maps unsupported Codex `ask` decisions to fail-closed `deny` |
 | `hooks/askq_timeout_guard.py` | Claude | AskUserQuestion AFK guard; no claimed Codex equivalent |
+| `hooks/announced_work_guard.py` | Claude | Stop hook that blocks a final message which announces work that has not begun; no claimed Codex equivalent |
 | `hooks/codex_session_start.py` | Codex | injects mandatory shared policy, resolved adapter commands, and optional host-local context |
 | `$CODEX_HOME/z-harness/AGENTS.local.md` | local Codex host | optional non-packaged machine instructions appended by the session adapter |
 | `hooks/harness_check.py` | shared | mechanical gate over skills, hooks, context files, and plugin packaging |
@@ -124,6 +125,7 @@ same shared policy at both user and project scope.
 | `tools/cc-cost.py` | Claude | Claude request-deduplicated token accounting |
 | `tools/codex-cost.py` | Codex | per-request token accounting with copied/replayed record dedupe |
 | `tools/claim-provenance.py` | shared | explicitly bound byte-exact quote and successful-read provenance checks for local documents |
+| `tools/repository_ownership.py` | shared | validates nested Git ownership boundaries for inventory and evidence scans |
 | `tools/pr-delivery-state.py` | shared | proves workspace, local HEAD, PR head, and exact-head CI agree before publication claims |
 | ignored `projects/*/memory/` | Claude-local data | host-bound Claude memory remains on the authoring machine and is not packaged for Codex |
 | ignored `harness-audit-*/` | publisher-local record | pre-migration snapshots and machine-derived evidence stay beside the authoring checkout, never in the plugin package |
@@ -138,14 +140,19 @@ python3 hooks/spawn_preflight_guard.py --selftest
 python3 hooks/codex_session_start.py --selftest
 python3 hooks/askq_timeout_guard.py --selftest
 python3 hooks/askq_timeout_guard.py --verify-harness
+python3 hooks/announced_work_guard.py --selftest
 python3 hooks/harness_report.py --selftest
 python3 tools/cc-cost.py --selftest
 python3 tools/codex-cost.py --selftest
 python3 tools/claim-provenance.py --selftest
+python3 tools/repository_ownership.py --selftest
 python3 tools/pr-delivery-state.py --selftest
 python3 tools/run-skill-evals.py --selftest
 python3 tools/run-skill-evals.py --validate
 python3 tools/render-packages.py --selftest
+python3 tools/verify-review-publication.py --selftest
+python3 instruments/enumerate_survivors.py --selftest
+python3 instruments/fuzz_judge_diff.py --selftest
 python3 tools/ci-gate.py --selftest
 python3 tools/ci-gate.py
 ```
@@ -154,17 +161,35 @@ python3 tools/ci-gate.py
 meta-selftest, the renderer and guard selftests, eval validation, and a fresh render/verify pair. It
 accepts each child only when the process result and one terminal, suite-qualified receipt agree.
 The workflow pins its action commits and Python patch version, grants only read access to contents,
-does not persist checkout credentials, and runs that gate using fixed Ubuntu and macOS runner labels;
-GitHub still manages the image contents behind those labels. A separate
+does not persist checkout credentials, and first runs `hooks/harness_check.py --ci` before the
+complete gate on fixed Ubuntu and macOS runner labels. The harness binds the reviewed `ci-gate.py`
+source and the gate independently binds the reviewed harness source, so replacing either runner in
+isolation fails before its claimed receipt is accepted when the declared workflow invokes both.
+The in-repository workflow files are trust roots: a workflow-only edit can bypass those runners,
+and coordinated edits to both workflows can fabricate both in-repo job classes. Reviewer inspection
+or an externally administered required workflow must govern that boundary. GitHub still manages the
+image contents behind those labels. A `mutation-proof` workflow accepts pull requests, pushes to
+`main`, and manual dispatches, explicitly checks out
+`github.event.pull_request.head.sha || github.sha`, runs the deterministic mutation plan in six
+private-tree shards for every accepted head, and aggregates raw artifacts with `if: always()`. The aggregator
+rejects missing, duplicate, overlapping, foreign, or stale mutation IDs, recomputes each raw outcome,
+schema-compares the canonical tracked receipt, and byte-compares the tracked summary. The offline gate validates that receipt against
+the current plan and sources, derives the canonical summary bytes from the strict receipt, and then
+checks the outbound include copies; it does not rerun the expensive mutation plan locally. A separate
 declared Ubuntu job runs `tools/portable-conformance.py`. It resolves locked wheel filenames through
 live PyPI metadata, requires the published digest to equal the lock, hash-verifies every downloaded
 artifact, derives the vendored Agent Plugins schema and license URLs from their pinned repository
 revision and paths, and verifies a signed, hash-pinned Claude Code release before validating a fresh render.
 Network failure is red, never skipped. The repository workflow does not itself prove that either job
-is a branch-protection required check.
+is a branch-protection required check. `tools/pr-delivery-state.py` proves generic exact-head check
+and workflow presence; final mutation evidence additionally requires the named mutation workflow,
+six nonempty shard artifacts, and its successful aggregate job to be inspected explicitly.
 
-Local `harness_check.py` mode adds machine-specific Claude anchors. `--selftest` plants defects and
-proves each check family can turn red; a zero-input scan is an error, not a clean verdict. C1 requires
+Local `harness_check.py` mode adds machine-specific Claude anchors, compares the complete payload
+of repository-owned skills under `~/.claude/skills`, and scans tracked plus authored-untracked
+context files
+without crossing nested Git ownership. `--selftest` plants defects and proves each check family can
+turn red; a zero-input scan is an error, not a clean verdict. C1 requires
 every direct selftest to be registered with a positive floor and a unique terminal suite receipt;
 `harness_check.py` is the sole recursive meta-suite exemption.
 
@@ -173,6 +198,49 @@ headless model scenarios and spends API budget, so it remains manual.
 
 Document quote/citation scans are also manual because they require the target document, artifact
 root, and session transcript. Their detector selftest is blocking through C1.
+
+The mutation-development instruments are also bound into C1 by source digest and exact selftest
+count, while their full exploratory runs remain explicit. Keep their JSON outside the checkout:
+
+```text
+python3 instruments/enumerate_survivors.py hooks/announced_work_guard.py hooks/fixtures_stop \
+  > /tmp/announced-work-survivors.json
+python3 instruments/fuzz_judge_diff.py /path/to/oracle.py hooks/announced_work_guard.py 17 10000 \
+  > /tmp/announced-work-fuzz.json
+```
+
+`enumerate_survivors.py` first requires one complete green pristine receipt, then mutates each
+top-level function except the selftest and CLI runner. It records target, fixture-tree, plan, and
+instrument hashes. A semantic kill requires the same suite and check count, a positive failure
+count, and assertion-failure exit 1; a timeout, crash, missing receipt, count drift, source drift,
+any other exit, or setup failure exits 2 as an instrument error. Fixture roots and descendants
+containing symlinks are rejected, as are Python bytecode caches. The completed private destination
+is checked against the recorded digest before an isolated interpreter executes it and checked again
+afterward. This binds the starting and ending private snapshots, not transient changes restored by
+the code under test or arbitrary files it reads outside those declared copies. A complete
+measurement exits 0 and reports survivors in JSON rather than treating coverage debt as tool
+failure.
+
+`fuzz_judge_diff.py` captures the instrument, oracle, and candidate bytes once, creates and
+post-verifies a separate private worker snapshot for each guard, and compiles each guard directly
+without import bytecode. Runtime `__file__` reads resolve to that private guard while the original
+path is retained only as the compile filename for tracebacks. It deterministically covers every
+grammar production and supported group
+spelling before random generation, and retains every case in the JSON report with source, grammar,
+message-corpus, and instrument hashes. In comparison mode it exits 1 only when the candidate changes a block into an
+allow, exits 2 on instrument failure -- including a run whose oracle blocked nothing, which could only
+have classified every case as agreement or allow-to-block -- and reports allow-to-block and block-reason changes separately
+without collapsing them into that safety verdict. Its grammar carries near-miss tokens drawn from
+outside the guard's tables. The mandatory prefix pins every one, so a widening that admits
+one of those tokens diverges at the minimum case count rather than needing a large run. That
+guarantee is exercised with actual one-literal private-copy widenings and covers three of the
+guard's collections; a widening elsewhere may still diverge by
+chance, and a clean run over an unpinned collection is not evidence of coverage. The accepted count range runs from the
+mandatory-case count to 100,000; the
+mandatory prefix includes every production and renders every supported delimiter spelling. Use
+multiple recorded seeds instead of one unbounded worker allocation. Source symlinks are rejected;
+source hashes bind the two top-level guard files and their runtime `__file__` reads, not imported
+standard-library or installed-package code.
 
 ## Mechanics worth knowing
 

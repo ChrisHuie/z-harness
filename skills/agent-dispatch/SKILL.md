@@ -11,9 +11,9 @@ A skill body loads at **turn 1 of the agent that loads it** — after the parent
 spawned — and an agent whose `tools:` allowlist omits `Skill` gets neither the tool nor
 the listing. **A preflight written as prose is a reminder, not a gate.** Put it in a
 `PreToolUse` hook in `~/.claude/settings.json` on the spawn tool (matcher `Agent|Task`;
-this harness emits `Agent`), exiting non-zero to block. The append-to-subagent-system-prompt
-flag pierces every nesting depth and is the only non-negotiables channel headless; hooks
-see the agent type, so per-depth capture is free.
+this harness emits `Agent`), exiting non-zero to block. A hook decides; it cannot write
+into the child. `--agents` carries a per-type prompt, never a per-worker value.
+Verify an injection channel against the installed CLI, not memory.
 
 ## Before you spawn
 

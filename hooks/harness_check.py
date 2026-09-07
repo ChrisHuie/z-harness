@@ -17,10 +17,11 @@ Runs from either clone (repo root auto-detected from this file's location). Chec
   C6  stale-claim tripwires: patterns that once shipped false stay at zero across
       every tracked file except the declared SCAN_EXCLUSIONS
   C7  anchors: routing-table skills exist; Claude and Codex hook commands resolve;
-      [local] original audit paths exist, `timeout` still absent, askq binary
-      anchors hold
-  C8  reserved context basenames (CLAUDE.md/AGENTS.md/GEMINI.md) exist nowhere
-      but the repo root, .git excluded as a path component (not a substring)
+      [local] original audit paths and askq anchors hold, and every repository-owned
+      Claude-installed skill payload matches its complete reviewed source tree
+  C8  reserved context basenames (CLAUDE.md/AGENTS.md/GEMINI.md) exist nowhere but
+      the repo root across tracked and authored-untracked files; nested Git ownership
+      boundaries are pruned and `.git` is matched as a component, not a substring
   C9  Codex package contract: manifest, marketplace, hook config, context bridges,
       and their size budgets are internally consistent
   C10 PR delivery contract: scoped publication authority, state-proof command,
@@ -39,16 +40,46 @@ zero inputs (an empty scan set is an error, never a clean verdict).
 """
 import fnmatch
 import hashlib
+import importlib.util
+import io
 import json
 import os
 import re
 import shlex
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+import time
 
-VERSION = "3.1.0"
+VERSION = "3.3.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TOOLS_DIR = os.path.join(ROOT, "tools")
+if TOOLS_DIR not in sys.path:
+    sys.path.insert(0, TOOLS_DIR)
+
+from repository_ownership import (  # noqa: E402
+    _GIT_REPOSITORY_ENV,
+    _bound_separate_gitdir,
+    _git_common_dir,
+    _git_path_line,
+    _gitdir_from_marker,
+    _indexed_gitlink,
+    _registered_linked_worktree,
+    RepositoryOwnershipError,
+    git_command_failure,
+    git_toplevel_error as _git_toplevel_error,
+    is_repository_boundary,
+    run_git,
+    same_file as _same_file,
+    sanitized_git_environment,
+)
+
+
+def _is_git_worktree_root(path, runner, owner_root=None):
+    """Compatibility wrapper around the shared ownership authority."""
+    return is_repository_boundary(path, owner_root=owner_root, runner=runner)
 
 # C11 anchor. AGENTS.md bans self-assessment carrying no technical sense and keeps words
 # like `clean` and `verified` usable, because the corpus needs them for a tree or a head.
@@ -86,7 +117,10 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 72
+SELFTEST_FLOOR = 230
+# This pin gives the current package a reviewable release identity. Update it with the
+# manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
+CURRENT_PLUGIN_VERSION = "0.3.3"
 
 AUTHORING_SKILLS = {"craft-prompt", "craft-skill", "craft-context-file", "review-prompt"}
 BODY_CHAR_CAP = 5000          # chars after frontmatter — the builders' instrument
@@ -98,23 +132,122 @@ DESC_CAP = 400                # house cap (spec ceiling is 1024)
 # checks=111, so a suite can be gutted with nothing failing. Raise a floor in the same
 # commit that adds the checks; lowering one is a deliberate, reviewable edit.
 SELFTEST_SUITES = [
-    ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"], 111),
+    ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"], 1395),
     ("askq_timeout_guard", ["hooks/askq_timeout_guard.py", "--selftest"], 13),
+    ("announced_work_guard", ["hooks/announced_work_guard.py", "--selftest"], 916),
     ("harness_report", ["hooks/harness_report.py", "--selftest"], 12),
     ("cc-cost", ["tools/cc-cost.py", "--selftest"], 8),
     ("codex-cost", ["tools/codex-cost.py", "--selftest"], 28),
-    ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 42),
-    ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 8),
+    ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 83),
+    ("repository-ownership", ["tools/repository_ownership.py", "--selftest"], 78),
+    ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 25),
+    ("verify-review-publication",
+     ["tools/verify-review-publication.py", "--selftest"], 94),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
-    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 17),
-    ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 63),
+    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 369),
+    ("write-mutation-receipt",
+     ["tools/write-mutation-receipt.py", "--selftest"], 99),
+    ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 65),
+    ("enumerate-survivors", ["instruments/enumerate_survivors.py", "--selftest"], 28),
+    ("fuzz-judge-diff", ["instruments/fuzz_judge_diff.py", "--selftest"], 65),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
-    ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 16),
-    ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 66),
-    ("zsh_rev_modifier_guard", ["hooks/guards/zsh_rev_modifier_guard.py", "--selftest"], 31),
+    ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 88),
+    ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 1175),
+    ("zsh_rev_modifier_guard", ["hooks/guards/zsh_rev_modifier_guard.py", "--selftest"], 489),
 ]
-# The only non-aggregated selftest is this recursive meta-suite itself.
+
+
+def expected_selftest_checks(name):
+    """Exact execution-derived counts for suites whose former formulas hid probes."""
+    fixed = {
+        "announced_work_guard": 916,
+        "ci-gate": 369,
+        "enumerate-survivors": 28,
+        "fuzz-judge-diff": 65,
+        "spawn_preflight_guard": 88,
+        "verify-review-publication": 94,
+    }
+    if name in fixed:
+        return fixed[name]
+    if name == "bash_command_guard":
+        return 1395
+    if name == "zsh_rev_modifier_guard":
+        return 489
+    if name != "git_grep_engine_guard":
+        return None
+    binaries, seen = [], set()
+    for directory in (os.environ.get("PATH") or "").split(os.pathsep):
+        if not directory:
+            continue
+        resolved = shutil.which("git", path=directory)
+        if not resolved:
+            continue
+        real = os.path.realpath(resolved)
+        if real not in seen:
+            seen.add(real)
+            binaries.append(real)
+    # The portable corpus is 1175 checks for one Git. Every additional executable adds
+    # one version probe, one fixture setup, and 22 alias-proof-name probes.
+    return 1175 + 24 * (max(1, len(binaries)) - 1)
+# The public Bash-guard selftest intentionally runs five independent process-level timing
+# observations for each runtime. Give that aggregate suite enough wall-clock without
+# weakening the five-second deadline each individual hook process must meet.
+# Registered where the 15 s default leaves no headroom for a slower runner. Measured
+# on the authoring host: bash_command_guard 27 s, git_grep_engine_guard 7.3 s (its
+# byte-cap, token and subcommand fixtures parse real megabyte-scale sources, and it
+# probes the installed git and zsh), announced_work_guard 15-16 s run alone and longer under
+# this gate's own concurrency (the suite includes real Stop-process envelopes), ci-gate
+# 20.8 s. C1 requires each to finish inside SELFTEST_TIMEOUT_MARGIN of its budget, so these
+# are ceilings with room, not targets -- and the figure that decides the verdict is the
+# loaded one, which none of these are. They are not regenerable from a green run either:
+# C1 prints a suite's elapsed time only when it exceeds its margin, so a number here is a
+# hand-timing on one host and drifts silently until the day it reddens. announced_work_guard
+# was raised from 30 s the day that happened, on a run that changed none of its checks. The
+# ratios these figures imply are not quoted here: the loaded and unloaded numbers give
+# different answers, and the earlier attempt to state one contradicted the ci-gate figure
+# three lines above it.
+SELFTEST_TIMEOUTS = {
+    "bash_command_guard": 90,
+    "git_grep_engine_guard": 60,
+    "announced_work_guard": 60,
+    "ci-gate": 60,
+}
+DEFAULT_SELFTEST_TIMEOUT = 15
+# A suite may use this much of its registered timeout before C1 says so. Without it the
+# timeout was a number nothing checked: setting the Bash suite's to 15 -- below its
+# measured runtime -- left the whole harness selftest green, because the only assertion
+# re-derived the expected value from this table.
+SELFTEST_TIMEOUT_MARGIN = 0.6
+# Non-aggregated, and why. The discovery above matches any file carrying the STRING
+# "--selftest", which cannot tell a script that exposes one from a script that invokes
+# one. The remaining entry is the recursive case; anything else that lands in this dict
+# is a suite dodging aggregation. Invoking other suites is not by itself grounds for an
+# exemption, and the mutation generator held one on that reasoning while its own kill
+# scoring went unmeasured: an under-generating plan moves plan_sha256, which the gate
+# recomputes, but a mis-scored kill leaves every shard agreeing and the re-measurement
+# reproducing the same verdict. It is aggregated above over that scoring.
+# Citations in reference documents that name something this repository does not contain.
+# Each is a runtime artifact or an illustrative filename, so requiring it to resolve would be
+# wrong rather than merely noisy. Declared, because no structural test separates them from a
+# citation that should resolve: `agents/openai.yaml` carries a path separator and is external,
+# `PRINCIPLE-REGISTRY.md` carries none and is not. Adding a name here claims the artifact lives
+# outside this repository, and the diff is where that claim gets reviewed.
+EXTERNAL_REFERENCE_CITATIONS = {
+    "probe.py": "illustrative worker filename in a collision anecdote",
+    "mutate.py": "illustrative worker filename in a collision anecdote",
+    "base.py": "illustrative worker filename in a collision anecdote",
+    "agents/openai.yaml": "Codex configuration in the user environment",
+    "AGENTS.override.md": "Codex convention outside this repository",
+    "policy-blocks/persistence.md": "external prompt-library path",
+}
+# The line suffix is optional and captured separately. Requiring the backtick to follow the
+# extension made `doc.md:12` invisible to this check, so a citation could carry a line number
+# and evade resolution entirely -- the path half is what resolves either way.
+REFERENCE_CITATION = re.compile(
+    r"`([A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:py|md|json|ya?ml|sh|txt))(?::\d+)?`")
+
+
 SELFTEST_EXEMPTIONS = {
     "hooks/harness_check.py": "recursive meta-suite",
 }
@@ -190,13 +323,43 @@ def suite_source_golden(root=None):
     return value if isinstance(value, dict) else {}
 
 
+def child_faults(stdout, limit=2):
+    """-> the failing child's own FAIL lines, so a red suite says WHICH check failed.
+
+    This layer keeps a suite's receipt and drops its stdout, so `failures=1` reached the
+    record with nothing naming the check behind it. A suite that improves its own failure
+    text gains nothing in CI while that text is captured here and never printed: one
+    occurrence read as `failures=1` in the log while the guard's explanation sat in a
+    buffer nobody emitted, and attributing it cost a source read and a reproduction.
+
+    Cut at a word boundary. A slice cut a child's reason at "internal decision " and dropped
+    `budget`, the one word naming the cause, and this is the copy CI records -- the suite's
+    own line does not survive to the log at all.
+    """
+    def clip(text, limit=220):
+        text = " ".join(text.split())
+        if len(text) <= limit:
+            return text
+        cut = text[:limit].rsplit(" ", 1)[0]
+        return f"{cut or text[:limit]}..."
+
+    lines = [line.decode("utf-8", "replace").strip()
+             for line in stdout.splitlines()
+             if line.strip().startswith(b"FAIL")]
+    if not lines:
+        return ""
+    shown = "; ".join(clip(line) for line in lines[:limit])
+    more = f"; and {len(lines) - limit} more" if len(lines) > limit else ""
+    return f"; child reported: {shown}{more}"
+
+
 # C6/C8 scan set: everything tracked EXCEPT these. Written down rather than implied by a
 # directory list, so a surface added later is scanned by default and an omission is a
 # reviewable line instead of a forgotten tuple entry.
 # Printing the resolved set size is not a floor on it: adding one filename to
 # SCAN_EXCLUSIONS removed a file from the sweep and the verdict stayed green with a
 # smaller number nobody compares. Lower this only in the commit that removes the files.
-C6_SCAN_FLOOR = 162
+C6_SCAN_FLOOR = 163
 
 SCAN_EXCLUSIONS = (
     "hooks/harness_check.py",   # this file names every tripwire; it cannot sweep itself
@@ -215,9 +378,11 @@ ROUTING_SKILLS = ["git-workflow", "pr-review-method", "testing-ci", "agent-dispa
 # the same end state as the deleted hooks block it was written to catch. Bind the script to
 # the event instead.
 REQUIRED_CLAUDE_HANDLERS = [
-    ("PostToolUse", "AskUserQuestion", "hooks/askq_timeout_guard.py"),
-    ("PreToolUse", "Bash", "hooks/bash_command_guard.py"),
-    ("PreToolUse", "Agent|Task", "hooks/spawn_preflight_guard.py"),
+    ("Stop", None, "hooks/announced_work_guard.py", ()),
+    ("PostToolUse", "AskUserQuestion", "hooks/askq_timeout_guard.py", ()),
+    ("PreToolUse", "Bash", "hooks/bash_command_guard.py", ()),
+    ("PreToolUse", "Agent|Task", "hooks/spawn_preflight_guard.py",
+     ("--require-scratch",)),
 ]
 
 RESERVED_BASENAMES = {"claude.md", "agents.md", "gemini.md"}
@@ -237,7 +402,8 @@ REQUIRED_CODEX_HANDLERS = [
     ("SessionStart", "startup|resume|clear|compact", "hooks/codex_session_start.py", ()),
     ("SubagentStart", None, "hooks/codex_session_start.py", ()),
     ("PreToolUse", "^Bash$", "hooks/bash_command_guard.py", ("--runtime", "codex")),
-    ("PreToolUse", "^Agent$", "hooks/spawn_preflight_guard.py", ("--runtime", "codex")),
+    ("PreToolUse", "^Agent$", "hooks/spawn_preflight_guard.py",
+     ("--runtime", "codex", "--require-scratch")),
 ]
 DELIVERY_CONTRACT = {
     "AGENTS.md": [
@@ -373,20 +539,59 @@ def validate_codex_hook_config(hook_config):
     return handler_count, errors
 
 
-def package_paths(root):
+def package_paths(root, runner=None):
     """Return (surface, paths, error) for source or installed package contents."""
+    runner = subprocess.run if runner is None else runner
     if os.path.exists(os.path.join(root, ".git")):
-        tracked = subprocess.run(
-            ["git", "-C", root, "ls-files"], capture_output=True, text=True,
-        )
+        problem = _git_toplevel_error(root, runner)
+        if problem:
+            return "source", [], problem
+        try:
+            tracked = run_git(
+                runner,
+                ["git", "-C", root, "ls-files", "-z"],
+                capture_output=True, text=False,
+            )
+        except OSError as exc:
+            # Git absent from PATH raised FileNotFoundError out through every caller, so
+            # the gate died with a traceback and no verdict line. An unusable instrument
+            # is a named failure of the checks that depend on it.
+            return "source", [], f"cannot run git ls-files: {exc}"
         if tracked.returncode != 0:
-            return "source", [], tracked.stderr.strip() or "git ls-files failed"
-        return "source", [line for line in tracked.stdout.splitlines() if line], None
+            return "source", [], git_command_failure(tracked.returncode, tracked.stderr)
+        raw = bytes(tracked.stdout or b"")
+        if raw and not raw.endswith(b"\0"):
+            return "source", [], "git ls-files returned an unterminated NUL inventory"
+        paths = [item.decode("utf-8", "surrogateescape")
+                 for item in raw.split(b"\0") if item]
+        return "source", paths, None
     paths = []
     for dirpath, dirs, files in os.walk(root):
+        # A directory carrying its own `.git` is a separate repository vendored inside this
+        # tree, not content of the package being inventoried. Without the prune its files are
+        # compared against the source as though the package shipped them, and the marker file
+        # itself was listed as package content.
+        if dirpath != root:
+            try:
+                boundary = _is_git_worktree_root(dirpath, runner, root)
+            except RepositoryOwnershipError as exc:
+                return "installed", [], f"cannot resolve Git ownership: {exc}"
+            if boundary:
+                dirs[:] = []
+                continue
+        # No filename filter for `.git` here: a directory holding one is pruned above, and a
+        # root holding one never reaches this walk because package_paths takes the tracked
+        # branch instead. The two conditions coincide, so the filter could not fire.
         dirs[:] = [d for d in dirs if d != ".git"]
         for filename in files:
-            paths.append(os.path.relpath(os.path.join(dirpath, filename), root))
+            # A symlinked file is not package content: its bytes live outside the tree being
+            # inventoried, and every consumer of this list reads the path. os.walk already
+            # declines to descend a symlinked directory, so this is the same rule for the
+            # file case. Nothing tracked in this repository is a symlink.
+            full = os.path.join(dirpath, filename)
+            if os.path.islink(full):
+                continue
+            paths.append(os.path.relpath(full, root))
     return "installed", paths, None
 
 
@@ -427,6 +632,251 @@ def forbidden_package_entries(root):
     return surface, forbidden_paths, forbidden_contents, error
 
 
+def skill_payload_manifest(root, required_names=None):
+    """Return the full regular-file payload owned by repository skill directories."""
+    errors = []
+    if not os.path.isdir(root) or os.path.islink(root):
+        return (), {}, [f"skill root is absent, symlinked, or not a directory: {root}"]
+    if required_names is None:
+        entries = list(os.scandir(root))
+        errors.extend(
+            f"source skill entry is symlinked: {entry.name}"
+            for entry in entries if entry.is_symlink()
+        )
+        names = tuple(sorted(
+            entry.name for entry in entries
+            if entry.is_dir(follow_symlinks=False)
+        ))
+    else:
+        names = tuple(sorted(required_names))
+    if not names:
+        return names, {}, ["zero source-owned skill directories"]
+    manifest = {}
+    for name in names:
+        skill_root = os.path.join(root, name)
+        if os.path.islink(skill_root) or not os.path.isdir(skill_root):
+            errors.append(f"{name}: skill directory is absent, symlinked, or not a directory")
+            continue
+        skill_md = os.path.join(skill_root, "SKILL.md")
+        if os.path.islink(skill_md) or not os.path.isfile(skill_md):
+            errors.append(f"{name}: SKILL.md is absent, symlinked, or not a regular file")
+        for dirpath, dirs, files in os.walk(skill_root, followlinks=False):
+            retained = []
+            for directory in sorted(dirs):
+                path = os.path.join(dirpath, directory)
+                if os.path.islink(path):
+                    errors.append(
+                        f"{name}: directory symlink {os.path.relpath(path, skill_root)}")
+                else:
+                    retained.append(directory)
+            dirs[:] = retained
+            for filename in sorted(files):
+                path = os.path.join(dirpath, filename)
+                relative = os.path.relpath(path, skill_root).replace(os.sep, "/")
+                if os.path.islink(path) or not os.path.isfile(path):
+                    errors.append(f"{name}: non-regular payload {relative}")
+                    continue
+                try:
+                    data = open(path, "rb").read()
+                    mode = os.stat(path, follow_symlinks=False).st_mode
+                except OSError as exc:
+                    errors.append(f"{name}: cannot read {relative}: {exc}")
+                    continue
+                manifest[f"{name}/{relative}"] = (
+                    len(data), hashlib.sha256(data).hexdigest(),
+                    bool(mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)),
+                )
+    return names, manifest, errors
+
+
+def installed_skill_payload_error(source_root, installed_root):
+    """Return why the live installed payload differs from the repository-owned skills."""
+    names, source, errors = skill_payload_manifest(source_root)
+    _installed_names, installed, installed_errors = skill_payload_manifest(
+        installed_root, required_names=names)
+    errors.extend(installed_errors)
+    missing = sorted(set(source) - set(installed))
+    extra = sorted(set(installed) - set(source))
+    drifted = sorted(
+        path for path in set(source) & set(installed)
+        if source[path] != installed[path]
+    )
+    if missing:
+        errors.append(f"missing payload: {missing}")
+    if extra:
+        errors.append(f"stale payload: {extra}")
+    if drifted:
+        errors.append(f"drifted payload: {drifted}")
+    return "; ".join(errors)
+
+
+def _below_nested_git_boundary(root, relative, runner):
+    parts = relative.replace(os.sep, "/").split("/")[:-1]
+    current = root
+    for part in parts:
+        current = os.path.join(current, part)
+        if _is_git_worktree_root(current, runner, root):
+            return True
+    return False
+
+
+def _walk_owned_files(root, start, runner):
+    """Walk one owned directory, pruning only registered nested Git worktrees."""
+    retained, pruned = [], 0
+    for dirpath, dirs, files in os.walk(start, followlinks=False):
+        kept = []
+        for directory in sorted(dirs):
+            path = os.path.join(dirpath, directory)
+            relative = os.path.relpath(path, root)
+            if directory == ".git":
+                continue
+            if os.path.islink(path):
+                retained.append(relative)
+            elif _is_git_worktree_root(path, runner, root):
+                pruned += 1
+            else:
+                kept.append(directory)
+        dirs[:] = kept
+        for filename in sorted(files):
+            path = os.path.join(dirpath, filename)
+            if os.path.isfile(path) or os.path.islink(path):
+                retained.append(os.path.relpath(path, root))
+    return retained, pruned
+
+
+def _expand_git_inventory_group(root, relatives, runner):
+    """Expand Git-collapsed directories unless a registered worktree owns them."""
+    retained, pruned = [], 0
+    for relative in dict.fromkeys(relatives):
+        path = os.path.join(root, relative)
+        if _below_nested_git_boundary(root, relative, runner):
+            pruned += 1
+            continue
+        if os.path.isdir(path) and not os.path.islink(path):
+            if _is_git_worktree_root(path, runner, root):
+                pruned += 1
+                continue
+            walked, nested_pruned = _walk_owned_files(root, path, runner)
+            retained.extend(walked)
+            pruned += nested_pruned
+        elif os.path.isfile(path) or os.path.islink(path):
+            retained.append(relative)
+    return list(dict.fromkeys(retained)), pruned
+
+
+def _outer_indexed_live_paths(root, relatives, runner):
+    """Retain indexed files; validate or walk indexed directory entries."""
+    retained, pruned = [], 0
+    for relative in dict.fromkeys(relatives):
+        path = os.path.join(root, relative)
+        if os.path.isfile(path) or os.path.islink(path):
+            retained.append(relative)
+        elif os.path.isdir(path):
+            if _is_git_worktree_root(path, runner, root):
+                pruned += 1
+            else:
+                walked, nested_pruned = _walk_owned_files(root, path, runner)
+                retained.extend(walked)
+                pruned += nested_pruned
+    return list(dict.fromkeys(retained)), pruned
+
+
+def _git_inventory_failure(error, surface="git"):
+    """A named, fail-closed inventory. C8 prints this rather than raising through Run."""
+    return {
+        "surface": surface,
+        "tracked": 0,
+        "untracked": 0,
+        "ignored_context": 0,
+        "pruned": 0,
+        "paths": (),
+        "error": error,
+    }
+
+
+def git_owned_live_paths(root, runner=None):
+    """Inventory committed and authored-untracked files, pruning nested Git ownership.
+
+    Every way this inventory can fail leaves by the `error` key. Two ways used to leave by
+    raising instead, which cost the caller its whole verdict: the gate exited on a
+    traceback with no summary line, so a broken instrument and a real violation looked
+    nothing alike and neither was named.
+    """
+    runner = subprocess.run if runner is None else runner
+    if os.path.lexists(os.path.join(root, ".git")):
+        problem = _git_toplevel_error(root, runner)
+        if problem:
+            return _git_inventory_failure(problem)
+    groups = []
+    failed = False
+    failure = ""
+    queries = (
+        ("--cached",),
+        ("--others", "--exclude-standard"),
+        ("--others", "--ignored", "--exclude-standard", "--",
+         ":(icase,glob)**/agents.md", ":(icase,glob)**/claude.md",
+         ":(icase,glob)**/gemini.md"),
+    )
+    for args in queries:
+        try:
+            done = run_git(
+                runner,
+                ["git", "-C", root, "ls-files", "-z", *args],
+                capture_output=True, text=False)
+        except OSError as exc:
+            # A `git` that cannot be launched cannot enumerate anything, and the
+            # filesystem fallback below needs the same binary to find ownership
+            # boundaries. Say so and stop, rather than raising or walking blind.
+            return _git_inventory_failure(f"cannot run git ls-files: {exc}")
+        if done.returncode != 0:
+            # The exit status decides, not the presence of stderr text. Deriving the
+            # decision from a stripped stderr read a silent nonzero exit as success,
+            # left `groups` empty, and died indexing it.
+            groups = []
+            failed = True
+            failure = git_command_failure(done.returncode, done.stderr)
+            break
+        groups.append([
+            item.decode("utf-8", "surrogateescape")
+            for item in bytes(done.stdout).split(b"\0") if item
+        ])
+    surface = "git"
+    if failed and os.path.lexists(os.path.join(root, ".git")):
+        return _git_inventory_failure(failure)
+    try:
+        if failed:
+            surface = "filesystem"
+            walked, pruned = _walk_owned_files(root, root, runner)
+            groups = [walked, [], []]
+        else:
+            pruned = 0
+        expanded = []
+        for index, group in enumerate(groups):
+            if surface == "git" and index == 0:
+                paths, group_pruned = _outer_indexed_live_paths(root, group, runner)
+                expanded.append(paths)
+                pruned += group_pruned
+                continue
+            paths, group_pruned = _expand_git_inventory_group(root, group, runner)
+            expanded.append(paths)
+            pruned += group_pruned
+    except (OSError, RepositoryOwnershipError) as exc:
+        # Ownership resolution shells out to `git` per candidate boundary, so the binary
+        # can still go away after enumeration succeeded.
+        return _git_inventory_failure(f"cannot resolve Git ownership: {exc}", surface)
+    groups = expanded
+    retained = list(dict.fromkeys(groups[0] + groups[1] + groups[2]))
+    return {
+        "surface": surface,
+        "tracked": len(groups[0]),
+        "untracked": len(groups[1]),
+        "ignored_context": len(groups[2]),
+        "pruned": pruned,
+        "paths": tuple(retained),
+        "error": "",
+    }
+
+
 class Run:
     def __init__(self, root, ci):
         self.root, self.ci, self.failures, self.checks = root, ci, [], 0
@@ -445,8 +895,10 @@ class Run:
         `SELFTEST-SUMMARY suite=<name> checks=<floor> failures=0` satisfied the floor and
         took the whole gate green, including for the tool that proves PR delivery state.
         The floor only ever defended against a suite that reported honestly, so the source
-        of each suite is pinned: a suite cannot be replaced by something that merely
-        claims to have run.
+        of each suite is pinned. Under the reviewed workflow and authentic runners, an
+        isolated suite replacement cannot merely claim to have run. A coordinated edit to
+        the workflow, runners, and authored digest registry remains a reviewer or external
+        required-workflow trust boundary rather than an in-repo self-attestation.
         """
         if suites is None:
             suites = SELFTEST_SUITES
@@ -481,12 +933,26 @@ class Run:
                                 f"the same commit and review that diff")
                     continue
             try:
+                timeout = SELFTEST_TIMEOUTS.get(name, DEFAULT_SELFTEST_TIMEOUT)
+                started = time.monotonic()
                 p = subprocess.run(
                     [sys.executable, os.path.join(self.root, cmd[0])] + cmd[1:],
-                    capture_output=True, cwd=self.root, timeout=15,
+                    capture_output=True, cwd=self.root, timeout=timeout,
                 )
+                elapsed = time.monotonic() - started
             except subprocess.TimeoutExpired:
-                self.result("C1", False, f"selftest {name}: exceeded 15s")
+                self.result("C1", False,
+                            f"selftest {name}: exceeded {timeout}s")
+                continue
+            # A registered timeout is a claim about the suite, and nothing checked it
+            # against the suite. Requiring the margin on the host that actually runs it
+            # is the non-circular form: a suite that grows into its budget reddens here
+            # instead of timing out on the first slower runner.
+            if elapsed > timeout * SELFTEST_TIMEOUT_MARGIN:
+                self.result("C1", False,
+                            f"selftest {name}: took {elapsed:.1f}s of its registered "
+                            f"{timeout}s, past the {SELFTEST_TIMEOUT_MARGIN:.0%} margin; "
+                            f"make the suite faster or raise the timeout deliberately")
                 continue
             receipts = re.findall(
                 rb"^SELFTEST-SUMMARY suite=([a-z0-9_-]+) checks=(\d+) failures=(\d+)$",
@@ -494,10 +960,16 @@ class Run:
                 re.M,
             )
             final_line = p.stdout.rstrip().splitlines()[-1] if p.stdout.rstrip() else b""
+            exact_checks = expected_selftest_checks(name)
+            count_ok = (
+                int(receipts[0][1]) == exact_checks
+                if len(receipts) == 1 and exact_checks is not None
+                else len(receipts) == 1 and int(receipts[0][1]) >= floor
+            )
             receipt_ok = (
                 len(receipts) == 1
                 and receipts[0][0].decode("ascii") == name
-                and int(receipts[0][1]) >= floor
+                and count_ok
                 and int(receipts[0][2]) == 0
                 and final_line == (
                     b"SELFTEST-SUMMARY suite=" + receipts[0][0]
@@ -509,11 +981,17 @@ class Run:
             if len(receipts) == 1:
                 detail += (f" suite={receipts[0][0].decode('ascii')} "
                            f"checks={int(receipts[0][1])} floor={floor} "
+                           f"exact={exact_checks if exact_checks is not None else 'n/a'} "
                            f"failures={int(receipts[0][2])} "
                            f"final={final_line.startswith(b'SELFTEST-SUMMARY ')}")
                 if int(receipts[0][1]) < floor:
                     detail += " below-floor"
-            self.result("C1", p.returncode == 0 and receipt_ok, detail)
+                elif exact_checks is not None and int(receipts[0][1]) != exact_checks:
+                    detail += " wrong-exact-count"
+            passed = p.returncode == 0 and receipt_ok
+            if not passed:
+                detail += child_faults(p.stdout)
+            self.result("C1", passed, detail)
 
     def c1_selftest_inventory(self, suites=None, exemptions=None):
         """Every script exposing --selftest is aggregated or explicitly classified."""
@@ -521,7 +999,7 @@ class Run:
         exemptions = SELFTEST_EXEMPTIONS if exemptions is None else exemptions
         aggregated = {cmd[0] for _name, cmd, _floor in suites}
         actual = set()
-        for rel_root in ("hooks", "tools"):
+        for rel_root in ("hooks", "tools", "instruments"):
             base = os.path.join(self.root, rel_root)
             if not os.path.isdir(base):
                 continue
@@ -578,31 +1056,148 @@ class Run:
     # ---- C3 ----------------------------------------------------------------
     def c3_reference_resolution(self):
         skills_dir = os.path.join(self.root, "skills")
+        inventory = git_owned_live_paths(self.root)
+        if inventory["error"]:
+            self.result("C3", False,
+                        f"cannot enumerate repository-owned references: {inventory['error']}")
+            return
+        root_real = os.path.realpath(self.root)
+        owned = set()
+        for relative in inventory["paths"]:
+            full = os.path.join(self.root, relative)
+            if os.path.islink(full) or not os.path.isfile(full):
+                continue
+            resolved_path = os.path.realpath(full)
+            try:
+                inside = os.path.commonpath([root_real, resolved_path]) == root_real
+            except ValueError:
+                inside = False
+            if inside:
+                owned.add(os.path.normpath(relative).replace(os.sep, "/"))
+
+        reference_files = sorted(
+            relative for relative in owned
+            if re.fullmatch(r"skills/[^/]+/references/.+", relative)
+        )
         resolved = 0
         for skill in sorted(os.listdir(skills_dir)):
             body_path = os.path.join(skills_dir, skill, "SKILL.md")
             if not os.path.isfile(body_path):
                 continue
             body = open(body_path, encoding="utf-8").read()
-            refdir = os.path.join(skills_dir, skill, "references")
-            cited = set(re.findall(r"references/([\w<>.\-]+\.(?:md|yaml))", body))
+            prefix = f"skills/{skill}/references/"
+            cited = set(re.findall(
+                r"references/([\w<>./\-]+\.(?:md|yaml))", body))
             literal = {c for c in cited if "<" not in c}
             template_res = [re.compile("^" + re.sub(r"<[^>]*>", r"[\\w.\\-]+", re.escape(c)) + "$")
                             for c in cited if "<" in c]
             # direction 1: cited -> exists
             for c in sorted(literal):
-                p = os.path.join(refdir, c)
                 resolved += 1
-                self.result("C3", os.path.isfile(p), f"{skill}: cites references/{c}")
+                self.result("C3", prefix + c in owned,
+                            f"{skill}: cites references/{c}")
             # direction 2: exists -> cited (literal or template family)
-            if os.path.isdir(refdir):
-                for f in sorted(os.listdir(refdir)):
-                    if not os.path.isfile(os.path.join(refdir, f)):
-                        continue
-                    ok = f in literal or any(t.match(f) for t in template_res)
-                    resolved += 1
-                    self.result("C3", ok, f"{skill}: references/{f} "
-                                          f"{'reachable' if ok else 'NAMED NOWHERE in SKILL.md'}")
+            for relative in reference_files:
+                if not relative.startswith(prefix):
+                    continue
+                name = relative[len(prefix):]
+                ok = name in literal or any(t.match(name) for t in template_res)
+                resolved += 1
+                self.result("C3", ok, f"{skill}: references/{name} "
+                                      f"{'reachable' if ok else 'NAMED NOWHERE in SKILL.md'}")
+        # direction 3: a citation inside a reference document must resolve, or be declared
+        # external. C3 read only SKILL.md, so a reference file could cite a document existing
+        # nowhere and nothing looked -- which is how two skills came to cite a registry that
+        # was never in this repository.
+        # Prune nested checkouts. Every linked worktree carries its own `.git`, and this tree
+        # keeps a dozen of them under an ignored directory -- 2235 of 2433 walked paths at the
+        # time this was written. Left in, a citation to a file deleted from this repository
+        # still resolves against a stale copy, and the check certifies a reference that is
+        # gone. A directory holding `.git` is a different repository, not content of this one.
+        scanned_docs = 0
+        scanned_citations = 0
+        cited_anywhere = set()
+
+        def citation_candidates(document, skill, target):
+            """Resolve locally first; use repository fallback only when unambiguous."""
+            normalized_target = target.replace("\\", "/")
+            exact = []
+            for candidate in (
+                os.path.normpath(os.path.join(os.path.dirname(document), normalized_target)),
+                os.path.normpath(os.path.join(f"skills/{skill}", normalized_target)),
+                os.path.normpath(normalized_target),
+            ):
+                candidate = candidate.replace(os.sep, "/")
+                if candidate in owned and candidate not in exact:
+                    exact.append(candidate)
+            if exact:
+                return exact
+            fallback = []
+            for candidate in owned:
+                if not (candidate == normalized_target
+                        or candidate.endswith("/" + normalized_target)):
+                    continue
+                if ("/" not in normalized_target and candidate.startswith("skills/")
+                        and not candidate.startswith(f"skills/{skill}/")):
+                    continue
+                fallback.append(candidate)
+            return sorted(fallback)
+
+        for document in reference_files:
+            if not document.endswith(".md"):
+                continue
+            parts = document.split("/")
+            skill = parts[1]
+            label = document[len("skills/"):]
+            scanned_docs += 1
+            try:
+                text = open(os.path.join(self.root, document), encoding="utf-8").read()
+            except OSError as exc:
+                self.result("C3", False, f"{label}: unreadable ({exc})")
+                continue
+            targets = sorted({m.group(1) for m in REFERENCE_CITATION.finditer(text)})
+            cited_anywhere.update(targets)
+            for target in targets:
+                if target in EXTERNAL_REFERENCE_CITATIONS:
+                    continue
+                scanned_citations += 1
+                candidates = citation_candidates(document, skill, target)
+                resolved += 1
+                if len(candidates) == 1:
+                    self.result("C3", True,
+                                f"{label}: cites {target} -> {candidates[0]}")
+                elif not candidates:
+                    self.result("C3", False,
+                                f"{label}: cites {target} -- resolves to no owned file")
+                else:
+                    self.result("C3", False,
+                                f"{label}: cites {target} -- ambiguous: {candidates[:4]}")
+
+        # An exemption that no document uses is dead weight that can silence a real defect
+        # later without anyone re-reading it. Every declared external name must be cited by
+        # something, or the declaration is removed rather than kept as a standing allowance.
+        # Only against this repository: the allowlist describes these documents, so a planted
+        # fixture tree cannot answer the question. And these do not count toward `resolved`,
+        # which means authored reference relationships -- counting them defeated the
+        # zero-reference guard below, because six exemptions made an empty scan look populated.
+        if os.path.realpath(self.root) == os.path.realpath(ROOT):
+            for declared in sorted(EXTERNAL_REFERENCE_CITATIONS):
+                reached = declared in cited_anywhere
+                self.result("C3", reached,
+                            f"external citation {declared} is "
+                            f"{'used' if reached else 'DECLARED BUT CITED NOWHERE'}")
+
+        # The scan set is part of the claim. This matcher models a backticked token only, so
+        # a bare filename in prose is a mention rather than a citation and is deliberately out
+        # of scope; measured over this tree, every unbackticked non-resolving token is a
+        # mention carrying no line number. Say so in the verdict rather than letting a clean
+        # run imply that every spelling was examined.
+        self.result(
+            "C3", scanned_docs == 0 or scanned_citations > 0,
+            f"citation resolution over {scanned_docs} reference document(s), "
+            f"{scanned_citations} backticked citation(s); unbackticked prose mentions "
+            f"are out of scope")
+
         if resolved == 0:
             self.result("C3", False, "zero authored reference relationships")
 
@@ -675,37 +1270,79 @@ class Run:
                         + (f" e.g. {os.path.relpath(hits[0], self.root)}" if hits else ""))
 
     # ---- C7 ----------------------------------------------------------------
+    def c7_claude_installed_skill_payload(self, source_root=None, installed_root=None):
+        source_root = source_root or os.path.join(self.root, "skills")
+        installed_root = installed_root or os.path.expanduser("~/.claude/skills")
+        problem = installed_skill_payload_error(source_root, installed_root)
+        self.result(
+            "C7", not problem,
+            "[local] complete Claude-installed skill payload under ~/.claude/skills "
+            "matches reviewed source"
+            + (f": {problem}" if problem else ""),
+        )
+
     def c7_anchors(self):
         for skill in ROUTING_SKILLS:
             p = os.path.join(self.root, "skills", skill)
             self.result("C7", os.path.isdir(p), f"routing-table skill exists: {skill}")
         st = json.load(open(os.path.join(self.root, "settings.json")))
-        # Deleting the hooks block unregistered every Claude guard and produced zero checks
-        # and zero failures -- a silent pass over an empty scan set, which this file's own
-        # exit-code contract calls an error. The Codex side is bound by
-        # REQUIRED_CODEX_HANDLERS; this is its Claude counterpart.
-        for event, matcher, script in REQUIRED_CLAUDE_HANDLERS:
+        # Emit one fixed-cardinality verdict per required handler. Counting the handlers
+        # discovered in settings made a deletion shrink the selector, so the mutation was
+        # caught but could not prove the same suite ran. Exact argv also rejects shell
+        # wrappers such as ``VAR=off ...`` and ``... || true`` that name the script while
+        # disabling or masking it.
+        actual_claude_handlers = []
+        malformed_claude_handlers = 0
+        hook_events = st.get("hooks", {})
+        if not isinstance(hook_events, dict):
+            hook_events = {}
+            malformed_claude_handlers += 1
+        for event, entries in hook_events.items():
+            if not isinstance(entries, list):
+                malformed_claude_handlers += 1
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    malformed_claude_handlers += 1
+                    continue
+                handlers = entry.get("hooks", [])
+                if not isinstance(handlers, list):
+                    malformed_claude_handlers += 1
+                    continue
+                for handler in handlers:
+                    if not isinstance(handler, dict):
+                        malformed_claude_handlers += 1
+                        continue
+                    actual_claude_handlers.append(
+                        (event, entry.get("matcher"), handler))
+        def command_argv(handler):
+            try:
+                return shlex.split(handler.get("command", ""))
+            except (TypeError, ValueError):
+                return []
+        for event, matcher, script, required_args in REQUIRED_CLAUDE_HANDLERS:
+            expected_argv = ["python3", f"~/.claude/{script}", *required_args]
             matches = [
-                h for entry in st.get("hooks", {}).get(event, [])
-                if entry.get("matcher") == matcher
-                for h in entry.get("hooks", [])
-                if script in h.get("command", "")
+                handler for actual_event, actual_matcher, handler
+                in actual_claude_handlers
+                if actual_event == event and actual_matcher == matcher
+                and handler.get("type") == "command"
+                and handler.get("timeout") == 5
+                and handler.get("async", False) is False
+                and command_argv(handler) == expected_argv
+                and os.path.isfile(os.path.join(self.root, script))
             ]
             self.result("C7", len(matches) == 1,
                         f"settings.json {event} matcher={matcher!r} -> {script}: "
-                        f"{len(matches)} match(es)")
-        for event, entries in st.get("hooks", {}).items():
-            for entry in entries:
-                for h in entry.get("hooks", []):
-                    cmd = h.get("command", "")
-                    m = re.search(r"~/[\w./\-]+\.(?:py|sh)", cmd)
-                    if not m:
-                        continue
-                    rel = m.group(0).replace("~/.claude/", "")
-                    p = os.path.join(self.root, rel)
-                    self.result("C7", os.path.isfile(p), f"settings {event} -> {rel}")
-                    self.result("C7", "timeout" in h,
-                                f"settings {event} {rel}: timeout set")
+                        f"argv={expected_argv!r} timeout=5: {len(matches)} match(es)")
+        self.result(
+            "C7", (len(actual_claude_handlers) == len(REQUIRED_CLAUDE_HANDLERS)
+                   and malformed_claude_handlers == 0),
+            "settings.json Claude handler inventory is closed: "
+            f"{len(actual_claude_handlers)} handler(s), "
+            f"expected {len(REQUIRED_CLAUDE_HANDLERS)}; "
+            f"malformed={malformed_claude_handlers}",
+        )
         codex_hooks_path = os.path.join(self.root, "hooks", "hooks.json")
         try:
             codex_hooks = json.load(open(codex_hooks_path))
@@ -713,38 +1350,79 @@ class Run:
             self.result("C7", False, f"Codex hooks config parses: {exc}")
             codex_hooks = {}
         inventory = []
-        for event, entries in codex_hooks.get("hooks", {}).items():
+        malformed_codex_handlers = 0
+        codex_events = codex_hooks.get("hooks", {}) if isinstance(codex_hooks, dict) else {}
+        if not isinstance(codex_events, dict):
+            malformed_codex_handlers += 1
+            codex_events = {}
+        for event, entries in codex_events.items():
+            if not isinstance(entries, list):
+                malformed_codex_handlers += 1
+                continue
             for entry in entries:
-                for hook in entry.get("hooks", []):
-                    command = hook.get("command", "")
-                    match = re.search(r"\$\{PLUGIN_ROOT\}/([\w./\-]+\.(?:py|sh))", command)
-                    if not match:
-                        self.result("C7", False,
-                                    f"Codex {event}: command has no PLUGIN_ROOT script anchor")
-                        continue
-                    rel = match.group(1)
+                if not isinstance(entry, dict):
+                    malformed_codex_handlers += 1
+                    continue
+                hooks = entry.get("hooks", [])
+                if not isinstance(hooks, list):
+                    malformed_codex_handlers += 1
+                    continue
+                for hook in hooks:
                     try:
-                        argv = shlex.split(command)
-                    except ValueError:
-                        argv = []
-                    inventory.append({
-                        "event": event,
-                        "matcher": entry.get("matcher"),
-                        "rel": rel,
-                        "argv": argv,
-                    })
-                    self.result("C7", os.path.isfile(os.path.join(self.root, rel)),
-                                f"Codex {event} -> {rel}")
-                    self.result("C7", "timeout" in hook,
-                                f"Codex {event} {rel}: timeout set")
+                        command = hook.get("command", "")
+                        match = (re.search(
+                            r"\$\{PLUGIN_ROOT\}/([\w./\-]+\.(?:py|sh))", command)
+                            if isinstance(command, str) else None)
+                        rel = match.group(1) if match else None
+                        try:
+                            argv = (shlex.split(command)
+                                    if isinstance(command, str) else [])
+                        except (TypeError, ValueError):
+                            argv = []
+                        if rel is None or not argv:
+                            malformed_codex_handlers += 1
+                        inventory.append({
+                            "event": event,
+                            "matcher": entry.get("matcher"),
+                            "rel": rel,
+                            "argv": argv,
+                            "type": hook.get("type"),
+                            "timeout": hook.get("timeout"),
+                            "async": hook.get("async", False),
+                        })
+                    except (AttributeError, TypeError, ValueError):
+                        # Keep C7's fixed-cardinality receipt even when a malformed
+                        # handler defeats an individual traversal predicate.
+                        malformed_codex_handlers += 1
+                        inventory.append({
+                            "event": event, "matcher": entry.get("matcher"),
+                            "rel": None, "argv": [], "type": None,
+                            "timeout": None, "async": None,
+                        })
         for event, matcher, rel, required_args in REQUIRED_CODEX_HANDLERS:
-            matches = [item for item in inventory
-                       if item["event"] == event and item["matcher"] == matcher
-                       and item["rel"] == rel
-                       and all(arg in item["argv"] for arg in required_args)]
-            self.result("C7", len(matches) == 1,
+            candidates = [item for item in inventory
+                          if item["event"] == event and item["matcher"] == matcher
+                          and item["rel"] == rel]
+            expected_argv = ["python3", f"${{PLUGIN_ROOT}}/{rel}", *required_args]
+            exact = [item for item in candidates if item["argv"] == expected_argv]
+            execution = [item for item in exact
+                         if item["type"] == "command" and item["timeout"] == 5
+                         and item["async"] is False]
+            self.result("C7", len(exact) == 1,
                         f"required Codex handler {event} matcher={matcher!r} -> {rel} "
-                        f"args={list(required_args)!r}: {len(matches)} match(es)")
+                        f"argv={expected_argv!r}: {len(exact)} match(es)")
+            self.result("C7", len(execution) == 1,
+                        f"Codex {event} {rel}: type=command timeout=5 async=false: "
+                        f"{len(execution)} match(es)")
+            self.result("C7", os.path.isfile(os.path.join(self.root, rel)),
+                        f"Codex {event} -> {rel}")
+        self.result(
+            "C7", (len(inventory) == len(REQUIRED_CODEX_HANDLERS)
+                   and malformed_codex_handlers == 0),
+            "Codex handler inventory is closed: "
+            f"{len(inventory)} handler(s), expected {len(REQUIRED_CODEX_HANDLERS)}; "
+            f"malformed={malformed_codex_handlers}",
+        )
         if not self.ci:
             fp = os.path.expanduser("~/.claude/harness-audit-20260801/FINDINGS.md")
             self.result("C7", os.path.isfile(fp),
@@ -757,9 +1435,15 @@ class Run:
                                 "--verify-harness"], capture_output=True)
             self.result("C7", v.returncode == 0,
                         f"[local] askq --verify-harness: exit {v.returncode}")
+            # The repository owns every payload file below its skill directories, while
+            # unrelated top-level installed skills remain outside this comparison. Missing
+            # roots, manifests, references, evals, scripts, stale files, symlinks, byte
+            # drift, and executable-bit drift all fail. CI proves the helper's red arms;
+            # only local mode claims to inspect the live installation.
+            self.c7_claude_installed_skill_payload()
 
     # ---- C8 ----------------------------------------------------------------
-    def c8_reserved_basenames(self):
+    def c8_reserved_basenames(self, runner=None):
         """A reserved context basename anywhere but the repo root is auto-loaded instructions.
 
         The exclusion is the `.git` directory itself, matched as a path component. A
@@ -767,20 +1451,26 @@ class Run:
         identical bytes under docs/ failed — so the one directory a reviewer is least
         likely to read was the one place the guard could not see.
         """
-        hits, scanned = [], 0
-        for dirpath, dirs, files in os.walk(self.root):
-            dirs[:] = [d for d in dirs if d != ".git"]
-            for f in files:
-                scanned += 1
-                if f.lower() in RESERVED_BASENAMES:
-                    p = os.path.join(dirpath, f)
-                    if os.path.dirname(os.path.abspath(p)) != os.path.abspath(self.root):
-                        hits.append(os.path.relpath(p, self.root))
+        inventory = git_owned_live_paths(self.root, runner=runner)
+        if inventory["error"]:
+            self.result("C8", False,
+                        f"cannot enumerate Git-owned scan set: {inventory['error']}")
+            return
+        hits = []
+        for name in inventory["paths"]:
+            if os.path.basename(name).lower() in RESERVED_BASENAMES:
+                if os.path.dirname(name):
+                    hits.append(name)
+        scanned = len(inventory["paths"])
         if not scanned:
             self.result("C8", False, "zero files in scan set")
             return
         self.result("C8", not hits,
-                    f"reserved basenames outside root over {scanned} files: {hits or 'none'}")
+                    f"reserved basenames outside root over {scanned} "
+                    f"{inventory['surface']} files "
+                    f"(tracked={inventory['tracked']} untracked={inventory['untracked']} "
+                    f"ignored-context={inventory['ignored_context']} "
+                    f"nested-boundary-pruned={inventory['pruned']}): {hits or 'none'}")
 
     # ---- C9 ----------------------------------------------------------------
     def c9_codex_package(self):
@@ -798,6 +1488,9 @@ class Run:
         self.result("C9", bool(re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?",
                                            str(manifest.get("version", "")))),
                     f"manifest version is semver: {manifest.get('version')!r}")
+        self.result("C9", manifest.get("version") == CURRENT_PLUGIN_VERSION,
+                    f"manifest version is the reviewed release: "
+                    f"{manifest.get('version')!r} == {CURRENT_PLUGIN_VERSION!r}")
         self.result("C9", manifest.get("skills") == "./skills/",
                     "manifest skills path is ./skills/")
         self.result("C9", isinstance(manifest.get("description"), str)
@@ -1104,6 +1797,8 @@ class Run:
 
 # ---- selftest: every check proves it can go red -------------------------------
 def selftest():
+    from unittest.mock import patch
+
     bad = checks = 0
 
     def expect_red(label, fn):
@@ -1119,6 +1814,31 @@ def selftest():
         print(f"  {'PASS' if ok else 'FAIL'} {label}")
         bad += (not ok)
 
+    # A suite reports `failures=1` and this layer kept only that. The child's own FAIL line
+    # is the diagnosis and was being dropped, so improving a suite's failure text bought
+    # nothing where it is read.
+    expect_red(
+        "a failing child's own FAIL line reaches the C1 detail",
+        lambda: (
+            "operator-budget" in child_faults(
+                b"  PASS unrelated\n"
+                b"  FAIL operator-budget claude decided ask; budget exhausted\n"
+                b"SELFTEST-SUMMARY suite=x checks=1 failures=1\n")
+            and child_faults(
+                b"  PASS all good\nSELFTEST-SUMMARY suite=x checks=1 failures=0\n") == ""
+            and "and 1 more" in child_faults(
+                b"  FAIL one\n  FAIL two\n  FAIL three\n", limit=2)
+        ),
+    )
+    # The cut lands on a whole word or the one word naming the cause is what gets dropped.
+    expect_red(
+        "a surfaced child line is cut at a word boundary, never mid-word",
+        lambda: (
+            lambda body: body.endswith("...") and body[:-3].rstrip().endswith("alpha")
+        )(child_faults(b"  FAIL " + b"alpha " * 80 + b"budget\n")
+          .split("child reported: ", 1)[1]),
+    )
+
     with tempfile.TemporaryDirectory() as td:
         # minimal planted-defect tree
         sk = os.path.join(td, "skills")
@@ -1133,6 +1853,48 @@ def selftest():
         # C3 red: cited file absent in alpha; orphan file in beta
         open(os.path.join(sk, "beta/references/present.md"), "w").write("ok")
         open(os.path.join(sk, "beta/references/orphan.md"), "w").write("named nowhere")
+        open(os.path.join(sk, "beta/references/orphan.txt"), "w").write("named nowhere")
+        # C3 direction 3: a reference document citing a document that exists nowhere, beside
+        # one citing a declared-external name. Both in the same file, so a check that simply
+        # refuses every citation would fail the second and be visible as over-refusal.
+        # `beta/references/present.md` names a real file by a partial path, which only
+        # resolves through the suffix rule. Without it a citation that omits a leading
+        # component is reported as missing, which is how this check first false-positived on
+        # a document that plainly exists.
+        open(os.path.join(sk, "beta/references/present.md"), "a").write(
+            "\n\nSee `NO-SUCH-REGISTRY.md`, `probe.py`, "
+            "`beta/references/present.md`, `NO-SUCH-SUFFIXED.md:12`, and "
+            "`ONLY-IN-NESTED.md` for the rest.\n")
+        os.makedirs(os.path.join(sk, "alpha", "references", "nested"))
+        os.makedirs(os.path.join(sk, "alpha", "references", "other"))
+        open(os.path.join(sk, "alpha", "SKILL.md"), "a").write(
+            "\nRead references/nested/deep.md, references/nested/local.md, "
+            "and references/other/local.md\n")
+        open(os.path.join(sk, "alpha", "references", "nested", "deep.md"), "w").write(
+            "See `NESTED-MISSING.md`, `ONLY-BETA.md`, `local.md`, and "
+            "`references/shared.md`.\n")
+        open(os.path.join(sk, "alpha", "references", "nested", "local.md"), "w").write(
+            "document-local\n")
+        open(os.path.join(sk, "alpha", "references", "other", "local.md"), "w").write(
+            "same-skill suffix fallback must remain ambiguous\n")
+        open(os.path.join(sk, "beta", "references", "local.md"), "w").write(
+            "sibling fallback must not win\n")
+        open(os.path.join(sk, "alpha", "references", "shared.md"), "w").write(
+            "skill-local\n")
+        os.makedirs(os.path.join(td, "references"))
+        open(os.path.join(td, "references", "shared.md"), "w").write("repo-root\n")
+        open(os.path.join(sk, "beta", "ONLY-BETA.md"), "w").write("wrong sibling\n")
+        os.symlink(os.devnull,
+                   os.path.join(sk, "beta", "references", "escaped.md"))
+        open(os.path.join(sk, "beta", "references", "present.md"), "a").write(
+            "See `escaped.md`.\n")
+        # A nested checkout holding a file by the same name must not satisfy a citation. It is
+        # a different repository's copy, and letting it resolve certifies a reference this
+        # tree no longer has.
+        nested_repo = os.path.join(td, "nested-checkout")
+        os.makedirs(nested_repo)
+        subprocess.run(["git", "init", "--quiet", nested_repo], check=True)
+        open(os.path.join(nested_repo, "ONLY-IN-NESTED.md"), "w").write("copy")
         # C6 red: stale pattern planted
         os.makedirs(os.path.join(td, "hooks"))
         open(os.path.join(td, "hooks/stale.md"), "w").write("this guard is NOT INSTALLED")
@@ -1232,6 +1994,96 @@ def selftest():
                                    for _c, d in c1_bound.failures))
         expect_red("C1 floor control: the same suite exactly at its floor stays green",
                    lambda: not c1_at_floor.failures)
+
+        observed_timeouts = []
+        original_subprocess_run = subprocess.run
+        def record_c1_timeout(*args, **kwargs):
+            observed_timeouts.append(kwargs.get("timeout"))
+            return subprocess.CompletedProcess(
+                args[0], 0,
+                b"SELFTEST-SUMMARY suite=bash_command_guard checks=1395 failures=0\n",
+                b"")
+        subprocess.run = record_c1_timeout
+        try:
+            c1_timeout = Run(td, ci=True)
+            c1_timeout.c1_selftests(
+                [("bash_command_guard", [stub_suite], 1)],
+                sources=planted_sources("bash_command_guard", stub_suite))
+        finally:
+            subprocess.run = original_subprocess_run
+        # 90 is a literal here on purpose. Reading it back out of SELFTEST_TIMEOUTS
+        # re-derived the expected value from the table under test: setting the Bash
+        # suite's timeout to 15 -- below its measured runtime -- left this green.
+        expect_red(
+            "C1 gives the process-level Bash timing suite its registered aggregate timeout",
+            lambda: observed_timeouts == [90] and not c1_timeout.failures,
+        )
+        expect_red(
+            "the registered Bash timeout is still the one this check asserts",
+            lambda: SELFTEST_TIMEOUTS["bash_command_guard"] == 90,
+        )
+        expect_red(
+            "the registered CI-gate timeout retains measured headroom",
+            lambda: SELFTEST_TIMEOUTS["ci-gate"] == 60,
+        )
+
+        announced_timeouts = []
+        def record_announced_timeout(*args, **kwargs):
+            announced_timeouts.append(kwargs.get("timeout"))
+            return subprocess.CompletedProcess(
+                args[0], 0,
+                b"SELFTEST-SUMMARY suite=announced_work_guard checks=916 failures=0\n",
+                b"")
+        subprocess.run = record_announced_timeout
+        try:
+            c1_announced_timeout = Run(td, ci=True)
+            c1_announced_timeout.c1_selftests(
+                [("announced_work_guard", [stub_suite], 916)],
+                sources=planted_sources("announced_work_guard", stub_suite))
+        finally:
+            subprocess.run = original_subprocess_run
+        expect_red(
+            "C1 gives the process-level announced-work suite measured timeout headroom",
+            lambda: SELFTEST_TIMEOUTS["announced_work_guard"] == 60
+            and announced_timeouts == [60] and not c1_announced_timeout.failures,
+        )
+
+        slow_timeouts = []
+        def slow_run(*args, **kwargs):
+            slow_timeouts.append(kwargs.get("timeout"))
+            time.sleep(0.05)
+            return subprocess.CompletedProcess(
+                args[0], 0,
+                b"SELFTEST-SUMMARY suite=bash_command_guard checks=1395 failures=0\n",
+                b"")
+        subprocess.run = slow_run
+        try:
+            c1_margin = Run(td, ci=True)
+            c1_margin.c1_selftests(
+                [("bash_command_guard", [stub_suite], 1)],
+                sources=planted_sources("bash_command_guard", stub_suite),
+                )
+        finally:
+            subprocess.run = original_subprocess_run
+        margin_clean = not c1_margin.failures
+        original_margin = globals()["SELFTEST_TIMEOUT_MARGIN"]
+        original_registered = SELFTEST_TIMEOUTS["bash_command_guard"]
+        subprocess.run = slow_run
+        SELFTEST_TIMEOUTS["bash_command_guard"] = 0.05
+        try:
+            c1_tight = Run(td, ci=True)
+            c1_tight.c1_selftests(
+                [("bash_command_guard", [stub_suite], 1)],
+                sources=planted_sources("bash_command_guard", stub_suite))
+        finally:
+            subprocess.run = original_subprocess_run
+            SELFTEST_TIMEOUTS["bash_command_guard"] = original_registered
+            globals()["SELFTEST_TIMEOUT_MARGIN"] = original_margin
+        expect_red(
+            "C1 reddens when a suite grows into its registered timeout",
+            lambda: margin_clean and bool(c1_tight.failures)
+            and any("margin" in detail for _check, detail in c1_tight.failures),
+        )
 
         os.makedirs(os.path.join(td, "tools"))
         open(os.path.join(td, "tools", "unregistered.py"), "w").write(
@@ -1491,6 +2343,221 @@ def selftest():
                    lambda: any(c == "C7" and "0 match(es)" in d
                                for c, d in c7_nohooks.failures))
 
+        registration_root = os.path.join(td, "scratch-registration")
+        os.makedirs(os.path.join(registration_root, "hooks"), exist_ok=True)
+        for skill in ROUTING_SKILLS:
+            os.makedirs(os.path.join(registration_root, "skills", skill), exist_ok=True)
+        for rel in ("hooks/announced_work_guard.py", "hooks/askq_timeout_guard.py",
+                    "hooks/bash_command_guard.py", "hooks/spawn_preflight_guard.py",
+                    "hooks/codex_session_start.py"):
+            open(os.path.join(registration_root, rel), "w").write("# fixture\n")
+
+        exact_registration = json.load(open(os.path.join(ROOT, "settings.json")))
+        open(os.path.join(registration_root, "settings.json"), "w").write(
+            json.dumps(exact_registration))
+        open(os.path.join(registration_root, "hooks/hooks.json"), "w").write(
+            open(os.path.join(ROOT, "hooks/hooks.json")).read())
+        exact_registration_run = Run(registration_root, ci=True)
+        exact_registration_run.c7_anchors()
+        exact_registration_checks = exact_registration_run.checks
+        expect_red(
+            "C7 accepts the exact checked-in Claude and Codex registrations",
+            lambda: not exact_registration_run.failures,
+        )
+
+        missing_stop_registration = json.load(open(os.path.join(ROOT, "settings.json")))
+        del missing_stop_registration["hooks"]["Stop"]
+        open(os.path.join(registration_root, "settings.json"), "w").write(
+            json.dumps(missing_stop_registration))
+        open(os.path.join(registration_root, "hooks/hooks.json"), "w").write(
+            open(os.path.join(ROOT, "hooks/hooks.json")).read())
+        missing_stop = Run(registration_root, ci=True)
+        missing_stop.c7_anchors()
+        expect_red(
+            "C7 rejects a missing Claude Stop registration for announced work",
+            lambda: any(c == "C7" and "settings.json Stop" in d
+                        and "announced_work_guard.py" in d and "0 match(es)" in d
+                        for c, d in missing_stop.failures),
+        )
+
+        wrong_stop_registration = json.load(open(os.path.join(ROOT, "settings.json")))
+        wrong_stop_registration["hooks"]["Stop"][0]["hooks"][0]["command"] = "true"
+        open(os.path.join(registration_root, "settings.json"), "w").write(
+            json.dumps(wrong_stop_registration))
+        wrong_stop = Run(registration_root, ci=True)
+        wrong_stop.c7_anchors()
+        expect_red(
+            "C7 rejects a Claude Stop registration that runs another command",
+            lambda: any(c == "C7" and "settings.json Stop" in d
+                        and "announced_work_guard.py" in d and "0 match(es)" in d
+                        for c, d in wrong_stop.failures),
+        )
+
+        duplicate_stop_registration = json.load(open(os.path.join(ROOT, "settings.json")))
+        duplicate_stop_registration["hooks"]["Stop"].append(
+            json.loads(json.dumps(duplicate_stop_registration["hooks"]["Stop"][0])))
+        open(os.path.join(registration_root, "settings.json"), "w").write(
+            json.dumps(duplicate_stop_registration))
+        duplicate_stop = Run(registration_root, ci=True)
+        duplicate_stop.c7_anchors()
+        expect_red(
+            "C7 rejects duplicate Claude Stop registrations for announced work",
+            lambda: any(c == "C7" and "settings.json Stop" in d
+                        and "announced_work_guard.py" in d and "2 match(es)" in d
+                for c, d in duplicate_stop.failures),
+        )
+
+        disabled_stop_registration = json.load(open(os.path.join(ROOT, "settings.json")))
+        disabled_stop_registration["hooks"]["Stop"][0]["hooks"][0]["command"] = (
+            "ANNOUNCED_WORK_GUARD=off python3 "
+            "~/.claude/hooks/announced_work_guard.py")
+        open(os.path.join(registration_root, "settings.json"), "w").write(
+            json.dumps(disabled_stop_registration))
+        disabled_stop = Run(registration_root, ci=True)
+        disabled_stop.c7_anchors()
+        expect_red(
+            "C7 rejects a Claude Stop registration disabled by an environment prefix",
+            lambda: any(c == "C7" and "settings.json Stop" in d
+                        and "announced_work_guard.py" in d and "0 match(es)" in d
+                        for c, d in disabled_stop.failures),
+        )
+
+        masked_stop_registration = json.load(open(os.path.join(ROOT, "settings.json")))
+        masked_stop_registration["hooks"]["Stop"][0]["hooks"][0]["command"] += " || true"
+        open(os.path.join(registration_root, "settings.json"), "w").write(
+            json.dumps(masked_stop_registration))
+        masked_stop = Run(registration_root, ci=True)
+        masked_stop.c7_anchors()
+        expect_red(
+            "C7 rejects a Claude Stop registration whose failure is shell-masked",
+            lambda: any(c == "C7" and "settings.json Stop" in d
+                        and "announced_work_guard.py" in d and "0 match(es)" in d
+                        for c, d in masked_stop.failures),
+        )
+        async_stop_registration = json.load(open(os.path.join(ROOT, "settings.json")))
+        async_stop_registration["hooks"]["Stop"][0]["hooks"][0]["async"] = True
+        open(os.path.join(registration_root, "settings.json"), "w").write(
+            json.dumps(async_stop_registration))
+        async_stop = Run(registration_root, ci=True)
+        async_stop.c7_anchors()
+        expect_red(
+            "C7 rejects an asynchronous Claude Stop registration that cannot block",
+            lambda: any(c == "C7" and "settings.json Stop" in d
+                        and "announced_work_guard.py" in d and "0 match(es)" in d
+                        for c, d in async_stop.failures),
+        )
+        malformed_stop_registration = json.load(open(os.path.join(ROOT, "settings.json")))
+        malformed_stop_registration["hooks"]["Stop"][0]["hooks"].append("not an object")
+        open(os.path.join(registration_root, "settings.json"), "w").write(
+            json.dumps(malformed_stop_registration))
+        malformed_stop = Run(registration_root, ci=True)
+        malformed_stop.c7_anchors()
+        expect_red(
+            "C7 rejects a malformed Claude handler instead of filtering it out",
+            lambda: any(c == "C7" and "handler inventory is closed" in d
+                        and "malformed=1" in d for c, d in malformed_stop.failures),
+        )
+        expect_red(
+            "C7 registration mutations preserve the exact selector cardinality",
+            lambda: all(run.checks == exact_registration_checks for run in (
+                missing_stop, wrong_stop, duplicate_stop, disabled_stop, masked_stop,
+                async_stop, malformed_stop)),
+        )
+
+        claude_registration = json.load(open(os.path.join(ROOT, "settings.json")))
+        for entry in claude_registration["hooks"]["PreToolUse"]:
+            if entry.get("matcher") == "Agent|Task":
+                entry["hooks"][0]["command"] = entry["hooks"][0]["command"].replace(
+                    " --require-scratch", "")
+        open(os.path.join(registration_root, "settings.json"), "w").write(
+            json.dumps(claude_registration))
+        codex_registration = json.load(open(os.path.join(ROOT, "hooks/hooks.json")))
+        open(os.path.join(registration_root, "hooks/hooks.json"), "w").write(
+            json.dumps(codex_registration))
+        missing_claude_activation = Run(registration_root, ci=True)
+        missing_claude_activation.c7_anchors()
+        expect_red(
+            "C7 rejects a Claude spawn registration that omits required scratch",
+            lambda: any(c == "C7" and "spawn_preflight_guard.py" in d
+                        and "--require-scratch" in d and "0 match(es)" in d
+                        for c, d in missing_claude_activation.failures),
+        )
+
+        claude_registration = json.load(open(os.path.join(ROOT, "settings.json")))
+        open(os.path.join(registration_root, "settings.json"), "w").write(
+            json.dumps(claude_registration))
+        for entries in codex_registration["hooks"].values():
+            for entry in entries:
+                for handler in entry.get("hooks", []):
+                    if "spawn_preflight_guard.py" in handler.get("command", ""):
+                        handler["command"] = handler["command"].replace(
+                            " --require-scratch", "")
+        open(os.path.join(registration_root, "hooks/hooks.json"), "w").write(
+            json.dumps(codex_registration))
+        missing_codex_activation = Run(registration_root, ci=True)
+        missing_codex_activation.c7_anchors()
+        expect_red(
+            "C7 rejects a Codex spawn registration that omits required scratch",
+            lambda: any(c == "C7" and "required Codex handler" in d
+                        and "--require-scratch" in d and "0 match(es)" in d
+                        for c, d in missing_codex_activation.failures),
+        )
+
+        masked_codex_registration = json.load(open(os.path.join(ROOT, "hooks/hooks.json")))
+        for entries in masked_codex_registration["hooks"].values():
+            for entry in entries:
+                for handler in entry.get("hooks", []):
+                    if "spawn_preflight_guard.py" in handler.get("command", ""):
+                        handler["command"] += " || true"
+        open(os.path.join(registration_root, "hooks/hooks.json"), "w").write(
+            json.dumps(masked_codex_registration))
+        masked_codex = Run(registration_root, ci=True)
+        masked_codex.c7_anchors()
+        expect_red(
+            "C7 rejects a Codex handler whose failure is shell-masked",
+            lambda: any(c == "C7" and "required Codex handler" in d
+                        and "spawn_preflight_guard.py" in d and "0 match(es)" in d
+                        for c, d in masked_codex.failures),
+        )
+
+        malformed_codex_registration = json.load(open(os.path.join(ROOT, "hooks/hooks.json")))
+        malformed_codex_registration["hooks"]["PreToolUse"][0]["hooks"].append(
+            "not an object")
+        open(os.path.join(registration_root, "hooks/hooks.json"), "w").write(
+            json.dumps(malformed_codex_registration))
+        malformed_codex = Run(registration_root, ci=True)
+        malformed_codex.c7_anchors()
+        expect_red(
+            "C7 rejects a malformed Codex handler instead of crashing or filtering it out",
+            lambda: any(c == "C7" and "Codex handler inventory is closed" in d
+                        and "malformed=1" in d for c, d in malformed_codex.failures),
+        )
+        expect_red(
+            "Codex C7 registration mutations preserve selector cardinality",
+            lambda: all(run.checks == exact_registration_checks for run in (
+                missing_codex_activation, masked_codex, malformed_codex)),
+        )
+
+        portable_spawn_dir = os.path.join(td, "portable-spawn")
+        portable_cwd = os.path.join(td, "portable-cwd")
+        os.makedirs(portable_spawn_dir)
+        os.makedirs(portable_cwd)
+        portable_spawn = os.path.join(portable_spawn_dir, "spawn_preflight_guard.py")
+        shutil.copy2(os.path.join(ROOT, "hooks", "spawn_preflight_guard.py"), portable_spawn)
+        portable_env = dict(os.environ)
+        portable_env.pop("PYTHONPATH", None)
+        portable_result = subprocess.run(
+            [sys.executable, "-B", portable_spawn, "--selftest"],
+            cwd=portable_cwd, env=portable_env, capture_output=True, text=True,
+            timeout=30,
+        )
+        expect_red(
+            "the spawn selftest runs from a copied hook outside the checkout",
+            lambda: portable_result.returncode == 0
+            and "SELFTEST-SUMMARY suite=spawn_preflight_guard checks=88 failures=0"
+            in portable_result.stdout,
+        )
+
         r = Run(td, ci=True)
         r.c2_shared_identity()
         expect_red("C2 goes red on diverged copies",
@@ -1500,6 +2567,263 @@ def selftest():
                    lambda: any(c == "C3" and "alpha" in d for c, d in r.failures))
         expect_red("C3 goes red on orphan file",
                    lambda: any(c == "C3" and "orphan.md" in d for c, d in r.failures))
+        expect_red("C3 goes red on a reference document citing a file that does not exist",
+                   lambda: any(c == "C3" and "NO-SUCH-REGISTRY.md" in d
+                               for c, d in r.failures))
+        expect_red("C3 stays green on a declared-external citation",
+                   lambda: not any(c == "C3" and "probe.py" in d for c, d in r.failures))
+        # The exemption list only asserts against this repository, so this case drives the
+        # real root with a planted dead entry rather than the fixture tree.
+        _real_ext = EXTERNAL_REFERENCE_CITATIONS
+        globals()["EXTERNAL_REFERENCE_CITATIONS"] = dict(
+            _real_ext, **{"NEVER-CITED-BY-ANY-DOCUMENT.md": "planted dead exemption"})
+        try:
+            dead_ext_run = Run(ROOT, ci=True)
+            dead_ext_run.c3_reference_resolution()
+        finally:
+            globals()["EXTERNAL_REFERENCE_CITATIONS"] = _real_ext
+        # ...and the same list must stay silent against a tree it does not describe. Without
+        # the root scoping every fixture Run reports six exemptions as uncited, which is noise
+        # attributed to whatever fixture happened to be under test.
+        expect_red("C3 reports no exemption failure against a tree it does not describe",
+                   lambda: not any(c == "C3" and "DECLARED BUT CITED NOWHERE" in d
+                                   for c, d in r.failures))
+
+        expect_red("C3 goes red on an exemption no document cites",
+                   lambda: any(c == "C3" and "DECLARED BUT CITED NOWHERE" in d
+                               for c, d in dead_ext_run.failures))
+
+        # The installed-surface inventory has the same exposure: a package directory that is
+        # not itself a repository can contain one, and its files were counted as package
+        # content. Not reachable from this machine, where the installation carries its own
+        # .git and takes the tracked path, so the case builds the tree the walk is for.
+        pkg_root = os.path.join(td, "installed-pkg")
+        os.makedirs(os.path.join(pkg_root, "pkg"))
+        open(os.path.join(pkg_root, "pkg", "real.md"), "w").write("x")
+        vendored = os.path.join(pkg_root, "vendored")
+        os.makedirs(vendored)
+        subprocess.run(["git", "init", "--quiet", vendored], check=True)
+        open(os.path.join(vendored, "foreign.md"), "w").write("x")
+        invalid_marker = os.path.join(pkg_root, "invalid-marker")
+        os.makedirs(invalid_marker)
+        open(os.path.join(invalid_marker, ".git"), "w").write("not a repository\n")
+        open(os.path.join(invalid_marker, "stale.md"), "w").write("NOT INSTALLED\n")
+        # ...and a symlinked file, whose bytes live outside the package entirely.
+        pkg_outside = os.path.join(td, "outside-the-package")
+        os.makedirs(pkg_outside)
+        open(os.path.join(pkg_outside, "loose.md"), "w").write("x")
+        os.symlink(os.path.join(pkg_outside, "loose.md"),
+                   os.path.join(pkg_root, "linked-file.md"))
+        _pkg_surface, _pkg_paths, _ = package_paths(pkg_root)
+        expect_red("the installed inventory excludes a vendored repository",
+                   lambda: _pkg_surface == "installed"
+                   and "pkg/real.md" in _pkg_paths
+                   and not any(p.startswith("vendored/") for p in _pkg_paths))
+        expect_red("the installed inventory keeps files behind an invalid .git marker",
+                   lambda: "invalid-marker/stale.md" in _pkg_paths)
+        invalid_marker_run = Run(pkg_root, ci=True)
+        invalid_marker_run.c6_stale_patterns(scan_floor=1)
+        expect_red("C6 adopts invalid-marker files as outer-owned package content",
+                   lambda: any(c == "C6" and "invalid-marker/stale.md" in d
+                               for c, d in invalid_marker_run.failures))
+        expect_red("the installed inventory excludes a symlinked file",
+                   lambda: "linked-file.md" not in _pkg_paths)
+
+        late_pkg_root = os.path.join(td, "late-ownership-package")
+        late_pkg_candidate = os.path.join(late_pkg_root, "separate")
+        late_pkg_admin = os.path.join(td, "late-ownership-admin")
+        os.makedirs(late_pkg_root)
+        subprocess.run(
+            ["git", "init", "--quiet", "--separate-git-dir", late_pkg_admin,
+             late_pkg_candidate], check=True)
+        subprocess.run(
+            ["git", "--git-dir", late_pkg_admin, "config", "core.worktree",
+             late_pkg_candidate], check=True)
+        late_package_calls = 0
+        def late_package_runner(argv, **kwargs):
+            nonlocal late_package_calls
+            late_package_calls += 1
+            if late_package_calls == 1:
+                return subprocess.run(argv, **kwargs)
+            raise OSError(5, "planted package ownership EIO")
+        _, _, late_package_error = package_paths(
+            late_pkg_root, runner=late_package_runner)
+        expect_red(
+            "the package inventory names a late ownership-probe I/O failure",
+            lambda: "planted package ownership EIO" in (late_package_error or ""),
+        )
+
+        for surface in ("live", "installed"):
+            ownership_root = os.path.join(td, f"metadata-{surface}")
+            donor = os.path.join(td, f"metadata-{surface}-donor")
+            os.makedirs(os.path.join(ownership_root, "skills", "check", "references"))
+            open(os.path.join(ownership_root, "README.md"), "w").write("outer-owned\n")
+            open(os.path.join(ownership_root, "skills", "check", "SKILL.md"), "w").write(
+                "Read references/rule.md\n")
+            open(os.path.join(ownership_root, "skills", "check", "references", "rule.md"),
+                 "w").write("See `README.md`.\n")
+            if surface == "live":
+                subprocess.run(["git", "init", "--quiet", ownership_root], check=True)
+                subprocess.run(["git", "-C", ownership_root, "add", "README.md"], check=True)
+            subprocess.run(["git", "init", "--quiet", donor], check=True)
+            subprocess.run(
+                ["git", "-C", donor, "-c", "user.name=fixture", "-c",
+                 "user.email=fixture@example.invalid", "commit", "--quiet",
+                 "--allow-empty", "-m", "base"], check=True)
+            linked = os.path.join(ownership_root, "registered")
+            subprocess.run(
+                ["git", "-C", donor, "worktree", "add", "--quiet", "--detach", linked],
+                check=True)
+            open(os.path.join(linked, "AGENTS.md"), "w").write("nested-owner\n")
+            linked_admin = _gitdir_from_marker(linked, os.path.join(linked, ".git"))
+            backlink = os.path.join(linked_admin, "gitdir")
+
+            def ownership_inventory():
+                if surface == "installed":
+                    _kind, paths, error = package_paths(ownership_root)
+                    return paths, error
+                inventory = git_owned_live_paths(ownership_root)
+                return inventory["paths"], inventory["error"]
+
+            paths, error = ownership_inventory()
+            expect_red(
+                f"{surface} inventory excludes a registered worktree and retains outer files",
+                lambda: not error and "README.md" in paths
+                and not any(p.startswith("registered/") for p in paths))
+            control_c3, control_c8 = Run(ownership_root, ci=True), Run(ownership_root, ci=True)
+            control_c3.c3_reference_resolution()
+            control_c8.c8_reserved_basenames()
+            expect_red(f"{surface} ownership fixture has nonempty passing C3 and C8 controls",
+                       lambda: control_c3.checks > 0 and control_c8.checks == 1
+                       and not control_c3.failures and not control_c8.failures)
+
+            real_open = open
+            def denied_backlink(filename, *args, **kwargs):
+                if os.fspath(filename) == backlink:
+                    raise PermissionError(13, "planted metadata permission failure", filename)
+                return real_open(filename, *args, **kwargs)
+            with patch("builtins.open", denied_backlink):
+                paths, error = ownership_inventory()
+                error_c3, error_c8 = Run(ownership_root, ci=True), Run(ownership_root, ci=True)
+                error_c3.c3_reference_resolution()
+                error_c8.c8_reserved_basenames()
+            expect_red(f"{surface} inventory fails closed on an unreadable backlink",
+                       lambda: not paths and "planted metadata permission failure" in (error or ""))
+            for code, run in (("C3", error_c3), ("C8", error_c8)):
+                expect_red(f"{surface} {code} names the ownership metadata error",
+                           lambda code=code, run=run: run.checks == 1
+                           and len(run.failures) == 1
+                           and run.failures[0][0] == code
+                           and "planted metadata permission failure" in run.failures[0][1])
+
+            mode = stat.S_IMODE(os.stat(backlink).st_mode)
+            os.chmod(backlink, 0)
+            try:
+                try:
+                    with real_open(backlink, "rb") as fh:
+                        fh.read()
+                    permission_enforced = False
+                except PermissionError:
+                    permission_enforced = True
+                paths, error = ownership_inventory()
+            finally:
+                os.chmod(backlink, mode)
+            print(f"  OBSERVATION {surface} chmod-backlink permission_enforced={permission_enforced}")
+            expect_red(f"{surface} inventory does not admit files after chmod-zero metadata",
+                       lambda: (not paths and "cannot read Git metadata" in (error or ""))
+                       if permission_enforced else (
+                           not error and "README.md" in paths
+                           and not any(p.startswith("registered/") for p in paths)))
+
+            for name in ("ordinary-cr\r", "registered-cr\r"):
+                nested = os.path.join(ownership_root, name)
+                if name.startswith("ordinary"):
+                    subprocess.run(["git", "init", "--quiet", nested], check=True)
+                else:
+                    subprocess.run(
+                        ["git", "-C", donor, "worktree", "add", "--quiet", "--detach",
+                         nested], check=True)
+                open(os.path.join(nested, "GEMINI.md"), "w").write("nested-owner\n")
+                paths, error = ownership_inventory()
+                expect_red(f"{surface} inventory excludes a CR-ending repository: {name!r}",
+                           lambda: not error and "README.md" in paths
+                           and not any(p.startswith(name + "/") for p in paths))
+
+            separate = os.path.join(ownership_root, "separate")
+            admin = os.path.join(td, f"metadata-{surface}-separate-admin")
+            subprocess.run(
+                ["git", "init", "--quiet", "--separate-git-dir", admin, separate], check=True)
+            open(os.path.join(separate, "AGENTS.md"), "w").write("no independent binding\n")
+            paths, error = ownership_inventory()
+            expect_red(f"{surface} inventory retains an absent-config negative control",
+                       lambda: not error and "README.md" in paths
+                       and "separate/AGENTS.md" in paths)
+            subprocess.run(
+                ["git", "--git-dir", admin, "config", "core.worktree", separate], check=True)
+            real_run = subprocess.run
+            def failed_config(argv, **kwargs):
+                if "config" in argv and "core.worktree" in argv:
+                    return subprocess.CompletedProcess(
+                        argv, 128, b"", b"planted config failure")
+                return real_run(argv, **kwargs)
+            with patch("subprocess.run", failed_config):
+                paths, error = ownership_inventory()
+                config_c8 = Run(ownership_root, ci=True)
+                config_c8.c8_reserved_basenames()
+            expect_red(f"{surface} inventory distinguishes an operational config error",
+                       lambda: not paths and "core.worktree exited 128: planted config failure"
+                       in (error or ""))
+            expect_red(f"{surface} C8 names an operational config error",
+                       lambda: config_c8.checks == 1 and len(config_c8.failures) == 1
+                       and "core.worktree exited 128: planted config failure"
+                       in config_c8.failures[0][1])
+            for fixture in (ownership_root, donor, admin):
+                shutil.rmtree(fixture)
+
+        newline_repo = os.path.join(td, "newline-source")
+        os.makedirs(newline_repo)
+        subprocess.run(["git", "init", "--quiet", newline_repo], check=True)
+        newline_name = "hidden\nclaim.md"
+        open(os.path.join(newline_repo, newline_name), "w").write("NOT INSTALLED\n")
+        subprocess.run(["git", "-C", newline_repo, "add", "--", newline_name], check=True)
+        _newline_surface, newline_paths, newline_error = package_paths(newline_repo)
+        expect_red(
+            "the source inventory preserves a tracked filename containing a newline",
+            lambda: newline_error is None and newline_name in newline_paths,
+        )
+        newline_run = Run(newline_repo, ci=True)
+        newline_run.c6_stale_patterns(scan_floor=1)
+        expect_red(
+            "C6 scans a tracked filename containing a newline",
+            lambda: any(c == "C6" and newline_name in d
+                        for c, d in newline_run.failures),
+        )
+
+        expect_red("C3 does not resolve a citation against a nested checkout",
+                   lambda: any(c == "C3" and "ONLY-IN-NESTED.md" in d for c, d in r.failures))
+        expect_red("C3 recursively scans nested reference documents",
+                   lambda: any(c == "C3" and "NESTED-MISSING.md" in d
+                               for c, d in r.failures))
+        expect_red("C3 inventories non-Markdown reference payloads",
+                   lambda: any(c == "C3" and "orphan.txt" in d
+                               for c, d in r.failures))
+        expect_red("C3 prefers the reference document's local target",
+                   lambda: not any(c == "C3" and "cites local.md --" in d
+                                   for c, d in r.failures))
+        expect_red("C3 rejects multiple exact citation candidates as ambiguous",
+                   lambda: any(c == "C3" and "cites references/shared.md -- ambiguous" in d
+                               for c, d in r.failures))
+        expect_red("C3 does not satisfy a bare citation from another skill",
+                   lambda: any(c == "C3" and "ONLY-BETA.md" in d
+                               for c, d in r.failures))
+        expect_red("C3 does not resolve through an out-of-root symlink",
+                   lambda: any(c == "C3" and "escaped.md" in d
+                               for c, d in r.failures))
+        expect_red("C3 goes red on a citation carrying a line suffix",
+                   lambda: any(c == "C3" and "NO-SUCH-SUFFIXED.md" in d for c, d in r.failures))
+        expect_red("C3 resolves a citation naming a real file by a partial path",
+                   lambda: not any(c == "C3" and "beta/references/present.md -- resolves" in d
+                                   for c, d in r.failures))
         empty_c3 = os.path.join(td, "empty-c3")
         os.makedirs(os.path.join(empty_c3, "skills"))
         c3_empty_run = Run(empty_c3, ci=True)
@@ -1553,6 +2877,244 @@ def selftest():
                    lambda: any(c == "C6" and "ph-lint" in d for c, d in r3_root.failures))
         os.remove(os.path.join(td, "statusline.sh"))
 
+        # C6 and C9 both enumerate through package_paths. `git ls-files` failing there is a
+        # broken instrument, and the check has to say which one: an empty stderr is no
+        # evidence of success, and a `git` that will not launch raised straight through the
+        # check rather than being reported by it.
+        scan_repo = os.path.join(td, "scan-set-repo")
+        os.makedirs(scan_repo)
+        open(os.path.join(scan_repo, ".git"), "w").write("gitdir: elsewhere\n")
+        open(os.path.join(scan_repo, "README.md"), "w").write("root\n")
+        real_subprocess_run = subprocess.run
+
+        def with_patched_run(replacement, call):
+            subprocess.run = replacement
+            try:
+                return call()
+            finally:
+                subprocess.run = real_subprocess_run
+
+        def silent_git_scan(args, **kwargs):
+            if (list(args[:2]) == ["git", "-C"]
+                    and os.path.realpath(args[2]) == os.path.realpath(scan_repo)
+                    and list(args[3:]) == ["rev-parse", "--show-toplevel"]):
+                return subprocess.CompletedProcess(
+                    args, 0, stdout=os.fsencode(scan_repo) + b"\n", stderr=b"")
+            if list(args[:1]) == ["git"] and "ls-files" in args:
+                return subprocess.CompletedProcess(args, 3, stdout="", stderr="")
+            return real_subprocess_run(args, **kwargs)
+
+        def unlaunchable_git_scan(args, **kwargs):
+            if (list(args[:2]) == ["git", "-C"]
+                    and os.path.realpath(args[2]) == os.path.realpath(scan_repo)
+                    and list(args[3:]) == ["rev-parse", "--show-toplevel"]):
+                return subprocess.CompletedProcess(
+                    args, 0, stdout=os.fsencode(scan_repo) + b"\n", stderr=b"")
+            if list(args[:1]) == ["git"] and "ls-files" in args:
+                raise FileNotFoundError(2, "No such file or directory", "git")
+            return real_subprocess_run(args, **kwargs)
+
+        def c6_names_a_silent_git_exit():
+            def probe():
+                _surface, paths, error = package_paths(scan_repo)
+                run = Run(scan_repo, ci=True)
+                run.c6_stale_patterns(scan_floor=1)
+                return paths, error, run
+            paths, error, run = with_patched_run(silent_git_scan, probe)
+            return (paths == [] and "exited 3" in (error or "")
+                    and any(c == "C6" and "cannot enumerate scan set" in d
+                            and "exited 3" in d for c, d in run.failures))
+
+        expect_red(
+            "C6 names a silent nonzero git ls-files exit, never an unexplained scan set",
+            c6_names_a_silent_git_exit,
+        )
+
+        def c6_names_an_unlaunchable_git():
+            def probe():
+                _surface, _paths, error = package_paths(scan_repo)
+                run = Run(scan_repo, ci=True)
+                run.c6_stale_patterns(scan_floor=1)
+                return error, run
+            error, run = with_patched_run(unlaunchable_git_scan, probe)
+            return ("cannot run git ls-files" in (error or "")
+                    and any(c == "C6" and "cannot enumerate scan set" in d
+                            and "cannot run git ls-files" in d
+                            for c, d in run.failures))
+
+        expect_red(
+            "C6 reports an unlaunchable git as a named failure, never as an exception",
+            c6_names_an_unlaunchable_git,
+        )
+
+        # A LITERAL roster, never *_GIT_REPOSITORY_ENV: an input built from the constant
+        # under test follows it, so deleting a member removed it from both the input and the
+        # expectation and the proof stayed green.
+        reviewed_repository_selectors = (
+            "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_NO_REPLACE_OBJECTS",
+            "GIT_REPLACE_REF_BASE", "GIT_PREFIX", "GIT_INTERNAL_SUPER_PREFIX",
+            "GIT_SHALLOW_FILE", "GIT_CEILING_DIRECTORIES",
+            "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_NAMESPACE",
+            "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS",
+            "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS",
+        )
+        expect_red(
+            "the scrubbed selector set covers exactly the reviewed roster",
+            lambda: _GIT_REPOSITORY_ENV == frozenset(reviewed_repository_selectors),
+        )
+
+        # The spawn guard restates this roster instead of importing it, because a hook that
+        # reaches into tools/ turns a partially synchronised installation into an
+        # ImportError, and this host continues the tool call on any exit other than 2. A
+        # restated constant can only go stale, so the staleness is what gets a check: both
+        # definitions are compared to the literal roster above, and to each other. Loaded
+        # by path rather than by import name so the comparison does not depend on which
+        # directory the harness was started from.
+        def guard_module(name):
+            spec = importlib.util.spec_from_file_location(
+                f"_harness_check_{name}", os.path.join(ROOT, "hooks", f"{name}.py"))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+        # Two assertions, not one chained comparison: chained, the shared authority's
+        # operand was already answered by the roster case above, so removing it changed
+        # nothing and the check read as grading more than it did.
+        expect_red(
+            "the spawn guard scrubs exactly the reviewed selectors",
+            lambda: guard_module("spawn_preflight_guard")._GIT_REPOSITORY_ENV
+            == frozenset(reviewed_repository_selectors),
+        )
+        expect_red(
+            "the spawn guard and the shared authority scrub the same selectors",
+            lambda: guard_module("spawn_preflight_guard")._GIT_REPOSITORY_ENV
+            == _GIT_REPOSITORY_ENV,
+        )
+        # A second constant both PreToolUse guards must agree on. hooks/hooks.json registers
+        # the spawn guard with --runtime codex, so a copy that drops a runtime refuses every
+        # Codex spawn while its own suite stays green.
+        expect_red(
+            "both PreToolUse guards accept exactly the same runtimes",
+            lambda: guard_module("spawn_preflight_guard").RUNTIMES
+            == guard_module("bash_command_guard").RUNTIMES == {"claude", "codex"},
+        )
+        hostile_git_env = {
+            key: "planted" for key in (
+                *reviewed_repository_selectors, "GIT_CONFIG", "GIT_CONFIG_COUNT",
+                "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_PARAMETERS",
+                "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM",
+            )
+        }
+        hostile_git_env.update(PATH="retained", Z_HARNESS_SENTINEL="retained",
+                               GIT_AUTHOR_NAME="retained")
+        scrubbed_git_env = sanitized_git_environment(hostile_git_env)
+        expect_red(
+            "Git subprocesses discard repository and config selectors but retain benign env",
+            lambda: (set(hostile_git_env) - set(scrubbed_git_env)
+                     == set(hostile_git_env) - {
+                         "PATH", "Z_HARNESS_SENTINEL", "GIT_AUTHOR_NAME"}
+            and scrubbed_git_env == {
+                "PATH": "retained", "Z_HARNESS_SENTINEL": "retained",
+                "GIT_AUTHOR_NAME": "retained"}),
+        )
+        # The constant is not the whole copy. The function around it is restated too, and
+        # comparing only the names left its GIT_CONFIG operands ungraded in the hook: either
+        # could be deleted there with both suites green. Compared by RESULT over the same
+        # hostile environment, so the two implementations have to agree on what they remove
+        # rather than on how they spell it.
+        expect_red(
+            "the spawn guard scrubs a hostile environment identically",
+            lambda: guard_module("spawn_preflight_guard").sanitized_git_environment(
+                dict(hostile_git_env)) == scrubbed_git_env,
+        )
+
+        # C7 owns every file below each repository skill directory in Claude's installed
+        # skill root. That root may contain unrelated top-level skills, but no reviewed file
+        # may disappear, drift, or gain a stale installed sibling without making the local
+        # comparison red.
+        skill_fixture = os.path.join(td, "skill-payload")
+        source_skills = os.path.join(skill_fixture, "source")
+        installed_skills = os.path.join(skill_fixture, "installed")
+
+        def reset_skill_payload():
+            shutil.rmtree(skill_fixture, ignore_errors=True)
+            for root in (source_skills, installed_skills):
+                os.makedirs(os.path.join(root, "alpha", "references"))
+                open(os.path.join(root, "alpha", "SKILL.md"), "w").write("# alpha\n")
+                open(os.path.join(root, "alpha", "references", "rule.md"), "w").write(
+                    "rule\n")
+
+        reset_skill_payload()
+        expect_red("C7 full-payload control accepts an exact installed skill tree",
+                   lambda: installed_skill_payload_error(
+                       source_skills, installed_skills) == "")
+        empty_source = os.path.join(skill_fixture, "empty-source")
+        os.makedirs(empty_source)
+        expect_red("C7 rejects zero source-owned skill directories",
+                   lambda: "zero source-owned" in installed_skill_payload_error(
+                       empty_source, installed_skills))
+        expect_red("C7 rejects an absent installed skill root",
+                   lambda: "skill root is absent" in installed_skill_payload_error(
+                       source_skills, os.path.join(skill_fixture, "absent")))
+
+        reset_skill_payload()
+        os.symlink("alpha", os.path.join(source_skills, "source-alias"))
+        expect_red("C7 rejects a symlinked source skill entry",
+                   lambda: "source skill entry is symlinked" in
+                   installed_skill_payload_error(source_skills, installed_skills))
+        reset_skill_payload()
+        os.remove(os.path.join(source_skills, "alpha", "SKILL.md"))
+        expect_red("C7 rejects a source skill without SKILL.md",
+                   lambda: "alpha: SKILL.md is absent" in installed_skill_payload_error(
+                       source_skills, installed_skills))
+        reset_skill_payload()
+        os.remove(os.path.join(installed_skills, "alpha", "SKILL.md"))
+        expect_red("C7 rejects an installed skill without SKILL.md",
+                   lambda: "alpha: SKILL.md is absent" in installed_skill_payload_error(
+                       source_skills, installed_skills))
+        reset_skill_payload()
+        os.remove(os.path.join(installed_skills, "alpha", "references", "rule.md"))
+        expect_red("C7 rejects a missing installed support file",
+                   lambda: "missing payload" in installed_skill_payload_error(
+                       source_skills, installed_skills))
+        reset_skill_payload()
+        open(os.path.join(installed_skills, "alpha", "stale.md"), "w").write("stale\n")
+        expect_red("C7 rejects a stale file inside a managed installed skill",
+                   lambda: "stale payload" in installed_skill_payload_error(
+                       source_skills, installed_skills))
+        reset_skill_payload()
+        open(os.path.join(installed_skills, "alpha", "references", "rule.md"), "w").write(
+            "different\n")
+        expect_red("C7 rejects support-file byte drift",
+                   lambda: "drifted payload" in installed_skill_payload_error(
+                       source_skills, installed_skills))
+        reset_skill_payload()
+        os.chmod(os.path.join(installed_skills, "alpha", "SKILL.md"), 0o755)
+        expect_red("C7 rejects executable-class drift",
+                   lambda: "drifted payload" in installed_skill_payload_error(
+                       source_skills, installed_skills))
+        reset_skill_payload()
+        os.makedirs(os.path.join(installed_skills, "unmanaged"))
+        open(os.path.join(installed_skills, "unmanaged", "SKILL.md"), "w").write(
+            "# unmanaged\n")
+        expect_red("C7 ignores unrelated top-level installed skills",
+                   lambda: installed_skill_payload_error(
+                       source_skills, installed_skills) == "")
+        reset_skill_payload()
+        os.symlink("rule.md", os.path.join(
+            installed_skills, "alpha", "references", "alias.md"))
+        expect_red("C7 rejects symlinked payload",
+                   lambda: "non-regular payload" in installed_skill_payload_error(
+                       source_skills, installed_skills))
+        reset_skill_payload()
+        os.remove(os.path.join(installed_skills, "alpha", "references", "rule.md"))
+        c7_payload_run = Run(td, ci=False)
+        c7_payload_run.c7_claude_installed_skill_payload(source_skills, installed_skills)
+        expect_red("C7 production call adopts the full-payload failure",
+                   lambda: any(c == "C7" and "missing payload" in d
+                               for c, d in c7_payload_run.failures))
+
         r4 = Run(td, ci=True)
         r4.c8_reserved_basenames()
         expect_red("C8 goes red on nested claude.md",
@@ -1574,6 +3136,1214 @@ def selftest():
         expect_red("C8 goes red on a zero-file scan",
                    lambda: any(c == "C8" and "zero files" in d
                                for c, d in c8_empty_run.failures))
+
+        live_repo = os.path.join(td, "live-context-repo")
+        os.makedirs(live_repo)
+        subprocess.run(["git", "init", "--quiet", live_repo], check=True)
+        open(os.path.join(live_repo, "README.md"), "w").write("root\n")
+        subprocess.run(["git", "-C", live_repo, "add", "README.md"], check=True)
+        subprocess.run(
+            ["git", "-C", live_repo, "-c", "user.name=fixture", "-c",
+             "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "fixture"],
+            check=True)
+        os.makedirs(os.path.join(live_repo, "docs"))
+        open(os.path.join(live_repo, "docs", "AGENTS.md"), "w").write("untracked\n")
+        live_run = Run(live_repo, ci=True)
+        live_run.c8_reserved_basenames()
+        expect_red("C8 Git mode catches an authored untracked nested context file",
+                   lambda: any(c == "C8" and "docs/AGENTS.md" in d
+                               for c, d in live_run.failures))
+
+        decoy_repo = os.path.join(td, "ambient-git-decoy")
+        os.makedirs(decoy_repo)
+        subprocess.run(["git", "init", "--quiet", decoy_repo], check=True)
+        open(os.path.join(decoy_repo, "README.md"), "w").write("decoy\n")
+        subprocess.run(["git", "-C", decoy_repo, "add", "README.md"], check=True)
+        stale_path = os.path.join(live_repo, "stale.md")
+        open(stale_path, "w").write("NOT INSTALLED\n")
+        subprocess.run(["git", "-C", live_repo, "add", "stale.md"], check=True)
+
+        def with_ambient_git_decoy(call):
+            keys = ("GIT_DIR", "GIT_WORK_TREE", "GIT_CONFIG_COUNT",
+                    "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0")
+            previous = {key: os.environ.get(key) for key in keys}
+            os.environ.update({
+                "GIT_DIR": os.path.join(decoy_repo, ".git"),
+                "GIT_WORK_TREE": decoy_repo,
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "core.worktree",
+                "GIT_CONFIG_VALUE_0": decoy_repo,
+            })
+            try:
+                return call()
+            finally:
+                for key, value in previous.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
+
+        contaminated_c8 = with_ambient_git_decoy(
+            lambda: Run(live_repo, ci=True))
+        with_ambient_git_decoy(contaminated_c8.c8_reserved_basenames)
+        expect_red(
+            "C8 inspects its explicit root despite ambient Git repository substitution",
+            lambda: (any(c == "C8" and "docs/AGENTS.md" in d
+                         for c, d in live_run.failures)
+                     and any(c == "C8" and "docs/AGENTS.md" in d
+                             for c, d in contaminated_c8.failures)),
+        )
+        control_c6 = Run(live_repo, ci=True)
+        control_c6.c6_stale_patterns(scan_floor=1)
+        contaminated_c6 = Run(live_repo, ci=True)
+        with_ambient_git_decoy(
+            lambda: contaminated_c6.c6_stale_patterns(scan_floor=1))
+        expect_red(
+            "C6 inspects its explicit root despite ambient Git repository substitution",
+            lambda: (any(c == "C6" and "NOT INSTALLED" in d
+                         for c, d in control_c6.failures)
+                     and any(c == "C6" and "NOT INSTALLED" in d
+                             for c, d in contaminated_c6.failures)),
+        )
+
+        def wrong_toplevel(args, **kwargs):
+            if (list(args[:2]) == ["git", "-C"]
+                    and os.path.realpath(args[2]) == os.path.realpath(live_repo)
+                    and list(args[3:]) == ["rev-parse", "--show-toplevel"]):
+                return subprocess.CompletedProcess(
+                    args, 0, stdout=os.fsencode(decoy_repo) + b"\n", stderr=b"")
+            return subprocess.run(args, **kwargs)
+
+        wrong_root_inventory = git_owned_live_paths(live_repo, runner=wrong_toplevel)
+        expect_red(
+            "C8 rejects an inventory whose successful Git probe names another root",
+            lambda: (not wrong_root_inventory["paths"]
+                     and "resolved" in wrong_root_inventory["error"]
+                     and os.path.realpath(live_repo) in wrong_root_inventory["error"]),
+        )
+        wrong_root_surface, wrong_root_paths, wrong_root_error = package_paths(
+            live_repo, runner=wrong_toplevel)
+        expect_red(
+            "C6 rejects package enumeration whose successful Git probe names another root",
+            lambda: (wrong_root_surface == "source" and not wrong_root_paths
+                     and "resolved" in wrong_root_error
+                     and os.path.realpath(live_repo) in wrong_root_error),
+        )
+
+        def missing_toplevel(args, **kwargs):
+            if (list(args[:2]) == ["git", "-C"]
+                    and os.path.realpath(args[2]) == os.path.realpath(live_repo)
+                    and list(args[3:]) == ["rev-parse", "--show-toplevel"]):
+                return subprocess.CompletedProcess(
+                    args, 0, stdout=os.fsencode(
+                        os.path.join(td, "missing-repository-root")) + b"\n",
+                    stderr=b"")
+            return subprocess.run(args, **kwargs)
+
+        expect_red(
+            "C8 treats an unstatable reported top level as a mismatch, never authority",
+            lambda: "resolved" in _git_toplevel_error(live_repo, missing_toplevel),
+        )
+
+        def unterminated_toplevel(args, **kwargs):
+            if (list(args[:2]) == ["git", "-C"]
+                    and os.path.realpath(args[2]) == os.path.realpath(live_repo)
+                    and list(args[3:]) == ["rev-parse", "--show-toplevel"]):
+                return subprocess.CompletedProcess(
+                    args, 0, stdout=os.fsencode(live_repo) + b"x", stderr=b"")
+            return subprocess.run(args, **kwargs)
+
+        def nul_toplevel(args, **kwargs):
+            if (list(args[:2]) == ["git", "-C"]
+                    and os.path.realpath(args[2]) == os.path.realpath(live_repo)
+                    and list(args[3:]) == ["rev-parse", "--show-toplevel"]):
+                return subprocess.CompletedProcess(
+                    args, 0, stdout=os.fsencode(live_repo) + b"\0junk\n", stderr=b"")
+            return subprocess.run(args, **kwargs)
+
+        expect_red(
+            "C8 rejects an unterminated top-level path whose final byte masks as a terminator",
+            lambda: "malformed path" in _git_toplevel_error(
+                live_repo, unterminated_toplevel),
+        )
+        expect_red(
+            "C8 rejects an embedded NUL in the reported top-level path",
+            lambda: "malformed path" in _git_toplevel_error(live_repo, nul_toplevel),
+        )
+
+        case_alias = os.path.join(
+            os.path.dirname(live_repo), os.path.basename(live_repo).swapcase())
+        case_alias_supported = (
+            sys.platform != "darwin"
+            or (os.path.isdir(case_alias) and os.path.samefile(case_alias, live_repo))
+        )
+        expect_red(
+            "C8 case-alias fixture names the same directory on case-insensitive macOS",
+            lambda: case_alias_supported,
+        )
+        case_alias_surface = case_alias_paths = case_alias_error = None
+        case_alias_inventory = None
+        if sys.platform == "darwin" and case_alias_supported:
+            case_alias_surface, case_alias_paths, case_alias_error = package_paths(case_alias)
+            case_alias_inventory = git_owned_live_paths(case_alias)
+        expect_red(
+            "C6 and C8 accept filesystem-identical root spellings on macOS",
+            lambda: (sys.platform != "darwin"
+                     or (case_alias_supported
+                         and _git_toplevel_error(case_alias, subprocess.run) == ""
+                         and case_alias_surface == "source"
+                         and not case_alias_error and bool(case_alias_paths)
+                         and not case_alias_inventory["error"]
+                         and bool(case_alias_inventory["paths"]))),
+        )
+
+        def git_inventory_result(
+                args, returncode, stderr=b"", launch_error=None, kwargs=None):
+            if (list(args[:2]) == ["git", "-C"]
+                    and os.path.realpath(args[2]) == os.path.realpath(live_repo)
+                    and list(args[3:]) == ["rev-parse", "--show-toplevel"]):
+                return subprocess.CompletedProcess(
+                    args, 0, stdout=os.fsencode(live_repo) + b"\n", stderr=b"")
+            if "ls-files" in args:
+                if launch_error is not None:
+                    raise launch_error
+                return subprocess.CompletedProcess(
+                    args, returncode, stdout=b"", stderr=stderr)
+            return subprocess.run(args, **(kwargs or {}))
+
+        def failed_git_inventory(args, **_kwargs):
+            return git_inventory_result(args, 1, b"planted", kwargs=_kwargs)
+
+        failed_inventory_run = Run(live_repo, ci=True)
+        failed_inventory_run.c8_reserved_basenames(runner=failed_git_inventory)
+        expect_red("C8 fails closed when Git-owned scan enumeration fails",
+                   lambda: any(c == "C8" and "cannot enumerate" in d
+                               for c, d in failed_inventory_run.failures))
+
+        # stderr carries the detail; the exit status carries the verdict. A nonzero exit
+        # over an empty or whitespace-only stream took neither failure branch, so the
+        # inventory stayed empty, indexing it ended the process on a traceback, and no
+        # HARNESS-SUMMARY line was printed at all -- a broken instrument reading as
+        # neither a pass nor a named failure.
+        def silent_git_inventory(args, **_kwargs):
+            return git_inventory_result(args, 1, kwargs=_kwargs)
+
+        def whitespace_git_inventory(args, **_kwargs):
+            return git_inventory_result(args, -9, b"  \n\t ", kwargs=_kwargs)
+
+        def unlaunchable_git_inventory(args, **_kwargs):
+            return git_inventory_result(
+                args, 0,
+                launch_error=FileNotFoundError(2, "No such file or directory", "git"),
+                kwargs=_kwargs)
+
+        def c8_names_a_silent_git_exit():
+            run = Run(live_repo, ci=True)
+            run.c8_reserved_basenames(runner=silent_git_inventory)
+            return any(c == "C8" and "cannot enumerate" in d and "exited 1" in d
+                       for c, d in run.failures)
+
+        expect_red(
+            "C8 names a silent nonzero git ls-files exit instead of indexing an empty "
+            "inventory",
+            c8_names_a_silent_git_exit,
+        )
+
+        def c8_reads_whitespace_stderr_as_failure():
+            run = Run(live_repo, ci=True)
+            run.c8_reserved_basenames(runner=whitespace_git_inventory)
+            return any(c == "C8" and "cannot enumerate" in d and "exited -9" in d
+                       for c, d in run.failures)
+
+        expect_red(
+            "C8 reads whitespace-only git stderr as failure, never as a clean inventory",
+            c8_reads_whitespace_stderr_as_failure,
+        )
+
+        def c8_names_an_unlaunchable_git():
+            run = Run(live_repo, ci=True)
+            run.c8_reserved_basenames(runner=unlaunchable_git_inventory)
+            return any(c == "C8" and "cannot enumerate" in d
+                       and "cannot run git ls-files" in d
+                       for c, d in run.failures)
+
+        expect_red(
+            "C8 names an unlaunchable git binary instead of propagating OSError",
+            c8_names_an_unlaunchable_git,
+        )
+
+        # Failing closed on the exit status may not cost the check its non-Git surface: a
+        # silent failure outside a worktree still has to reach the filesystem fallback.
+        def c8_keeps_its_filesystem_fallback_on_a_silent_failure():
+            fallback = os.path.join(td, "silent-failure-fallback")
+            os.makedirs(os.path.join(fallback, "sub"), exist_ok=True)
+            open(os.path.join(fallback, "README.md"), "w").write("root\n")
+            open(os.path.join(fallback, "sub", "CLAUDE.md"), "w").write("nested\n")
+            run = Run(fallback, ci=True)
+            run.c8_reserved_basenames(runner=silent_git_inventory)
+            return any(c == "C8" and "sub/CLAUDE.md" in d and "filesystem files" in d
+                       for c, d in run.failures)
+
+        expect_red(
+            "C8 still reaches its filesystem fallback when a silent git failure has no .git",
+            c8_keeps_its_filesystem_fallback_on_a_silent_failure,
+        )
+
+        # The point of a named failure is the verdict line. Driving Run.run through the
+        # broken instrument has to end in a HARNESS-SUMMARY receipt, not a traceback.
+        def harness_summary_survives_a_broken_git_inventory():
+            summary_run = Run(live_repo, ci=True)
+            for _check_id, method_name in PRODUCTION_CHECKS:
+                if method_name != "c8_reserved_basenames":
+                    setattr(summary_run, method_name, lambda: None)
+            summary_run.c8_reserved_basenames = (
+                lambda: Run.c8_reserved_basenames(
+                    summary_run, runner=silent_git_inventory))
+            buffer = io.StringIO()
+            original_stdout = sys.stdout
+            sys.stdout = buffer
+            try:
+                code = summary_run.run()
+            finally:
+                sys.stdout = original_stdout
+            return (code == 1
+                    and "HARNESS-SUMMARY mode=ci checks=1 failures=1 exit=1"
+                    in buffer.getvalue()
+                    and any(c == "C8" and "exited 1" in d
+                            for c, d in summary_run.failures))
+
+        expect_red(
+            "Run.run still prints HARNESS-SUMMARY when the Git inventory instrument fails",
+            harness_summary_survives_a_broken_git_inventory,
+        )
+
+        os.remove(os.path.join(live_repo, "docs", "AGENTS.md"))
+        nested_repo = os.path.join(live_repo, "nested-repo")
+        os.makedirs(nested_repo)
+        subprocess.run(["git", "init", "--quiet", nested_repo], check=True)
+        open(os.path.join(nested_repo, "CLAUDE.md"), "w").write("other owner\n")
+        nested_run = Run(live_repo, ci=True)
+        nested_run.c8_reserved_basenames()
+        expect_red("C8 prunes a nested repository boundary",
+                   lambda: not nested_run.failures)
+
+        # Ownership resolution shells out once per candidate boundary, so the binary can
+        # still become unusable after enumeration already succeeded. The control above
+        # proves this fixture reaches that call at all.
+        def git_lost_during_resolution(args, **kwargs):
+            if (list(args[:2]) == ["git", "-C"]
+                    and os.path.realpath(args[2]) == os.path.realpath(nested_repo)
+                    and list(args[3:5]) == ["rev-parse", "--show-toplevel"]):
+                raise FileNotFoundError(2, "No such file or directory", "git")
+            return subprocess.run(args, **kwargs)
+
+        def c8_names_a_git_lost_while_resolving_ownership():
+            run = Run(live_repo, ci=True)
+            run.c8_reserved_basenames(runner=git_lost_during_resolution)
+            return any(c == "C8" and "cannot resolve Git ownership" in d
+                       and "No such file or directory" in d
+                       for c, d in run.failures)
+
+        expect_red(
+            "C8 fails closed when a boundary ownership probe cannot launch Git",
+            c8_names_a_git_lost_while_resolving_ownership,
+        )
+
+        def failed_exact_root(args, **kwargs):
+            if (args[:2] == ["git", "-C"]
+                    and os.path.realpath(args[2]) == os.path.realpath(nested_repo)
+                    and args[3:] == ["rev-parse", "--show-toplevel"]):
+                return subprocess.CompletedProcess(
+                    args, 1, stdout=os.fsencode(nested_repo) + b"\n", stderr=b"planted")
+            return subprocess.run(args, **kwargs)
+
+        failed_exact_root_run = Run(live_repo, ci=True)
+        failed_exact_root_run.c8_reserved_basenames(runner=failed_exact_root)
+        expect_red(
+            "C8 fails closed on partial output from a failed plausible-boundary Git command",
+            lambda: any(c == "C8" and "cannot resolve Git ownership" in d
+                        and "exited 1" in d for c, d in failed_exact_root_run.failures),
+        )
+
+        indexed_then_nested = os.path.join(live_repo, "indexed-then-nested")
+        os.makedirs(indexed_then_nested)
+        indexed_context = os.path.join(indexed_then_nested, "AGENTS.md")
+        open(indexed_context, "w").write("outer owner\n")
+        subprocess.run(
+            ["git", "-C", live_repo, "add", "indexed-then-nested/AGENTS.md"],
+            check=True)
+        subprocess.run(["git", "init", "--quiet", indexed_then_nested], check=True)
+        indexed_then_nested_run = Run(live_repo, ci=True)
+        indexed_then_nested_run.c8_reserved_basenames()
+        expect_red("C8 retains a live file still owned by the outer Git index",
+                   lambda: any(c == "C8" and "indexed-then-nested/AGENTS.md" in d
+                               for c, d in indexed_then_nested_run.failures))
+        subprocess.run(
+            ["git", "-C", live_repo, "rm", "--cached", "--quiet", "--force",
+             "indexed-then-nested/AGENTS.md"], check=True)
+        shutil.rmtree(indexed_then_nested)
+
+        # The clause above decides an INDEXED path. A separate clause decides the untracked
+        # ones by walking their parent components, and nothing reached it: Git does not
+        # descend into a nested repository, so `--others` normally lists nothing below one
+        # and that walk could be made inert with the whole suite green. Index a file inside
+        # the directory first and Git does descend, so an untracked context file beside it
+        # arrives in the inventory and only the parent-component walk keeps the nested
+        # repository's own file out of the owner's scan set.
+        below_boundary_owner = os.path.join(td, "below-boundary-owner")
+        os.makedirs(os.path.join(below_boundary_owner, "nested"))
+        subprocess.run(["git", "init", "--quiet", below_boundary_owner], check=True)
+        open(os.path.join(below_boundary_owner, "README.md"), "w").write("root\n")
+        open(os.path.join(below_boundary_owner, "nested", "keep.md"), "w").write(
+            "outer owner\n")
+        subprocess.run(
+            ["git", "-C", below_boundary_owner, "add", "README.md", "nested/keep.md"],
+            check=True)
+        subprocess.run(
+            ["git", "-C", below_boundary_owner, "-c", "user.name=fixture", "-c",
+             "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "fixture"],
+            check=True)
+        subprocess.run(
+            ["git", "init", "--quiet", os.path.join(below_boundary_owner, "nested")],
+            check=True)
+        open(os.path.join(below_boundary_owner, "nested", "AGENTS.md"), "w").write(
+            "other owner\n")
+        below_boundary_others = subprocess.run(
+            ["git", "-C", below_boundary_owner, "ls-files", "--others",
+             "--exclude-standard", "-z"], capture_output=True).stdout
+        below_boundary_run = Run(below_boundary_owner, ci=True)
+        below_boundary_run.c8_reserved_basenames()
+        # Without this the proof below passes over an empty inventory: if Git ever stops
+        # descending here, nothing reaches the parent-component walk at all, and "pruned"
+        # and "never enumerated" produce the same green.
+        expect_red(
+            "C8 below-boundary fixture really does enumerate the file below the boundary",
+            lambda: b"nested/AGENTS.md" in below_boundary_others.split(b"\0"),
+        )
+        expect_red(
+            "C8 prunes an untracked file below a boundary Git still descended into",
+            lambda: not below_boundary_run.failures,
+        )
+        shutil.rmtree(below_boundary_owner)
+
+        fake_boundary = os.path.join(live_repo, "fake-boundary")
+        os.makedirs(fake_boundary)
+        open(os.path.join(fake_boundary, ".git"), "w").write("not a repository\n")
+        open(os.path.join(fake_boundary, "AGENTS.md"), "w").write("still owned here\n")
+        fake_boundary_run = Run(live_repo, ci=True)
+        fake_boundary_run.c8_reserved_basenames()
+        expect_red("C8 does not let a fake .git marker prune authored context",
+                   lambda: any(c == "C8" and "fake-boundary/AGENTS.md" in d
+                               for c, d in fake_boundary_run.failures))
+        shutil.rmtree(fake_boundary)
+
+        invalid_directory = os.path.join(live_repo, "invalid-git-directory")
+        os.makedirs(os.path.join(invalid_directory, ".git"))
+        open(os.path.join(invalid_directory, "AGENTS.md"), "w").write(
+            "still owned here\n")
+        invalid_directory_run = Run(live_repo, ci=True)
+        invalid_directory_run.c8_reserved_basenames()
+        expect_red("C8 does not fall through an invalid .git directory to its owner",
+                   lambda: any(c == "C8" and "invalid-git-directory/AGENTS.md" in d
+                               for c, d in invalid_directory_run.failures))
+        shutil.rmtree(invalid_directory)
+
+        redirected_directory = os.path.join(live_repo, "redirected-git-directory")
+        os.makedirs(redirected_directory)
+        subprocess.run(
+            ["git", "init", "--quiet", "--bare",
+             os.path.join(redirected_directory, ".git")], check=True)
+        subprocess.run(
+            ["git", "--git-dir", os.path.join(redirected_directory, ".git"),
+             "config", "core.bare", "false"], check=True)
+        subprocess.run(
+            ["git", "--git-dir", os.path.join(redirected_directory, ".git"),
+             "config", "core.worktree", live_repo], check=True)
+        open(os.path.join(redirected_directory, "GEMINI.md"), "w").write(
+            "still owned here\n")
+        redirected_directory_run = Run(live_repo, ci=True)
+        redirected_directory_run.c8_reserved_basenames()
+        expect_red("C8 rejects a nested gitdir whose worktree is the owner repository",
+                   lambda: any(c == "C8" and "redirected-git-directory/GEMINI.md" in d
+                               for c, d in redirected_directory_run.failures))
+        shutil.rmtree(redirected_directory)
+
+        forged_boundary = os.path.join(live_repo, "forged-boundary")
+        os.makedirs(forged_boundary)
+        open(os.path.join(forged_boundary, ".git"), "w").write("gitdir: ../.git\n")
+        open(os.path.join(forged_boundary, "AGENTS.md"), "w").write("still owned here\n")
+        forged_boundary_run = Run(live_repo, ci=True)
+        forged_boundary_run.c8_reserved_basenames()
+        expect_red("C8 rejects an unregistered .git pointer into the outer repository",
+                   lambda: any(c == "C8" and "forged-boundary/AGENTS.md" in d
+                               for c, d in forged_boundary_run.failures))
+        shutil.rmtree(forged_boundary)
+
+        linked = os.path.join(live_repo, "linked-worktree")
+        subprocess.run(
+            ["git", "-C", live_repo, "worktree", "add", "--quiet", "--detach",
+             linked, "HEAD"], check=True)
+        open(os.path.join(linked, "GEMINI.md"), "w").write("other owner\n")
+        linked_run = Run(live_repo, ci=True)
+        linked_run.c8_reserved_basenames()
+        expect_red("C8 prunes a registered nested worktree boundary",
+                   lambda: not linked_run.failures)
+        linked_case_alias_run = Run(case_alias, ci=True)
+        linked_case_alias_run.c8_reserved_basenames()
+        expect_red(
+            "C8 prunes registered linked worktrees through a case-alias owner root",
+            lambda: sys.platform != "darwin" or not linked_case_alias_run.failures,
+        )
+
+        worktree_list_calls = []
+        def no_worktree_list(args, **kwargs):
+            if args[-4:] == ["worktree", "list", "--porcelain", "-z"]:
+                worktree_list_calls.append(tuple(args))
+                return subprocess.CompletedProcess(
+                    args, 129, stdout=b"", stderr=b"error: unknown switch `z'\n")
+            return subprocess.run(args, **kwargs)
+        linked_portable_run = Run(live_repo, ci=True)
+        linked_portable_run.c8_reserved_basenames(runner=no_worktree_list)
+        expect_red("C8 linked-worktree proof does not require worktree-list -z support",
+                   lambda: not linked_portable_run.failures and not worktree_list_calls)
+        os.remove(os.path.join(linked, "GEMINI.md"))
+
+        linked_trailing = os.path.join(live_repo, "linked-trailing ")
+        subprocess.run(
+            ["git", "-C", live_repo, "worktree", "add", "--quiet", "--detach",
+             linked_trailing, "HEAD"], check=True)
+        open(os.path.join(linked_trailing, "AGENTS.md"), "w").write("other owner\n")
+        linked_trailing_run = Run(live_repo, ci=True)
+        linked_trailing_run.c8_reserved_basenames()
+        expect_red("C8 preserves trailing spaces in registered-worktree paths",
+                   lambda: not linked_trailing_run.failures)
+        os.remove(os.path.join(linked_trailing, "AGENTS.md"))
+
+        linked_newline = os.path.join(live_repo, "linked-newline\n")
+        subprocess.run(
+            ["git", "-C", live_repo, "worktree", "add", "--quiet", "--detach",
+             linked_newline, "HEAD"], check=True)
+        open(os.path.join(linked_newline, "GEMINI.md"), "w").write("other owner\n")
+        linked_newline_run = Run(live_repo, ci=True)
+        linked_newline_run.c8_reserved_basenames()
+        expect_red("C8 preserves trailing newlines in registered-worktree paths",
+                   lambda: not linked_newline_run.failures)
+        os.remove(os.path.join(linked_newline, "GEMINI.md"))
+
+        linked_marker = os.path.join(linked, ".git")
+        linked_admin = _gitdir_from_marker(linked, linked_marker)
+        linked_common = os.path.join(linked_admin, "commondir")
+        linked_common_bytes = open(linked_common, "rb").read()
+        alias_common_supported = sys.platform != "darwin"
+        if sys.platform == "darwin" and case_alias_supported:
+            open(linked_common, "wb").write(
+                os.fsencode(os.path.join(case_alias, ".git")) + b"\n")
+            linked_git_probe = subprocess.run(
+                ["git", "-C", linked, "rev-parse", "--show-toplevel"],
+                capture_output=True)
+            alias_common_run = Run(case_alias, ci=True)
+            alias_common_run.c8_reserved_basenames()
+            alias_common_supported = (
+                linked_git_probe.returncode == 0
+                and _registered_linked_worktree(linked, linked_marker)
+                and not alias_common_run.failures)
+            open(linked_common, "wb").write(linked_common_bytes)
+        expect_red(
+            "C8 accepts an absolute case-alias common-dir for a registered worktree",
+            lambda: alias_common_supported,
+        )
+        linked_backlink = os.path.join(linked_admin, "gitdir")
+        linked_backlink_bytes = open(linked_backlink, "rb").read()
+        os.remove(linked_backlink)
+        open(os.path.join(linked, "AGENTS.md"), "w").write("still owned here\n")
+        missing_backlink_run = Run(live_repo, ci=True)
+        missing_backlink_run.c8_reserved_basenames()
+        expect_red("C8 rejects linked metadata without its reciprocal backlink",
+                   lambda: any(c == "C8" and "linked-worktree/AGENTS.md" in d
+                               for c, d in missing_backlink_run.failures))
+        open(linked_backlink, "wb").write(linked_backlink_bytes)
+        os.remove(os.path.join(linked, "AGENTS.md"))
+
+        linked_metadata = (
+            linked_marker,
+            os.path.join(linked_admin, "commondir"),
+            linked_backlink,
+        )
+        linked_metadata_bytes = {
+            path: open(path, "rb").read() for path in linked_metadata
+        }
+        for path, data in linked_metadata_bytes.items():
+            open(path, "wb").write(data[:-1] + b"\r\n")
+        open(os.path.join(linked, "AGENTS.md"), "w").write("other owner\n")
+        crlf_linked_run = Run(live_repo, ci=True)
+        crlf_linked_run.c8_reserved_basenames()
+        expect_red("C8 accepts Git-valid CRLF linked-worktree metadata",
+                   lambda: not crlf_linked_run.failures)
+        for path, data in linked_metadata_bytes.items():
+            open(path, "wb").write(data)
+        os.remove(os.path.join(linked, "AGENTS.md"))
+
+        foreign_repo = os.path.join(td, "foreign-linked-owner")
+        subprocess.run(["git", "init", "--quiet", foreign_repo], check=True)
+        subprocess.run(
+            ["git", "-C", foreign_repo, "-c", "user.name=fixture", "-c",
+             "user.email=fixture@example.invalid", "commit", "--quiet",
+             "--allow-empty", "-m", "fixture"], check=True)
+        foreign_linked = os.path.join(td, "foreign-linked-worktree")
+        subprocess.run(
+            ["git", "-C", foreign_repo, "worktree", "add", "--quiet", "--detach",
+             foreign_linked, "HEAD"], check=True)
+        foreign_admin = _gitdir_from_marker(
+            foreign_linked, os.path.join(foreign_linked, ".git"))
+        borrowed_admin = os.path.join(live_repo, "borrowed-linked-admin")
+        os.makedirs(borrowed_admin)
+        open(os.path.join(borrowed_admin, ".git"), "wb").write(
+            b"gitdir: " + os.fsencode(foreign_admin) + b"\n")
+        open(os.path.join(borrowed_admin, "AGENTS.md"), "w").write(
+            "still owned here\n")
+        borrowed_admin_run = Run(live_repo, ci=True)
+        borrowed_admin_run.c8_reserved_basenames()
+        expect_red("C8 rejects a pointer borrowing another worktree's registered admin",
+                   lambda: any(c == "C8" and "borrowed-linked-admin/AGENTS.md" in d
+                               for c, d in borrowed_admin_run.failures))
+        shutil.rmtree(borrowed_admin)
+        subprocess.run(
+            ["git", "-C", foreign_repo, "worktree", "remove", "--force",
+             foreign_linked], check=True)
+        shutil.rmtree(foreign_repo)
+
+        # The rejection above holds because that admin has no `core.worktree` binding at
+        # all, so the query below it fails and the reciprocal-registration clause guarding
+        # it is never the reason. Bind one and they separate. `--local` on a linked
+        # worktree's admin resolves to the repository's COMMON config, so the binding is
+        # written there -- in the FOREIGN repository, leaving the owner's own worktree
+        # resolution untouched -- and the borrowing directory then answers every question
+        # an independently bound separate gitdir would. Only the clause that says a linked
+        # admin is owned by its registration keeps it from pruning the tree.
+        bound_foreign_repo = os.path.join(td, "bound-linked-owner")
+        subprocess.run(["git", "init", "--quiet", bound_foreign_repo], check=True)
+        subprocess.run(
+            ["git", "-C", bound_foreign_repo, "-c", "user.name=fixture", "-c",
+             "user.email=fixture@example.invalid", "commit", "--quiet",
+             "--allow-empty", "-m", "fixture"], check=True)
+        bound_foreign_linked = os.path.join(td, "bound-linked-worktree")
+        subprocess.run(
+            ["git", "-C", bound_foreign_repo, "worktree", "add", "--quiet", "--detach",
+             bound_foreign_linked, "HEAD"], check=True)
+        bound_foreign_admin = _gitdir_from_marker(
+            bound_foreign_linked, os.path.join(bound_foreign_linked, ".git"))
+        bound_borrowed = os.path.join(live_repo, "borrowed-bound-linked-admin")
+        os.makedirs(bound_borrowed)
+        open(os.path.join(bound_borrowed, ".git"), "wb").write(
+            b"gitdir: " + os.fsencode(bound_foreign_admin) + b"\n")
+        open(os.path.join(bound_borrowed, "AGENTS.md"), "w").write(
+            "still owned here\n")
+        subprocess.run(
+            ["git", "-C", bound_foreign_repo, "config", "core.worktree",
+             bound_borrowed], check=True)
+        bound_borrowed_binding = subprocess.run(
+            ["git", "--git-dir", bound_foreign_admin, "config", "--local", "--path",
+             "--null", "--get-all", "core.worktree"], capture_output=True)
+        bound_borrowed_run = Run(live_repo, ci=True)
+        bound_borrowed_run.c8_reserved_basenames()
+        # The binding has to actually be visible through that admin, or the rejection
+        # below is the absent-binding rejection already proved above wearing a new name.
+        expect_red(
+            "C8 bound-linked fixture really does answer the separate-gitdir query",
+            lambda: bound_borrowed_binding.returncode == 0
+            and os.path.realpath(os.fsdecode(
+                bytes(bound_borrowed_binding.stdout).rstrip(b"\0")))
+            == os.path.realpath(bound_borrowed)
+            and os.path.lexists(os.path.join(bound_foreign_admin, "commondir")),
+        )
+        expect_red(
+            "C8 keeps a registered linked admin owned by its registration, not by a "
+            "core.worktree binding",
+            lambda: any(c == "C8" and "borrowed-bound-linked-admin/AGENTS.md" in d
+                        for c, d in bound_borrowed_run.failures),
+        )
+        shutil.rmtree(bound_borrowed)
+        subprocess.run(
+            ["git", "-C", bound_foreign_repo, "worktree", "remove", "--force",
+             bound_foreign_linked], check=True)
+        shutil.rmtree(bound_foreign_repo)
+
+        sibling_repo = os.path.join(live_repo, "sibling-ordinary-repository")
+        subprocess.run(["git", "init", "--quiet", sibling_repo], check=True)
+        borrowed_ordinary = os.path.join(live_repo, "borrowed-ordinary-admin")
+        os.makedirs(borrowed_ordinary)
+        open(os.path.join(borrowed_ordinary, ".git"), "wb").write(
+            b"gitdir: " + os.fsencode(os.path.join(sibling_repo, ".git")) + b"\n")
+        open(os.path.join(borrowed_ordinary, "AGENTS.md"), "w").write(
+            "still owned here\n")
+        borrowed_ordinary_run = Run(live_repo, ci=True)
+        borrowed_ordinary_run.c8_reserved_basenames()
+        expect_red("C8 rejects a pointer borrowing an ordinary repository's admin",
+                   lambda: any(c == "C8" and "borrowed-ordinary-admin/AGENTS.md" in d
+                               for c, d in borrowed_ordinary_run.failures))
+        shutil.rmtree(borrowed_ordinary)
+        shutil.rmtree(sibling_repo)
+
+        # `borrowed-ordinary-admin` above carries the same `.git`-file-into-an-ordinary-
+        # repository shape, but nothing records that directory in the owner's index, so
+        # `ls-files --stage` returns no record at all and the index-mode comparison behind
+        # it is never reached. Two conjuncts guard that comparison and each needs its own
+        # tree, because a tree that reaches one leaves the other unasserted.
+        #
+        # First: a stale index TYPE. The owner recorded `sub` as a regular file and the
+        # working tree now holds a directory there, so the pathspec yields a `100644`
+        # record AT the queried path. Only the recorded mode separates that from a
+        # submodule, and reading any mode as a gitlink prunes the directory whole.
+        stale_type_owner = os.path.join(td, "stale-index-type-owner")
+        stale_type_sibling = os.path.join(td, "stale-index-type-sibling")
+        os.makedirs(stale_type_owner)
+        for repository in (stale_type_owner, stale_type_sibling):
+            subprocess.run(["git", "init", "--quiet", repository], check=True)
+        open(os.path.join(stale_type_owner, "README.md"), "w").write("root\n")
+        open(os.path.join(stale_type_owner, "sub"), "w").write("a regular file\n")
+        subprocess.run(
+            ["git", "-C", stale_type_owner, "add", "README.md", "sub"], check=True)
+        subprocess.run(
+            ["git", "-C", stale_type_owner, "-c", "user.name=fixture", "-c",
+             "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "fixture"],
+            check=True)
+        os.remove(os.path.join(stale_type_owner, "sub"))
+        os.makedirs(os.path.join(stale_type_owner, "sub"))
+        open(os.path.join(stale_type_owner, "sub", "CLAUDE.md"), "w").write(
+            "still owned here\n")
+        open(os.path.join(stale_type_owner, "sub", ".git"), "wb").write(
+            b"gitdir: " + os.fsencode(os.path.join(stale_type_sibling, ".git")) + b"\n")
+        stale_type_staged = subprocess.run(
+            ["git", "-C", stale_type_owner, "ls-files", "--stage", "-z", "--", "sub"],
+            capture_output=True).stdout
+        stale_type_run = Run(stale_type_owner, ci=True)
+        stale_type_run.c8_reserved_basenames()
+        # Without this the proof above can degrade into agreement: a Git that stopped
+        # producing the record, or a pathspec that stopped matching, leaves an empty
+        # inventory that no mode comparison ever reads and the tree looks discriminating
+        # while asserting nothing.
+        expect_red(
+            "C8 stale-index-type fixture records that path as a regular file, not a "
+            "gitlink",
+            lambda: stale_type_staged.startswith(b"100644 ")
+            and stale_type_staged.rstrip(b"\0").endswith(b"\tsub"),
+        )
+        expect_red(
+            "C8 reads a stale index type as a regular file, not a submodule boundary",
+            lambda: any(c == "C8" and "sub/CLAUDE.md" in d
+                        for c, d in stale_type_run.failures),
+        )
+
+        # The exit status decides here too. A failed index query can still have written
+        # gitlink-shaped bytes. Neither parsing those bytes nor treating the query as an
+        # ordinary negative is valid; ownership is unknown and the inventory must fail.
+        def stale_type_partial_stage(args, **kwargs):
+            if "--stage" in args:
+                return subprocess.CompletedProcess(
+                    args, 1, stdout=b"160000 " + b"0" * 40 + b" 0\tsub\0",
+                    stderr=b"planted")
+            return subprocess.run(args, **kwargs)
+
+        stale_type_partial_run = Run(stale_type_owner, ci=True)
+        stale_type_partial_run.c8_reserved_basenames(runner=stale_type_partial_stage)
+        expect_red(
+            "C8 fails closed on gitlink-shaped output from a failed index query",
+            lambda: any(c == "C8" and "cannot inspect indexed gitlink" in d
+                        and "git ls-files --stage exited 1: planted" in d
+                        for c, d in stale_type_partial_run.failures),
+        )
+        shutil.rmtree(stale_type_owner)
+        shutil.rmtree(stale_type_sibling)
+
+        # Second: a gitlink recorded BENEATH the queried directory. The pathspec now
+        # yields a genuine `160000` record, so the mode comparison passes and only the
+        # recorded-path comparison is left. An owner holding one submodule under a
+        # directory does not make that directory somebody else's worktree.
+        gitlink_beneath_owner = os.path.join(td, "gitlink-beneath-owner")
+        gitlink_beneath_sibling = os.path.join(td, "gitlink-beneath-sibling")
+        os.makedirs(gitlink_beneath_owner)
+        for repository in (gitlink_beneath_owner, gitlink_beneath_sibling):
+            subprocess.run(["git", "init", "--quiet", repository], check=True)
+        open(os.path.join(gitlink_beneath_owner, "README.md"), "w").write("root\n")
+        subprocess.run(
+            ["git", "-C", gitlink_beneath_owner, "add", "README.md"], check=True)
+        subprocess.run(
+            ["git", "-C", gitlink_beneath_owner, "-c", "user.name=fixture", "-c",
+             "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "fixture"],
+            check=True)
+        beneath_commit = subprocess.run(
+            ["git", "-C", gitlink_beneath_owner, "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True).stdout.strip()
+        subprocess.run(
+            ["git", "-C", gitlink_beneath_owner, "update-index", "--add", "--cacheinfo",
+             f"160000,{beneath_commit},sub/inner"], check=True)
+        os.makedirs(os.path.join(gitlink_beneath_owner, "sub"))
+        open(os.path.join(gitlink_beneath_owner, "sub", "AGENTS.md"), "w").write(
+            "still owned here\n")
+        open(os.path.join(gitlink_beneath_owner, "sub", ".git"), "wb").write(
+            b"gitdir: " + os.fsencode(
+                os.path.join(gitlink_beneath_sibling, ".git")) + b"\n")
+        beneath_staged = subprocess.run(
+            ["git", "-C", gitlink_beneath_owner, "ls-files", "--stage", "-z",
+             "--", "sub"], capture_output=True).stdout
+        gitlink_beneath_run = Run(gitlink_beneath_owner, ci=True)
+        gitlink_beneath_run.c8_reserved_basenames()
+        expect_red(
+            "C8 gitlink-beneath fixture yields a real gitlink record under that pathspec",
+            lambda: beneath_staged.startswith(b"160000 ")
+            and beneath_staged.rstrip(b"\0").endswith(b"\tsub/inner"),
+        )
+        expect_red(
+            "C8 requires the gitlink record to be the queried path, not one beneath it",
+            lambda: any(c == "C8" and "sub/AGENTS.md" in d
+                        for c, d in gitlink_beneath_run.failures),
+        )
+        shutil.rmtree(gitlink_beneath_owner)
+        shutil.rmtree(gitlink_beneath_sibling)
+
+        standalone_owner_admin = os.path.join(td, "standalone-owner-admin")
+        standalone_owner_tree = os.path.join(td, "standalone-owner-tree")
+        subprocess.run(
+            ["git", "init", "--quiet", "--separate-git-dir",
+             standalone_owner_admin, standalone_owner_tree], check=True)
+        borrowed_standalone = os.path.join(live_repo, "borrowed-standalone-admin")
+        os.makedirs(borrowed_standalone)
+        open(os.path.join(borrowed_standalone, ".git"), "wb").write(
+            b"gitdir: " + os.fsencode(standalone_owner_admin) + b"\n")
+        open(os.path.join(borrowed_standalone, "CLAUDE.md"), "w").write(
+            "still owned here\n")
+        borrowed_standalone_run = Run(live_repo, ci=True)
+        borrowed_standalone_run.c8_reserved_basenames()
+        expect_red("C8 rejects a pointer borrowing an unbound standalone gitdir",
+                   lambda: any(c == "C8" and "borrowed-standalone-admin/CLAUDE.md" in d
+                               for c, d in borrowed_standalone_run.failures))
+        shutil.rmtree(borrowed_standalone)
+        shutil.rmtree(standalone_owner_tree)
+        shutil.rmtree(standalone_owner_admin)
+
+        separate_admin = os.path.join(td, "separate-git-admin")
+        separate_tree = os.path.join(live_repo, "separate-git-tree")
+        subprocess.run(
+            ["git", "init", "--quiet", "--separate-git-dir", separate_admin,
+             separate_tree], check=True)
+        open(os.path.join(separate_tree, "CLAUDE.md"), "w").write("other owner\n")
+        unbound_separate_run = Run(live_repo, ci=True)
+        unbound_separate_run.c8_reserved_basenames()
+        expect_red("C8 rejects an external gitdir with no candidate binding",
+                   lambda: any(c == "C8" and "separate-git-tree/CLAUDE.md" in d
+                               for c, d in unbound_separate_run.failures))
+        subprocess.run(
+            ["git", "--git-dir", separate_admin, "config", "core.worktree",
+             separate_tree], check=True)
+        separate_config_queries = []
+        separate_config_environments = []
+        def record_separate_config(args, **kwargs):
+            separate_config_environments.append(dict(kwargs.get("env", {})))
+            if (args[:3] == ["git", "--git-dir", os.path.realpath(separate_admin)]
+                    and args[-2:] == ["--get", "core.worktree"]):
+                separate_config_queries.append(args)
+            return subprocess.run(args, **kwargs)
+        bound_separate_run = Run(live_repo, ci=True)
+        prior_sentinel = os.environ.get("Z_HARNESS_GIT_SENTINEL")
+        prior_config_count = os.environ.get("GIT_CONFIG_COUNT")
+        os.environ["Z_HARNESS_GIT_SENTINEL"] = "retained"
+        os.environ["GIT_CONFIG_COUNT"] = "1"
+        try:
+            bound_separate_run.c8_reserved_basenames(runner=record_separate_config)
+        finally:
+            if prior_sentinel is None:
+                os.environ.pop("Z_HARNESS_GIT_SENTINEL", None)
+            else:
+                os.environ["Z_HARNESS_GIT_SENTINEL"] = prior_sentinel
+            if prior_config_count is None:
+                os.environ.pop("GIT_CONFIG_COUNT", None)
+            else:
+                os.environ["GIT_CONFIG_COUNT"] = prior_config_count
+        expect_red("C8 prunes an external gitdir explicitly bound to its worktree",
+                   lambda: not bound_separate_run.failures)
+        bound_separate_alias_run = Run(case_alias, ci=True)
+        bound_separate_alias_run.c8_reserved_basenames()
+        expect_red(
+            "C8 prunes bound separate gitdirs through a case-alias owner root",
+            lambda: sys.platform != "darwin" or not bound_separate_alias_run.failures,
+        )
+        expect_red("C8 reads only the local admin-owned core.worktree binding",
+                   lambda: {tuple(args) for args in separate_config_queries} == {(
+                       "git", "--git-dir", os.path.realpath(separate_admin), "config",
+                       "--local", "--path", "--null", "--get", "core.worktree",
+                   )}
+                   and separate_config_environments
+                   and all(env.get("Z_HARNESS_GIT_SENTINEL") == "retained"
+                           and "GIT_CONFIG_COUNT" not in env
+                           and not any(key in _GIT_REPOSITORY_ENV for key in env)
+                           for env in separate_config_environments))
+        other_separate_tree = os.path.join(td, "other-separate-tree")
+        os.makedirs(other_separate_tree)
+        subprocess.run(
+            ["git", "--git-dir", separate_admin, "config", "--unset-all",
+             "core.worktree"], check=True)
+        for value in (other_separate_tree, separate_tree):
+            subprocess.run(
+                ["git", "--git-dir", separate_admin, "config", "--add",
+                 "core.worktree", value], check=True)
+        effective_candidate = subprocess.run(
+            ["git", "--git-dir", separate_admin, "config", "--path", "--get",
+             "core.worktree"], capture_output=True, text=True, check=True).stdout.strip()
+        effective_candidate_top = subprocess.run(
+            ["git", "-C", separate_tree, "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, check=True).stdout.strip()
+        effective_candidate_run = Run(live_repo, ci=True)
+        effective_candidate_run.c8_reserved_basenames()
+        expect_red(
+            "C8 prunes a repeated core.worktree whose effective value is the candidate",
+            lambda: (_same_file(effective_candidate, separate_tree)
+                     and _same_file(effective_candidate_top, separate_tree)
+                     and not effective_candidate_run.failures),
+        )
+        subprocess.run(
+            ["git", "--git-dir", separate_admin, "config", "--unset-all",
+             "core.worktree"], check=True)
+        for value in (separate_tree, other_separate_tree):
+            subprocess.run(
+                ["git", "--git-dir", separate_admin, "config", "--add",
+                 "core.worktree", value], check=True)
+        effective_foreign = subprocess.run(
+            ["git", "--git-dir", separate_admin, "config", "--path", "--get",
+             "core.worktree"], capture_output=True, text=True, check=True).stdout.strip()
+        effective_foreign_top = subprocess.run(
+            ["git", "-C", separate_tree, "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, check=True).stdout.strip()
+        effective_foreign_run = Run(live_repo, ci=True)
+        effective_foreign_run.c8_reserved_basenames()
+        expect_red(
+            "C8 rejects a repeated core.worktree whose effective value is foreign",
+            lambda: (_same_file(effective_foreign, other_separate_tree)
+                     and _same_file(effective_foreign_top, other_separate_tree)
+                     and any(c == "C8" and "separate-git-tree/CLAUDE.md" in d
+                             for c, d in effective_foreign_run.failures)),
+        )
+        expect_red(
+            "the separate-gitdir comparison itself rejects a different bound worktree",
+            lambda: not _bound_separate_gitdir(
+                separate_tree, os.path.join(separate_tree, ".git"), subprocess.run),
+        )
+        wrong_binding_run = Run(live_repo, ci=True)
+        wrong_binding_run.c8_reserved_basenames()
+        expect_red("C8 rejects an external gitdir bound to a different worktree",
+                   lambda: any(c == "C8" and "separate-git-tree/CLAUDE.md" in d
+                               for c, d in wrong_binding_run.failures))
+        shutil.rmtree(other_separate_tree)
+        shutil.rmtree(separate_tree)
+        shutil.rmtree(separate_admin)
+
+        # The core.worktree reply is validated by three operands and none was asserted:
+        # replacing the whole condition with `if False:` left this suite green, because on
+        # every existing fixture the downstream comparison rejected the path anyway. These
+        # drive the helper directly so each operand is the only thing standing between the
+        # reply and acceptance. The operands do two different jobs -- the first rejects a
+        # failed query, the other two reject a malformed reply that would otherwise reach
+        # os.path.samefile with an embedded NUL, which raises ValueError where _same_file
+        # catches only OSError.
+        reply_admin = os.path.join(td, "reply-git-admin")
+        reply_tree = os.path.join(td, "reply-git-tree")
+        os.makedirs(reply_admin)
+        os.makedirs(reply_tree)
+        reply_marker = os.path.join(reply_tree, ".git")
+        with open(reply_marker, "w", encoding="utf-8") as fh:
+            fh.write(f"gitdir: {reply_admin}\n")
+        encoded_reply_tree = os.fsencode(reply_tree)
+
+        class _ConfigReply:
+            def __init__(self, returncode, stdout):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = b""
+
+        def reply_runner(returncode, stdout):
+            return lambda args, **kwargs: _ConfigReply(returncode, stdout)
+
+        def malformed_success_is_unknown(stdout):
+            try:
+                _bound_separate_gitdir(
+                    reply_tree, reply_marker, reply_runner(0, stdout))
+            except RepositoryOwnershipError as exc:
+                return "malformed path record" in str(exc)
+            return False
+
+        # The control comes first: without a reply this fixture ACCEPTS, so "rejected" below
+        # means the operand did it, not that the fixture can never be accepted.
+        expect_red(
+            "C8 accepts a separate gitdir whose config binds this worktree",
+            lambda: _bound_separate_gitdir(
+                reply_tree, reply_marker,
+                reply_runner(0, encoded_reply_tree + b"\0")) is True)
+        def failed_config_reply_is_unknown():
+            try:
+                _bound_separate_gitdir(
+                    reply_tree, reply_marker,
+                    reply_runner(1, encoded_reply_tree + b"\0"))
+            except RepositoryOwnershipError as exc:
+                return "core.worktree exited 1" in str(exc)
+            return False
+        expect_red("C8 treats partial output from a failed config query as unknown",
+                   failed_config_reply_is_unknown)
+        expect_red(
+            "C8 types an unterminated successful core.worktree reply as unknown",
+            lambda: malformed_success_is_unknown(encoded_reply_tree + b"\0X"))
+        expect_red(
+            "C8 types a successful two-value core.worktree reply as unknown",
+            lambda: malformed_success_is_unknown(
+                encoded_reply_tree + b"\0" + encoded_reply_tree + b"\0"))
+        shutil.rmtree(reply_tree)
+        shutil.rmtree(reply_admin)
+
+        symlink_admin = os.path.join(td, "symlink-git-admin")
+        symlink_tree = os.path.join(live_repo, "symlink-git-marker")
+        subprocess.run(
+            ["git", "init", "--quiet", "--separate-git-dir", symlink_admin,
+             symlink_tree], check=True)
+        subprocess.run(
+            ["git", "--git-dir", symlink_admin, "config", "core.worktree",
+             symlink_tree], check=True)
+        os.remove(os.path.join(symlink_tree, ".git"))
+        os.symlink(symlink_admin, os.path.join(symlink_tree, ".git"))
+        open(os.path.join(symlink_tree, "GEMINI.md"), "w").write(
+            "still owned here\n")
+        symlink_marker_run = Run(live_repo, ci=True)
+        symlink_marker_run.c8_reserved_basenames()
+        expect_red("C8 rejects a symlinked .git marker even when Git accepts it",
+                   lambda: any(c == "C8" and "symlink-git-marker/GEMINI.md" in d
+                               for c, d in symlink_marker_run.failures))
+        shutil.rmtree(symlink_tree)
+        shutil.rmtree(symlink_admin)
+
+        wrong_parent_tree = os.path.join(live_repo, "wrong-admin-parent")
+        subprocess.run(
+            ["git", "-C", live_repo, "worktree", "add", "--quiet", "--detach",
+             wrong_parent_tree, "HEAD"], check=True)
+        wrong_parent_marker = os.path.join(wrong_parent_tree, ".git")
+        wrong_parent_admin = _gitdir_from_marker(
+            wrong_parent_tree, wrong_parent_marker)
+        relocated_admin = os.path.join(live_repo, ".git", "relocated-admin")
+        shutil.move(wrong_parent_admin, relocated_admin)
+        open(wrong_parent_marker, "wb").write(
+            b"gitdir: " + os.fsencode(relocated_admin) + b"\n")
+        open(os.path.join(relocated_admin, "commondir"), "wb").write(b"..\n")
+        open(os.path.join(wrong_parent_tree, "AGENTS.md"), "w").write(
+            "still owned here\n")
+        wrong_parent_run = Run(live_repo, ci=True)
+        wrong_parent_run.c8_reserved_basenames()
+        expect_red("C8 rejects linked metadata outside the common worktrees directory",
+                   lambda: any(c == "C8" and "wrong-admin-parent/AGENTS.md" in d
+                               for c, d in wrong_parent_run.failures))
+        shutil.rmtree(wrong_parent_tree)
+        shutil.rmtree(relocated_admin)
+
+        stale_backlink_tree = os.path.join(live_repo, "stale-backlink")
+        subprocess.run(
+            ["git", "-C", live_repo, "worktree", "add", "--quiet", "--detach",
+             stale_backlink_tree, "HEAD"], check=True)
+        stale_backlink_marker = os.path.join(stale_backlink_tree, ".git")
+        stale_backlink_admin = _gitdir_from_marker(
+            stale_backlink_tree, stale_backlink_marker)
+        open(os.path.join(stale_backlink_admin, "gitdir"), "wb").write(
+            os.fsencode(os.path.join(live_repo, "missing", ".git")) + b"\n")
+        open(os.path.join(stale_backlink_tree, "CLAUDE.md"), "w").write(
+            "still owned here\n")
+        stale_backlink_run = Run(live_repo, ci=True)
+        stale_backlink_run.c8_reserved_basenames()
+        expect_red("C8 rejects linked metadata whose reciprocal backlink is stale",
+                   lambda: any(c == "C8" and "stale-backlink/CLAUDE.md" in d
+                               for c, d in stale_backlink_run.failures))
+        shutil.rmtree(stale_backlink_tree)
+        shutil.rmtree(stale_backlink_admin)
+
+        unterminated_tree = os.path.join(live_repo, "unterminated-marker")
+        subprocess.run(
+            ["git", "-C", live_repo, "worktree", "add", "--quiet", "--detach",
+             unterminated_tree, "HEAD"], check=True)
+        unterminated_marker = os.path.join(unterminated_tree, ".git")
+        unterminated_admin = _gitdir_from_marker(unterminated_tree, unterminated_marker)
+        marker_bytes = open(unterminated_marker, "rb").read()
+        open(unterminated_marker, "wb").write(marker_bytes[:-1])
+        open(os.path.join(unterminated_tree, "GEMINI.md"), "w").write(
+            "still owned here\n")
+        unterminated_run = Run(live_repo, ci=True)
+        unterminated_run.c8_reserved_basenames()
+        expect_red("C8 rejects Git metadata without its required final terminator",
+                   lambda: any(c == "C8" and "unterminated-marker/GEMINI.md" in d
+                               for c, d in unterminated_run.failures))
+        shutil.rmtree(unterminated_tree)
+        shutil.rmtree(unterminated_admin)
+
+        # Truncating the terminator above also destroys the path, so the requirement and
+        # the unconditional final-byte strip that follows it agree and neither is isolated:
+        # dropping the requirement still leaves a directory that does not exist. Give the
+        # marker one byte of slack -- a trailing separator, still unterminated -- and they
+        # disagree. Git accepts the marker either way, so only the requirement stands
+        # between the strip and a valid admin directory to prune the tree with.
+        slack_tree = os.path.join(live_repo, "unterminated-slack-marker")
+        subprocess.run(
+            ["git", "-C", live_repo, "worktree", "add", "--quiet", "--detach",
+             slack_tree, "HEAD"], check=True)
+        slack_marker = os.path.join(slack_tree, ".git")
+        slack_admin = _gitdir_from_marker(slack_tree, slack_marker)
+        open(slack_marker, "wb").write(b"gitdir: " + os.fsencode(slack_admin) + b"/")
+        open(os.path.join(slack_tree, "CLAUDE.md"), "w").write("still owned here\n")
+        slack_prefix = subprocess.run(
+            ["git", "-C", slack_tree, "rev-parse", "--show-prefix"],
+            capture_output=True)
+        slack_run = Run(live_repo, ci=True)
+        slack_run.c8_reserved_basenames()
+        # The rejection has to be this file's doing. If Git itself refused the marker, the
+        # exact-root gate would reject the tree first and the requirement below would be
+        # asserted by a fixture that never reaches it.
+        expect_red(
+            "C8 unterminated-slack fixture is a marker Git itself still accepts",
+            lambda: slack_prefix.returncode == 0
+            and bytes(slack_prefix.stdout) in (b"\n", b"\r\n")
+            and os.path.isdir(slack_admin)
+            and open(slack_marker, "rb").read()[:-1].endswith(os.fsencode(slack_admin)),
+        )
+        expect_red(
+            "C8 requires the final terminator even when the last byte is strippable slack",
+            lambda: any(c == "C8" and "unterminated-slack-marker/CLAUDE.md" in d
+                        for c, d in slack_run.failures),
+        )
+        shutil.rmtree(slack_tree)
+        shutil.rmtree(slack_admin)
+
+        # Same condition, other operand. A marker carrying an embedded NUL is one Git
+        # itself accepts -- it stops at the newline -- so nothing upstream rejects the
+        # tree, and the NUL never reaches a path call only because this clause drops it
+        # first. Without the clause the byte reaches `realpath`, which raises ValueError
+        # rather than returning; the inventory catches OSError only, so the gate would
+        # end on a traceback with no verdict line instead of naming a failure.
+        nul_tree = os.path.join(live_repo, "nul-bearing-marker")
+        subprocess.run(
+            ["git", "-C", live_repo, "worktree", "add", "--quiet", "--detach",
+             nul_tree, "HEAD"], check=True)
+        nul_marker = os.path.join(nul_tree, ".git")
+        nul_admin = _gitdir_from_marker(nul_tree, nul_marker)
+        open(nul_marker, "wb").write(
+            b"gitdir: " + os.fsencode(nul_admin) + b"\0junk\n")
+        open(os.path.join(nul_tree, "AGENTS.md"), "w").write("still owned here\n")
+        nul_prefix = subprocess.run(
+            ["git", "-C", nul_tree, "rev-parse", "--show-prefix"], capture_output=True)
+        # The scan runs inside the proof on purpose. Dropping the clause makes this tree
+        # raise out of the inventory, and a raise at fixture-construction time takes the
+        # whole meta-suite down before it can print a receipt -- the missing-receipt arm,
+        # which says only that something broke. Inside, the same raise is caught and
+        # attributed to the proof whose subject it is.
+        def c8_drops_a_nul_bearing_marker():
+            run = Run(live_repo, ci=True)
+            run.c8_reserved_basenames()
+            return any(c == "C8" and "nul-bearing-marker/AGENTS.md" in d
+                       for c, d in run.failures)
+
+        expect_red(
+            "C8 nul-bearing fixture is a marker Git itself still accepts",
+            lambda: nul_prefix.returncode == 0
+            and bytes(nul_prefix.stdout) in (b"\n", b"\r\n")
+            and b"\0" in open(nul_marker, "rb").read(),
+        )
+        expect_red(
+            "C8 drops a NUL-bearing marker instead of carrying the byte into a path call",
+            c8_drops_a_nul_bearing_marker,
+        )
+        shutil.rmtree(nul_tree)
+        shutil.rmtree(nul_admin)
+
+        submodule_source = os.path.join(td, "submodule-source")
+        subprocess.run(["git", "init", "--quiet", submodule_source], check=True)
+        subprocess.run(
+            ["git", "-C", submodule_source, "-c", "user.name=fixture", "-c",
+             "user.email=fixture@example.invalid", "commit", "--quiet", "--allow-empty",
+             "-m", "fixture"], check=True)
+        submodule = os.path.join(live_repo, "nested-submodule")
+        subprocess.run(
+            ["git", "-C", live_repo, "-c", "protocol.file.allow=always", "submodule",
+             "add", "--quiet", submodule_source, "nested-submodule"], check=True)
+        submodule_marker = os.path.join(submodule, ".git")
+        submodule_admin = _gitdir_from_marker(submodule, submodule_marker)
+        subprocess.run(
+            ["git", "--git-dir", submodule_admin, "config", "--unset", "core.worktree"],
+            check=True)
+        open(os.path.join(submodule, "AGENTS.md"), "w").write("other owner\n")
+        submodule_run = Run(live_repo, ci=True)
+        submodule_run.c8_reserved_basenames()
+        expect_red("C8 prunes an indexed nested submodule boundary",
+                   lambda: not submodule_run.failures)
+
+        submodule_marker_bytes = open(submodule_marker, "rb").read()
+        os.remove(submodule_marker)
+        broken_submodule_run = Run(live_repo, ci=True)
+        broken_submodule_run.c8_reserved_basenames()
+        expect_red("C8 walks an indexed submodule whose live Git boundary is missing",
+                   lambda: any(c == "C8" and "nested-submodule/AGENTS.md" in d
+                               for c, d in broken_submodule_run.failures))
+        open(submodule_marker, "wb").write(submodule_marker_bytes)
+
+        ignored = os.path.join(live_repo, "ignored")
+        os.makedirs(ignored)
+        open(os.path.join(live_repo, ".gitignore"), "w").write("ignored/\n")
+        open(os.path.join(ignored, "AGENTS.md"), "w").write("ignored but live\n")
+        ignored_run = Run(live_repo, ci=True)
+        ignored_run.c8_reserved_basenames()
+        expect_red("C8 separately reaches an ignored reserved context basename",
+                   lambda: any(c == "C8" and "ignored/AGENTS.md" in d
+                               for c, d in ignored_run.failures))
+
+        fallback_root = os.path.join(td, "fallback-live-context")
+        os.makedirs(fallback_root)
+        open(os.path.join(fallback_root, "README.md"), "w").write("root\n")
+        fallback_fake = os.path.join(fallback_root, "invalid-marker")
+        os.makedirs(fallback_fake)
+        open(os.path.join(fallback_fake, ".git"), "w").write("not a repository\n")
+        open(os.path.join(fallback_fake, "AGENTS.md"), "w").write("still owned here\n")
+        fallback_fake_run = Run(fallback_root, ci=True)
+        fallback_fake_run.c8_reserved_basenames()
+        expect_red("C8 filesystem fallback does not trust a fake .git marker",
+                   lambda: any(c == "C8" and "invalid-marker/AGENTS.md" in d
+                               for c, d in fallback_fake_run.failures))
+
+        shutil.rmtree(fallback_fake)
+        fallback_nested = os.path.join(fallback_root, "nested-repository")
+        subprocess.run(["git", "init", "--quiet", fallback_nested], check=True)
+        open(os.path.join(fallback_nested, "CLAUDE.md"), "w").write("other owner\n")
+        fallback_nested_run = Run(fallback_root, ci=True)
+        fallback_nested_run.c8_reserved_basenames()
+        expect_red("C8 filesystem fallback prunes a real nested repository",
+                   lambda: not fallback_nested_run.failures)
+
+        fallback_separate_admin = os.path.join(td, "fallback-separate-admin")
+        fallback_separate_tree = os.path.join(
+            fallback_root, "separate-git-repository")
+        subprocess.run(
+            ["git", "init", "--quiet", "--separate-git-dir",
+             fallback_separate_admin, fallback_separate_tree], check=True)
+        open(os.path.join(fallback_separate_tree, "GEMINI.md"), "w").write(
+            "other owner\n")
+        fallback_unbound_run = Run(fallback_root, ci=True)
+        fallback_unbound_run.c8_reserved_basenames()
+        expect_red("C8 filesystem fallback rejects an unbound external gitdir",
+                   lambda: any(c == "C8" and "separate-git-repository/GEMINI.md" in d
+                               for c, d in fallback_unbound_run.failures))
+        subprocess.run(
+            ["git", "--git-dir", fallback_separate_admin, "config", "core.worktree",
+             fallback_separate_tree], check=True)
+        fallback_bound_run = Run(fallback_root, ci=True)
+        fallback_bound_run.c8_reserved_basenames()
+        expect_red("C8 filesystem fallback prunes an explicitly bound external gitdir",
+                   lambda: not fallback_bound_run.failures)
+
+        os.makedirs(os.path.join(live_repo, ".github"))
+        open(os.path.join(live_repo, ".github", "CLAUDE.md"), "w").write("visible\n")
+        github_live_run = Run(live_repo, ci=True)
+        github_live_run.c8_reserved_basenames()
+        expect_red("C8 Git mode keeps .github visible",
+                   lambda: any(c == "C8" and ".github/CLAUDE.md" in d
+                               for c, d in github_live_run.failures))
         r5 = Run(td, ci=True)
         r5.c9_codex_package()
         expect_red("C9 goes red on absent plugin package",
@@ -1599,7 +4369,8 @@ def selftest():
         open(os.path.join(valid, "CLAUDE.md"), "w").write("@AGENTS.md\n")
         open(os.path.join(valid, "settings.json"), "w").write("{}")
         manifest = {
-            "name": "z-harness", "version": "0.1.0", "description": "fixture",
+            "name": "z-harness", "version": CURRENT_PLUGIN_VERSION,
+            "description": "fixture",
             "author": {"name": "Chris"}, "skills": "./skills/",
             "interface": {
                 "displayName": "z-harness", "shortDescription": "fixture",
@@ -1641,7 +4412,7 @@ def selftest():
                     }]},
                     {"matcher": "^Agent$", "hooks": [{
                         "type": "command",
-                        "command": "python3 \"${PLUGIN_ROOT}/hooks/spawn_preflight_guard.py\" --runtime codex",
+                        "command": "python3 \"${PLUGIN_ROOT}/hooks/spawn_preflight_guard.py\" --runtime codex --require-scratch",
                         "timeout": 5,
                     }]},
                 ],
@@ -1664,6 +4435,15 @@ def selftest():
 
         baseline = c9_after()
         expect_red("C9 valid fixture has no failures", lambda: not baseline.failures)
+
+        stale_release = json.loads(json.dumps(manifest))
+        stale_release["version"] = "0.3.0"
+        stale_release_run = c9_after(mutated_manifest=stale_release)
+        expect_red(
+            "C9 rejects a manifest that keeps the predecessor release identity",
+            lambda: any("reviewed release" in detail
+                        for _check, detail in stale_release_run.failures),
+        )
 
         bad_top = json.loads(json.dumps(hook_fixture))
         bad_top["version"] = 1

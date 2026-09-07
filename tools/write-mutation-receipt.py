@@ -1,0 +1,2843 @@
+#!/usr/bin/env python3
+"""Run deterministic guard mutations and build the tracked coverage receipt.
+
+Each mutation runs the real suite from a private on-disk tree. Shards write raw
+fragments; aggregation reconstructs the exact plan, rejects missing or overlapping IDs,
+and reduces platform-specific counts to the stable fact the receipt claims: whether the
+shipped gate catches that mutation. Receipt changes require an explicit acceptance flag.
+"""
+from __future__ import annotations
+
+import argparse
+import ast
+import contextlib
+import hashlib
+import io
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent.parent
+RECEIPT = ROOT / "contracts/goldens/mutation-receipt.json"
+SUMMARY = ROOT / "contracts/goldens/mutation-summary.md"
+GREP = "hooks/guards/git_grep_engine_guard.py"
+ZSH = "hooks/guards/zsh_rev_modifier_guard.py"
+BASH = "hooks/bash_command_guard.py"
+STOP = "hooks/announced_work_guard.py"
+OWNERSHIP = "tools/repository_ownership.py"
+# Every mutation-owned suite participates in source custody and the green baseline. Only
+# the three command guards participate in automatic uppercase-collection removal; Stop and
+# ownership use focused site mutations so the sweep does not grade their fixture vocabularies.
+GUARDS = (GREP, ZSH, BASH, STOP, OWNERSHIP)
+COLLECTION_GUARDS = (GREP, ZSH, BASH)
+SCHEMA_VERSION = 3
+GENERATOR = "tools/write-mutation-receipt.py"
+NOTE = ("which guard mutations the shipped suites catch; each result's reason is an observation from the host that generated it, not a cross-platform fact")
+OUTCOMES = {"caught", "survived"}
+# The reason a kill was scored, recorded per result because the outcome alone cannot be
+# graded. ``result_kill`` scores a kill when the recorded check count moves, and a guard
+# that increments its counter once per element of the collection under mutation moves that
+# count on ANY removal -- so the kill is decided by loop structure before an assertion runs.
+# Measured over CROSS_VERSION_ALIAS_PROOF, 17 of its 22 elements were killed that way with
+# zero assertions failing, while the deletion moved real verdicts from deny to ask. Dropping
+# the reason made a predetermined kill and a detection read identically in the artifact.
+UNASSERTED_KILL_REASON = "exact-check-count"
+UNASSERTED_KILL_CEILING = 1
+KILL_REASONS = frozenset({
+    "suite-failure", "selector-failure", UNASSERTED_KILL_REASON, "survived",
+    "timeout",
+})
+# Fields whose value is an observation of the host that produced it rather than a fact about
+# the guards. Whether an assertion fires can differ between environments -- deleting "W" from
+# MOD_UNMODELLED reddens a probe on a zsh that consumes that letter as a modifier and only
+# moves the recorded check count on a zsh that does not -- so anything derived from them is
+# host-specific. The receipt and its summary are compared byte for byte between the host that
+# writes them and the CI runner that re-measures, so NOTHING either artifact is compared on
+# may be derived from these. They are recorded as evidence and projected out before any
+# comparison; `platform_stable` is the single place that removes them, and `summary_text`
+# consumes only its output so a new summary field cannot reintroduce one.
+HOST_OBSERVED_RESULT_FIELDS = frozenset({"reason"})
+HOST_OBSERVED_RECEIPT_KEYS = frozenset({"unasserted_kills"})
+RECEIPT_KEYS = (
+    "schema_version", "generated_by", "note", "generator_sha256",
+    "source_digests", "plan_sha256", "baseline", "sweep_exclusions",
+    "results", "survivors", "unasserted_kills", "caught", "total",
+)
+FRAGMENT_KEYS = (
+    "schema_version", "kind", "head_sha", "generator_sha256", "source_digests",
+    "plan_sha256", "shard", "baseline", "results",
+)
+
+
+def qname(module: str, name: str) -> str:
+    return f"{module}::{name}"
+
+
+SWEEP_EXCLUSIONS = {
+    qname(GREP, "FIXTURES"): "fixture corpus; removing a fixture measures the grader",
+    qname(GREP, "GREP_LONG_PATTERN_ARG"):
+        "empty grammar collection has no element mutation; absence is fixture-pinned",
+    qname(GREP, "_GIT_AUTHORITY_CACHE"):
+        "runtime memoization map, not a guarded membership collection",
+    qname(GREP, "_EQUALS_LOOKUP_CACHE"):
+        "runtime memoization map, not a guarded membership collection",
+    qname(ZSH, "FIXTURES"): "fixture corpus; removing a fixture measures the grader",
+}
+
+CHARSET_COLLECTIONS = {
+    qname(GREP, "PCRE_ESCAPE_LETTERS"),
+    qname(GREP, "GREP_SHORT_VALUE"),
+    qname(GREP, "GREP_SHORT_NOARG"),
+    qname(ZSH, "MODS"),
+    qname(ZSH, "MOD_PREFIXES"),
+    qname(ZSH, "MOD_UNMODELLED"),
+}
+
+
+# ``timeout`` is an allowed kill only for the edit that restores an unbounded traversal.
+SITE_MUTATIONS = (
+    {
+        "label": "effective core.worktree scalar lookup dropped", "module": OWNERSHIP,
+        "anchor": (
+            "             \"--get\", \"core.worktree\"], capture_output=True, text=False)"),
+        "replacement": (
+            "             \"--get-all\", \"core.worktree\"], capture_output=True, text=False)"),
+        "selectors": (
+            "a repeated core.worktree binds the effective candidate Git recognises",),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "whole report-token membership dropped", "module": STOP,
+        "anchor": "        if word in REPORT_TERMS:",
+        "replacement": "        if any(term in word for term in REPORT_TERMS):",
+        "selectors": (
+            "main blocks embedded report substrings after a retained activity noun",),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "productive complement tokens dropped", "module": STOP,
+        "anchor": (
+            "REPORT_COMPLEMENTS = frozenset({\n"
+            "    \"whether\", \"what\", \"whatever\", \"why\", \"where\", \"wherever\", \"how\", \"however\",\n"
+            "    \"which\", \"whichever\", \"who\", \"whoever\", \"whom\", \"whomever\", \"whose\",\n"
+            "})"),
+        "replacement": (
+            "REPORT_COMPLEMENTS = frozenset({\n"
+            "    \"whether\", \"what\", \"why\", \"where\", \"how\", \"which\", \"who\", \"whom\", \"whose\",\n"
+            "})"),
+        "selectors": ("main blocks productive interrogative complements",),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "whole complement-token membership dropped", "module": STOP,
+        "anchor": "        if word in REPORT_CLAUSE_WORDS:",
+        "replacement": (
+            "        if any(word.startswith(item) for item in REPORT_CLAUSE_WORDS):"),
+        "selectors": (
+            "main keeps a hyphenated complement root inside the activity token",),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "hard separator classification dropped", "module": STOP,
+        "anchor": "    if any(mark in separator for mark in (\";\", \"!\", \"?\", \"—\")):",
+        "replacement": (
+            "    if False and any(mark in separator for mark in (\";\", \"!\", \"?\", \"—\")):"),
+        "selectors": (
+            "main blocks attached and decorated historical report clauses",),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "attached period classification dropped", "module": STOP,
+        "anchor": (
+            "        if any(char.isspace() for char in after) or following_word[:1].isupper():"),
+        "replacement": "        if any(char.isspace() for char in after):",
+        "selectors": (
+            "main blocks an attached full-stop historical report clause",),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "decorated colon classification dropped", "module": STOP,
+        "anchor": "    if \":\" in separator:",
+        "replacement": "    if False and \":\" in separator:",
+        "selectors": ("main blocks a unicode colon-labelled historical report",),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "comma adjective distinction dropped", "module": STOP,
+        "anchor": (
+            "    comma = REPORT_COMMA_TAIL.match(remainder, report_end)\n"
+            "    if not comma:\n"
+            "        return False\n"
+            "    # Once a comma begins, its following phrase cannot reliably reveal whether the report\n"
+            "    # word was a predicate (``returning errors``) or another prenominal modifier\n"
+            "    # (``quarantined in CI tests``). Require the evidence before the report instead.\n"
+            "    return comma_subject_is_clear(core_words)"),
+        "replacement": (
+            "    comma = REPORT_COMMA_TAIL.match(remainder, report_end)\n"
+            "    if not comma:\n"
+            "        return False\n"
+            "    # Once a comma begins, its following phrase cannot reliably reveal whether the report\n"
+            "    # word was a predicate (``returning errors``) or another prenominal modifier\n"
+            "    # (``quarantined in CI tests``). Require the evidence before the report instead.\n"
+            "    return True"),
+        "selectors": (
+            "main blocks a straight possessive comma modifier",
+            "main blocks an overseas comma modifier",
+            "main blocks a DevOps comma modifier",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "comma predicate continuation dropped", "module": STOP,
+        "anchor": (
+            "    comma = REPORT_COMMA_TAIL.match(remainder, report_end)\n"
+            "    if not comma:\n"
+            "        return False\n"
+            "    # Once a comma begins, its following phrase cannot reliably reveal whether the report\n"
+            "    # word was a predicate (``returning errors``) or another prenominal modifier\n"
+            "    # (``quarantined in CI tests``). Require the evidence before the report instead.\n"
+            "    return comma_subject_is_clear(core_words)"),
+        "replacement": (
+            "    comma = REPORT_COMMA_TAIL.match(remainder, report_end)\n"
+            "    if not comma:\n"
+            "        return False\n"
+            "    # Once a comma begins, its following phrase cannot reliably reveal whether the report\n"
+            "    # word was a predicate (``returning errors``) or another prenominal modifier\n"
+            "    # (``quarantined in CI tests``). Require the evidence before the report instead.\n"
+            "    return False"),
+        "selectors": (
+            "main preserves a participial comma result continuation",
+            "main preserves a terminal comma result adverb",
+            "main preserves a direct plural comma subject",
+            "main preserves an audit comma subject",
+            "main preserves a multiword integration-test comma subject",
+            "main preserves a hundred-test comma subject",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "URL punctuation bypass dropped", "module": STOP,
+        "anchor": (
+            "        if (not url_active\n"
+            "                and report_separator_breaks(outside_separator, original_word)\n"
+            "                and not colon_bridge):"),
+        "replacement": (
+            "        if (report_separator_breaks(outside_separator, original_word)\n"
+            "                and not colon_bridge):"),
+        "selectors": (
+            "main keeps URL query punctuation inside the direct report",
+            "main keeps uppercase URL hostname dots inside the direct report",
+            "main keeps URL semicolons opaque until whitespace",
+            "main keeps URL exclamations opaque until whitespace",
+            "main keeps mixed-case URL dots opaque until whitespace",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "URL semantic-token bypass dropped", "module": STOP,
+        "anchor": (
+            "        if url_active:\n"
+            "            # Locator tokens are neither clause words nor completed-work predicates.\n"
+            "            # Only the first whitespace-bearing separator releases prose parsing.\n"
+            "            previous_word = word\n"
+            "            previous_end = token.end()\n"
+            "            continue"),
+        "replacement": (
+            "        if False and url_active:\n"
+            "            # Locator tokens are neither clause words nor completed-work predicates.\n"
+            "            # Only the first whitespace-bearing separator releases prose parsing.\n"
+            "            previous_word = word\n"
+            "            previous_end = token.end()\n"
+            "            continue"),
+        "selectors": (
+            "main keeps URL complement words opaque",
+            "main ignores report words inside a URL",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "open-group association dropped", "module": STOP,
+        "anchor": "        if not url_active and group_stack:",
+        "replacement": "        if False and group_stack:",
+        "selectors": (
+            "main string blocks a parenthetical nested report",
+            "main string blocks a parenthetical historical report",
+            "main string blocks a bracketed nested report",
+            "main string blocks a curly-quoted nested report",
+            "main content blocks a parenthetical nested report",
+            "main content blocks a parenthetical historical report",
+            "main content blocks a bracketed nested report",
+            "main content blocks a curly-quoted nested report",
+            "main bare blocks a parenthetical nested report",
+            "main bare blocks a parenthetical historical report",
+            "main bare blocks a bracketed nested report",
+            "main bare blocks a curly-quoted nested report",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "inline-code group recognition dropped", "module": STOP,
+        "anchor": "        if character == \"`\":",
+        "replacement": "        if False and character == \"`\":",
+        "selectors": (
+            "main string blocks a single-backtick nested report",
+            "main string blocks a double-backtick nested report",
+            "main string blocks an emphasised inline-code nested report",
+            "main content blocks a single-backtick nested report",
+            "main content blocks a double-backtick nested report",
+            "main content blocks an emphasised inline-code nested report",
+            "main bare blocks a single-backtick nested report",
+            "main bare blocks a double-backtick nested report",
+            "main bare blocks an emphasised inline-code nested report",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "URL prose-release boundary dropped", "module": STOP,
+        "anchor": (
+            "            if url_was_active:\n"
+            "                # URL punctuation before the first whitespace stays locator content,\n"
+            "                # except a trailing run of sentence punctuation against that whitespace,\n"
+            "                # which is prose the way GFM autolinks read it: ``https://x.test, failed``\n"
+            "                # ends the locator at the comma. A closing quote/backtick inside the\n"
+            "                # locator must not become a new prose opener merely because the following\n"
+            "                # token is outside the URL.\n"
+            "                cut = next(index for index, character in enumerate(separator)\n"
+            "                           if character.isspace())\n"
+            "                locator = separator[:cut]\n"
+            "                prose_tail = len(locator) - len(locator.rstrip(\".,;:!?\"))\n"
+            "                separator = separator[cut - prose_tail:]"),
+        "replacement": (
+            "            if False and url_was_active:\n"
+            "                # URL punctuation before the first whitespace stays locator content,\n"
+            "                # except a trailing run of sentence punctuation against that whitespace,\n"
+            "                # which is prose the way GFM autolinks read it: ``https://x.test, failed``\n"
+            "                # ends the locator at the comma. A closing quote/backtick inside the\n"
+            "                # locator must not become a new prose opener merely because the following\n"
+            "                # token is outside the URL.\n"
+            "                cut = next(index for index, character in enumerate(separator)\n"
+            "                           if character.isspace())\n"
+            "                locator = separator[:cut]\n"
+            "                prose_tail = len(locator) - len(locator.rstrip(\".,;:!?\"))\n"
+            "                separator = separator[cut - prose_tail:]"),
+        "selectors": (
+            "main string keeps a URL closing backtick out of prose grouping",
+            "main content keeps a URL closing backtick out of prose grouping",
+            "main bare keeps a URL closing backtick out of prose grouping",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "URL trailing-punctuation trim dropped", "module": STOP,
+        "anchor": (
+            "                cut = next(index for index, character in enumerate(separator)\n"
+            "                           if character.isspace())\n"
+            "                locator = separator[:cut]\n"
+            "                prose_tail = len(locator) - len(locator.rstrip(\".,;:!?\"))\n"
+            "                separator = separator[cut - prose_tail:]"),
+        "replacement": (
+            "                separator = separator[next(\n"
+            "                    index for index, character in enumerate(separator)\n"
+            "                    if character.isspace()):]"),
+        "selectors": (
+            "a comma ending a URL is prose punctuation",
+            "main blocks a report after a URL-ending comma",
+            "a colon ending a URL is prose punctuation",
+            "a semicolon ending a URL is prose punctuation",
+            "main string blocks a report after a URL-ending colon",
+            "main string blocks a report after a URL-ending semicolon",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "escaped group delimiter handling dropped", "module": STOP,
+        "anchor": (
+            "        if (character == \"\\\\\" and index + 1 < len(separator)\n"
+            "                and separator[index + 1] in REPORT_GROUP_ESCAPES):"),
+        "replacement": (
+            "        if (False and character == \"\\\\\" and index + 1 < len(separator)\n"
+            "                and separator[index + 1] in REPORT_GROUP_ESCAPES):"),
+        "selectors": (
+            "main string blocks a predicate after an escaped parenthesis",
+            "main string blocks a predicate after an escaped quote",
+            "main content blocks a predicate after an escaped parenthesis",
+            "main content blocks a predicate after an escaped quote",
+            "main bare blocks a predicate after an escaped parenthesis",
+            "main bare blocks a predicate after an escaped quote",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "straight-single outer predicate closure dropped", "module": STOP,
+        "anchor": "            if group_stack[-1] == \"'\" and original_word.endswith(\"'\"):",
+        "replacement": "            if False and group_stack[-1] == \"'\" and original_word.endswith(\"'\"):",
+        "selectors": (
+            "main string preserves a predicate after a straight-single-quoted subject",
+            "main string preserves a modified predicate after a straight-single-quoted subject",
+            "main content preserves a predicate after a straight-single-quoted subject",
+            "main content preserves a modified predicate after a straight-single-quoted subject",
+            "main bare preserves a predicate after a straight-single-quoted subject",
+            "main bare preserves a modified predicate after a straight-single-quoted subject",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "post-group subject replacement guard dropped", "module": STOP,
+        "anchor": "        if bridge_active and word not in REPORT_TERMS:",
+        "replacement": "        if False and bridge_active and word not in REPORT_TERMS:",
+        "selectors": (
+            "main string blocks a plural possessive inside a straight-single-quoted aside",
+            "main string blocks a quoted noun from replacing the announced activity subject",
+            "main string blocks a noun after a closed parenthetical from replacing the activity subject",
+            "main content blocks a plural possessive inside a straight-single-quoted aside",
+            "main content blocks a quoted noun from replacing the announced activity subject",
+            "main content blocks a noun after a closed parenthetical from replacing the activity subject",
+            "main bare blocks a plural possessive inside a straight-single-quoted aside",
+            "main bare blocks a quoted noun from replacing the announced activity subject",
+            "main bare blocks a noun after a closed parenthetical from replacing the activity subject",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "grouped historical subject ownership dropped", "module": STOP,
+        "anchor": (
+            "        if word in REPORT_TERMS:\n"
+            "            if grouped_historical_subject:\n"
+            "                return False"),
+        "replacement": (
+            "        if word in REPORT_TERMS:\n"
+            "            if False and grouped_historical_subject:\n"
+            "                return False"),
+        "selectors": (
+            "a parenthetical historical subject cannot lend its predicate to the activity",
+            "a parenthetical historical subject retains ownership through a modifier",
+            "a parenthetical historical subject retains ownership through a context",
+            "main string blocks a parenthetical historical subject before its predicate",
+            "main string blocks a parenthetical historical subject through a predicate modifier",
+            "main string blocks a parenthetical historical subject through a bounded context",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "grouped historical compound traversal dropped", "module": STOP,
+        "anchor": (
+            "    while (marker_cursor >= 0\n"
+            "           and marker_distance < REPORT_GROUP_ACTIVITY_PREFIX_LIMIT\n"
+            "           and (prefix[marker_cursor] in REPORT_GROUP_ACTIVITY_MODIFIERS\n"
+            "                or prefix[marker_cursor] in REPORT_ACTIVITY_HEADS)):\n"
+            "        marker_cursor -= 1\n"
+            "        marker_distance += 1"),
+        "replacement": (
+            "    while False:\n"
+            "        marker_cursor -= 1\n"
+            "        marker_distance += 1"),
+        "selectors": (
+            "a latest CI run retains its grouped predicate",
+            "a previous CI run retains its grouped predicate",
+            "a prior test suite retains its grouped predicate",
+            "a last GitHub Actions run retains its grouped predicate",
+            "main string blocks a latest CI run historical subject",
+            "main string blocks a previous CI run historical subject",
+            "main string blocks a prior test-suite historical subject",
+            "main string blocks a last GitHub Actions run historical subject",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "grouped historical compound bound dropped", "module": STOP,
+        "anchor": "           and marker_distance < REPORT_GROUP_ACTIVITY_PREFIX_LIMIT",
+        "replacement": "           and marker_distance >= 0",
+        "selectors": ("four activity-compound words exceed the ownership bound",),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "grouped latest-run distinction dropped", "module": STOP,
+        "anchor": (
+            "             or (word in {\"run\", \"runs\"}\n"
+            "                 and prefix[marker_cursor] in {\"last\", \"latest\"}))"),
+        "replacement": (
+            "             or prefix[marker_cursor] in {\"last\", \"latest\"})"),
+        "selectors": (
+            "a latest workflow appositive still describes the outer test",
+            "main string preserves a latest workflow-test appositive",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "outer-group closure signal dropped", "module": STOP,
+        "anchor": "            if outer_group_closed:",
+        "replacement": "            if False and outer_group_closed:",
+        "selectors": (
+            "main string blocks an empty parenthetical from replacing the activity subject",
+            "main string blocks a spaced empty parenthetical from replacing the activity subject",
+            "main string blocks nested empty groups from replacing the activity subject",
+            "main string blocks empty brackets from replacing the activity subject",
+            "main string blocks empty straight-double quotes from replacing the activity subject",
+            "main string blocks empty straight-single quotes from replacing the activity subject",
+            "main string blocks empty inline code from replacing the activity subject",
+            "main content blocks an empty parenthetical from replacing the activity subject",
+            "main content blocks a spaced empty parenthetical from replacing the activity subject",
+            "main content blocks nested empty groups from replacing the activity subject",
+            "main content blocks empty brackets from replacing the activity subject",
+            "main content blocks empty straight-double quotes from replacing the activity subject",
+            "main content blocks empty straight-single quotes from replacing the activity subject",
+            "main content blocks empty inline code from replacing the activity subject",
+            "main bare blocks an empty parenthetical from replacing the activity subject",
+            "main bare blocks a spaced empty parenthetical from replacing the activity subject",
+            "main bare blocks nested empty groups from replacing the activity subject",
+            "main bare blocks empty brackets from replacing the activity subject",
+            "main bare blocks empty straight-double quotes from replacing the activity subject",
+            "main bare blocks empty straight-single quotes from replacing the activity subject",
+            "main bare blocks empty inline code from replacing the activity subject",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "post-group predicate modifier bridge dropped", "module": STOP,
+        "anchor": "            if word in REPORT_POSTGROUP_MODIFIERS:",
+        "replacement": "            if False and word in REPORT_POSTGROUP_MODIFIERS:",
+        "selectors": (
+            "main string preserves a modified predicate after a straight-single-quoted subject",
+            "main content preserves a modified predicate after a straight-single-quoted subject",
+            "main bare preserves a modified predicate after a straight-single-quoted subject",
+            "main string preserves a common post-group predicate modifier",
+            "main content preserves a common post-group predicate modifier",
+            "main bare preserves a common post-group predicate modifier",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "adjectival group ambiguity guard dropped", "module": STOP,
+        "anchor": "        if report_group_follows(remainder, report_end):",
+        "replacement": "        if False and report_group_follows(remainder, report_end):",
+        "selectors": (
+            "main string blocks a group-modified failure adjective before the activity noun",
+            "main content blocks a group-modified failure adjective before the activity noun",
+            "main bare blocks a group-modified failure adjective before the activity noun",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "colon adjectival group deferral dropped", "module": STOP,
+        "anchor": (
+            "            if grouped_adjective and pending_colon and "
+            "adjectival_predicate:"),
+        "replacement": (
+            "            if grouped_adjective and False and "
+            "adjectival_predicate:"),
+        "selectors": (
+            "main string blocks a colon group-modified failure adjective",
+            "main content blocks a colon group-modified failure adjective",
+            "main bare blocks a colon group-modified failure adjective",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "colon grouped-result tail resolution dropped", "module": STOP,
+        "anchor": (
+            "        if (colon_adjectival_candidate and after_group\n"
+            "                and word in REPORT_POSTGROUP_RESULT_TAILS):\n"
+            "            return True"),
+        "replacement": (
+            "        if (False and colon_adjectival_candidate and after_group\n"
+            "                and word in REPORT_POSTGROUP_RESULT_TAILS):\n"
+            "            return True"),
+        "selectors": (
+            "main string preserves a colon predicate result-group duration adjunct",
+            "main string preserves a colon predicate result-group timestamp adjunct",
+            "main string preserves a colon predicate result-group object adjunct",
+            "main content preserves a colon predicate result-group duration adjunct",
+            "main content preserves a colon predicate result-group timestamp adjunct",
+            "main content preserves a colon predicate result-group object adjunct",
+            "main bare preserves a colon predicate result-group duration adjunct",
+            "main bare preserves a colon predicate result-group timestamp adjunct",
+            "main bare preserves a colon predicate result-group object adjunct",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "colon-to-group predicate bridge dropped", "module": STOP,
+        "anchor": (
+            "            group_colon = soft_colon_predicate_bridge(\n"
+            "                outside_separator, core_last, core_incomplete)"),
+        "replacement": "            group_colon = False",
+        "selectors": (
+            "main string preserves a colon-deferred predicate after a subject aside",
+            "main content preserves a colon-deferred predicate after a subject aside",
+            "main bare preserves a colon-deferred predicate after a subject aside",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "colon bridge same-line boundary dropped", "module": STOP,
+        "anchor": (
+            "    return (\"\\r\" not in separator and \"\\n\" not in separator\n"
+            "            and core_last is not None and core_last not in REPORT_NONFINAL\n"
+            "            and not core_incomplete and colon_label_pending(separator, \"failed\"))"),
+        "replacement": (
+            "    return (core_last is not None and core_last not in REPORT_NONFINAL\n"
+            "            and not core_incomplete and colon_label_pending(separator, \"failed\"))"),
+        "selectors": ("a newline keeps a colon from deferring into a group",),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "colon predicate-modifier bridge dropped", "module": STOP,
+        "anchor": "        if colon_bridge:\n            colon_pending = True",
+        "replacement": "        if False and colon_bridge:\n            colon_pending = True",
+        "selectors": (
+            "main string blocks an unknown direct-colon context",
+            "main content blocks an unknown direct-colon context",
+            "main bare blocks an unknown direct-colon context",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "colon predicate bridge classification dropped", "module": STOP,
+        "anchor": (
+            "        colon_bridge = (not url_active\n"
+            "                        and soft_colon_predicate_bridge(\n"
+            "                            outside_separator, core_last, core_incomplete)\n"
+            "                        and (word in REPORT_POSTGROUP_MODIFIERS\n"
+            "                             or word in REPORT_POSTGROUP_CONTEXTS))"),
+        "replacement": (
+            "        colon_bridge = (False and not url_active\n"
+            "                        and soft_colon_predicate_bridge(\n"
+            "                            outside_separator, core_last, core_incomplete)\n"
+            "                        and (word in REPORT_POSTGROUP_MODIFIERS\n"
+            "                             or word in REPORT_POSTGROUP_CONTEXTS))"),
+        "selectors": (
+            "main string preserves a colon-deferred modifier after a subject aside",
+            "main string preserves a direct colon predicate modifier",
+            "main content preserves a colon-deferred modifier after a subject aside",
+            "main bare preserves a direct colon predicate modifier",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "adjectival group subject-resume bridge dropped", "module": STOP,
+        "anchor": "            if adjectival_group_modifier:",
+        "replacement": "            if False and adjectival_group_modifier:",
+        "selectors": (
+            "main string preserves a later predicate after an adjective group",
+            "main content preserves a later predicate after an adjective group",
+            "main bare preserves a later predicate after an adjective group",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "adjectival group modifier state dropped", "module": STOP,
+        "anchor": (
+            "                if report_group_follows(remainder, token.end()):\n"
+            "                    adjectival_group_modifier = True"),
+        "replacement": (
+            "                if False and report_group_follows(remainder, token.end()):\n"
+            "                    adjectival_group_modifier = True"),
+        "selectors": (
+            "main string preserves a later predicate after an adjective group",
+            "main content preserves a later predicate after an adjective group",
+            "main bare preserves a later predicate after an adjective group",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "bounded post-group context bridge dropped", "module": STOP,
+        "anchor": "            if word in REPORT_POSTGROUP_CONTEXTS:",
+        "replacement": "            if False and word in REPORT_POSTGROUP_CONTEXTS:",
+        "selectors": (
+            "main string preserves a bounded post-group CI adjunct",
+            "main content preserves a bounded post-group CI adjunct",
+            "main bare preserves a bounded post-group CI adjunct",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "post-group context object validation dropped", "module": STOP,
+        "anchor": "            if word not in REPORT_POSTGROUP_CONTEXTS[context_preposition]:",
+        "replacement": (
+            "            if False and word not in "
+            "REPORT_POSTGROUP_CONTEXTS[context_preposition]:"),
+        "selectors": (
+            "main string blocks an unknown post-group context",
+            "main content blocks an unknown post-group context",
+            "main bare blocks an unknown post-group context",
+        ),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "unexpected judge exception block dropped", "module": STOP,
+        "anchor": (
+            "    except BaseException as exc:\n"
+            "        if off:\n"
+            "            return 0\n"
+            "        why = f\"internal guard error ({type(exc).__name__})\"\n"
+            "        print(DRIFT_MSG.format(v=VERSION, why=why), file=sys.stderr)\n"
+            "        return 2"),
+        "replacement": (
+            "    except Exception as exc:\n"
+            "        if off:\n"
+            "            return 0\n"
+            "        why = f\"internal guard error ({type(exc).__name__})\"\n"
+            "        print(DRIFT_MSG.format(v=VERSION, why=why), file=sys.stderr)\n"
+            "        return 2"),
+        "selectors": ("unexpected judge exceptions block through main",),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "merged guard function cache scope dropped", "module": BASH,
+        "anchor": (
+            "def decide(command, _deadline=None):\n"
+            "    \"\"\"-> (decision, reason). Worst decision wins; reasons accumulate.\"\"\"\n"
+            "    with grep_guard.function_record_cache_scope():\n"
+            "        return _decide(command, _deadline)"),
+        "replacement": (
+            "def decide(command, _deadline=None):\n"
+            "    \"\"\"-> (decision, reason). Worst decision wins; reasons accumulate.\"\"\"\n"
+            "    return _decide(command, _deadline)"),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "alias shadowing failure channel dropped", "module": GREP,
+        "anchor": "                if shadowed:\n                    failures.append(",
+        "replacement": (
+            "                if False and shadowed:\n"
+            "                    failures.append("),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "budget wrap deleted", "module": GREP,
+        "anchor": (
+            "    except CommandParseError as exc:\n"
+            "        decisions.append((\"ask\", BUDGET_EXHAUSTED_REASON % exc))"),
+        "replacement": "    except CommandParseError:\n        pass",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "decision-budget checkpoint neutered", "module": GREP,
+        "anchor": (
+            "def _check_decision_budget(deadline):\n"
+            "    if deadline is not None and time.monotonic() >= deadline:\n"
+            "        raise CommandParseError(\n"
+            "            \"the guard's internal decision budget was exhausted while parsing\")"),
+        "replacement": "def _check_decision_budget(deadline):\n    return None",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "function record decision cache dropped", "module": GREP,
+        "anchor": (
+            "def function_declaration_records(cmd, deadline=None):\n"
+            "    \"\"\"Return live function declarations with temporal reachability and scope.\"\"\"\n"
+            "    _check_decision_budget(deadline)\n"
+            "    cache = _FUNCTION_RECORD_CACHE.get()"),
+        "replacement": (
+            "def function_declaration_records(cmd, deadline=None):\n"
+            "    \"\"\"Return live function declarations with temporal reachability and scope.\"\"\"\n"
+            "    _check_decision_budget(deadline)\n"
+            "    cache = None"),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "function record cache cap raised", "module": GREP,
+        "anchor": "MAX_FUNCTION_RECORD_CACHE_ENTRIES = 32",
+        "replacement": "MAX_FUNCTION_RECORD_CACHE_ENTRIES = 4096",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "guarded-tail predicate rescans per word", "module": GREP,
+        "anchor": (
+            "    later = [False] * (len(words) + 1)\n"
+            "    for index in range(len(words) - 1, -1, -1):\n"
+            "        later[index] = (later[index + 1]\n"
+            "                        or os.path.basename(words[index]) in GIT_HAZARD_SUBCOMMANDS)\n"
+            "    return later"),
+        "replacement": (
+            "    return [any(os.path.basename(w) in GIT_HAZARD_SUBCOMMANDS\n"
+            "                for w in words[index + 1:])\n"
+            "            for index in range(-1, len(words))]"),
+        "allowed_statuses": ("timeout",),
+    },
+    {
+        "label": "candidate authority forced trusted", "module": GREP,
+        "anchor": "    if not authority.candidate_trusted or lookup_authority_uncertain:",
+        "replacement": "    if False:", "allowed_statuses": (),
+    },
+    {
+        "label": "dynamic source adoption removed", "module": GREP,
+        "anchor": (
+            "    for finding in dynamic_source_findings(\n"
+            "            scan_command, commands, _deadline, _shell, equals_states):"),
+        "replacement": "    for finding in ():", "allowed_statuses": (),
+    },
+    {
+        "label": "process substitution loses typed operand", "module": GREP,
+        "anchor": "            append_tok(marker + \"__PROCESS__)\")",
+        "replacement": "            append_tok(\"<\")", "allowed_statuses": (),
+    },
+    {
+        "label": "source exec wrapper omitted", "module": GREP,
+        "anchor": "    while executable in {\"builtin\", \"command\", \"exec\"}:",
+        "replacement": "    while executable in {\"builtin\", \"command\"}:",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "source command wrapper omitted", "module": GREP,
+        "anchor": "    while executable in {\"builtin\", \"command\", \"exec\"}:",
+        "replacement": "    while executable in {\"builtin\", \"exec\"}:",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "nested source shell identity dropped", "module": GREP,
+        "anchor": "        source_operand = _source_builtin_operand(tokens, current_shell)",
+        "replacement": "        source_operand = _source_builtin_operand(tokens)",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "attached exec argv-zero grammar dropped", "module": GREP,
+        "anchor": "                if index + 1 < len(flags):\n                    index = len(flags)",
+        "replacement": "                if False:\n                    index = len(flags)",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "exec single-dash terminator dropped", "module": GREP,
+        "anchor": "        if option in {\"--\", \"-\"}:\n            return None",
+        "replacement": (
+            "        if option == \"--\":\n"
+            "            return None\n"
+            "        if option == \"-\":\n"
+            "            return \"unmodelled exec option '-'\""),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "dynamic source command identity dropped", "module": GREP,
+        "anchor": "    if source_has_dynamic_command_word(command, deadline):\n        findings.append(DynamicSourceFinding(",
+        "replacement": "    if False:\n        findings.append(DynamicSourceFinding(",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "source alias invocation dropped", "module": GREP,
+        "anchor": (
+            "    findings.extend(_literal_source_alias_findings(\n"
+            "        command, parsed, current_shell, deadline))"),
+        "replacement": "    findings.extend(())",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "source alias wrapper resolution dropped", "module": GREP,
+        "anchor": (
+            "            resolved = _source_command_invocation(\n"
+            "                tokens, current_shell)\n"
+            "            if resolved is None:\n"
+            "                continue\n"
+            "            executable, items, _noglob = resolved\n"
+            "            if _apply_literal_alias_mutation(executable, items, aliases):"),
+        "replacement": (
+            "            resolved = (\n"
+            "                (tokens[0][0], list(tokens[1:]), False)\n"
+            "                if tokens else None)\n"
+            "            if resolved is None:\n"
+            "                continue\n"
+            "            executable, items, _noglob = resolved\n"
+            "            if _apply_literal_alias_mutation(executable, items, aliases):"),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "source alias body traversal dropped", "module": GREP,
+        "anchor": (
+            "    def inspect(commands, depth, alias_stack=()):\n"
+            "        if depth > MAX_SOURCE_DEPTH:\n"
+            "            findings.append(DynamicSourceFinding(\n"
+            "                \"<alias eval>\", \"literal alias evaluation exceeds the source depth bound\"))\n"
+            "            return\n"
+            "        for tokens in commands:"),
+        "replacement": (
+            "    def inspect(commands, depth, alias_stack=()):\n"
+            "        if depth > MAX_SOURCE_DEPTH:\n"
+            "            findings.append(DynamicSourceFinding(\n"
+            "                \"<alias eval>\", \"literal alias evaluation exceeds the source depth bound\"))\n"
+            "            return\n"
+            "        for tokens in commands[-1:]:"),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "ordinary shell alias Git classification dropped", "module": GREP,
+        "anchor": (
+            "            if alias_stack:\n"
+            "                alias_resolution = unwrap_command_prefix("),
+        "replacement": (
+            "            if False:\n"
+            "                alias_resolution = unwrap_command_prefix("),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "executed alias Git traversal dropped", "module": GREP,
+        "anchor": "            if body_alias_maps:\n",
+        "replacement": "            if False:\n",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "nonordinary alias mode tracking dropped", "module": GREP,
+        "anchor": (
+            "        if \"g\" in option[1:]:\n"
+            "            modes.add(\"global\")\n"
+            "        if \"s\" in option[1:]:\n"
+            "            modes.add(\"suffix\")"),
+        "replacement": (
+            "        if False:\n"
+            "            modes.add(\"global\")\n"
+            "        if False:\n"
+            "            modes.add(\"suffix\")"),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "nonordinary alias use detection dropped", "module": GREP,
+        "anchor": (
+            "            special_alias = _used_nonordinary_alias(\n"
+            "                tokens, (aliases, *executed_alias_maps))\n"
+            "            if special_alias is not None:"),
+        "replacement": (
+            "            special_alias = None\n"
+            "            if special_alias is not None:"),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "declared helper function alias traversal dropped", "module": GREP,
+        "anchor": (
+            "            if declarations is not None and executable in declarations:\n"
+            "                if executable in active_stack or len(active_stack) >= MAX_SOURCE_DEPTH:"),
+        "replacement": (
+            "            if False:\n"
+            "                if executable in active_stack or len(active_stack) >= MAX_SOURCE_DEPTH:"),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "invoked alias body state transition dropped", "module": GREP,
+        "anchor": (
+            "            inspect(nested, depth + 1, "
+            "alias_stack + (executable,))"),
+        "replacement": "            pass",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "source alias embedded operand classification dropped", "module": GREP,
+        "anchor": (
+            "                    reason = _dynamic_source_operand_reason(\n"
+            "                        source_items[0], _noglob, current_shell)\n"
+            "                    if reason is not None:"),
+        "replacement": (
+            "                    reason = None\n"
+            "                    if reason is not None:"),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "source alias dynamic command detection dropped", "module": GREP,
+        "anchor": (
+            "    if source_has_dynamic_command_word(body, deadline):\n"
+            "        return \"unresolved\""),
+        "replacement": (
+            "    if False:\n"
+            "        return \"unresolved\""),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "source alias state lookup bypass dropped", "module": GREP,
+        "anchor": (
+            "            if (executable not in aliases\n"
+            "                    or _literal_alias_invocation_bypassed(command_tokens)):\n"
+            "                continue"),
+        "replacement": (
+            "            if executable not in aliases:\n"
+            "                continue"),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "source alias invocation lookup bypass dropped", "module": GREP,
+        "anchor": (
+            "            if executable not in aliases or bypassed:\n"
+            "                continue"),
+        "replacement": (
+            "            if executable not in aliases:\n"
+            "                continue"),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "same-shell alias mutation wrapper resolution dropped", "module": GREP,
+        "anchor": (
+            "            resolved = _source_command_invocation(\n"
+            "                tokens, current_shell)\n"
+            "            if resolved is None:\n"
+            "                continue\n"
+            "            executable, items, _noglob = resolved\n"
+            "            _apply_literal_alias_mutation(executable, items, aliases)"),
+        "replacement": (
+            "            resolved = (\n"
+            "                (tokens[0][0], list(tokens[1:]), False)\n"
+            "                if tokens else None)\n"
+            "            if resolved is None:\n"
+            "                continue\n"
+            "            executable, items, _noglob = resolved\n"
+            "            _apply_literal_alias_mutation(executable, items, aliases)"),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "called function alias state dropped", "module": GREP,
+        "anchor": "    for context in call_contexts:\n",
+        "replacement": "    for context in ():\n",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "TRAPDEBUG function alias state dropped", "module": GREP,
+        "anchor": (
+            "    extra_sources = [record.body for record in records\n"
+            "                     if record.name == \"TRAPDEBUG\"]"),
+        "replacement": "    extra_sources = []",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "DEBUG trap alias state dropped", "module": GREP,
+        "anchor": "    extra_sources.extend(_debug_trap_action_sources(parsed, current_shell))",
+        "replacement": "    extra_sources.extend(())",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "repeat zero execution boundary dropped", "module": GREP,
+        "anchor": "            if count == \"0\":\n                return None",
+        "replacement": "            if False:\n                return None",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "trap action traversal dropped", "module": GREP,
+        "anchor": "    if shell == \"trap\":\n        args = resolution.items[1:]",
+        "replacement": "    if False:\n        args = resolution.items[1:]",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "builtin trap wrapper adoption dropped", "module": GREP,
+        "anchor": (
+            "            if items[0][0] in "
+            "{\"builtin\", \"command\", \"exec\", \"trap\"}:\n"
+            "                continue"),
+        "replacement": (
+            "            if items[0][0] in "
+            "{\"builtin\", \"command\", \"exec\"}:\n"
+            "                continue"),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "zsh trap function source traversal dropped", "module": GREP,
+        "anchor": "    if _shell == \"zsh\":\n        for body in zsh_trap_function_sources(command, _deadline):",
+        "replacement": "    if False:\n        for body in zsh_trap_function_sources(command, _deadline):",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "git config count cap dropped", "module": GREP,
+        "anchor": "        if count > MAX_TOKENS:\n            raise CommandParseError(",
+        "replacement": "        if False:\n            raise CommandParseError(",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "git config loop budget dropped", "module": GREP,
+        "anchor": "        for index in range(count):\n            _check_decision_budget(deadline)",
+        "replacement": "        for index in range(count):\n            pass",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "git hazard union adoption dropped", "module": GREP,
+        "anchor": "} | REV_PATH_SUBCOMMANDS\n\n\ndef _consume_exec_options",
+        "replacement": "}\n\n\ndef _consume_exec_options",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "native command checked after alias", "module": GREP,
+        "anchor": "        if authority_error is None:\n            return current, argv, None, derived_configs",
+        "replacement": "        if False:\n            return current, argv, None, derived_configs",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "shell alias forwarding dropped", "module": GREP,
+        "anchor": "    if invocation.subcommand is None and forwarded_argv:",
+        "replacement": "    if False:", "allowed_statuses": (),
+    },
+    {
+        "label": "shell alias depth context corrupted", "module": GREP,
+        "anchor": "            resolution.items, resolution, deadline, aliases, seen, depth)",
+        "replacement": (
+            "            resolution.items, resolution, deadline, aliases, seen, "
+            "MAX_ALIAS_DEPTH + 1)"),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "zsh shared resolver bypassed", "module": ZSH,
+        "anchor": (
+            "        invocation = resolve_effective_git_invocation(\n"
+            "            tokens, resolution, deadline)"),
+        "replacement": "        invocation = None", "allowed_statuses": (),
+    },
+    {
+        "label": "zsh unmodelled modifier uncertainty dropped", "module": ZSH,
+        "anchor": "            if unmodelled_hits:\n                decisions.append((",
+        "replacement": "            if False:\n                decisions.append((",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "zsh unmodelled modifier prefix grammar dropped", "module": ZSH,
+        "anchor": (
+            "    r\"|(?:[A-Za-z_][A-Za-z0-9_]*(?:\\[[^\\]]*\\])?|[0-9]+|[#?*@!$-]))\"\n"
+            "    r\":[\" + MOD_PREFIXES + r\"]*W\")"),
+        "replacement": (
+            "    r\"|(?:[A-Za-z_][A-Za-z0-9_]*(?:\\[[^\\]]*\\])?|[0-9]+|[#?*@!$-])):W\")"),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "zsh trap function traversal dropped", "module": ZSH,
+        "anchor": "    if _shell == \"zsh\":\n        for body in zsh_trap_function_sources(command, _deadline):",
+        "replacement": "    if False:\n        for body in zsh_trap_function_sources(command, _deadline):",
+        "allowed_statuses": (),
+    },
+)
+
+# Additions, declared rather than generated. The element sweep only REMOVES members, and for
+# a collection that grants an exemption removal makes the guard stricter -- so the generated
+# sweep returns a clean result on precisely the sets whose failure direction it cannot
+# express. Each entry names a value that must never be a member, together with the hazard
+# that becomes reachable if it is. Every entry is expected to be caught; a survivor here is a
+# live fail-open, not coverage debt.
+#
+# This table is declared, so it covers what it names and no more -- it is not a claim that
+# every exemption-shaped collection in the tree has an entry. `mutation_addition_policy` pins
+# it so entries cannot be dropped without the gate saying so.
+ADDITION_MUTATIONS = (
+    {
+        "label": "a non-terminating git global is treated as terminal",
+        "module": GREP, "name": "_GIT_TERMINAL_OPTIONS", "collection_kind": "set",
+        "element": "--icase-pathspecs",
+        # git 2.46.1 runs the subcommand after this option, so treating it as terminal makes
+        # the guard stop reading the argv that carries the engine hazard.
+        "allowed_statuses": (),
+    },
+    {
+        "label": "a valueless git global is treated as value-taking",
+        "module": GREP, "name": "_GIT_GLOBAL_OPTIONS_WITH_VALUES", "collection_kind": "set",
+        "element": "--no-advice",
+        # Consuming the next token as this option's value desynchronises subcommand
+        # identification, so the word actually naming the subcommand is skipped.
+        "allowed_statuses": (),
+    },
+    {
+        "label": "a boolean grep short option is treated as taking the pattern",
+        "module": GREP, "name": "GREP_SHORT_PATTERN_ARG", "collection_kind": "set",
+        "element": "w",
+        # `git grep -Ew 'harness\b'` returns no match on git 2.46.1 while -Pw matches, so
+        # reading `w` as the pattern-bearing option loses the ERE engine hazard.
+        "allowed_statuses": (),
+    },
+    {
+        "label": "a boolean grep short option is treated as optionally valued",
+        "module": GREP, "name": "GREP_SHORT_OPTIONAL_VALUE", "collection_kind": "set",
+        "element": "w",
+        # Same hazard reached through the attached spelling `-Ew'harness\b'`.
+        "allowed_statuses": (),
+    },
+)
+
+
+def canonical(value) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=True).encode()
+
+
+def digest(value) -> str:
+    return hashlib.sha256(canonical(value)).hexdigest()
+
+
+def file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def source_digests(root: Path = ROOT) -> dict[str, str]:
+    return {relative: file_sha256(root / relative) for relative in GUARDS}
+
+
+def _string_collection(value, assignments, seen=()):
+    """Statically resolve a closed string collection without importing production."""
+    if isinstance(value, ast.Name):
+        if value.id in seen or value.id not in assignments:
+            return None
+        return _string_collection(
+            assignments[value.id], assignments, seen + (value.id,))
+    if (isinstance(value, ast.BinOp) and isinstance(value.op, ast.BitOr)):
+        left = _string_collection(value.left, assignments, seen)
+        right = _string_collection(value.right, assignments, seen)
+        if left is None or right is None:
+            return None
+        return tuple(dict.fromkeys(left + right))
+    if isinstance(value, ast.Call) and getattr(value.func, "id", "") in {
+            "frozenset", "set"}:
+        value = value.args[0] if len(value.args) == 1 else None
+    if isinstance(value, ast.Dict):
+        if all(isinstance(key, ast.Constant) and isinstance(key.value, str)
+               for key in value.keys):
+            return tuple(key.value for key in value.keys)
+        return None
+    if isinstance(value, (ast.Set, ast.List, ast.Tuple)):
+        if all(isinstance(item, ast.Constant) and isinstance(item.value, str)
+               for item in value.elts):
+            return tuple(item.value for item in value.elts)
+        return None
+    return None
+
+
+def declared_sets(relative: str) -> tuple[dict, dict]:
+    """Return literal guarded collections plus structurally rejected constants."""
+    source = (ROOT / relative).read_text(encoding="utf-8")
+    found, rejected = {}, {}
+    tree = ast.parse(source)
+    assignments = {
+        node.targets[0].id: node.value for node in tree.body
+        if isinstance(node, ast.Assign) and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+    }
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if not isinstance(target, ast.Name) or not target.id.isupper():
+            continue
+        if target.id == "FIXTURES":
+            found[target.id] = ("fixture", ())
+            continue
+        value = node.value
+        identity = qname(relative, target.id)
+        if target.id == "GUARDS" and isinstance(value, (ast.List, ast.Tuple)):
+            elements = tuple(
+                item.elts[0].value for item in value.elts
+                if isinstance(item, ast.Tuple) and len(item.elts) == 2
+                and isinstance(item.elts[0], ast.Constant)
+                and isinstance(item.elts[0].value, str))
+            if len(elements) != len(value.elts):
+                rejected[identity] = "dispatch list is not entirely (label, predicate) tuples"
+                continue
+            found[target.id] = ("dispatch", elements)
+            continue
+        if identity in CHARSET_COLLECTIONS:
+            if isinstance(value, ast.Call) and getattr(value.func, "id", "") in {
+                    "frozenset", "set"}:
+                value = value.args[0] if len(value.args) == 1 else None
+            if (not isinstance(value, ast.Constant)
+                    or not isinstance(value.value, str)):
+                rejected[identity] = "declared charset is not one literal string"
+                continue
+            if len(set(value.value)) != len(value.value):
+                rejected[qname(relative, target.id)] = (
+                    "repeated characters identify an enum word, not a membership charset")
+                continue
+            found[target.id] = ("charset", tuple(value.value))
+            continue
+        elements = _string_collection(value, assignments)
+        if elements is None:
+            if (isinstance(value, ast.Constant) and isinstance(value.value, str)
+                    and len(value.value) > 2 and value.value.isalpha()
+                    and len(set(value.value)) != len(value.value)):
+                rejected[identity] = (
+                    "repeated characters identify an enum word, not a membership charset")
+            continue
+        if isinstance(value, ast.Dict):
+            kind = "dict"
+        elif isinstance(value, ast.BinOp):
+            kind = "computed-set"
+        else:
+            kind = "set"
+        found[target.id] = (kind, tuple(elements))
+    return found, rejected
+
+
+def without_element(source: str, name: str, kind: str, element: str) -> str:
+    tree = ast.parse(source)
+    target_node = None
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == name):
+            target_node = node
+            break
+    if target_node is None:
+        raise LookupError(name)
+    value, wrapper = target_node.value, None
+    if isinstance(value, ast.Call):
+        wrapper = value.func.id
+        value = value.args[0]
+    if kind == "charset":
+        literal = repr(value.value.replace(element, "", 1))
+    elif kind == "dispatch":
+        kept = [item for item in value.elts
+                if not (isinstance(item, ast.Tuple) and item.elts
+                        and isinstance(item.elts[0], ast.Constant)
+                        and item.elts[0].value == element)]
+        literal = "[" + ", ".join(ast.unparse(item) for item in kept) + "]"
+    elif kind == "computed-set":
+        assignments = {
+            node.targets[0].id: node.value for node in tree.body
+            if isinstance(node, ast.Assign) and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        }
+        elements = _string_collection(value, assignments)
+        if elements is None:
+            raise ValueError(f"cannot resolve computed collection {name}")
+        kept = [item for item in elements if item != element]
+        literal = ("{" + ", ".join(repr(item) for item in kept) + "}"
+                   if kept else "set()")
+    elif kind == "dict":
+        kept = [(key, item) for key, item in zip(value.keys, value.values)
+                if not (isinstance(key, ast.Constant) and key.value == element)]
+        literal = ("{" + ", ".join(
+            f"{ast.unparse(key)}: {ast.unparse(item)}" for key, item in kept) + "}"
+            if kept else "{}")
+    else:
+        kept = [item for item in value.elts
+                if not (isinstance(item, ast.Constant) and item.value == element)]
+        literal = ("{" + ", ".join(ast.unparse(item) for item in kept) + "}"
+                   if kept else "set()")
+    if wrapper:
+        literal = f"{wrapper}({literal})"
+    lines = source.splitlines(keepends=True)
+    start = sum(len(line) for line in lines[:target_node.lineno - 1])
+    end = sum(len(line) for line in lines[:target_node.end_lineno])
+    return source[:start] + f"{name} = {literal}\n" + source[end:]
+
+
+def with_element(source: str, name: str, kind: str, element: str) -> str:
+    """Add ``element`` to a module-level collection.
+
+    Removing a member of a collection that grants an exemption makes the guard STRICTER, so
+    a deletion-only sweep reports a clean result on exactly the sets whose failure direction
+    is addition. Measured on the terminal-option set: none of its eight deletions moves a
+    verdict toward allow, while adding one option moves a denied engine hazard to allow.
+    """
+    tree = ast.parse(source)
+    target_node = None
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == name):
+            target_node = node
+            break
+    if target_node is None:
+        raise LookupError(name)
+    value, wrapper = target_node.value, None
+    if isinstance(value, ast.Call):
+        wrapper = value.func.id
+        value = value.args[0]
+    if kind == "charset":
+        if element in value.value:
+            raise ValueError(f"{name} already contains {element!r}")
+        literal = repr(value.value + element)
+    elif kind in {"set", "computed-set"}:
+        assignments = {
+            node.targets[0].id: node.value for node in tree.body
+            if isinstance(node, ast.Assign) and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        }
+        elements = _string_collection(value, assignments)
+        if elements is None:
+            raise ValueError(f"cannot resolve collection {name} for addition")
+        if element in elements:
+            raise ValueError(f"{name} already contains {element!r}")
+        literal = "{" + ", ".join(repr(item) for item in [*elements, element]) + "}"
+    else:
+        # Never fall through to an unchanged source: a mutation that edits nothing runs the
+        # suite against the pristine tree, scores "survived", and is recorded as coverage
+        # debt that no assertion could ever retire.
+        raise ValueError(f"addition is not modelled for collection kind {kind!r}")
+    if wrapper:
+        literal = f"{wrapper}({literal})"
+    lines = source.splitlines(keepends=True)
+    start = sum(len(line) for line in lines[:target_node.lineno - 1])
+    end = sum(len(line) for line in lines[:target_node.end_lineno])
+    return source[:start] + f"{name} = {literal}\n" + source[end:]
+
+
+def mutation_plan() -> tuple[list[dict], dict[str, str]]:
+    mutations, rejected = [], {}
+    discovered_names = set()
+    for module in COLLECTION_GUARDS:
+        declared, module_rejected = declared_sets(module)
+        rejected.update(module_rejected)
+        for name, (kind, elements) in sorted(declared.items()):
+            identity = qname(module, name)
+            discovered_names.add(identity)
+            if identity in SWEEP_EXCLUSIONS:
+                continue
+            for element in elements:
+                descriptor = {
+                    "version": 1, "kind": "set-element", "module": module,
+                    "name": name, "collection_kind": kind, "element": element,
+                    "allowed_statuses": [],
+                }
+                descriptor["id"] = digest(descriptor)
+                mutations.append(descriptor)
+    stale_exclusions = sorted(set(SWEEP_EXCLUSIONS) - discovered_names)
+    if stale_exclusions:
+        raise ValueError(f"stale sweep exclusions: {stale_exclusions}")
+    for site in SITE_MUTATIONS:
+        source = (ROOT / site["module"]).read_text(encoding="utf-8")
+        count = source.count(site["anchor"])
+        if count != 1:
+            raise ValueError(
+                f"site anchor {site['label']!r} matched {count} times in {site['module']}")
+        descriptor = {
+            "version": 1, "kind": "site", "module": site["module"],
+            "label": site["label"],
+            "anchor_sha256": hashlib.sha256(site["anchor"].encode()).hexdigest(),
+            "replacement_sha256": hashlib.sha256(
+                site["replacement"].encode()).hexdigest(),
+            "allowed_statuses": list(site["allowed_statuses"]),
+        }
+        selectors = list(site.get("selectors", ()))
+        if selectors:
+            descriptor["selectors"] = selectors
+        descriptor["id"] = digest(descriptor)
+        mutations.append(descriptor)
+    for addition in ADDITION_MUTATIONS:
+        identity = qname(addition["module"], addition["name"])
+        if identity not in discovered_names:
+            raise ValueError(
+                f"addition {addition['label']!r} names {identity}, which the element sweep "
+                f"does not enumerate; a declared addition against an invisible collection "
+                f"would never run")
+        descriptor = {
+            "version": 1, "kind": "set-addition", "module": addition["module"],
+            "name": addition["name"], "collection_kind": addition["collection_kind"],
+            "element": addition["element"], "label": addition["label"],
+            "allowed_statuses": list(addition["allowed_statuses"]),
+        }
+        descriptor["id"] = digest(descriptor)
+        mutations.append(descriptor)
+    mutations.sort(key=lambda item: item["id"])
+    ids = [item["id"] for item in mutations]
+    if len(ids) != len(set(ids)) or not ids:
+        raise ValueError("mutation plan has duplicate IDs or is empty")
+    exclusions = dict(SWEEP_EXCLUSIONS)
+    exclusions.update(rejected)
+    return mutations, dict(sorted(exclusions.items()))
+
+
+RECEIPT_RE = re.compile(
+    r"^SELFTEST-SUMMARY suite=(?P<suite>[a-z0-9_-]+) "
+    r"checks=(?P<checks>\d+) failures=(?P<failures>\d+)$")
+
+
+def suite_name(relative: str) -> str:
+    if relative == OWNERSHIP:
+        return "repository-ownership"
+    return Path(relative).stem
+
+
+def exit_receipt_agree(returncode: int, failures: int) -> bool:
+    """Accept only this repository's green or assertion-failure exit/receipt pairs."""
+    return ((returncode == 0 and failures == 0)
+            or (returncode == 1 and failures > 0))
+
+
+def run_suite(tree: Path, relative: str, timeout: int = 240,
+              selectors=()) -> dict:
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    try:
+        done = subprocess.run(
+            [sys.executable, "-B", relative, "--selftest"], cwd=tree,
+            capture_output=True, text=True, timeout=timeout, env=env)
+    except subprocess.TimeoutExpired:
+        return {"status": "timeout", "timeout_seconds": timeout}
+    matches = [match for line in done.stdout.splitlines()
+               if (match := RECEIPT_RE.fullmatch(line)) is not None]
+    final = done.stdout.rstrip().splitlines()[-1] if done.stdout.rstrip() else ""
+    expected_suite = suite_name(relative)
+    if (len(matches) != 1 or matches[0].group("suite") != expected_suite
+            or final != matches[0].group(0)):
+        return {
+            "status": "invalid-receipt", "returncode": done.returncode,
+            "receipt_count": len(matches), "stderr_tail": done.stderr[-1000:],
+        }
+    checks = int(matches[0].group("checks"))
+    failures = int(matches[0].group("failures"))
+    if not exit_receipt_agree(done.returncode, failures):
+        return {
+            "status": "invalid-receipt", "returncode": done.returncode,
+            "receipt_count": len(matches),
+            "stderr_tail": "process exit and receipt failures disagree",
+        }
+    selected = {}
+    for selector in selectors:
+        pattern = re.compile(
+            rf"^  (?P<status>PASS|FAIL) {re.escape(selector)}(?: ->.*)?$")
+        hits = [match.group("status").casefold() for line in done.stdout.splitlines()
+                if (match := pattern.fullmatch(line)) is not None]
+        if len(hits) != 1:
+            return {
+                "status": "invalid-receipt", "returncode": done.returncode,
+                "receipt_count": len(matches),
+                "stderr_tail": f"selector {selector!r} matched {len(hits)} lines",
+            }
+        selected[selector] = hits[0]
+    result = {
+        "status": "completed", "returncode": done.returncode,
+        "checks": checks,
+        "failures": failures,
+    }
+    if selectors:
+        result["selectors"] = selected
+    return result
+
+
+def baseline_results(tree: Path, plan=None) -> dict[str, dict]:
+    if shutil.which("zsh") is None:
+        raise ValueError(
+            "zsh is required for mutation baselines; skipped runtime probes are not proof")
+    if plan is None:
+        plan, _exclusions = mutation_plan()
+    by_module = {relative: set() for relative in GUARDS}
+    for descriptor in plan:
+        by_module.setdefault(descriptor["module"], set()).update(
+            descriptor.get("selectors", ()))
+    baseline = {
+        relative: run_suite(tree, relative, selectors=sorted(by_module[relative]))
+        for relative in GUARDS
+    }
+    bad = {relative: result for relative, result in baseline.items()
+           if result.get("status") != "completed"
+           or result.get("returncode") != 0 or result.get("failures") != 0}
+    if bad:
+        raise ValueError(f"baseline suites are not green: {bad}")
+    nonpassing = {
+        relative: result.get("selectors") for relative, result in baseline.items()
+        if any(status != "pass" for status in result.get("selectors", {}).values())
+    }
+    if nonpassing:
+        raise ValueError(f"baseline selectors are not green: {nonpassing}")
+    return baseline
+
+
+def result_kill(result: dict, baseline: dict, allowed_statuses=(),
+                selectors=()) -> tuple[bool, str]:
+    status = result.get("status")
+    if status != "completed":
+        # A predeclared timeout can grade the dedicated performance mutant. Missing or
+        # malformed receipts never grade behavior: they are invalid measurements even if
+        # a compromised descriptor tries to list that status as allowed.
+        if status == "timeout" and status in allowed_statuses:
+            return True, status
+        raise ValueError(f"mutation produced an invalid measurement: {result}")
+    if not exit_receipt_agree(
+            result.get("returncode"), result.get("failures", 0)):
+        raise ValueError(f"mutation produced an invalid measurement: {result}")
+    if selectors:
+        expected = set(selectors)
+        baseline_selected = baseline.get("selectors", {})
+        selected = result.get("selectors", {})
+        if (not expected or not expected.issubset(baseline_selected)
+                or any(baseline_selected[name] != "pass" for name in expected)
+                or set(selected) != expected):
+            raise ValueError("mutation selector inventory differs from its green baseline")
+        if all(selected[name] == "fail" for name in expected):
+            if result.get("returncode") != 1 or result.get("failures", 0) <= 0:
+                raise ValueError(
+                    "selector failure disagrees with terminal receipt")
+            return True, "selector-failure"
+        return False, "survived"
+    if result.get("returncode") == 1 and result.get("failures", 0) > 0:
+        return True, "suite-failure"
+    if result.get("checks") != baseline.get("checks"):
+        return True, "exact-check-count"
+    return False, "survived"
+
+
+def needs_merged_run(killed: bool, reason: str, module: str) -> bool:
+    """Whether the merged suite must also run after the owner suite has reported.
+
+    A kill scored only by a moved check count is arithmetic: nothing asserted. Stopping
+    there let that artifact PREEMPT a real detection, because the merged suite is where some
+    hazards are visible at all. Deleting a name from the cross-version alias-proof set moves
+    thirteen merged verdicts from deny to ask while the owning guard's own verdict never
+    changes, so the owner could only ever report the count while the assertion that sees the
+    regression lives one suite away and was never run.
+    """
+    if module not in (GREP, ZSH):
+        return False
+    return (not killed) or reason == UNASSERTED_KILL_REASON
+
+
+def apply_mutation(tree: Path, descriptor: dict) -> tuple[Path, str]:
+    target = tree / descriptor["module"]
+    source = target.read_text(encoding="utf-8")
+    if descriptor["kind"] == "set-element":
+        mutated = without_element(
+            source, descriptor["name"], descriptor["collection_kind"],
+            descriptor["element"])
+    elif descriptor["kind"] == "set-addition":
+        mutated = with_element(
+            source, descriptor["name"], descriptor["collection_kind"],
+            descriptor["element"])
+    else:
+        site = next(item for item in SITE_MUTATIONS
+                    if item["label"] == descriptor["label"]
+                    and item["module"] == descriptor["module"])
+        if source.count(site["anchor"]) != 1:
+            raise ValueError(f"site anchor moved for {descriptor['label']!r}")
+        mutated = source.replace(site["anchor"], site["replacement"])
+    # A mutation that edits nothing runs the suite against a pristine tree, scores
+    # "survived", and is recorded as coverage debt no assertion could ever retire.
+    if mutated == source:
+        raise ValueError(
+            f"mutation {descriptor['id']} left {descriptor['module']} byte-identical")
+    target.write_text(mutated, encoding="utf-8")
+    return target, source
+
+
+def execute_mutation(tree: Path, descriptor: dict, baseline: dict) -> dict:
+    target, pristine = apply_mutation(tree, descriptor)
+    try:
+        selectors = descriptor.get("selectors", ())
+        owner = run_suite(tree, descriptor["module"], selectors=selectors)
+        killed, reason = result_kill(
+            owner, baseline[descriptor["module"]], descriptor.get("allowed_statuses", ()),
+            selectors)
+        merged = None
+        if needs_merged_run(killed, reason, descriptor["module"]):
+            merged = run_suite(tree, BASH)
+            merged_killed, merged_reason = result_kill(
+                merged, baseline[BASH], descriptor.get("allowed_statuses", ()))
+            # A detection outranks a count artifact. Otherwise the owner's verdict stands,
+            # so an arithmetic kill is still a kill -- just an honestly labelled one.
+            if not killed or (merged_killed and merged_reason != UNASSERTED_KILL_REASON):
+                killed, reason = merged_killed, merged_reason
+        return {
+            "owner": owner, "merged": merged,
+            "outcome": "caught" if killed else "survived", "reason": reason,
+        }
+    finally:
+        target.write_text(pristine, encoding="utf-8")
+
+
+def git_head() -> str:
+    done = subprocess.run(
+        ["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True,
+        text=True, check=True)
+    return done.stdout.strip()
+
+
+def fragment_payload(index: int, count: int, expected_head: str | None) -> dict:
+    if count < 1 or index < 0 or index >= count:
+        raise ValueError(f"invalid shard {index}/{count}")
+    head = git_head()
+    if expected_head is not None and head != expected_head:
+        raise ValueError(f"checkout HEAD {head} != expected exact head {expected_head}")
+    plan, _exclusions = mutation_plan()
+    plan_hash = digest(plan)
+    generator_hash = file_sha256(ROOT / GENERATOR)
+    guard_hashes = source_digests()
+    with tempfile.TemporaryDirectory(prefix="z-harness-mutations-") as raw:
+        tree = Path(raw) / "tree"
+        # ``.claude`` holds locally-created worktrees whose basename is ``worktrees``, so the
+        # ``.worktrees`` pattern never matched them and each shard copied every nested
+        # checkout into its private tree. Nothing under it is tracked and no suite reads it.
+        shutil.copytree(ROOT, tree, ignore=shutil.ignore_patterns(
+            ".git", ".claude", ".worktrees", "__pycache__", "node_modules"))
+        if (file_sha256(tree / GENERATOR) != generator_hash
+                or source_digests(tree) != guard_hashes):
+            raise ValueError("private mutation tree differs from the captured sources")
+        baseline = baseline_results(tree, plan)
+        assigned = [item for position, item in enumerate(plan)
+                    if position % count == index]
+        results = {}
+        for position, descriptor in enumerate(assigned, 1):
+            result = execute_mutation(tree, descriptor, baseline)
+            results[descriptor["id"]] = result
+            print(
+                f"[{position}/{len(assigned)}] {descriptor['id'][:12]} "
+                f"{descriptor['kind']} {result['outcome']} ({result['reason']})",
+                flush=True)
+    if (file_sha256(ROOT / GENERATOR) != generator_hash
+            or source_digests() != guard_hashes):
+        raise ValueError("mutation sources changed while the shard was running")
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "mutation-fragment",
+        "head_sha": head,
+        "generator_sha256": generator_hash,
+        "source_digests": guard_hashes,
+        "plan_sha256": plan_hash,
+        "shard": {"index": index, "count": count},
+        "baseline": baseline,
+        "results": results,
+    }
+
+
+def validate_fragment(fragment: dict) -> str:
+    if not isinstance(fragment, dict) or set(fragment) != set(FRAGMENT_KEYS):
+        return "fragment fields are not exact"
+    if fragment.get("schema_version") != SCHEMA_VERSION:
+        return "fragment schema version differs"
+    if fragment.get("kind") != "mutation-fragment":
+        return "fragment kind differs"
+    if not isinstance(fragment.get("results"), dict):
+        return "fragment results are not an object"
+    shard = fragment.get("shard")
+    if not isinstance(shard, dict) or set(shard) != {"index", "count"}:
+        return "fragment shard is malformed"
+    index, count = shard.get("index"), shard.get("count")
+    if (not isinstance(index, int) or isinstance(index, bool)
+            or not isinstance(count, int) or isinstance(count, bool)
+            or count < 1 or index < 0 or index >= count):
+        return "fragment shard coordinates are outside their domain"
+    baseline = fragment.get("baseline")
+    if not isinstance(baseline, dict) or set(baseline) != set(GUARDS):
+        return "fragment baseline inventory differs"
+    for relative, result in baseline.items():
+        problem = suite_result_error(result, baseline=True)
+        if problem:
+            return f"fragment baseline {relative}: {problem}"
+    return ""
+
+
+def suite_result_error(result: object, *, baseline: bool = False) -> str:
+    if not isinstance(result, dict) or not isinstance(result.get("status"), str):
+        return "suite result is not a typed object"
+    status = result["status"]
+    expected = {
+        "completed": {"status", "returncode", "checks", "failures"},
+        "timeout": {"status", "timeout_seconds"},
+        "invalid-receipt": {
+            "status", "returncode", "receipt_count", "stderr_tail"},
+    }.get(status)
+    if status == "completed" and "selectors" in result:
+        expected = expected | {"selectors"}
+    if expected is None or set(result) != expected:
+        return f"suite result fields differ for status {status!r}"
+    if status == "completed":
+        integers = (result["returncode"], result["checks"], result["failures"])
+        if any(not isinstance(value, int) or isinstance(value, bool)
+               for value in integers):
+            return "completed suite result counters are not integers"
+        if result["checks"] < 1 or result["failures"] < 0:
+            return "completed suite result counters are outside their domain"
+        if not exit_receipt_agree(result["returncode"], result["failures"]):
+            return "completed suite exit and receipt failures disagree"
+        if baseline and (result["returncode"] != 0 or result["failures"] != 0):
+            return "baseline suite result is not green"
+        if "selectors" in result:
+            selected = result["selectors"]
+            if (not isinstance(selected, dict) or not selected
+                    or any(not isinstance(name, str) or status not in {"pass", "fail"}
+                           for name, status in selected.items())):
+                return "completed suite selector evidence is malformed"
+            if ("fail" in selected.values()
+                    and (result["returncode"] != 1 or result["failures"] <= 0)):
+                return "completed suite selector failures disagree with terminal receipt"
+    elif status == "timeout":
+        if (not isinstance(result["timeout_seconds"], int)
+                or isinstance(result["timeout_seconds"], bool)
+                or result["timeout_seconds"] < 1):
+            return "timeout duration is invalid"
+    else:
+        if (not isinstance(result["returncode"], int)
+                or isinstance(result["returncode"], bool)
+                or not isinstance(result["receipt_count"], int)
+                or isinstance(result["receipt_count"], bool)
+                or result["receipt_count"] < 0
+                or not isinstance(result["stderr_tail"], str)):
+            return "invalid-receipt evidence is malformed"
+    return ""
+
+
+def recompute_raw_result(raw: object, descriptor: dict, baseline: dict) -> tuple[str, str]:
+    expected = {"owner", "merged", "outcome", "reason"}
+    if not isinstance(raw, dict) or set(raw) != expected:
+        raise ValueError(f"raw result fields differ for {descriptor['id']}")
+    problem = suite_result_error(raw["owner"])
+    if problem:
+        raise ValueError(f"raw owner result {descriptor['id']}: {problem}")
+    killed, reason = result_kill(
+        raw["owner"], baseline[descriptor["module"]],
+        descriptor.get("allowed_statuses", ()), descriptor.get("selectors", ()))
+    if not needs_merged_run(killed, reason, descriptor["module"]):
+        if raw["merged"] is not None:
+            raise ValueError(
+                f"raw merged result is unexpected for {descriptor['id']}")
+    else:
+        problem = suite_result_error(raw["merged"])
+        if problem:
+            raise ValueError(f"raw merged result {descriptor['id']}: {problem}")
+        merged_killed, merged_reason = result_kill(
+            raw["merged"], baseline[BASH], descriptor.get("allowed_statuses", ()))
+        if not killed or (merged_killed and merged_reason != UNASSERTED_KILL_REASON):
+            killed, reason = merged_killed, merged_reason
+    outcome = "caught" if killed else "survived"
+    if raw["outcome"] != outcome or raw["reason"] != reason:
+        raise ValueError(
+            f"raw classification disagrees with recomputation for {descriptor['id']}")
+    return outcome, reason
+
+
+def aggregate_context_error(
+        fragment: dict, expected_head: str, expected_baseline: dict) -> str:
+    if fragment["head_sha"] != expected_head:
+        return "fragment head is not the aggregate checkout head"
+    if fragment["baseline"] != expected_baseline:
+        return "fragment baseline differs from the aggregate checkout baseline"
+    return ""
+
+
+def shard_assignment_error(fragment: dict, plan: list[dict], shard_count: int) -> str:
+    index = fragment["shard"]["index"]
+    expected = {
+        descriptor["id"] for position, descriptor in enumerate(plan)
+        if position % shard_count == index
+    }
+    actual = set(fragment["results"])
+    if actual == expected:
+        return ""
+    return (
+        f"fragment shard {index} assignment differs: "
+        f"foreign={sorted(actual - expected)[:4]} "
+        f"missing={sorted(expected - actual)[:4]}")
+
+
+def normalized_receipt(fragments: list[dict]) -> dict:
+    plan, exclusions = mutation_plan()
+    plan_by_id = {item["id"]: item for item in plan}
+    expected_ids = set(plan_by_id)
+    if not fragments:
+        raise ValueError("no mutation fragments supplied")
+    for fragment in fragments:
+        problem = validate_fragment(fragment)
+        if problem:
+            raise ValueError(problem)
+    for field in (
+            "head_sha", "generator_sha256", "source_digests", "plan_sha256",
+            "baseline"):
+        values = {json.dumps(fragment[field], sort_keys=True) for fragment in fragments}
+        if len(values) != 1:
+            raise ValueError(f"fragments disagree on {field}")
+    if fragments[0]["generator_sha256"] != file_sha256(ROOT / GENERATOR):
+        raise ValueError("fragment generator digest is stale")
+    if fragments[0]["source_digests"] != source_digests():
+        raise ValueError("fragment guard digests are stale")
+    if fragments[0]["plan_sha256"] != digest(plan):
+        raise ValueError("fragment plan digest is stale")
+    aggregate_baseline = baseline_results(ROOT, plan)
+    context_problem = aggregate_context_error(
+        fragments[0], git_head(), aggregate_baseline)
+    if context_problem:
+        raise ValueError(context_problem)
+    counts = {fragment["shard"]["count"] for fragment in fragments}
+    if len(counts) != 1:
+        raise ValueError("fragments disagree on shard count")
+    shard_count = counts.pop()
+    indices = [fragment["shard"]["index"] for fragment in fragments]
+    if sorted(indices) != list(range(shard_count)) or len(indices) != len(set(indices)):
+        raise ValueError(
+            f"fragment shard inventory is incomplete or duplicated: {sorted(indices)}")
+    for fragment in fragments:
+        assignment_problem = shard_assignment_error(fragment, plan, shard_count)
+        if assignment_problem:
+            raise ValueError(assignment_problem)
+    combined = {}
+    for fragment in fragments:
+        for mutation_id, raw in fragment["results"].items():
+            if mutation_id in combined:
+                raise ValueError(f"overlapping mutation result {mutation_id}")
+            combined[mutation_id] = (raw, fragment["baseline"])
+    foreign = sorted(set(combined) - expected_ids)
+    missing = sorted(expected_ids - set(combined))
+    if foreign or missing:
+        raise ValueError(
+            f"mutation result inventory foreign={foreign[:4]} missing={missing[:4]}")
+    reduced, survivors, unasserted = {}, [], []
+    for mutation_id in sorted(expected_ids):
+        raw, baseline = combined[mutation_id]
+        outcome, reason = recompute_raw_result(
+            raw, plan_by_id[mutation_id], baseline)
+        descriptor = dict(plan_by_id[mutation_id])
+        descriptor.pop("allowed_statuses", None)
+        descriptor["outcome"] = outcome
+        descriptor["reason"] = reason
+        reduced[mutation_id] = descriptor
+        if outcome == "survived":
+            survivors.append(mutation_id)
+        elif reason == UNASSERTED_KILL_REASON:
+            unasserted.append(mutation_id)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "generated_by": f"{GENERATOR} --aggregate",
+        "note": NOTE,
+        "generator_sha256": fragments[0]["generator_sha256"],
+        "source_digests": fragments[0]["source_digests"],
+        "plan_sha256": fragments[0]["plan_sha256"],
+        "baseline": {relative: "passed" for relative in GUARDS},
+        "sweep_exclusions": exclusions,
+        "results": reduced,
+        "survivors": survivors,
+        "unasserted_kills": unasserted,
+        "caught": len(reduced) - len(survivors),
+        "total": len(reduced),
+    }
+
+
+def collection_scope_sentence(payload: dict) -> str:
+    """State which swept sources had their collections enumerated, and which did not.
+
+    The sentence above bounds the exclusion list by FILE: nothing outside the swept sources
+    is mutated. It does not bound it by KIND, and only some swept sources take automatic
+    collection removal -- the rest carry whatever mutations were authored for them, so
+    their collections are never enumerated and therefore never appear as exclusions. Without this, a source
+    listed as swept with no exclusion entry reads as "every collection in it was mutated",
+    which is the opposite of what happened.
+
+    Enumeration is evidenced by an element DELETION or by an exclusion entry, because both
+    come from the same walk. A set-addition is authored per element, so on its own it does
+    not show which collections the walk reached -- ``mutation_plan`` does require the
+    addition's collection to have been discovered, but a collection discovered empty yields
+    no deletion and no exclusion, which is the case this arm separates. A swept source with no mutations at all is reported as its own case:
+    calling it site-only would assert mutations it does not have.
+    """
+    swept = set(payload["source_digests"])
+    kinds: dict[str, set] = {}
+    for entry in payload["results"].values():
+        kinds.setdefault(entry["module"], set()).add(entry["kind"])
+    walked = {name.split("::", 1)[0] for name in payload.get("sweep_exclusions", {})}
+    enumerated = sorted(name for name in swept
+                        if "set-element" in kinds.get(name, ()) or name in walked)
+    # Name only the kind a source actually carries. "site mutations only" was asserted of
+    # anything unenumerated-but-mutated, which is false for a source carrying, say, only
+    # authored additions -- the same shape of false statement this sentence exists to stop.
+    site_only = sorted(name for name in swept
+                       if name not in enumerated and kinds.get(name) == {"site"})
+    other_kinds = sorted(name for name in swept
+                         if name not in enumerated and kinds.get(name)
+                         and kinds.get(name) != {"site"})
+    unmutated = sorted(name for name in swept if not kinds.get(name))
+    # A result whose module is not a swept source contradicts the receipt's own digest map.
+    # Say so rather than dropping it, which would hide exactly the disagreement this
+    # sentence exists to prevent.
+    stray = sorted(set(kinds) - swept)
+
+    def listing(names):
+        return ", ".join(f"`{name}`" for name in names)
+
+    if not swept:
+        empty = ("No source was swept, so the exclusions below enumerate nothing and their "
+                 "content is not evidence about any file.")
+        # Results with no swept source at all is a contradiction of the same kind as a
+        # stray one, and returning early used to drop it -- the defect this clause exists
+        # to prevent, reintroduced one branch over.
+        if stray:
+            empty += (" Results nonetheless reference " + listing(stray) + ".")
+        return empty
+    parts = []
+    if enumerated:
+        parts.append("Collections are enumerated for " + listing(enumerated) + ".")
+    else:
+        parts.append("No swept source had its collections enumerated.")
+    if site_only:
+        parts.append(listing(site_only)
+                     + (" carries" if len(site_only) == 1 else " carry")
+                     + " site mutations only: no collection in "
+                     + ("it" if len(site_only) == 1 else "them")
+                     + " is enumerated, so none appears in the exclusions below -- and for "
+                       "a collection in these sources, absence from that list is not "
+                       "evidence it was mutated.")
+    if other_kinds:
+        parts.append(listing(other_kinds)
+                     + (" carries" if len(other_kinds) == 1 else " carry")
+                     + " no enumerated collection: only "
+                     + ", ".join(sorted(
+                         {kind for name in other_kinds for kind in kinds[name]}))
+                     + " mutations, so nothing in "
+                     + ("it" if len(other_kinds) == 1 else "them")
+                     + " appears in the exclusions below.")
+    if unmutated:
+        parts.append(listing(unmutated)
+                     + (" carries" if len(unmutated) == 1 else " carry")
+                     + " no mutation of any kind in this sweep.")
+    if stray:
+        parts.append("Results reference " + listing(stray)
+                     + ", which the digest map does not list as swept.")
+    if not site_only and not other_kinds and not unmutated and not stray:
+        parts.append("The exclusions below are therefore complete for every swept source.")
+    return " ".join(parts)
+
+
+def summary_text(payload: dict) -> str:
+    # Consume only the projection. The summary is compared byte for byte against a CI
+    # re-measurement, so a field derived from a host observation would make it unequal on a
+    # host that observed differently. Reading through the projection turns that into an
+    # immediate KeyError here rather than a red aggregate job on another machine.
+    payload = platform_stable(payload)
+    # The scan set belongs with the verdict. Without it the per-symbol exclusion list at the
+    # end reads as the complete inventory, when it enumerates only symbols INSIDE these
+    # sources; every other file in the repository is outside the sweep entirely, including
+    # hooks this package registers. Read from the receipt's own digest map rather than a
+    # literal, so the declaration cannot disagree with what was measured. The map is
+    # platform-stable, so the cross-host byte comparison still holds.
+    lines = [
+        "<!-- generated by tools/write-mutation-receipt.py -- do not edit -->", "",
+        "Swept sources: "
+        + ", ".join(f"`{name}`" for name in sorted(payload["source_digests"]))
+        + ". No other repository file is mutated by this sweep, so the exclusions listed "
+          "at the end enumerate symbols inside these sources only.",
+        "",
+        collection_scope_sentence(payload),
+        "",
+        "| module | guarded set | elements | caught | survived |",
+        "|---|---|---:|---:|---:|",
+    ]
+    grouped, additions, sites = {}, [], []
+    for entry in payload["results"].values():
+        if entry["kind"] == "site":
+            sites.append(entry)
+            continue
+        if entry["kind"] == "set-addition":
+            additions.append(entry)
+            continue
+        key = (entry["module"], entry["name"])
+        counts = grouped.setdefault(key, {"caught": 0, "survived": 0})
+        counts[entry["outcome"]] += 1
+    for (module, name), counts in sorted(grouped.items()):
+        total = counts["caught"] + counts["survived"]
+        lines.append(
+            f"| `{Path(module).name}` | `{name}` | {total} | "
+            f"{counts['caught']} | {counts['survived']} |")
+    lines += [
+        "", "| module | guarded set | added element | declared mutation | outcome |",
+        "|---|---|---|---|---|",
+    ]
+    for entry in sorted(
+            additions,
+            key=lambda item: (item["module"], item["name"], item["element"])):
+        lines.append(
+            f"| `{Path(entry['module']).name}` | `{entry['name']}` | "
+            f"`{entry['element']}` | {entry['label']} | {entry['outcome']} |")
+    lines += ["", "| module | site mutation | outcome |", "|---|---|---|"]
+    for entry in sorted(sites, key=lambda item: (item["module"], item["label"])):
+        lines.append(
+            f"| `{Path(entry['module']).name}` | {entry['label']} | "
+            f"{entry['outcome']} |")
+    lines += [
+        "",
+        f"{payload['caught']} of {payload['total']} planned mutations are caught; "
+        f"{len(payload['survivors'])} exact mutation IDs remain recorded coverage debt.",
+        "",
+        "A kill scored only because the recorded check count moved is not evidence that the "
+        "suites observe the change. That count is recorded per result and reported by the "
+        "gate rather than shown here, because whether an assertion fires can differ between "
+        "hosts and this file is compared across them.",
+        "",
+    ]
+    if payload["sweep_exclusions"]:
+        lines.append(
+            "Not swept: " + "; ".join(
+                f"`{name}` ({reason})" for name, reason
+                in sorted(payload["sweep_exclusions"].items())) + ".")
+    return "\n".join(lines) + "\n"
+
+
+def load_json(path: Path) -> dict:
+    def unique_object(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"duplicate JSON object key {key!r} in {path}")
+            value[key] = item
+        return value
+
+    return json.loads(
+        path.read_text(encoding="utf-8"), object_pairs_hook=unique_object)
+
+
+def platform_stable(payload):
+    """Drop the environment-observed fields so two hosts can be compared."""
+    if not isinstance(payload, dict):
+        return payload
+    reduced = {k: v for k, v in payload.items()
+               if k not in HOST_OBSERVED_RECEIPT_KEYS}
+    results = reduced.get("results")
+    if isinstance(results, dict):
+        reduced["results"] = {
+            key: {k: v for k, v in value.items()
+                  if k not in HOST_OBSERVED_RESULT_FIELDS}
+            if isinstance(value, dict) else value
+            for key, value in results.items()
+        }
+    return reduced
+
+
+def result_reason_error(result: object, descriptor: dict) -> str:
+    """Reject kill mechanisms that production scoring cannot emit for a descriptor."""
+    if not isinstance(result, dict):
+        return "mutation result is not an object"
+    outcome, reason = result.get("outcome"), result.get("reason")
+    if outcome == "survived":
+        return "" if reason == "survived" else "survived outcome has a kill reason"
+    if outcome != "caught":
+        return f"mutation outcome {outcome!r} is invalid"
+    selectors = tuple(descriptor.get("selectors", ()) or ())
+    allowed_statuses = set(descriptor.get("allowed_statuses", ()) or ())
+    reachable = ({"selector-failure"} if selectors else {
+        "suite-failure", UNASSERTED_KILL_REASON,
+    }) | allowed_statuses
+    if reason not in reachable:
+        return (
+            f"caught reason {reason!r} is unreachable for a descriptor "
+            f"with {len(selectors)} selector(s)"
+        )
+    return ""
+
+
+def fresh_observation_error(payload: dict, plan=None) -> str:
+    """Validate host-observed kill evidence before projecting it away."""
+    if not isinstance(payload, dict):
+        return "fresh mutation receipt root is not an object"
+    results = payload.get("results")
+    if not isinstance(results, dict):
+        return "fresh mutation results are not an object"
+    if plan is None:
+        try:
+            plan, _exclusions = mutation_plan()
+        except (OSError, ValueError) as exc:
+            return f"cannot bind fresh reasons to the mutation plan: {exc}"
+    plan_by_id = {item["id"]: item for item in plan}
+    if set(results) != set(plan_by_id):
+        return "fresh reason inventory differs from the mutation plan"
+    for mutation_id in sorted(results):
+        problem = result_reason_error(results[mutation_id], plan_by_id[mutation_id])
+        if problem:
+            return f"fresh result {mutation_id}: {problem}"
+    observed = sorted(
+        mutation_id for mutation_id, result in results.items()
+        if isinstance(result, dict)
+        and result.get("outcome") == "caught"
+        and result.get("reason") == UNASSERTED_KILL_REASON
+    )
+    if payload.get("unasserted_kills") != observed:
+        return "fresh unasserted-kill IDs are not exactly derived from results"
+    if len(observed) > UNASSERTED_KILL_CEILING:
+        return (
+            f"fresh unasserted kills {len(observed)} exceed ceiling "
+            f"{UNASSERTED_KILL_CEILING}")
+    return ""
+
+
+def aggregate(paths: list[Path], accept: bool) -> int:
+    payload = normalized_receipt([load_json(path) for path in paths])
+    plan, _exclusions = mutation_plan()
+    observation_problem = fresh_observation_error(payload, plan)
+    if observation_problem:
+        print(f"refusing mutation receipt: {observation_problem}", file=sys.stderr)
+        return 2
+    summary = summary_text(payload)
+    existing = load_json(RECEIPT) if RECEIPT.is_file() else None
+    existing_summary = SUMMARY.read_text(encoding="utf-8") if SUMMARY.is_file() else None
+    if existing is not None and not accept:
+        existing_problem = fresh_observation_error(existing, plan)
+        if existing_problem:
+            print(
+                f"refusing tracked mutation receipt: {existing_problem}",
+                file=sys.stderr,
+            )
+            return 2
+    # `reason` answers whether an assertion fired, which legitimately differs by platform:
+    # deleting "W" from MOD_UNMODELLED reddens a probe on a zsh that consumes that letter as
+    # a modifier and only moves the check count on a zsh that does not. The outcome is the
+    # cross-platform fact this receipt claims, so the comparison is made on the projection
+    # that excludes reason and its derived tally; both remain recorded as an observation from
+    # the host that generated them, and ci-gate still validates their vocabulary and their
+    # consistency with the outcome.
+    if not accept and (
+            platform_stable(existing) != platform_stable(payload)
+            or existing_summary != summary):
+        before = len(existing.get("results", {})) if isinstance(existing, dict) else 0
+        print(
+            f"refusing mutation receipt change ({before} -> {payload['total']} results; "
+            f"{len(payload['survivors'])} survivors); review fragments and rerun with "
+            "--accept-receipt-changes",
+            file=sys.stderr)
+        return 2
+    if accept:
+        RECEIPT.write_text(json.dumps(payload, indent=1) + "\n", encoding="utf-8")
+        SUMMARY.write_text(summary, encoding="utf-8")
+        print(
+            f"wrote {RECEIPT.relative_to(ROOT)} and {SUMMARY.relative_to(ROOT)}: "
+            f"{payload['caught']}/{payload['total']} caught, "
+            f"{len(payload['survivors'])} survivors")
+    else:
+        print(
+            f"verified {payload['caught']}/{payload['total']} caught mutation outcomes "
+            "against the tracked receipt")
+    return 0
+
+
+def selftest() -> int:
+    """Prove the scoring and plan-construction logic without measuring anything.
+
+    A generator that UNDER-generates is already caught: fewer descriptors change
+    ``plan_sha256``, which the gate recomputes from source and compares. A generator that
+    mis-scores a kill is caught by nothing -- every shard would agree, the receipt would be
+    internally consistent, and the CI re-measurement recomputes from the receipt's own
+    contents, so it reproduces the same wrong verdict. These checks are that missing
+    control, so they run no suite, spawn no process and open no socket: suite results are
+    hand-built typed dictionaries and ``mutation_plan`` runs against a fixture guard in a
+    temporary directory with the module's collection tables swapped out.
+    """
+    checks = failures = 0
+
+    def record(name: str, ok: bool, detail: str = "") -> None:
+        nonlocal checks, failures
+        checks += 1
+        print(f"  {'PASS' if ok else 'FAIL'} {name}")
+        if not ok and detail:
+            print(f"       {detail}")
+        failures += not ok
+
+    def equal(name, actual, expected) -> None:
+        record(name, actual == expected, f"actual={actual!r} expected={expected!r}")
+
+    def raises(name, exception, message, call) -> None:
+        """Assert the exact type AND text: ``!= ""`` lets a neighbouring failure pass."""
+        try:
+            returned = call()
+        except Exception as exc:
+            record(name, type(exc) is exception and str(exc) == message,
+                   f"raised {type(exc).__name__}({str(exc)!r}), expected "
+                   f"{exception.__name__}({message!r})")
+            return
+        record(name, False,
+               f"returned {returned!r} instead of {exception.__name__}({message!r})")
+
+    # ---- result_kill: the decision the sweep cannot grade for itself ------------------
+    baseline = {"status": "completed", "returncode": 0, "checks": 40, "failures": 0}
+
+    def completed(returncode=0, checks=40, failures=0) -> dict:
+        return {"status": "completed", "returncode": returncode,
+                "checks": checks, "failures": failures}
+
+    equal("a green run at the baseline check count survives",
+          result_kill(completed(), baseline), (False, "survived"))
+    raises("exit one with zero receipt failures is not a measurement",
+           ValueError,
+           "mutation produced an invalid measurement: "
+           "{'status': 'completed', 'returncode': 1, 'checks': 40, 'failures': 0}",
+           lambda: result_kill(completed(returncode=1), baseline))
+    raises("receipt failures with a zero exit are not a measurement",
+           ValueError,
+           "mutation produced an invalid measurement: "
+           "{'status': 'completed', 'returncode': 0, 'checks': 40, 'failures': 3}",
+           lambda: result_kill(completed(failures=3), baseline))
+    equal("consistent red exit and receipt channels are a suite failure",
+          result_kill(completed(returncode=1, failures=3), baseline),
+          (True, "suite-failure"))
+    for invalid_exit in (2, -9):
+        invalid_result = completed(returncode=invalid_exit, failures=1)
+        raises(f"exit {invalid_exit} with assertion failures is not a measurement",
+               ValueError,
+               f"mutation produced an invalid measurement: {invalid_result}",
+               lambda result=invalid_result: result_kill(result, baseline))
+        equal(f"raw validation rejects exit {invalid_exit} with assertion failures",
+              suite_result_error(invalid_result),
+              "completed suite exit and receipt failures disagree")
+    equal("raw validation rejects a nonzero exit with zero receipt failures",
+          suite_result_error(completed(returncode=1)),
+          "completed suite exit and receipt failures disagree")
+    equal("raw validation rejects receipt failures with a zero exit",
+          suite_result_error(completed(failures=3)),
+          "completed suite exit and receipt failures disagree")
+    equal("a check count that rose with nothing failing is an unasserted kill",
+          result_kill(completed(checks=41), baseline), (True, "exact-check-count"))
+    equal("a check count that fell with nothing failing is an unasserted kill",
+          result_kill(completed(checks=39), baseline), (True, "exact-check-count"))
+    # The distinction the receipt exists to make: a detection must not be filed as
+    # arithmetic when the count also moved, or a real kill reads as a predetermined one.
+    equal("a failed assertion outranks a moved check count",
+          result_kill(completed(returncode=1, failures=1, checks=39), baseline),
+          (True, "suite-failure"))
+    equal("exit one outranks a moved check count",
+          result_kill(completed(returncode=1, failures=1, checks=39), baseline),
+          (True, "suite-failure"))
+    probe_descriptor = {"id": "probe", "module": BASH}
+    probe_baseline = {BASH: baseline}
+    for invalid_exit in (2, -9):
+        invalid_result = completed(returncode=invalid_exit, failures=1)
+        raw = {"owner": invalid_result, "merged": None,
+               "outcome": "caught", "reason": "suite-failure"}
+        raises(f"aggregation rejects exit {invalid_exit} with assertion failures",
+               ValueError,
+               "raw owner result probe: completed suite exit and receipt failures disagree",
+               lambda value=raw: recompute_raw_result(
+                   value, probe_descriptor, probe_baseline))
+    timed_out = {"status": "timeout", "timeout_seconds": 240}
+    unreadable = {"status": "invalid-receipt", "returncode": 1,
+                  "receipt_count": 0, "stderr_tail": ""}
+    equal("a timeout the plan declares is a kill carrying that status as its reason",
+          result_kill(timed_out, baseline, ("timeout",)), (True, "timeout"))
+    raises("an unreadable receipt remains invalid even if a plan declares it",
+           ValueError,
+           "mutation produced an invalid measurement: {'status': 'invalid-receipt', "
+           "'returncode': 1, 'receipt_count': 0, 'stderr_tail': ''}",
+           lambda: result_kill(unreadable, baseline, ("invalid-receipt",)))
+    raises("an undeclared timeout is not a measurement",
+           ValueError,
+           "mutation produced an invalid measurement: "
+           "{'status': 'timeout', 'timeout_seconds': 240}",
+           lambda: result_kill(timed_out, baseline))
+    raises("an allowance for one status does not cover a different one",
+           ValueError,
+           "mutation produced an invalid measurement: {'status': 'invalid-receipt', "
+           "'returncode': 1, 'receipt_count': 0, 'stderr_tail': ''}",
+           lambda: result_kill(unreadable, baseline, ("timeout",)))
+    raises("a result carrying no status is not a measurement",
+           ValueError, "mutation produced an invalid measurement: {}",
+           lambda: result_kill({}, baseline))
+    selector = "the repaired production link goes red"
+    selector_baseline = dict(baseline, selectors={selector: "pass"})
+    equal("a declared selector changing from pass to fail is an asserted kill",
+          result_kill(
+              dict(completed(returncode=1, failures=1),
+                   selectors={selector: "fail"}),
+              selector_baseline, selectors=(selector,)),
+          (True, "selector-failure"))
+    green_selector_failure = dict(completed(), selectors={selector: "fail"})
+    raises("a selected failure with a green terminal receipt is not a measurement",
+           ValueError, "selector failure disagrees with terminal receipt",
+           lambda: result_kill(
+               green_selector_failure, selector_baseline, selectors=(selector,)))
+    selector_probe_descriptor = {
+        "id": "selector-probe", "module": BASH, "selectors": (selector,),
+    }
+    selector_probe_raw = {
+        "owner": green_selector_failure, "merged": None,
+        "outcome": "caught", "reason": "selector-failure",
+    }
+    raises("aggregation rejects a selected failure with a green terminal receipt",
+           ValueError,
+           "raw owner result selector-probe: completed suite selector failures "
+           "disagree with terminal receipt",
+           lambda: recompute_raw_result(
+               selector_probe_raw, selector_probe_descriptor,
+               {BASH: selector_baseline}))
+    equal("an unrelated suite failure cannot grade a passing declared selector",
+          result_kill(
+              dict(completed(returncode=1, failures=1),
+                   selectors={selector: "pass"}),
+              selector_baseline, selectors=(selector,)),
+          (False, "survived"))
+    raises("a missing declared selector invalidates the measurement",
+           ValueError, "mutation selector inventory differs from its green baseline",
+           lambda: result_kill(completed(), selector_baseline, selectors=(selector,)))
+    raises("a nonpassing baseline selector invalidates the measurement",
+           ValueError, "mutation selector inventory differs from its green baseline",
+           lambda: result_kill(
+               dict(completed(), selectors={selector: "fail"}),
+               dict(selector_baseline, selectors={selector: "fail"}),
+               selectors=(selector,)))
+    equal("the unasserted reason is the exact wire value the gate reads",
+          UNASSERTED_KILL_REASON, "exact-check-count")
+    equal("the kill-reason vocabulary includes the selected assertion failure",
+          set(KILL_REASONS),
+          {"suite-failure", "exact-check-count", "survived", "timeout",
+           "selector-failure"})
+
+    selectorless_descriptor = {
+        "id": "selectorless", "module": GREP, "kind": "set-element",
+        "allowed_statuses": [],
+    }
+    selector_descriptor = {
+        "id": "selected", "module": STOP, "kind": "site",
+        "selectors": [selector], "allowed_statuses": [],
+    }
+    equal("a selectorless descriptor cannot claim a selector-failure kill",
+          result_reason_error(
+              {"outcome": "caught", "reason": "selector-failure"},
+              selectorless_descriptor),
+          "caught reason 'selector-failure' is unreachable for a descriptor with 0 selector(s)")
+    equal("a selected descriptor can claim a selector-failure kill",
+          result_reason_error(
+              {"outcome": "caught", "reason": "selector-failure"},
+              selector_descriptor), "")
+    equal("a selected descriptor cannot claim an exact-check-count kill",
+          result_reason_error(
+              {"outcome": "caught", "reason": UNASSERTED_KILL_REASON},
+              selector_descriptor),
+          "caught reason 'exact-check-count' is unreachable for a descriptor with 1 selector(s)")
+
+    reason_plan = [selectorless_descriptor, selector_descriptor]
+    truthful_reason_payload = {
+        "results": {
+            "selectorless": {"outcome": "caught", "reason": "suite-failure"},
+            "selected": {"outcome": "caught", "reason": "selector-failure"},
+        },
+        "unasserted_kills": [],
+    }
+    forged_reason_payload = json.loads(json.dumps(truthful_reason_payload))
+    forged_reason_payload["results"]["selectorless"]["reason"] = "selector-failure"
+    equal("fresh observation validation accepts reachable kill mechanisms",
+          fresh_observation_error(truthful_reason_payload, reason_plan), "")
+    record("fresh observation validation rejects a structurally impossible kill mechanism",
+           "unreachable" in fresh_observation_error(forged_reason_payload, reason_plan))
+
+    with tempfile.TemporaryDirectory(prefix="z-harness-reason-selftest-") as raw:
+        reason_root = Path(raw)
+        tracked_receipt = reason_root / "receipt.json"
+        tracked_summary = reason_root / "summary.md"
+        fragment = reason_root / "fragment.json"
+        tracked_receipt.write_text(
+            json.dumps(forged_reason_payload), encoding="utf-8")
+        tracked_summary.write_text("stable\n", encoding="utf-8")
+        fragment.write_text("{}", encoding="utf-8")
+        patched = {
+            "RECEIPT": tracked_receipt,
+            "SUMMARY": tracked_summary,
+            "mutation_plan": lambda: (reason_plan, {}),
+            "normalized_receipt": lambda _fragments: truthful_reason_payload,
+            "summary_text": lambda _payload: "stable\n",
+        }
+        restored = {name: globals()[name] for name in patched}
+        globals().update(patched)
+        try:
+            aggregate_stderr = io.StringIO()
+            with contextlib.redirect_stderr(aggregate_stderr):
+                aggregate_exit = aggregate([fragment], accept=False)
+        finally:
+            globals().update(restored)
+        record("verification aggregation rejects an impossibly relabelled tracked reason",
+               aggregate_exit == 2
+               and "refusing tracked mutation receipt" in aggregate_stderr.getvalue())
+
+    # ---- needs_merged_run: where an arithmetic kill must not stop the measurement -----
+    equal("the merged suite is not rerun against itself when it survives",
+          needs_merged_run(False, "survived", BASH), False)
+    equal("the merged suite is not rerun against itself on an arithmetic kill",
+          needs_merged_run(True, UNASSERTED_KILL_REASON, BASH), False)
+    equal("the merged suite is not rerun against itself on a detection",
+          needs_merged_run(True, "suite-failure", BASH), False)
+    equal("a survivor in the grep guard still runs the merged suite",
+          needs_merged_run(False, "survived", GREP), True)
+    equal("an arithmetic kill in the grep guard still runs the merged suite",
+          needs_merged_run(True, UNASSERTED_KILL_REASON, GREP), True)
+    equal("a detection in the grep guard stops at the owner suite",
+          needs_merged_run(True, "suite-failure", GREP), False)
+    equal("a declared timeout in the grep guard stops at the owner suite",
+          needs_merged_run(True, "timeout", GREP), False)
+    equal("a survivor in the zsh guard still runs the merged suite",
+          needs_merged_run(False, "survived", ZSH), True)
+    equal("an arithmetic kill in the zsh guard still runs the merged suite",
+          needs_merged_run(True, UNASSERTED_KILL_REASON, ZSH), True)
+    equal("a detection in the zsh guard stops at the owner suite",
+          needs_merged_run(True, "suite-failure", ZSH), False)
+    equal("a Stop mutation never delegates its verdict to the command envelope",
+          needs_merged_run(False, "survived", STOP), False)
+    equal("an ownership mutation never delegates its verdict to the command envelope",
+          needs_merged_run(False, "survived", OWNERSHIP), False)
+
+    # ---- without_element / with_element: the edit must be the declared one ------------
+    fixture = (
+        "HEAD = 0\n"
+        "COLORS = {'red', 'green', 'blue'}\n"
+        "WRAPPED = frozenset({'keep', 'drop'})\n"
+        "CHARS = 'abc'\n"
+        "TABLE = {'alpha': 1, 'beta': 2}\n"
+        "ONLY = {'lonely'}\n"
+        "SOLO_TABLE = {'lonely': 9}\n"
+        "BASE = {'x'}\n"
+        "UNION = BASE | {'y'}\n"
+        "OPAQUE = BASE | UNRESOLVED\n"
+        "GUARDS = [('first', 0), ('second', 1)]\n"
+        "TAIL = 0\n"
+    )
+    assignments = (
+        "COLORS = {'red', 'green', 'blue'}",
+        "WRAPPED = frozenset({'keep', 'drop'})",
+        "CHARS = 'abc'",
+        "TABLE = {'alpha': 1, 'beta': 2}",
+        "ONLY = {'lonely'}",
+        "SOLO_TABLE = {'lonely': 9}",
+        "UNION = BASE | {'y'}",
+        "GUARDS = [('first', 0), ('second', 1)]",
+    )
+
+    def edited(old: str, new: str) -> str:
+        """Build the expected whole file by literal substitution.
+
+        Deliberately NOT the offset arithmetic production uses: an expected value
+        re-derived from the expression under test asserts only that it is consistent
+        with itself. Rebuilding the whole file also pins that no other line moved.
+        """
+        return fixture.replace(old + "\n", new + "\n", 1)
+
+    record("each fixture assignment occurs once, so the expected edit is unambiguous",
+           all(fixture.count(line + "\n") == 1 for line in assignments))
+    equal("removing a set member rewrites only that assignment",
+          without_element(fixture, "COLORS", "set", "green"),
+          edited("COLORS = {'red', 'green', 'blue'}", "COLORS = {'red', 'blue'}"))
+    equal("removing a member keeps the collection's constructor",
+          without_element(fixture, "WRAPPED", "set", "drop"),
+          edited("WRAPPED = frozenset({'keep', 'drop'})",
+                 "WRAPPED = frozenset({'keep'})"))
+    equal("removing a charset member shortens the literal string",
+          without_element(fixture, "CHARS", "charset", "b"),
+          edited("CHARS = 'abc'", "CHARS = 'ac'"))
+    equal("removing a dict key drops its value with it",
+          without_element(fixture, "TABLE", "dict", "alpha"),
+          edited("TABLE = {'alpha': 1, 'beta': 2}", "TABLE = {'beta': 2}"))
+    equal("emptying a set writes a constructor call, not empty-dict syntax",
+          without_element(fixture, "ONLY", "set", "lonely"),
+          edited("ONLY = {'lonely'}", "ONLY = set()"))
+    equal("emptying a dict writes empty-dict syntax",
+          without_element(fixture, "SOLO_TABLE", "dict", "lonely"),
+          edited("SOLO_TABLE = {'lonely': 9}", "SOLO_TABLE = {}"))
+    equal("a computed set is flattened before the member is removed",
+          without_element(fixture, "UNION", "computed-set", "x"),
+          edited("UNION = BASE | {'y'}", "UNION = {'y'}"))
+    equal("removing a dispatch entry drops its whole (label, predicate) pair",
+          without_element(fixture, "GUARDS", "dispatch", "first"),
+          edited("GUARDS = [('first', 0), ('second', 1)]", "GUARDS = [('second', 1)]"))
+    raises("removing from an absent collection is a lookup failure",
+           LookupError, "MISSING",
+           lambda: without_element(fixture, "MISSING", "set", "x"))
+    raises("an unresolvable computed collection is refused, not silently skipped",
+           ValueError, "cannot resolve computed collection OPAQUE",
+           lambda: without_element(fixture, "OPAQUE", "computed-set", "x"))
+    equal("adding a set member appends it to that assignment",
+          with_element(fixture, "COLORS", "set", "cyan"),
+          edited("COLORS = {'red', 'green', 'blue'}",
+                 "COLORS = {'red', 'green', 'blue', 'cyan'}"))
+    equal("adding a member keeps the collection's constructor",
+          with_element(fixture, "WRAPPED", "set", "extra"),
+          edited("WRAPPED = frozenset({'keep', 'drop'})",
+                 "WRAPPED = frozenset({'keep', 'drop', 'extra'})"))
+    equal("adding a charset member extends the literal string",
+          with_element(fixture, "CHARS", "charset", "d"),
+          edited("CHARS = 'abc'", "CHARS = 'abcd'"))
+    equal("a computed set is flattened before the member is added",
+          with_element(fixture, "UNION", "computed-set", "z"),
+          edited("UNION = BASE | {'y'}", "UNION = {'x', 'y', 'z'}"))
+    raises("adding a member the set already holds is refused",
+           ValueError, "COLORS already contains 'red'",
+           lambda: with_element(fixture, "COLORS", "set", "red"))
+    raises("adding a character the charset already holds is refused",
+           ValueError, "CHARS already contains 'a'",
+           lambda: with_element(fixture, "CHARS", "charset", "a"))
+    raises("an addition to a dict collection is refused rather than skipped",
+           ValueError, "addition is not modelled for collection kind 'dict'",
+           lambda: with_element(fixture, "TABLE", "dict", "gamma"))
+    raises("an addition to a dispatch collection is refused rather than skipped",
+           ValueError, "addition is not modelled for collection kind 'dispatch'",
+           lambda: with_element(fixture, "GUARDS", "dispatch", "third"))
+    raises("adding to an absent collection is a lookup failure",
+           LookupError, "MISSING",
+           lambda: with_element(fixture, "MISSING", "set", "x"))
+    raises("an unresolvable collection cannot take an addition",
+           ValueError, "cannot resolve collection OPAQUE for addition",
+           lambda: with_element(fixture, "OPAQUE", "computed-set", "z"))
+    # An edit that changes nothing runs the suite against pristine source and is recorded
+    # as coverage debt no assertion could retire, so every modelled kind must move bytes.
+    record("every modelled edit leaves the source changed",
+           all(edit != fixture for edit in (
+               without_element(fixture, "COLORS", "set", "green"),
+               without_element(fixture, "WRAPPED", "set", "drop"),
+               without_element(fixture, "CHARS", "charset", "b"),
+               without_element(fixture, "TABLE", "dict", "alpha"),
+               without_element(fixture, "UNION", "computed-set", "x"),
+               without_element(fixture, "GUARDS", "dispatch", "first"),
+               with_element(fixture, "COLORS", "set", "cyan"),
+               with_element(fixture, "CHARS", "charset", "d"),
+               with_element(fixture, "UNION", "computed-set", "z"))))
+
+    # ---- mutation_plan: enumeration and the declared-anchor tripwire ------------------
+    guard_relative = "guards/fixture_guard.py"
+    guard_source = (
+        '"""fixture guard for the plan selftest"""\n'
+        "OPTS = {'--one', '--two'}\n"
+        "CHARS = 'pq'\n"
+        "ENUMWORD = 'aab'\n"
+        "SKIPPED = {'ignored'}\n"
+        "lower_case = {'not-upper'}\n"
+        "\n"
+        "\n"
+        "def decide(command):\n"
+        "    if command:\n"
+        "        return 'ask', 'fixture'\n"
+        "    return 'allow', ''\n"
+    )
+    fixture_site = {
+        "label": "fixture site", "module": guard_relative,
+        "anchor": "    return 'allow', ''",
+        "replacement": "    return 'deny', 'fixture'",
+        "allowed_statuses": (),
+    }
+    fixture_addition = {
+        "label": "fixture addition", "module": guard_relative, "name": "OPTS",
+        "collection_kind": "set", "element": "--three", "allowed_statuses": (),
+    }
+
+    @contextlib.contextmanager
+    def planning_fixture(**overrides):
+        """Point the plan at a private tree; restore the shipped tables on the way out."""
+        with tempfile.TemporaryDirectory(prefix="z-harness-plan-selftest-") as raw:
+            root = Path(raw)
+            (root / "guards").mkdir()
+            (root / guard_relative).write_text(
+                overrides.get("source", guard_source), encoding="utf-8")
+            patched = {
+                "ROOT": root,
+                "GUARDS": (guard_relative,),
+                "COLLECTION_GUARDS": (guard_relative,),
+                "CHARSET_COLLECTIONS": {qname(guard_relative, "CHARS")},
+                "SWEEP_EXCLUSIONS": overrides.get(
+                    "exclusions",
+                    {qname(guard_relative, "SKIPPED"): "declared exclusion"}),
+                "SITE_MUTATIONS": overrides.get("sites", (fixture_site,)),
+                "ADDITION_MUTATIONS": overrides.get("additions", (fixture_addition,)),
+            }
+            restore = {name: globals()[name] for name in patched}
+            globals().update(patched)
+            try:
+                yield
+            finally:
+                globals().update(restore)
+
+    def planning(**overrides):
+        def call():
+            with planning_fixture(**overrides):
+                return mutation_plan()
+        return call
+
+    with planning_fixture():
+        plan, exclusions = mutation_plan()
+
+    equal("the plan is exactly one descriptor per member, site and declared addition",
+          sorted((item["kind"], item.get("name", ""), item.get("element", ""))
+                 for item in plan),
+          [("set-addition", "OPTS", "--three"),
+           ("set-element", "CHARS", "p"),
+           ("set-element", "CHARS", "q"),
+           ("set-element", "OPTS", "--one"),
+           ("set-element", "OPTS", "--two"),
+           ("site", "", "")])
+    equal("a charset is planned character by character",
+          sorted(item["collection_kind"] for item in plan
+                 if item.get("name") == "CHARS"),
+          ["charset", "charset"])
+    equal("a declared exclusion and a structurally rejected constant are both reported",
+          exclusions,
+          {"guards/fixture_guard.py::ENUMWORD":
+              "repeated characters identify an enum word, not a membership charset",
+           "guards/fixture_guard.py::SKIPPED": "declared exclusion"})
+    equal("element mutations cannot declare instrument failure as a kill",
+          [item["allowed_statuses"] for item in plan
+           if item["kind"] == "set-element"],
+          [[], [], [], []])
+    equal("a site descriptor records both halves of the edit by digest",
+          [(item["module"], item["label"], item["anchor_sha256"],
+            item["replacement_sha256"], item.get("selectors", []),
+            item["allowed_statuses"])
+           for item in plan if item["kind"] == "site"],
+          [("guards/fixture_guard.py", "fixture site",
+            "d1a18fa4c21b99dedf52fd32f735e85635b7afddf9b96d132ac4117426f7c6ae",
+            "aecfce5ef61236a70a297f392eab1a1f6ba65ac66dcba3c88522777aa3935439",
+            [], [])])
+    identities = [item["id"] for item in plan]
+    record("every descriptor carries a distinct 64-hex identity",
+           len(identities) == 6 and len(set(identities)) == 6
+           and all(re.fullmatch(r"[0-9a-f]{64}", item) for item in identities),
+           f"identities={identities!r}")
+    record("the plan is ordered by identity so shard assignment is positional",
+           identities == sorted(identities), f"identities={identities!r}")
+    with planning_fixture():
+        replanned, _exclusions = mutation_plan()
+    equal("re-planning identical sources reproduces identical identities",
+          [item["id"] for item in replanned], identities)
+    raises("a declared anchor that matches nothing stops the plan",
+           ValueError,
+           "site anchor 'fixture site' matched 0 times in guards/fixture_guard.py",
+           planning(sites=({**fixture_site, "anchor": "no such anchor"},)))
+    raises("a declared anchor that matches twice stops the plan",
+           ValueError,
+           "site anchor 'fixture site' matched 2 times in guards/fixture_guard.py",
+           planning(sites=({**fixture_site, "anchor": "    return '"},)))
+    raises("an exclusion naming a collection the scan cannot see stops the plan",
+           ValueError,
+           "stale sweep exclusions: ['guards/fixture_guard.py::NOPE']",
+           planning(exclusions={qname(guard_relative, "NOPE"): "gone"}))
+    raises("an addition against a collection the sweep never enumerates stops the plan",
+           ValueError,
+           "addition 'fixture addition' names guards/fixture_guard.py::ABSENT, which "
+           "the element sweep does not enumerate; a declared addition against an "
+           "invisible collection would never run",
+           planning(additions=({**fixture_addition, "name": "ABSENT"},)))
+    raises("a plan with nothing in it stops rather than reporting a clean sweep",
+           ValueError, "mutation plan has duplicate IDs or is empty",
+           planning(source='"""fixture guard with no guarded collections"""\n',
+                    sites=(), additions=(), exclusions={}))
+
+    # collection_scope_sentence is the summary's only statement about which swept sources
+    # had their collections walked. Its only gate is a byte comparison against a CI
+    # re-measurement, and a deterministic falsehood passes that forever, so each arm's truth
+    # is asserted here on message content rather than on the call not raising.
+    def scope(sources, results, exclusions=None) -> str:
+        return collection_scope_sentence({
+            "source_digests": {name: "0" * 64 for name in sources},
+            "results": {str(index): entry for index, entry in enumerate(results)},
+            "sweep_exclusions": exclusions or {}})
+
+    quiet = scope(["walked.py", "quiet.py"],
+                  [{"module": "walked.py", "kind": "set-element"}])
+    record("a swept source with no mutations is not reported as site-only",
+           "`quiet.py` carries no mutation of any kind" in quiet
+           and "quiet.py` carries site mutations" not in quiet, quiet)
+    addition_only = scope(["added.py"], [{"module": "added.py", "kind": "set-addition"}])
+    record("an authored set-addition is not evidence the collection walk ran",
+           "No swept source had its collections enumerated" in addition_only, addition_only)
+    excluded = scope(["walked.py"], [{"module": "walked.py", "kind": "site"}],
+                     {"walked.py::TABLE": "why"})
+    record("an exclusion entry counts as evidence the collection walk ran",
+           "enumerated for `walked.py`" in excluded, excluded)
+    stray = scope(["walked.py"], [{"module": "outside.py", "kind": "site"},
+                                  {"module": "walked.py", "kind": "set-element"}])
+    record("a result outside the digest map is named, not silently dropped",
+           "`outside.py`, which the digest map does not list as swept" in stray, stray)
+    site_only = scope(["walked.py", "sited.py"],
+                      [{"module": "walked.py", "kind": "set-element"},
+                       {"module": "sited.py", "kind": "site"}])
+    record("a site-only source is named as unenumerated",
+           "`sited.py` carries site mutations only" in site_only
+           and "absence from that list is not evidence" in site_only, site_only)
+    complete = scope(["walked.py"], [{"module": "walked.py", "kind": "set-element"}])
+    record("a fully enumerated sweep says the exclusions are complete",
+           "complete for every swept source" in complete, complete)
+    record("an empty enumeration never renders a dangling list",
+           "enumerated for ." not in scope(
+               ["sited.py"], [{"module": "sited.py", "kind": "site"}]))
+    record("no swept source at all is stated rather than implied complete",
+           scope([], []).startswith("No source was swept"))
+    # The completeness clause is the sentence's only unconditional claim, so it needs
+    # assertions in the WITHHELD direction too. Asserted positively alone, an operand can be
+    # dropped from its guard and the summary then claims completeness over an incomplete
+    # sweep -- a falsehood the byte-comparison gate passes forever because it is stable.
+    complete_phrase = "complete for every swept source"
+    record("completeness is withheld when a swept source carried no mutation",
+           complete_phrase not in scope(
+               ["walked.py", "quiet.py"], [{"module": "walked.py", "kind": "set-element"}]))
+    record("completeness is withheld when a swept source is site-only",
+           complete_phrase not in scope(
+               ["walked.py", "sited.py"], [{"module": "walked.py", "kind": "set-element"},
+                                           {"module": "sited.py", "kind": "site"}]))
+    record("completeness is withheld when a result is off the digest map",
+           complete_phrase not in scope(
+               ["walked.py"], [{"module": "walked.py", "kind": "set-element"},
+                               {"module": "outside.py", "kind": "site"}]))
+    addition_only = scope(["walked.py", "added.py"],
+                          [{"module": "walked.py", "kind": "set-element"},
+                           {"module": "added.py", "kind": "set-addition"}])
+    record("a source carrying only additions is not described as site-only",
+           "`added.py` carries no enumerated collection" in addition_only
+           and "added.py` carries site mutations" not in addition_only
+           and complete_phrase not in addition_only, addition_only)
+    duplicate_kinds = scope(["walked.py", "one.py", "two.py"],
+                            [{"module": "walked.py", "kind": "set-element"},
+                             {"module": "one.py", "kind": "set-addition"},
+                             {"module": "two.py", "kind": "set-addition"}])
+    record("a kind shared by two sources is named once, not once per source",
+           "only set-addition mutations" in duplicate_kinds
+           and "set-addition, set-addition" not in duplicate_kinds, duplicate_kinds)
+    record("an empty sweep still names a result that references a file",
+           "`ghost.py`" in scope([], [{"module": "ghost.py", "kind": "set-element"}]))
+    # `mixed.py` carries site AND another kind, so it must land in other_kinds rather than
+    # site_only. Without it the fixture leaves other_kinds empty and a predicate weakened to
+    # `"site" in kinds` passes every check and the golden while emitting the falsehood this
+    # sentence exists to stop.
+    every_group = scope(["walked.py", "sited.py", "quiet.py", "mixed.py"],
+                        [{"module": "walked.py", "kind": "set-element"},
+                         {"module": "sited.py", "kind": "site"},
+                         {"module": "mixed.py", "kind": "site"},
+                         {"module": "mixed.py", "kind": "set-addition"},
+                         {"module": "outside.py", "kind": "site"}])
+    equal("each swept source is named exactly once when all groups are populated",
+          [every_group.count(f"`{name}`") for name in
+           ("walked.py", "sited.py", "quiet.py", "mixed.py", "outside.py")], [1, 1, 1, 1, 1])
+    # Locate the site-only CLAUSE and assert the source is absent from it, rather than
+    # grepping one inflection: the weakening that puts `mixed.py` there also pluralises
+    # "carries" to "carry", so an inflection-bound negative conjunct passed on it.
+    site_clause = next((part for part in every_group.split(". ")
+                        if "site mutations only" in part), "")
+    record("a source carrying site plus another kind is not called site-only",
+           "`mixed.py` carries no enumerated collection" in every_group
+           and "`mixed.py`" not in site_clause, every_group)
+    # W2 — deleting the call from summary_text left this suite green; only the golden byte
+    # comparison caught it, and a suite that cannot see its own output is not a control.
+    sample = {"source_digests": {"walked.py": "0" * 64, "sited.py": "0" * 64},
+              "results": {"a": {"module": "walked.py", "kind": "set-element",
+                                "name": "TABLE", "element": "x", "outcome": "caught"},
+                          "b": {"module": "sited.py", "kind": "site",
+                                "label": "a site", "outcome": "caught"}},
+              "sweep_exclusions": {}, "caught": 2, "total": 2, "survivors": []}
+    record("the generated summary actually carries the scope sentence",
+           collection_scope_sentence(sample) in summary_text(sample))
+
+    print(f"\n  {checks} checks, {failures} failure(s)")
+    print(f"SELFTEST-SUMMARY suite=write-mutation-receipt "
+          f"checks={checks} failures={failures}")
+    return 1 if failures else 0
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--selftest", action="store_true")
+    parser.add_argument("--list-plan", action="store_true")
+    parser.add_argument("--shard-index", type=int)
+    parser.add_argument("--shard-count", type=int)
+    parser.add_argument("--fragment", type=Path)
+    parser.add_argument("--expected-head")
+    parser.add_argument("--aggregate", nargs="+", type=Path)
+    parser.add_argument("--accept-receipt-changes", action="store_true")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    if args.selftest:
+        return selftest()
+    try:
+        if args.list_plan:
+            plan, exclusions = mutation_plan()
+            kinds = {kind: sum(item["kind"] == kind for item in plan)
+                     for kind in ("set-element", "set-addition", "site")}
+            print(json.dumps({
+                "total": len(plan), "kinds": kinds,
+                "plan_sha256": digest(plan), "exclusions": exclusions,
+            }, indent=1))
+            return 0
+        if args.aggregate:
+            return aggregate(args.aggregate, args.accept_receipt_changes)
+        if (args.shard_index is None or args.shard_count is None
+                or args.fragment is None):
+            print(
+                "choose --list-plan, --aggregate <fragments>, or all of "
+                "--shard-index/--shard-count/--fragment",
+                file=sys.stderr)
+            return 2
+        payload = fragment_payload(args.shard_index, args.shard_count, args.expected_head)
+        args.fragment.parent.mkdir(parents=True, exist_ok=True)
+        args.fragment.write_text(json.dumps(payload, indent=1) + "\n", encoding="utf-8")
+        print(
+            f"wrote {args.fragment}: shard {args.shard_index}/{args.shard_count}, "
+            f"{len(payload['results'])} mutation(s)")
+        return 0
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        print(f"mutation proof failed: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

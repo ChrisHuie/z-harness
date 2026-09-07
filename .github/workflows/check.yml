@@ -1,6 +1,7 @@
 name: harness-check
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
@@ -17,11 +18,70 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: 3.13.14
-      - name: complete offline gate
-        run: python3 tools/ci-gate.py
+      - name: install zsh where the runner image omits it
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        run: |
+          # A stalled mirror does not fail, it hangs: `update` sat on one InRelease fetch
+          # until the step budget killed it, so `|| true` never fired -- that guards against
+          # a non-zero exit, not against never exiting. Each refresh is bounded instead, and
+          # is advisory because the runner image ships package lists an install can already
+          # satisfy. `zsh --version` remains the assertion: an absent interpreter still fails
+          # this step, so resilience is not bought with coverage.
+          # No backslash continuations here: this file is pinned byte-for-byte inside a
+          # Python string literal, where a trailing backslash is a line continuation and
+          # would collapse, so the pin could never match the file.
+          APT_OPTS="-o Acquire::Retries=2 -o Acquire::http::Timeout=15"
+          for attempt in 1 2 3; do
+            sudo timeout 120 apt-get update $APT_OPTS || true
+            sudo apt-get install -y zsh && break
+            echo "apt attempt $attempt did not yield zsh; retrying"
+            sleep 10
+          done
+          zsh --version
+      - name: source-bound bootstrap and complete offline gate
+        run: |
+          python3 hooks/harness_check.py --ci
+          python3 tools/ci-gate.py
+
+  publication:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: 3.13.14
+      - name: frozen publication still matches the live pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # The offline gate compares the manifest to a literal in the gate's own source.
+          # Both are authored records of the same numbers, so agreement between them says
+          # nothing about the artifact GitHub is serving. This step is the only place the
+          # frozen body and title are read back from the published pull request.
+          # github.sha is the MERGE commit on a pull_request event, not the branch head,
+          # and the tool compares its argument against the head the API reports; passing
+          # the merge sha would fail every run for a reason unrelated to publication.
+          # No backslash continuations: this file is pinned byte-for-byte inside a Python
+          # string literal, where a trailing backslash is a line continuation.
+          MANIFEST="contracts/review/pr-$PR_NUMBER/frozen-publication.json"
+          if [ ! -f "$MANIFEST" ]; then
+            echo "no frozen publication registered for PR $PR_NUMBER at $MANIFEST"
+            exit 1
+          fi
+          python3 tools/verify-review-publication.py pr-snapshot --repo "$GITHUB_REPOSITORY" --pr "$PR_NUMBER" --expected-head "$HEAD_SHA" --manifest "$MANIFEST"
 
   portable-conformance:
     runs-on: ubuntu-24.04

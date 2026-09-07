@@ -15,15 +15,35 @@ source. Edits to the user-level `CLAUDE.md` reach the next session or compaction
 context; edits to an existing installed skill hot-reload, while a new skill directory needs a new
 session.
 
+There is no installer, so the order of that synchronization is yours to get right.
+Copy hook sources before `settings.json`, never the reverse.
+A registration that passes a flag the installed hook does not
+recognise is refused with exit 2, and a `PreToolUse` exit 2 blocks the call, so settings landing
+first denies every `Agent` and `Task` spawn on the machine until the sources catch up. The refusal
+names the guard's version and this ordering. The reverse order degrades safely: an older
+registration simply omits a flag the newer hook accepts.
+
 Claude's spawn tools are `Agent` and `Task`. Background agents must send their report with
 `SendMessage`; never read an agent's `.output` symlink because it is the full JSONL transcript.
 Worktree isolation may branch from `main`, so pass the target SHA and make the worker verify it.
+
+Claude Code gives a session one scratchpad directory and every subagent inherits that exact path, so
+a fan-out writes into one shared namespace. Assign each worker its own subdirectory and name it in
+the worker's prompt; the shared root is not a workspace. To inspect that collision surface, run
+`scratch_root='<absolute path copied from Claude Scratchpad Directory context>'` after replacing the
+right-hand placeholder, then `ls -1 "$scratch_root" | wc -l` and `ls -1 "$scratch_root" |
+sed 's/[0-9]*\.py$//' | sort | uniq -d`. `scratch_root` is a shell-local convenience, not a runtime
+variable: this repository defines no `$CLAUDE_SCRATCHPAD` producer.
 
 The AskUserQuestion AFK control is Claude-specific. After every Claude Code upgrade run:
 
 ```text
 python3 ~/.claude/hooks/askq_timeout_guard.py --verify-harness
 ```
+
+The registered Claude `Stop` hook runs `announced_work_guard.py`. It blocks a final message whose
+tail announces imminent work without evidence that the work began. Codex has no equivalent
+registration in this package, so this is a Claude-only enforcement claim.
 
 Use `python3 ~/.claude/hooks/harness_report.py --since 7d` for Claude skill-delivery evidence and
 `python3 ~/.claude/tools/cc-cost.py --since 7d` for Claude token accounting. Claude project memory

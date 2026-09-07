@@ -11,17 +11,15 @@ executable form, plus the rules that only fire once there is a draft.
 
 ## Before the first sentence
 
-- **Pick the shape first.** A multi-finding consolidation, a single comment and an issue body
-  are different structures. **A rule stated only as a parenthetical exception reads as the
-  rule's absence** — give it its own line.
+- **Pick the shape first.** A consolidation, comment, and issue body need different structures.
+  **A parenthetical-only exception reads as absent** — give it its own line.
 - **The audience decides whether you recommend.** Surfacing a decision to a **group** = options
   and tradeoffs, no recommendation. A 1:1 proposal recommends. The discriminator is the
   audience, never the artifact type.
 - **Display facts, not endorsements — mirror, don't judge.** Report what a third party's
   artifact does; grading it puts your voice into their record.
-- **The artifact IS the deliverable**, surfaced verbatim in the response — and when asked to
-  "see" or "show" something with structure, a rendered artifact, never a terminal dump.
-  Writing it to a file is additive, never the hand-off.
+- **The artifact IS the deliverable**; show it verbatim. When asked to "see" structured work,
+  render it rather than showing a terminal dump. A file is additive, not the handoff.
 - **Paste-bound text goes in a fenced block, never a quote-prefixed one** — a per-line prefix
   has to be stripped by hand. Discriminate on the request: "draft a comment for" is
   paste-bound; "what's the status" is read-only.
@@ -33,13 +31,10 @@ executable form, plus the rules that only fire once there is a draft.
 - **A report for an external actor is self-contained** — per item: location, what is wrong, why
   it matters, the literal tested change, how to verify. Never a status summary, never a pointer
   to a local path they cannot open.
-- **Issue body — include**: impact, what the contract requires, the current gap with pointers,
-  implementer-beware notes as non-obvious **facts** (not solutions), acceptance criteria as
-  **outcomes** (not steps), open questions, out-of-scope. **Exclude**: pseudocode, design
-  alternatives with pros/cons, file-by-file plans, test inventories, verification dumps.
-  ~150–250 lines is the signal; 700 is too long.
-- **A task labelled onboarding or easy that holds an unmade design decision is a hard task
-  wearing an easy label** — say so in the body.
+- **Issue body:** include impact, contract, gap with pointers, implementer-beware facts,
+  outcome-based acceptance, open questions, and out-of-scope. Exclude pseudocode, solution
+  tradeoffs, file plans, test inventories, and verification dumps. Target 150–250 lines, not 700.
+- **An onboarding or easy label cannot hide an unmade design decision** — name the hard work.
 - **Anonymize to roles, never named individuals** — and strip role-based *process controls*
   (on-call rosters, sign-offs, handoffs) entirely, per always-on. The two are different acts:
   anonymizing keeps the role as the abstraction, the always-on rule deletes the control.
@@ -68,10 +63,14 @@ executable form, plus the rules that only fire once there is a draft.
 - **Every outbound artifact carries the verified head id and a footer split `Ran:` /
   `Not-run:`** — the head you asserted against, not the one you fetched first, and the scope of
   what actually executed.
-- **One roll-up comment per PR, edited in place across rounds** — never a new one each round —
-  carrying that head id so a reader can tell when it went stale. **This governs the summary
-  only.** An individual review finding is an inline `path:line` thread with its own lifecycle
-  (`pr-review-method`); putting findings in the roll-up is what drops them unaddressed.
+- **Review handoffs are append-only, one exact head per comment.** Never edit, replace, or
+  delete a posted handoff; post a linked correction. Re-read the full object: raw body, repo,
+  PR, head, author, id, URL,
+  and unedited timestamps must match. Findings stay in inline `path:line` threads with their own
+  lifecycle (`pr-review-method`).
+- **Published PR narrative is append-only.** Freeze the body and title after creation; publish
+  later summaries, corrections, and exact-head evidence as new comments. Before a final handoff,
+  verify that the frozen publication still matches its reviewed snapshot.
 
 ## Publishing tooling
 

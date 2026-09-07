@@ -289,6 +289,10 @@ class ReceiptSpec:
     name: str
     pattern: re.Pattern[str]
     validate: Callable[[re.Match[str], int], Optional[str]]
+    # None means the shared default. A child that needs more says so here, beside the
+    # receipt contract it is registered with, so the budget cannot be attached to one
+    # command and read back by matching another's argv.
+    timeout_seconds: Optional[float] = None
 
 
 def _success_receipt(match: re.Match[str], returncode: int) -> Optional[str]:
@@ -886,13 +890,6 @@ DEFAULT_CHILD_TIMEOUT_SECONDS = 120
 HARNESS_CI_TIMEOUT_SECONDS = 240
 
 
-def child_timeout_seconds(argv: Sequence[str]) -> float:
-    """Return the bounded deadline for one exact registered child command."""
-    if tuple(argv) == (sys.executable, "hooks/harness_check.py", "--ci"):
-        return HARNESS_CI_TIMEOUT_SECONDS
-    return DEFAULT_CHILD_TIMEOUT_SECONDS
-
-
 def _timeout_stderr_tail(value) -> str:
     """Normalize TimeoutExpired stderr from text and byte subprocess implementations."""
     if value is None:
@@ -902,8 +899,16 @@ def _timeout_stderr_tail(value) -> str:
     return str(value)[-2000:]
 
 
-def run_command(argv: Sequence[str]) -> Result:
-    timeout_seconds = child_timeout_seconds(argv)
+def run_command(argv: Sequence[str], spec: Optional[ReceiptSpec] = None) -> Result:
+    """Run one child under the budget its registry entry declares.
+
+    Reading the budget from the spec rather than from the argv removes the failure this
+    used to be tested for: an entry whose command changed kept matching nothing and
+    silently dropped to the default. There is no argv to disagree with any more.
+    """
+    timeout_seconds = (
+        DEFAULT_CHILD_TIMEOUT_SECONDS if spec is None or spec.timeout_seconds is None
+        else spec.timeout_seconds)
     try:
         completed = subprocess.run(
             list(argv),
@@ -937,6 +942,7 @@ def command_specs(render_root: Path) -> List[Tuple[List[str], ReceiptSpec]]:
                     "zero harness checks" if int(match.group("checks")) == 0
                     else _success_receipt(match, code)
                 ),
+                HARNESS_CI_TIMEOUT_SECONDS,
             ),
         ),
         ([python, "hooks/harness_check.py", "--selftest"],
@@ -2704,7 +2710,7 @@ def gated_environment(which=None, runner=None) -> str:
 
 
 def gate(
-    runner: Callable[[Sequence[str]], Result] = run_command,
+    runner: Callable[..., Result] = run_command,
     *,
     emit_child_output: bool = True,
 ) -> int:
@@ -2826,7 +2832,7 @@ def gate(
     with tempfile.TemporaryDirectory(prefix="z-harness-ci-gate-") as raw:
         render_root = Path(raw) / "rendered"
         for argv, spec in command_specs(render_root):
-            result = runner(argv)
+            result = runner(argv, spec)
             problem = validate_receipt(result, spec)
             if emit_child_output:
                 if problem:
@@ -3705,10 +3711,17 @@ def selftest() -> int:
         observed_child_timeouts.append((tuple(argv), kwargs.get("timeout")))
         return subprocess.CompletedProcess(argv, 0, "", "")
 
+    other_spec = next(spec for _argv, spec in registered_commands
+                      if spec.name != "harness-ci")
     subprocess.run = record_child_timeout
     try:
-        for argv, _spec in registered_commands:
-            run_command(argv)
+        for argv, spec in registered_commands:
+            run_command(argv, spec)
+        unregistered_timeout = (run_command([sys.executable, "-c", "pass"]),
+                                observed_child_timeouts[-1][1])
+        borrowed_argv_timeout = (run_command(
+            [sys.executable, "hooks/harness_check.py", "--ci"], other_spec),
+            observed_child_timeouts[-1][1])
     finally:
         subprocess.run = original_subprocess_run
     expect(
@@ -3721,28 +3734,35 @@ def selftest() -> int:
         else [sys.executable, "hooks/harness_check.py", "--ci"]
     )
     harness_spec = harness_commands[0][1] if len(harness_commands) == 1 else None
-    observed_timeout_by_argv = dict(observed_child_timeouts)
+    # Keyed by the spec, because the spec is what owns the budget now. Keying these by
+    # argv is what the change removes, and doing it here read the harness command's later
+    # borrowed-spec run as though it were the registered one.
+    observed_by_spec = {
+        spec.name: timeout
+        for (_recorded_argv, timeout), (_argv, spec)
+        in zip(observed_child_timeouts[:len(registered_commands)], registered_commands)
+    }
     expect(
         "the registered full harness child receives its measured 240-second budget",
-        observed_timeout_by_argv.get(tuple(harness_argv)) == 240,
+        observed_by_spec.get("harness-ci") == 240,
     )
     expect(
         "every other registered child retains the 120-second default budget",
-        all(
-            timeout == 120
-            for argv, timeout in observed_child_timeouts
-            if argv != tuple(harness_argv)
-        ),
+        all(timeout == 120 for name, timeout in observed_by_spec.items()
+            if name != "harness-ci"),
     )
     expect(
-        "a foreign executable with the harness argument tail retains the default budget",
-        child_timeout_seconds(
-            ["/not-the-python-runtime", "hooks/harness_check.py", "--ci"]
-        ) == 120,
+        "a child with no registered spec runs on the shared default budget",
+        unregistered_timeout[1] == 120,
     )
+    # The replaced lookup keyed the exceptional budget off an argv literal, so the two
+    # checks here used to ask whether a near-miss argv fell back to the default. The
+    # budget is spec-owned now, so the sharper question is the one that design makes
+    # answerable: the harness command itself, carried under another entry's spec, must
+    # not bring its 240 seconds along.
     expect(
-        "extra harness arguments retain the default budget",
-        child_timeout_seconds([*harness_argv, "--extra"]) == 120,
+        "the budget travels with the spec, not with the argv",
+        borrowed_argv_timeout[1] == 120,
     )
     timed_out = run_command([sys.executable, "-c",
                              "import time; time.sleep(0.3)"])
@@ -3780,7 +3800,7 @@ def selftest() -> int:
 
     subprocess.run = byte_timeout
     try:
-        byte_timeout_result = run_command(harness_argv)
+        byte_timeout_result = run_command(harness_argv, harness_spec)
     finally:
         subprocess.run = original_subprocess_run
     expect(
@@ -5237,7 +5257,7 @@ def selftest() -> int:
     )
 
     fake_calls: List[Sequence[str]] = []
-    def fake_runner(argv: Sequence[str]) -> Result:
+    def fake_runner(argv: Sequence[str], _spec=None) -> Result:
         fake_calls.append(argv)
         joined = " ".join(argv)
         if "harness_check.py --ci" in joined:
@@ -5287,13 +5307,13 @@ def selftest() -> int:
     # The fake runner above emits the very constants the production check compares against,
     # so a floor change can never redden it -- the comparison is FLOOR < FLOOR. These arms
     # emit a corpus one below each floor instead, so the error path executes at least once.
-    def shrunken_scenario_runner(argv):
+    def shrunken_scenario_runner(argv, _spec=None):
         if "run-skill-evals.py" in " ".join(argv):
             return Result(0, f"EVAL-VALIDATE-SUMMARY scenarios={EVAL_SCENARIO_FLOOR - 1} "
                           f"skills={EVAL_SKILL_FLOOR} failures=0 scope=shape-only exit=0\n")
         return fake_runner(argv)
 
-    def shrunken_skill_runner(argv):
+    def shrunken_skill_runner(argv, _spec=None):
         if "run-skill-evals.py" in " ".join(argv):
             return Result(0, f"EVAL-VALIDATE-SUMMARY scenarios={EVAL_SCENARIO_FLOOR} "
                           f"skills={EVAL_SKILL_FLOOR - 1} failures=0 scope=shape-only exit=0\n")
@@ -5387,7 +5407,7 @@ def selftest() -> int:
         )
     finally:
         globals()["retired_dispatch_claim_error"] = original_retired_claim
-    def invalid_child_runner(argv: Sequence[str]) -> Result:
+    def invalid_child_runner(argv: Sequence[str], _spec=None) -> Result:
         result = fake_runner(argv)
         if "harness_check.py --ci" in " ".join(argv):
             return Result(

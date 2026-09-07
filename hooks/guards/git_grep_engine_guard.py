@@ -1608,6 +1608,7 @@ def split_commands(cmd, _parse_depth=0, _deadline=None):
     cmd, heredoc_sources = extract_heredoc_sources(cmd, _deadline)
     out, cur, embedded = [], [], []
     tok_parts, tok_mode_parts, tok_modes, q, i = [], [], set(), "", 0
+    brace_depth = 0
     token_count = 0
     n = len(cmd)
 
@@ -1732,11 +1733,34 @@ def split_commands(cmd, _parse_depth=0, _deadline=None):
                     append_tok(cmd[i:brace_end + 1])
                     i = brace_end + 1
                     continue
+        if c in "{}":
+            # Measured against zsh 5.9: `{` opens a group only where a command word may
+            # start, and `}` closes one only at a word end while a group is open.
+            # Everywhere else both are ordinary characters -- `a{b}c`, `probeargv {b}`
+            # and `probeargv }x` are single literal words. Splitting on every brace tore
+            # one argument into three commands, so `git grep -nE }'harness\b' -- f.txt`
+            # left the Git command with no pattern at all and was ALLOWED while the ERE
+            # engine matched the wrong line.
+            at_word_start = not tok_parts and not tok_modes
+            if c == "{":
+                delimiter = at_word_start and not cur
+            else:
+                following = cmd[i + 1] if i + 1 < len(cmd) else ""
+                delimiter = brace_depth > 0 and (
+                    following == "" or following.isspace() or following in ";|&()")
+            if delimiter:
+                brace_depth += 1 if c == "{" else -1
+                flush_cmd()
+                i += 1
+                continue
+            append_tok(c)
+            i += 1
+            continue
         if cmd.startswith("&&", i) or cmd.startswith("||", i):
             flush_cmd()
             i += 2
             continue
-        if c in ";|\n&(){}":
+        if c in ";|\n&()":
             flush_cmd()
             i += 1
             continue
@@ -3121,18 +3145,169 @@ def has_dynamic_guarded_command_tail(tokens):
     return False
 
 
+# `env -S` is not shell word splitting, and `shlex.split` used to stand in for it here.
+# The two grammars disagree in the fail-open direction: `\_` separates arguments for env
+# and folds into the surrounding word for shlex, so
+# `env -S 'git\_grep\_-E\_harness\\b'` arrived as ONE token that is not `git`, the walk
+# found no Git command, and the ERE hazard was ALLOWED while env ran it.
+#
+# The tables below were measured against both interpreters this package is tested on --
+# GNU coreutils 9.7 and the BSD env in macOS 15 -- over 55 cases covering separators,
+# quoting, expansion, comments and every refusal. They produce identical argv and refuse
+# identically; only their diagnostic wording differs.
+ENV_SPLIT_ESCAPES = {
+    "\\": "\\", '"': '"', "'": "'", "#": "#", "$": "$",
+    "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v",
+}
+ENV_SPLIT_SEPARATOR = "_"        # `\_` separates arguments; inside "..." it is one space
+ENV_SPLIT_TERMINATOR = "c"       # `\c` ends the string; inside any quote env refuses it
+ENV_SPLIT_WHITESPACE = " \t\n"
+# The one case where the two interpreters disagree: a backslash before a literal space,
+# tab or newline. BSD env accepts it and folds that whitespace into the word; GNU
+# coreutils 9.7 refuses the string outright. Modelling either answer would be right on one
+# CI runner and wrong on the other, so this stays unresolved and the caller asks.
+ENV_SPLIT_INTERPRETER_DISAGREEMENT = (
+    "env -S string escapes literal whitespace, which BSD env accepts and GNU env refuses"
+)
+# env expands only `${VARNAME}` and refuses every other `$`. This guard does not model that
+# refusal: a refused string runs nothing, and the guard exists to catch what runs. It models
+# the opposite risk instead -- the `-S` text a guard holds is not always the text env
+# receives. When the outer shell already expanded the word, a residual `$SHA` stands for a
+# value neither this process nor env will ever agree on. Every `$` form and every backtick is
+# therefore carried through as an unresolved token and answered by the guard's existing
+# live-expansion machinery, the same channel a bare `$VAR` uses outside `env -S`.
+ENV_SPLIT_EXPANSION = re.compile(r"\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\$")
+
+
 def _split_env_string(value):
+    """Split an `env -S` string the way env splits it.
+
+    Words come back as final argv text. A word carrying no expansion is marked
+    single-quoted, because nothing further rewrites it; a word carrying a `$` form or a
+    backtick is marked unquoted so it reaches the unresolved-expansion path rather than a
+    second, private notion of uncertainty. Constructs with no modelled token stream -- an
+    unterminated quote, a trailing backslash, an escape env rejects, or the one sequence the
+    two interpreters disagree about -- raise, and the caller answers with a question.
+    """
     if len(value) > MAX_COMMAND_CHARS:
         raise CommandParseError("env -S string exceeds the command parse limit")
-    try:
-        words = shlex.split(value, posix=True)
-    except ValueError as exc:
-        raise CommandParseError(f"env -S string cannot be parsed ({exc})") from exc
+    words = []
+    buf = []
+    started = False
+    dynamic = False
+
+    def flush():
+        nonlocal buf, started, dynamic
+        if started:
+            words.append(("".join(buf), "" if dynamic else "'"))
+            if len(words) > MAX_TOKENS:
+                raise CommandParseError("env -S string exceeds the token parse limit")
+        buf, started, dynamic = [], False, False
+
+    def read_expansion(at):
+        nonlocal dynamic, started
+        match = ENV_SPLIT_EXPANSION.match(value, at)
+        buf.append(match.group(0) if match else value[at])
+        dynamic = True
+        started = True
+        return match.end() if match else at + 1
+
+    def read_literal(char):
+        nonlocal dynamic, started
+        if char in "$`":
+            dynamic = True
+        buf.append(char)
+        started = True
+
+    quote = ""
+    index = 0
+    length = len(value)
+    while index < length:
+        char = value[index]
+        if quote == "'":
+            # Single quotes are literal to env except for two sequences, measured
+            # identically on both interpreters: `\\` yields one backslash and `\'` yields a
+            # quote that does NOT close the string. Every other backslash survives -- `\b`
+            # included, which is how the guarded PCRE atom reaches git through `env -S`.
+            if char == "\\" and index + 1 < length and value[index + 1] in "\\'":
+                read_literal(value[index + 1])
+                index += 2
+                continue
+            if char == "'":
+                quote = ""
+                index += 1
+                continue
+            read_literal(char)
+            index += 1
+            continue
+        if quote == '"':
+            if char == '"':
+                quote = ""
+                index += 1
+                continue
+            if char == "\\":
+                if index + 1 >= length:
+                    raise CommandParseError("env -S string ends in a backslash")
+                following = value[index + 1]
+                if following == ENV_SPLIT_TERMINATOR:
+                    raise CommandParseError(
+                        "env -S string uses \\c inside a quoted string")
+                if following == ENV_SPLIT_SEPARATOR:
+                    read_literal(" ")
+                elif following in ENV_SPLIT_ESCAPES:
+                    read_literal(ENV_SPLIT_ESCAPES[following])
+                elif following in ENV_SPLIT_WHITESPACE:
+                    raise CommandParseError(ENV_SPLIT_INTERPRETER_DISAGREEMENT)
+                else:
+                    raise CommandParseError(
+                        f"env -S string uses the invalid sequence '\\{following}'")
+                index += 2
+                continue
+            if char == "$":
+                index = read_expansion(index)
+                continue
+            read_literal(char)
+            index += 1
+            continue
+        if char in ENV_SPLIT_WHITESPACE:
+            flush()
+            index += 1
+            continue
+        if char == "#" and not started:
+            break
+        if char in "'\"":
+            quote = char
+            started = True
+            index += 1
+            continue
+        if char == "\\":
+            if index + 1 >= length:
+                raise CommandParseError("env -S string ends in a backslash")
+            following = value[index + 1]
+            if following == ENV_SPLIT_SEPARATOR:
+                flush()
+            elif following == ENV_SPLIT_TERMINATOR:
+                break
+            elif following in ENV_SPLIT_ESCAPES:
+                read_literal(ENV_SPLIT_ESCAPES[following])
+            elif following in ENV_SPLIT_WHITESPACE:
+                raise CommandParseError(ENV_SPLIT_INTERPRETER_DISAGREEMENT)
+            else:
+                raise CommandParseError(
+                    f"env -S string uses the invalid sequence '\\{following}'")
+            index += 2
+            continue
+        if char == "$":
+            index = read_expansion(index)
+            continue
+        read_literal(char)
+        index += 1
+    if quote:
+        raise CommandParseError("env -S string has no terminating quote")
+    flush()
     if not words:
         raise CommandParseError("env -S string resolves to no arguments")
-    if len(words) > MAX_TOKENS:
-        raise CommandParseError("env -S string exceeds the token parse limit")
-    return [(word, "") for word in words]
+    return words
 
 
 ZSH_EQUALS_LOOKUP_AUTHORITY_ERROR = (
@@ -3314,20 +3489,25 @@ def unwrap_command_prefix(tokens, shell="zsh", equals_state=ZSH_EQUALS_ON,
                     items.pop(0)
                 if split_value is not None:
                     env_splits += 1
+                    # Both arms below abandon a split-string blob this walk never read.
+                    # The outer tokens are `env -S <blob>`, which name no Git subcommand,
+                    # so neither `original` nor the emptied `items` can answer for what the
+                    # blob holds and `hazard_hint` would be False. Every such arm must say
+                    # so, or the caller's `errors and hazard_hint` test discards a real
+                    # uncertainty: at the cap a fifth `env -S` layer wrapping a live
+                    # `git grep -E 'harness\b'` was ALLOWED, and on the raising arm so was
+                    # `env -S '${G} grep -nE harness\ \\b'`, whose argv BSD env builds as
+                    # exactly that hazard.
                     if env_splits > MAX_ENV_SPLITS:
                         errors.append(
                             f"env -S nesting exceeds the limit of {MAX_ENV_SPLITS}")
-                        # Stopping here leaves a split-string blob this walk never read,
-                        # and the outer tokens do not mention Git, so `hazard_hint` from
-                        # the original argv is False. Without this the caller's
-                        # `errors and hazard_hint` arm never fired and a fifth `env -S`
-                        # layer wrapping a live `git grep -E 'harness\b'` was ALLOWED.
                         guarded_prefix_hazard = True
                         break
                     try:
                         items = _split_env_string(split_value) + items
                     except CommandParseError as exc:
                         errors.append(str(exc))
+                        guarded_prefix_hazard = True
                         break
                     continue
                 if word.startswith("-"):
@@ -3463,9 +3643,21 @@ def unwrap_command_prefix(tokens, shell="zsh", equals_state=ZSH_EQUALS_ON,
         break
     if wrapper_depth > MAX_PREFIX_DEPTH:
         errors.append(f"more than {MAX_PREFIX_DEPTH} nested command wrappers")
+    # `hazard_hint` decides whether a caller keeps `errors` or discards them as "this
+    # command proved it does not reach Git". Asking only `original` made that gate blind
+    # to every launcher this walk itself rewrites: after `env -S` splits its blob the
+    # outer argv is `env -S <blob>`, which names no Git subcommand, so a raised
+    # "dynamic executable cannot be resolved" was dropped and
+    # `env -S '${G} grep -E harness\\b'` was ALLOWED while env ran exactly that.
+    #
+    # `guarded_prefix_hazard` patched one branch of this -- the nesting cap -- and stays,
+    # because a capped walk leaves a blob no token list can be asked about. The walked
+    # stream is the argv that actually runs, so put the same question to it.
     return PrefixResolution(
         items, command_env, tuple(errors),
-        command_has_git_hazard_hint(original) or guarded_prefix_hazard,
+        (command_has_git_hazard_hint(original)
+         or command_has_git_hazard_hint(items)
+         or guarded_prefix_hazard),
         lookup_authority_uncertain, descendant_lookup_authority_uncertain)
 
 
@@ -3844,8 +4036,8 @@ def resolve_git_alias(
                 return None, [], error, derived_configs
             return None, [], None, derived_configs
         try:
-            words = shlex.split(body, posix=True)
-        except ValueError as exc:
+            words = _split_git_alias_body(body)
+        except CommandParseError as exc:
             return None, [], f"malformed Git alias {current!r}: {exc}", derived_configs
         if not words:
             return None, [], f"empty Git alias {current!r}", derived_configs
@@ -3872,6 +4064,51 @@ def resolve_git_alias(
         argv = [(word, "") for word in words[index + 1:]] + argv
     return (None, [], f"Git alias expansion exceeds depth {MAX_ALIAS_DEPTH}",
             derived_configs)
+
+
+def _split_git_alias_body(body):
+    """Split a non-shell Git alias body the way Git's own `split_cmdline` splits it.
+
+    Git escapes a backslash everywhere except inside single quotes, so an alias body
+    `grep -E "harness\\b"` reaches git as the pattern `harnessb` and carries no PCRE atom
+    at all. `shlex.split` keeps that backslash -- POSIX double quotes are only special
+    before $ ` " \\ and newline -- and the guard denied a command whose configured alias
+    cannot produce the hazard. Measured over 1,853 fuzzed alias bodies against the
+    installed Git: this rule reproduces every argv the previous model did, drops the five
+    decision-changing disagreements, and adds no case where Git builds an atom the model
+    cannot see.
+    """
+    words, buf, started, quoted, index = [], [], False, "", 0
+    length = len(body)
+    while index < length:
+        char = body[index]
+        if not quoted and char in " \t\n":
+            if started:
+                words.append("".join(buf))
+                buf, started = [], False
+            index += 1
+            continue
+        if not quoted and char in "\"'":
+            quoted, started = char, True
+            index += 1
+            continue
+        if quoted and char == quoted:
+            quoted = ""
+            index += 1
+            continue
+        if char == "\\" and quoted != "'":
+            index += 1
+            if index >= length:
+                raise CommandParseError("alias body ends in a backslash")
+            char = body[index]
+        buf.append(char)
+        started = True
+        index += 1
+    if quoted:
+        raise CommandParseError("alias body has no closing quote")
+    if started:
+        words.append("".join(buf))
+    return words
 
 
 def resolve_effective_git_invocation(
@@ -5516,6 +5753,46 @@ FIXTURES = [
      """env --split-string=\"git grep -nE 'harness\\b' -- README.md\"""", "deny"),
     ("GREEN ROUND 12: env -S preserves an explicit PCRE engine",
      """env -S \"git grep -nP 'harness\\b' -- README.md\"""", "allow"),
+    ("RED  ENV-S GRAMMAR: an underscore-escaped separator reaches the ERE hazard",
+     "env -S 'git\\_grep\\_-nE\\_harness\\\\b\\_--\\_README.md'", "deny"),
+    ("GREEN ENV-S GRAMMAR: the same separators keep an explicit PCRE engine clean",
+     "env -S 'git\\_grep\\_-nP\\_harness\\\\b\\_--\\_README.md'", "allow"),
+    ("ASK  ENV-S GRAMMAR: the shell's own quotes never reach env, so its rules apply bare",
+     "env -S \"git\\_grep\\_-nE\\_harness\\\\b\"", "ask"),
+    ("GREEN ENV-S GRAMMAR: a quote env itself receives makes one argument, not a split",
+     "env -S '\"git\\_grep\\_-nE\\_harness\\\\b\"'", "allow"),
+    ("GREEN ALIAS BODY: a double-quoted atom is stripped by Git before grep sees it",
+     "git -c 'alias.gg=grep -E \"harness\\b\"' gg -- README.md", "allow"),
+    ("GREEN ALIAS BODY: an unquoted atom is stripped the same way",
+     "git -c 'alias.gg=grep -E harness\\b' gg -- README.md", "allow"),
+    ("RED  ALIAS BODY: a single-quoted atom survives into the ERE engine",
+     "git -c \"alias.gg=grep -E 'harness\\\\b'\" gg -- README.md", "deny"),
+    ("RED  ALIAS BODY: a doubled backslash survives into the ERE engine",
+     "git -c 'alias.gg=grep -E harness\\\\b' gg -- README.md", "deny"),
+    ("ASK  ALIAS BODY: a body Git itself refuses is not a clean parse",
+     "git -c 'alias.gg=grep -E harness\\' gg -- README.md", "ask"),
+    ("RED  BRACE: an unquoted close brace does not detach the pattern from git grep",
+     "git grep -nE }'harness\\b' -- README.md", "deny"),
+    ("RED  BRACE: an unquoted brace pair does not detach it either",
+     "git grep -nE {a}'harness\\b' -- README.md", "deny"),
+    ("RED  BRACE: a brace group still exposes the guarded command inside it",
+     "{ git grep -nE 'harness\\b' -- README.md; }", "deny"),
+    ("RED  BRACE: a group opened without a following space is still a group",
+     "{git grep -nE 'harness\\b' -- README.md; }", "deny"),
+    ("RED  BRACE: a mid-word brace inside a group does not close it",
+     "{ git grep -nE a}harness\\\\b -- README.md; }", "deny"),
+    ("GREEN BRACE: a literal brace keeps an explicit PCRE engine clean",
+     "git grep -nP {a}'harness\\b' -- README.md", "allow"),
+    ("RED  ENV-S GRAMMAR: a comment cannot end the string before the guarded tail",
+     "env -S 'git\\_grep\\_-nE\\_harness\\\\b\\_#\\_ignored'", "deny"),
+    ("GREEN ENV-S GRAMMAR: a terminator drops the guarded tail env never receives",
+     "env -S 'git\\_status \\c git grep -nE harness\\\\b'", "allow"),
+    ("ASK  ENV-S GRAMMAR: an expansion choosing the executable is unresolved",
+     "env -S '${GITBIN} grep -nE harness\\\\b -- README.md'", "ask"),
+    ("ASK  ENV-S GRAMMAR: an escape neither interpreter accepts has no modelled argv",
+     "env -S 'git grep -nE harness\\\\b\\q'", "ask"),
+    ("ASK  ENV-S GRAMMAR: escaped whitespace the interpreters disagree on stays unread",
+     "env -S '${GITBIN} grep -nE harness\\ \\\\b -- README.md'", "ask"),
     ("ASK  ROUND 12: a dynamic executable with Git grep arguments is unresolved",
      """$TOOL grep -nE 'harness\\b' -- README.md""", "ask"),
     ("ASK  ROUND 12: command-prefix depth fails closed",
@@ -7177,6 +7454,23 @@ _CLOSED_LIMITS = {
 _GUARDED_GREP = r"""git grep -E 'harness\b' -- README.md"""
 _TOKEN_LIMIT_SOURCE = "/bin/echo " + " ".join(["x"] * 65535)
 _TOKEN_OVERFLOW_SOURCE = "/bin/echo " + " ".join(["x"] * 65537)
+# One long `env -S` token is the shape the previous splitter was worst at: `shlex.split`
+# took 12.5 s in process on a megabyte of it, and 14.0 s through the hook, against a
+# registered five-second PreToolUse timeout that fails OPEN when it expires. This payload
+# carries no guarded hazard, so its `allow` is fixed by the grammar alone -- which makes it
+# the budget control too. A splitter slow enough to exhaust GUARD_BUDGET_SECONDS turns that
+# `allow` into `ask`, so a latency regression is a named red rather than a slower suite.
+#
+# The size is a LITERAL and it is not the byte cap. Measured on the authoring host: the
+# previous splitter needs 6.4 s here, well past the 4 s budget, so the control still fires;
+# this one needs 1.45 s, x2.8 headroom, which is more margin than the megabyte
+# `_BYTE_LIMIT_SOURCE` this suite already ships at x2.4. At the cap the control worked but
+# the margin fell to x1.9, which is a red on a runner twice this host's cost.
+_ENV_SPLIT_BUDGET_SOURCE = "env -S '" + "a" * 734_000 + "'"
+# The argument-count cap needs the count, not the byte cap: a megabyte of separators pins
+# the same clause and cost 2.2 s in every mutation run of this suite, which the hosted sweep
+# pays once per mutation on every head. Literal, like its `_TOKEN_OVERFLOW_SOURCE` sibling.
+_ENV_SPLIT_TOKEN_OVERFLOW_SOURCE = "env -S '" + " ".join(["x"] * 65537) + "'"
 _SUBCOMMAND_LIMIT_SOURCE = "; ".join(["/bin/echo x"] * 16384)
 _SUBCOMMAND_OVERFLOW_SOURCE = "; ".join(["/bin/echo x"] * 16385)
 _PREFIX_LIMIT_SOURCE = "nice " * 8 + "git show $SHA:src/f.py"
@@ -7196,6 +7490,10 @@ FIXTURES += [
      _TOKEN_LIMIT_SOURCE, "allow"),
     ("ASK LIMIT: a token count past the cap says so instead of guessing",
      _TOKEN_OVERFLOW_SOURCE, "ask"),
+    ("GREEN BUDGET: a long env -S token is classified inside the guard's budget",
+     _ENV_SPLIT_BUDGET_SOURCE, "allow"),
+    ("ASK LIMIT: an env -S argument count past the cap says so instead of guessing",
+     _ENV_SPLIT_TOKEN_OVERFLOW_SOURCE, "ask"),
     ("GREEN LIMIT: a subcommand count at the cap is still classified",
      _SUBCOMMAND_LIMIT_SOURCE, "allow"),
     ("ASK LIMIT: a subcommand count past the cap says so instead of guessing",

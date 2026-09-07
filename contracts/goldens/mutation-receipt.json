@@ -4,13 +4,13 @@
  "note": "which guard mutations the shipped suites catch; each result's reason is an observation from the host that generated it, not a cross-platform fact",
  "generator_sha256": "ede22fc6749dab7bd7f0cde597a48400e4b12f5739adeca098708b84ac4d4f92",
  "source_digests": {
-  "hooks/guards/git_grep_engine_guard.py": "2fa728eb17d041bdf1c4f38fc6416f0bbf90df7d122ba3b1da15b1aa4c254bd0",
-  "hooks/guards/zsh_rev_modifier_guard.py": "a056e1f8375467c6c7a6b878aff858c257b44c10faaeb0fa3bb685d073c0fb9c",
+  "hooks/guards/git_grep_engine_guard.py": "79f50fbd261bbba2e592d6b01a6fd031fc955cd84236663fe9d534d541795308",
+  "hooks/guards/zsh_rev_modifier_guard.py": "aff5149a02c6eed2a9a986d31e728305f926d83486ec0cd66c747114d9523c96",
   "hooks/bash_command_guard.py": "4dbd2f3857241ace4d7ae588775ce8e07267b3943cda59c5bcaabde4a40993d5",
   "hooks/announced_work_guard.py": "2075db2aa7ee281666327b1d5686d5e342cfa79a61132fba1b1852aa9c8832d7",
   "tools/repository_ownership.py": "d72b23ef0e037f81bb0c1eefc93c2198a5355c1820b542ce285a83d8661f35ca"
  },
- "plan_sha256": "cb0748e90e969e52158c3a937c5d8fce9207e6859ee5cf8cca277ab4fc6b3be4",
+ "plan_sha256": "0624b1b349bb0ae52244cec1ffbc4495ffcd60560742c1df516f3bbb0e447a20",
  "baseline": {
   "hooks/guards/git_grep_engine_guard.py": "passed",
   "hooks/guards/zsh_rev_modifier_guard.py": "passed",
@@ -535,6 +535,17 @@
    "outcome": "caught",
    "reason": "suite-failure"
   },
+  "217abf19b0c71130566a5309cfe3e0adcd9a1911576e44fd0e68efd84fe07ab5": {
+   "version": 1,
+   "kind": "set-element",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "name": "ENV_SPLIT_ESCAPES",
+   "collection_kind": "dict",
+   "element": "\"",
+   "id": "217abf19b0c71130566a5309cfe3e0adcd9a1911576e44fd0e68efd84fe07ab5",
+   "outcome": "caught",
+   "reason": "suite-failure"
+  },
   "220f6551fc799e0b89098615330291b9ce66b288ea0f79f4a7ce5e17284d0d06": {
    "version": 1,
    "kind": "set-element",
@@ -568,6 +579,17 @@
    "anchor_sha256": "992d8204ca9bc0c791ee353221261833bee0976f2a780d93886d8208255f19aa",
    "replacement_sha256": "0ac28a88ade5e44749483d6206def7b7c6dcfc29f8aaab576b4316bd74bee27f",
    "id": "23df802af9069f4869cbe571f9c7b2a39fbb1341066a625835b045cb87a29c50",
+   "outcome": "caught",
+   "reason": "suite-failure"
+  },
+  "23fa65f969b8c2e5282f0d14ecb5cff923774022ee8617c31a8892a701d430ac": {
+   "version": 1,
+   "kind": "set-element",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "name": "ENV_SPLIT_ESCAPES",
+   "collection_kind": "dict",
+   "element": "\\",
+   "id": "23fa65f969b8c2e5282f0d14ecb5cff923774022ee8617c31a8892a701d430ac",
    "outcome": "caught",
    "reason": "suite-failure"
   },
@@ -942,6 +964,17 @@
    "outcome": "caught",
    "reason": "suite-failure"
   },
+  "3b2bbd77004700e91ded326ce75465791673283470922ded5468a04cb4950813": {
+   "version": 1,
+   "kind": "set-element",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "name": "ENV_SPLIT_ESCAPES",
+   "collection_kind": "dict",
+   "element": "n",
+   "id": "3b2bbd77004700e91ded326ce75465791673283470922ded5468a04cb4950813",
+   "outcome": "survived",
+   "reason": "survived"
+  },
   "3c154f71649917597029ab034353168dcfdf6eb4de2657fa679ab3557af5b64d": {
    "version": 1,
    "kind": "set-element",
@@ -1161,6 +1194,17 @@
    "id": "47d221dd7c8232d2e66ef6ba8fa41dab7e475695f1325a0cebc436da657ab5c6",
    "outcome": "caught",
    "reason": "suite-failure"
+  },
+  "4a2b396141615597bb3cd92e869210d0e24a81a5e3985eccd7503ee5a834401a": {
+   "version": 1,
+   "kind": "set-element",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "name": "ENV_SPLIT_ESCAPES",
+   "collection_kind": "dict",
+   "element": "t",
+   "id": "4a2b396141615597bb3cd92e869210d0e24a81a5e3985eccd7503ee5a834401a",
+   "outcome": "survived",
+   "reason": "survived"
   },
   "4ad96faf8c265a73869be2ecd80edb2597361ab545373ca0874b425a72e01a01": {
    "version": 1,
@@ -1755,6 +1799,17 @@
    "outcome": "survived",
    "reason": "survived"
   },
+  "66621a4c19fc617180c7b1c3d255b57372e6f7f25793e6c22e83c1f942036123": {
+   "version": 1,
+   "kind": "set-element",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "name": "ENV_SPLIT_ESCAPES",
+   "collection_kind": "dict",
+   "element": "v",
+   "id": "66621a4c19fc617180c7b1c3d255b57372e6f7f25793e6c22e83c1f942036123",
+   "outcome": "survived",
+   "reason": "survived"
+  },
   "66cfa9046f77a8b0234425b4ed6cdf50056c64ac9f61d823664af12b0b9c24e0": {
    "version": 1,
    "kind": "set-element",
@@ -2078,6 +2133,17 @@
    "id": "7cb8a8ae362d24358e40a1af0bf2b668bcd6dbe53226449cad91cf217d2d9ca2",
    "outcome": "caught",
    "reason": "suite-failure"
+  },
+  "7d357e479226bdab9c1920a8666b453110649da19dc8ddf4fe9eea7a045b9936": {
+   "version": 1,
+   "kind": "set-element",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "name": "ENV_SPLIT_ESCAPES",
+   "collection_kind": "dict",
+   "element": "#",
+   "id": "7d357e479226bdab9c1920a8666b453110649da19dc8ddf4fe9eea7a045b9936",
+   "outcome": "survived",
+   "reason": "survived"
   },
   "7ed0e7fcb11557fcab75a57edb8a042a2d6553b039a299d67b59a2866afebe0b": {
    "version": 1,
@@ -2866,6 +2932,17 @@
    "outcome": "caught",
    "reason": "suite-failure"
   },
+  "a9848a7467cccd6c8176523371a9e49ef2f89ba9e6e1c638902b2b0ec1f25ee1": {
+   "version": 1,
+   "kind": "set-element",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "name": "ENV_SPLIT_ESCAPES",
+   "collection_kind": "dict",
+   "element": "$",
+   "id": "a9848a7467cccd6c8176523371a9e49ef2f89ba9e6e1c638902b2b0ec1f25ee1",
+   "outcome": "survived",
+   "reason": "survived"
+  },
   "aa0cf1b528ed38b7b9be187e53f0ce03255aa24dd134ff24ccf0b2d69e39982e": {
    "version": 1,
    "kind": "set-element",
@@ -3225,6 +3302,17 @@
    "collection_kind": "dict",
    "element": "default",
    "id": "c89924010adebfedc7fb756ed5bfdc404e6dffcaf7b0aa33d9f966c31fce3b80",
+   "outcome": "survived",
+   "reason": "survived"
+  },
+  "c8b0cc970554ae1202f988dd5092ce29ab9853b08256b33208bc9bdd07751397": {
+   "version": 1,
+   "kind": "set-element",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "name": "ENV_SPLIT_ESCAPES",
+   "collection_kind": "dict",
+   "element": "'",
+   "id": "c8b0cc970554ae1202f988dd5092ce29ab9853b08256b33208bc9bdd07751397",
    "outcome": "survived",
    "reason": "survived"
   },
@@ -3819,6 +3907,17 @@
    "outcome": "caught",
    "reason": "suite-failure"
   },
+  "ea017592316c99fbf046550fd37941cdeb09445f8ce0ec6772f3d50020b0cdaa": {
+   "version": 1,
+   "kind": "set-element",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "name": "ENV_SPLIT_ESCAPES",
+   "collection_kind": "dict",
+   "element": "r",
+   "id": "ea017592316c99fbf046550fd37941cdeb09445f8ce0ec6772f3d50020b0cdaa",
+   "outcome": "survived",
+   "reason": "survived"
+  },
   "ec48aa911fbbed00c5474b4e26d8c88afca0bce4a7de001f691e8776f54dbc79": {
    "version": 1,
    "kind": "set-element",
@@ -4078,6 +4177,17 @@
    "outcome": "survived",
    "reason": "survived"
   },
+  "faba6a2af568106c3399303264f0b121a62f2eaa0ee919b5ef9baaa2dd04bea5": {
+   "version": 1,
+   "kind": "set-element",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "name": "ENV_SPLIT_ESCAPES",
+   "collection_kind": "dict",
+   "element": "f",
+   "id": "faba6a2af568106c3399303264f0b121a62f2eaa0ee919b5ef9baaa2dd04bea5",
+   "outcome": "survived",
+   "reason": "survived"
+  },
   "fb600f4a9c7acd6b49b7dbe78799bdbc7229567f5dc9626b022bd764f0a16a89": {
    "version": 1,
    "kind": "set-element",
@@ -4221,6 +4331,7 @@
   "379cedd7fe295b7b4982963775214f45a2944d7436ff80c8196972743d15c37f",
   "39a2712f65cf6a6ec7208d830d82c59ce2f80a0f434a29b92830c39822a2ce73",
   "39e1f95443176ea865f22cfbdce837977195c5c47df71f0c2d67932b5b2d59c9",
+  "3b2bbd77004700e91ded326ce75465791673283470922ded5468a04cb4950813",
   "3c154f71649917597029ab034353168dcfdf6eb4de2657fa679ab3557af5b64d",
   "3e29b37f507de0ad9cf0edf885f37d4f9a67a84f2ed00f3d25b496ca95531abe",
   "3f0e560ff26049e3f416f4d20eca673583da239167afc75fe8c8e393768444cf",
@@ -4230,6 +4341,7 @@
   "457fb56fe6e9a2aa02ee7e65d50bb0bd0f9897e296ab9f57852908bad8c80527",
   "45f66aa4878ba7ad899c44cb1abaccd6f5dde4a7757bd0a18779de8cf989ef05",
   "4779984667fd8062fb7bd4de2b9f9d0af0f49ac8da080fa5c0522c70a7744a3f",
+  "4a2b396141615597bb3cd92e869210d0e24a81a5e3985eccd7503ee5a834401a",
   "4ad96faf8c265a73869be2ecd80edb2597361ab545373ca0874b425a72e01a01",
   "4c89e1e75c16e4c93e7a9e7f16a2c2e520dcdf5aa98e0e6a3ffca55672c56e6a",
   "4ddfa4b16a119f3f4ffd0564e602a71dd7e1be799f0a780f17c4bc4775d4cd3c",
@@ -4240,12 +4352,14 @@
   "5e53eaf566e7a7e450967b600459932a03abcd8ddf470c1d242d494931f1dcac",
   "616d5c13c7393970f73c5ee356cfc3293ad60f0738feafa6813f7047cd655d92",
   "660bcefe00b2ff80592c07b0ad7cefa224ec0d7a9c55878d8bfb6e631b5cb6a2",
+  "66621a4c19fc617180c7b1c3d255b57372e6f7f25793e6c22e83c1f942036123",
   "6852a17abbb38ea338acbecf57cc0d10638f48b88330cbad255377a9d298a71f",
   "68fb3bcdb38c77596fa11c435461e57df5e1742d81a9b40032d39fec97d197e5",
   "6b6fa5df4bccd3b452a0198e62c56e89ec6a6f30cbfb62da6aed54bcebf2240b",
   "6bf20a8f49a91f000cbaf4da9badf31d31fbb273cd91c5debb40166eb68e91a8",
   "7351efca1d9d4c9f8c26002de27efe77d956619b579650add55fbd1a7b066f24",
   "74569fe0e3a82e848e8d37c8e928191475c7cb45798d808a4cbe046fc9ee8b6b",
+  "7d357e479226bdab9c1920a8666b453110649da19dc8ddf4fe9eea7a045b9936",
   "819da5964cc524c11fc07ed4f1941edd907af4c6955f03f4f65a0c8c3a7ff788",
   "86d59e50db268fb4310ffa2ab3cb34bbf4d6b10b6b0c164b77c6c593842e171c",
   "88125b55349e84919e5d2ab28a32cb638f2d3fdc0c83f9761e4d582fbe800b43",
@@ -4258,6 +4372,7 @@
   "a1fa305bd53469212e3332321d58ca07b65eeb8f1dafab5f6901e10007ec7dd2",
   "a631475d625947ea49440b144eb3cb492bbfc19e7c0644d122f93d817147c6be",
   "a7edef555989b2573fb1481f6a59b98698bb1a167035c4ba189fbd23427a309d",
+  "a9848a7467cccd6c8176523371a9e49ef2f89ba9e6e1c638902b2b0ec1f25ee1",
   "aa7989d8af32a7fc751d23926deffea57c4918cc85e66c01e3ebc233a88faa39",
   "ab0960fe7e5407bedf8601b597bb569cfeaf11828013dc46e7fd034311eb3533",
   "b3c4aec71762607e667e469e264f55ede152ca24e567ea0751fd2872f35b30f1",
@@ -4267,6 +4382,7 @@
   "c0c007a57c068b52fdd283064c777d04d62997731f2b9ed4d2c037c944971fa8",
   "c3a96a2b0437b5c2f4720396926dd1b85039a18bf21120a812ddba80d512aa84",
   "c89924010adebfedc7fb756ed5bfdc404e6dffcaf7b0aa33d9f966c31fce3b80",
+  "c8b0cc970554ae1202f988dd5092ce29ab9853b08256b33208bc9bdd07751397",
   "c98fa89e8b4ca13ba6e7dd049f6323766aff782fdeb64afbad7b37566303ff43",
   "cc90511c89261bc01f582f06164167fbdc8c773c84283827b0c1f18670e5d54a",
   "cdf3cdaee46812e068c82c6bf7bf9b4678d06ccbabbd56a1ceeff9f6f0e0988f",
@@ -4276,10 +4392,12 @@
   "dbeaa3d2afab96b7fcf29cfdf762a8860a19ef98bf4bda15954e7e2b274ea69c",
   "de6fe1be629df39cbf5ae62cc59f26118327bee4f2735170d28bb410bd2844d2",
   "e069adc99f3b5e6adb6651811707e655bf30b3b00dac4224f834724d485e29b3",
+  "ea017592316c99fbf046550fd37941cdeb09445f8ce0ec6772f3d50020b0cdaa",
   "ec523c83698ebdab2700a99af920ac80a1924c14235795eb6a779927f07d1bf4",
   "f4e4bf86d2680dd06ad156b735ebb0f319d97c177e29eb3a171082616788cbdf",
   "f563326755787e647043218705d93cb1b5364c2617bb523e7f304a65f1de46d5",
   "f8dd16867ad45e65c1eff6f732f6daf92e7a287b84897032cac624dc6d44b98e",
+  "faba6a2af568106c3399303264f0b121a62f2eaa0ee919b5ef9baaa2dd04bea5",
   "fb600f4a9c7acd6b49b7dbe78799bdbc7229567f5dc9626b022bd764f0a16a89",
   "fbf5ee11b2915da1a0f177f918d42abc66305f10434704d03d8358323305ab6c",
   "fc772a5b6d460ef94c7d316bf2aa7ade042ef7bc5e460b4693bd6eee41f4911f",
@@ -4287,6 +4405,6 @@
   "ffc1c94b7cea5f3c3c6fe3ed1a8467bd1748e0b906434e9fb8621863f86bdbd6"
  ],
  "unasserted_kills": [],
- "caught": 278,
- "total": 358
+ "caught": 280,
+ "total": 368
 }

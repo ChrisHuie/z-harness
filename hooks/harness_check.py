@@ -132,7 +132,7 @@ DESC_CAP = 400                # house cap (spec ceiling is 1024)
 # checks=111, so a suite can be gutted with nothing failing. Raise a floor in the same
 # commit that adds the checks; lowering one is a deliberate, reviewable edit.
 SELFTEST_SUITES = [
-    ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"], 1367),
+    ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"], 1391),
     ("askq_timeout_guard", ["hooks/askq_timeout_guard.py", "--selftest"], 13),
     ("announced_work_guard", ["hooks/announced_work_guard.py", "--selftest"], 916),
     ("harness_report", ["hooks/harness_report.py", "--selftest"], 12),
@@ -153,8 +153,8 @@ SELFTEST_SUITES = [
     ("fuzz-judge-diff", ["instruments/fuzz_judge_diff.py", "--selftest"], 65),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
     ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 88),
-    ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 1149),
-    ("zsh_rev_modifier_guard", ["hooks/guards/zsh_rev_modifier_guard.py", "--selftest"], 487),
+    ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 1171),
+    ("zsh_rev_modifier_guard", ["hooks/guards/zsh_rev_modifier_guard.py", "--selftest"], 489),
 ]
 
 
@@ -171,9 +171,9 @@ def expected_selftest_checks(name):
     if name in fixed:
         return fixed[name]
     if name == "bash_command_guard":
-        return 1367
+        return 1391
     if name == "zsh_rev_modifier_guard":
-        return 487
+        return 489
     if name != "git_grep_engine_guard":
         return None
     binaries, seen = [], set()
@@ -187,9 +187,9 @@ def expected_selftest_checks(name):
         if real not in seen:
             seen.add(real)
             binaries.append(real)
-    # The portable corpus is 1149 checks for one Git. Every additional executable adds
+    # The portable corpus is 1171 checks for one Git. Every additional executable adds
     # one version probe, one fixture setup, and 22 alias-proof-name probes.
-    return 1149 + 24 * (max(1, len(binaries)) - 1)
+    return 1171 + 24 * (max(1, len(binaries)) - 1)
 # The public Bash-guard selftest intentionally runs five independent process-level timing
 # observations for each runtime. Give that aggregate suite enough wall-clock without
 # weakening the five-second deadline each individual hook process must meet.
@@ -2001,7 +2001,7 @@ def selftest():
             observed_timeouts.append(kwargs.get("timeout"))
             return subprocess.CompletedProcess(
                 args[0], 0,
-                b"SELFTEST-SUMMARY suite=bash_command_guard checks=1367 failures=0\n",
+                b"SELFTEST-SUMMARY suite=bash_command_guard checks=1391 failures=0\n",
                 b"")
         subprocess.run = record_c1_timeout
         try:
@@ -2054,7 +2054,7 @@ def selftest():
             time.sleep(0.05)
             return subprocess.CompletedProcess(
                 args[0], 0,
-                b"SELFTEST-SUMMARY suite=bash_command_guard checks=1367 failures=0\n",
+                b"SELFTEST-SUMMARY suite=bash_command_guard checks=1391 failures=0\n",
                 b"")
         subprocess.run = slow_run
         try:

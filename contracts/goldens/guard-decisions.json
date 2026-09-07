@@ -15,6 +15,10 @@
     "length": 213003
    },
    {
+    "sha256": "2cf1e74a9b0b756ffdbce7ac894c680459e23a10ee77513e19dbdf70893e6c93",
+    "length": 131082
+   },
+   {
     "sha256": "6ce2ea72974d5c961269d840ff105e8e8b8944335d085d8ea8778c95903d06ae",
     "length": 212990
    },
@@ -37,6 +41,10 @@
    {
     "sha256": "efefbaed40932bb1ca777f2c95847ba2734b99a3d73e767a1e4205115243b557",
     "length": 131083
+   },
+   {
+    "sha256": "f5cd9f6ea7ac08dda5c7afede62539f261afd55d3a00d470e49197a911262593",
+    "length": 734009
    }
   ],
   "computed_at_import": [
@@ -47,6 +55,7 @@
    "ASK ALIAS: expansion beyond the bounded closure cannot become allow",
    "ASK LIMIT: a subcommand count past the cap says so instead of guessing",
    "ASK LIMIT: a token count past the cap says so instead of guessing",
+   "ASK LIMIT: an env -S argument count past the cap says so instead of guessing",
    "ASK LIMIT: env -S nesting past the cap leaves a blob the walk never read",
    "ASK LIMIT: shell -c nesting past the cap cannot be classified",
    "ASK LIMIT: substitution nesting past the cap cannot be classified",
@@ -59,6 +68,7 @@
    "GREEN AUTHORITY: an alternate Git running a floor builtin is not the hazard",
    "GREEN AUTHORITY: an alternate Git staging files is not the hazard",
    "GREEN AUTHORITY: an alternate Git with the PCRE engine stays allowed",
+   "GREEN BUDGET: a long env -S token is classified inside the guard's budget",
    "GREEN LIMIT: a legal source at the byte cap is classified inside the budget",
    "GREEN LIMIT: a subcommand count at the cap is still classified",
    "GREEN LIMIT: a token count at the cap is still classified",
@@ -221,7 +231,9 @@
   "SHA=x; env --ignore-environment git show $SHA:src/f.py": "deny",
   "SHA=x; env --unset=PATH git show $SHA:src/f.py": "deny",
   "SHA=x; env -S \"git show $SHA:src/f.py\"": "deny",
+  "SHA=x; env -S \"git\\_show\\_$SHA:src/f.py\"": "deny",
   "SHA=x; env -S 'git show $SHA:src/f.py'": "allow",
+  "SHA=x; env -S 'git\\_show\\_$SHA:src/f.py'": "allow",
   "SHA=x; env -i =git show $SHA:src/f.py": "deny",
   "SHA=x; env -i git show $SHA:src/f.py": "deny",
   "SHA=x; env -u PATH git show $SHA:src/f.py": "deny",
@@ -428,6 +440,15 @@
   "env -S \"git grep -Pe'harness\\b' -- README.md\"": "allow",
   "env -S \"git grep -nE 'harness\\b' -- README.md\"": "deny",
   "env -S \"git grep -nP 'harness\\b' -- README.md\"": "allow",
+  "env -S \"git\\_grep\\_-nE\\_harness\\\\b\"": "ask",
+  "env -S '\"git\\_grep\\_-nE\\_harness\\\\b\"'": "allow",
+  "env -S '${GITBIN} grep -nE harness\\ \\\\b -- README.md'": "ask",
+  "env -S '${GITBIN} grep -nE harness\\\\b -- README.md'": "ask",
+  "env -S 'git grep -nE harness\\\\b\\q'": "ask",
+  "env -S 'git\\_grep\\_-nE\\_harness\\\\b\\_#\\_ignored'": "deny",
+  "env -S 'git\\_grep\\_-nE\\_harness\\\\b\\_--\\_README.md'": "deny",
+  "env -S 'git\\_grep\\_-nP\\_harness\\\\b\\_--\\_README.md'": "allow",
+  "env -S 'git\\_status \\c git grep -nE harness\\\\b'": "allow",
   "env -S\"git grep -nE 'harness\\b' -- README.md\"": "deny",
   "env -i =git grep -E 'harness\\b' -- README.md": "deny",
   "env -i =git grep -P 'harness\\b' -- README.md": "allow",
@@ -555,6 +576,7 @@
   "git -C /repo grep -nE '\\bstatus=' -- src/": "deny",
   "git -P grep -nE 'harness\\b' -- README.md": "deny",
   "git -c \"alias.bad=grep -E 'unterminated\" bad 'harness\\b' ": "ask",
+  "git -c \"alias.gg=grep -E 'harness\\\\b'\" gg -- README.md": "deny",
   "git -c \"alias.gg=grep -E -e 'harness\\b'\" gg -- README.md": "deny",
   "git -c \"alias.s=!GIT_CONFIG_PARAMETERS=\\\"'alias.y=grep -E'\\\" git y 'harness\\b' -- README.md\" s": "ask",
   "git -c \"alias.s=!GIT_CONFIG_PARAMETERS=\\\"'alias.y=status --short'\\\" git y\" s": "allow",
@@ -562,6 +584,10 @@
   "git -c \"alias.x=!eval 'printf harmless'\" x": "allow",
   "git -c \"alias.x=-c alias.y='grep -E' y\" x 'harness\\b' -- README.md": "deny",
   "git -c 'alias.gg=-c grep.patternType=extended grep' gg 'harness\\b' -- README.md": "deny",
+  "git -c 'alias.gg=grep -E \"harness\\b\"' gg -- README.md": "allow",
+  "git -c 'alias.gg=grep -E harness\\' gg -- README.md": "ask",
+  "git -c 'alias.gg=grep -E harness\\\\b' gg -- README.md": "deny",
+  "git -c 'alias.gg=grep -E harness\\b' gg -- README.md": "allow",
   "git -c 'alias.ll=log -E' ll --grep='harness\\b'": "deny",
   "git -c 'alias.rl=rev-list -E' rl --grep='harness\\b' HEAD": "deny",
   "git -c 'alias.s=!GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.y GIT_CONFIG_VALUE_0=grep git y' s": "ask",
@@ -743,8 +769,11 @@
   "git grep -nE 'harness\\b' -- README.md": "deny",
   "git grep -nE -f pats.txt -- src/": "ask",
   "git grep -nE -fpats.txt -- src/": "ask",
+  "git grep -nE {a}'harness\\b' -- README.md": "deny",
+  "git grep -nE }'harness\\b' -- README.md": "deny",
   "git grep -nEe'x = \\d' -- README.md": "deny",
   "git grep -nF 'a\\sb' -- src/": "allow",
+  "git grep -nP {a}'harness\\b' -- README.md": "allow",
   "git log --extended-regexp --grep='foo\\b'": "deny",
   "git log --grep='foo\\b'": "ask",
   "git log --grep='harness\\b' -F": "allow",
@@ -1053,6 +1082,9 @@
   "{ /bin/echo prep; sh; } <<< \"git grep -E 'harness\\b' -- README.md\"": "ask",
   "{ echo() { git \"$@\"; }; echo grep -E 'harness\\b' -- README.md; }": "ask",
   "{ echo() { git \"$@\"; }; echo grep -nE 'harness\\b' -- README.md; }": "ask",
-  "{ echo() { git \"$@\"; }; echo show HEAD:README.md; }": "ask"
+  "{ echo() { git \"$@\"; }; echo show HEAD:README.md; }": "ask",
+  "{ git grep -nE 'harness\\b' -- README.md; }": "deny",
+  "{ git grep -nE a}harness\\\\b -- README.md; }": "deny",
+  "{git grep -nE 'harness\\b' -- README.md; }": "deny"
  }
 }

@@ -56,9 +56,9 @@ EVAL_SKILL_FLOOR = 7
 SUITE_FLOORS = {
     "harness_check": 230,
     "render-packages": 192,
-    "bash_command_guard": 1367,
-    "git_grep_engine_guard": 1149,
-    "zsh_rev_modifier_guard": 487,
+    "bash_command_guard": 1391,
+    "git_grep_engine_guard": 1171,
+    "zsh_rev_modifier_guard": 489,
 }
 EXPECTED_WORKFLOW = """name: harness-check
 on:
@@ -1307,8 +1307,13 @@ def decision_golden_error(golden_data=None, decide=None, snapshot=None,
 
 MUTATION_RECEIPT = ROOT / "contracts/goldens/mutation-receipt.json"
 MUTATION_SUMMARY = ROOT / "contracts/goldens/mutation-summary.md"
-MUTATION_SURVIVOR_DEBT_CEILING = 80
-MUTATION_PLAN_FLOOR = 358
+# 80 of these are the debt this branch already carried. The other 8 are the removal
+# direction of ENV_SPLIT_ESCAPES, the env -S escape table: removing an entry makes the
+# splitter REFUSE that sequence, which is strictly stricter, so an element sweep that
+# only removes cannot express a kill for them. Two of its ten are caught, by fixtures
+# that depend on the removed escape producing a literal backslash.
+MUTATION_SURVIVOR_DEBT_CEILING = 88
+MUTATION_PLAN_FLOOR = 368
 # Kills scored only because the recorded check count moved, with no assertion failing. A
 # guard that increments its counter once per element of the collection under mutation moves
 # that count on any removal, so such a kill is decided by loop structure before any probe
@@ -1365,6 +1370,7 @@ EXPECTED_MUTATION_COLLECTIONS = {
     ("hooks/guards/git_grep_engine_guard.py", "CONFIG_ENGINE"): 7,
     ("hooks/guards/git_grep_engine_guard.py", "CONTROL_KEYWORDS"): 12,
     ("hooks/guards/git_grep_engine_guard.py", "CROSS_VERSION_ALIAS_PROOF"): 22,
+    ("hooks/guards/git_grep_engine_guard.py", "ENV_SPLIT_ESCAPES"): 10,
     ("hooks/guards/git_grep_engine_guard.py", "EXEC_WRAPPERS"): 6,
     ("hooks/guards/git_grep_engine_guard.py", "GIT_HAZARD_SUBCOMMANDS"): 17,
     ("hooks/guards/git_grep_engine_guard.py", "GIT_LOG_ENGINE_TOKENS"): 7,

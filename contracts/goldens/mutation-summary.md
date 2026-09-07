@@ -12,6 +12,7 @@ Collections are enumerated for `hooks/bash_command_guard.py`, `hooks/guards/git_
 | `git_grep_engine_guard.py` | `CONFIG_ENGINE` | 7 | 2 | 5 |
 | `git_grep_engine_guard.py` | `CONTROL_KEYWORDS` | 12 | 7 | 5 |
 | `git_grep_engine_guard.py` | `CROSS_VERSION_ALIAS_PROOF` | 22 | 22 | 0 |
+| `git_grep_engine_guard.py` | `ENV_SPLIT_ESCAPES` | 10 | 2 | 8 |
 | `git_grep_engine_guard.py` | `EXEC_WRAPPERS` | 6 | 6 | 0 |
 | `git_grep_engine_guard.py` | `GIT_HAZARD_SUBCOMMANDS` | 17 | 17 | 0 |
 | `git_grep_engine_guard.py` | `GIT_LOG_ENGINE_TOKENS` | 7 | 4 | 3 |
@@ -135,7 +136,7 @@ Collections are enumerated for `hooks/bash_command_guard.py`, `hooks/guards/git_
 | `zsh_rev_modifier_guard.py` | zsh unmodelled modifier uncertainty dropped | caught |
 | `repository_ownership.py` | effective core.worktree scalar lookup dropped | caught |
 
-278 of 358 planned mutations are caught; 80 exact mutation IDs remain recorded coverage debt.
+280 of 368 planned mutations are caught; 88 exact mutation IDs remain recorded coverage debt.
 
 A kill scored only because the recorded check count moved is not evidence that the suites observe the change. That count is recorded per result and reported by the gate rather than shown here, because whether an assertion fires can differ between hosts and this file is compared across them.
 

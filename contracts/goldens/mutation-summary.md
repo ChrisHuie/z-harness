@@ -101,6 +101,10 @@ Collections are enumerated for `hooks/bash_command_guard.py`, `hooks/guards/git_
 | `git_grep_engine_guard.py` | dynamic source adoption removed | caught |
 | `git_grep_engine_guard.py` | dynamic source command identity dropped | caught |
 | `git_grep_engine_guard.py` | exec single-dash terminator dropped | caught |
+| `git_grep_engine_guard.py` | executable filename expansion adoption dropped | caught |
+| `git_grep_engine_guard.py` | executable leading redirection removal dropped | caught |
+| `git_grep_engine_guard.py` | executable noglob suppression dropped | caught |
+| `git_grep_engine_guard.py` | executable pattern group preservation dropped | caught |
 | `git_grep_engine_guard.py` | executed alias Git traversal dropped | caught |
 | `git_grep_engine_guard.py` | function record cache cap raised | caught |
 | `git_grep_engine_guard.py` | function record decision cache dropped | caught |
@@ -114,11 +118,13 @@ Collections are enumerated for `hooks/bash_command_guard.py`, `hooks/guards/git_
 | `git_grep_engine_guard.py` | nonordinary alias mode tracking dropped | caught |
 | `git_grep_engine_guard.py` | nonordinary alias use detection dropped | caught |
 | `git_grep_engine_guard.py` | ordinary shell alias Git classification dropped | caught |
+| `git_grep_engine_guard.py` | pattern brace expansion adoption dropped | caught |
 | `git_grep_engine_guard.py` | process substitution loses typed operand | caught |
 | `git_grep_engine_guard.py` | repeat zero execution boundary dropped | caught |
 | `git_grep_engine_guard.py` | same-shell alias mutation wrapper resolution dropped | caught |
 | `git_grep_engine_guard.py` | shell alias depth context corrupted | caught |
 | `git_grep_engine_guard.py` | shell alias forwarding dropped | caught |
+| `git_grep_engine_guard.py` | shell identity write adoption dropped | caught |
 | `git_grep_engine_guard.py` | source alias body traversal dropped | caught |
 | `git_grep_engine_guard.py` | source alias dynamic command detection dropped | caught |
 | `git_grep_engine_guard.py` | source alias embedded operand classification dropped | caught |
@@ -136,7 +142,7 @@ Collections are enumerated for `hooks/bash_command_guard.py`, `hooks/guards/git_
 | `zsh_rev_modifier_guard.py` | zsh unmodelled modifier uncertainty dropped | caught |
 | `repository_ownership.py` | effective core.worktree scalar lookup dropped | caught |
 
-280 of 368 planned mutations are caught; 88 exact mutation IDs remain recorded coverage debt.
+286 of 374 planned mutations are caught; 88 exact mutation IDs remain recorded coverage debt.
 
 A kill scored only because the recorded check count moved is not evidence that the suites observe the change. That count is recorded per result and reported by the gate rather than shown here, because whether an assertion fires can differ between hosts and this file is compared across them.
 

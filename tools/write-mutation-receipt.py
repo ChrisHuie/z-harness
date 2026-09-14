@@ -103,6 +103,46 @@ CHARSET_COLLECTIONS = {
 # ``timeout`` is an allowed kill only for the edit that restores an unbounded traversal.
 SITE_MUTATIONS = (
     {
+        "label": "pattern brace expansion adoption dropped", "module": GREP,
+        "anchor": "            if live_brace_expansion((pattern, _pattern_q)):",
+        "replacement": "            if False:",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "shell identity write adoption dropped", "module": GREP,
+        "anchor": "    identity_write = shell_identity_write(items, shell)",
+        "replacement": "    identity_write = None",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "executable filename expansion adoption dropped", "module": GREP,
+        "anchor": "        if executable_filename_expansion(items[0], noglob):",
+        "replacement": "        if False:",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "executable pattern group preservation dropped", "module": GREP,
+        "anchor": "        if pattern_depth or (c == \"(\" and tok_parts",
+        "replacement": "        if pattern_depth or (False and tok_parts",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "executable noglob suppression dropped", "module": GREP,
+        "anchor": "        if executable_filename_expansion(items[0], noglob):",
+        "replacement": "        if executable_filename_expansion(items[0], False):",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "executable leading redirection removal dropped", "module": GREP,
+        "anchor": (
+            "    items = _without_redirection_tokens(_resolve_outer_zsh_equals(\n"
+            "        tokens, shell, equals_state, command_env, lookup_authority_uncertain))"),
+        "replacement": (
+            "    items = _resolve_outer_zsh_equals(\n"
+            "        tokens, shell, equals_state, command_env, lookup_authority_uncertain)"),
+        "allowed_statuses": (),
+    },
+    {
         "label": "effective core.worktree scalar lookup dropped", "module": OWNERSHIP,
         "anchor": (
             "             \"--get\", \"core.worktree\"], capture_output=True, text=False)"),

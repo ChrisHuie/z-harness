@@ -132,6 +132,29 @@ same shared policy at both user and project scope.
 
 ## Health
 
+### Bash command identity limits
+
+The command guards inspect shell source without executing it. Visible zsh assignments to
+`commands`, `functions`, `dis_functions`, `aliases`, `galiases`, `saliases`, or `options`, and
+`hash name=path` writes, produce uncertainty even when the assigned name is unused or harmless.
+They are not interpreted as proof that Git will execute. Ordinary function and alias declarations
+retain their separate invocation analysis.
+
+An unquoted executable containing filename-pattern or brace syntax also produces uncertainty.
+The guards do not enumerate matching files or infer global `GLOB`, `EXTENDED_GLOB`, or `BRACE_CCL`
+state. Quoting and a command-local `noglob` prefix suppress filename-generation uncertainty;
+`noglob` does not suppress braces. Live braces in a grep/log pattern remain unresolved because
+expansion can introduce regex constructs that are absent from the written pattern. Quoted regex
+quantifiers remain literal. These are bounded syntax checks, not a general shell interpreter or
+security sandbox. Non-shell interpreter bodies and the contents of literal script files are not
+inspected.
+
+Claude receives `ask` for uncertainty; the Codex adapter maps it to `deny`. A separately proven
+regex-engine or rev-path hazard retains `deny` precedence. Prefer a direct literal executable and
+an explicit pattern engine when rewriting a questioned command.
+
+### Verification commands
+
 ```text
 python3 hooks/harness_check.py
 python3 hooks/harness_check.py --selftest

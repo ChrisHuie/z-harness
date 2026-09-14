@@ -73,9 +73,9 @@ PCRE_ESCAPE_LETTERS = frozenset("bBdDsSwWAZzhHvVRQEXNK")
 # every existing consumer of "unresolved" answer for it: the executable, the hazard hint, the
 # pattern, and the raw-source scan.
 #
-# Only the comma and range forms expand; `{a}` is literal, and so are `'{a,b}'`, `"{a,b}"`
-# and `\{a,b\}`. Each alternative excludes its own delimiter from the leading class so the
-# match is decided without backtracking on a megabyte-scale token.
+# This matcher handles the comma and range forms. Option-dependent single-member braces
+# are handled separately with token quoting by live_brace_expansion. Each alternative
+# excludes its own delimiter to avoid backtracking on a megabyte-scale token.
 UNRESOLVED = re.compile(
     r"\$[A-Za-z_{(]|`"
     r"|\{[^{},\s;|&()]*,[^{}\s;|&()]*\}"
@@ -1624,6 +1624,7 @@ def split_commands(cmd, _parse_depth=0, _deadline=None):
     out, cur, embedded = [], [], []
     tok_parts, tok_mode_parts, tok_modes, q, i = [], [], set(), "", 0
     brace_depth = 0
+    pattern_depth = 0
     token_count = 0
     n = len(cmd)
 
@@ -1738,6 +1739,19 @@ def split_commands(cmd, _parse_depth=0, _deadline=None):
                 append_tok(cmd[i + 1], "escaped")
             i += 2
             continue
+        # A parenthesis attached to a word can be a zsh filename pattern, not a
+        # subshell boundary. Keep its alternatives in one token so the executable
+        # resolver can question them. Array assignments and output process
+        # substitutions retain their existing parsing paths.
+        if pattern_depth or (c == "(" and tok_parts
+                             and not tok_parts[-1].endswith(("=", ">"))):
+            if c == "(":
+                pattern_depth += 1
+            elif c == ")":
+                pattern_depth -= 1
+            append_tok(c)
+            i += 1
+            continue
         if c == "{":
             brace_end = cmd.find("}", i + 1)
             if brace_end != -1:
@@ -1785,6 +1799,8 @@ def split_commands(cmd, _parse_depth=0, _deadline=None):
             continue
         append_tok(c)
         i += 1
+    if pattern_depth:
+        raise CommandParseError("command source has an unclosed filename pattern")
     if q:
         raise CommandParseError("command source has an unclosed quote")
     flush_cmd()
@@ -1953,6 +1969,19 @@ def _source_operand_modes(operand):
         quoting, "E") * len(text)
 
 
+def live_brace_expansion(token):
+    """Keep option-dependent braces unresolved unless their characters are quoted.
+
+    Attached -e/--grep patterns retain their original token's quote map. The pattern is
+    its suffix, so align that map from the right rather than from the removed option.
+    """
+    text, _quoting = token
+    if not text or not ("{" in text or "}" in text):
+        return False
+    modes = _source_operand_modes(token)[-len(text):]
+    return any(char in "{}" and mode == "U" for char, mode in zip(text, modes))
+
+
 def _dynamic_source_operand_reason(
         operand, noglob, current_shell, equals_state=ZSH_EQUALS_UNKNOWN):
     """Return why one source operand is computed, or ``None`` when literal."""
@@ -1970,9 +1999,8 @@ def _dynamic_source_operand_reason(
         any(mode in "UD" for mode in modes[match.start():match.end()])
         for match in source_expansion.finditer(text))
     live_initial_tilde = bool(text) and text[0] == "~" and modes[0] == "U"
-    computed = computed or live_initial_tilde or any(
-        mode == "U" and (character in "{}"
-                         or (not noglob and character in "*?["))
+    computed = computed or live_initial_tilde or live_brace_expansion(operand) or any(
+        mode == "U" and not noglob and character in "*?["
         for character, mode in zip(text, modes))
     descriptor = (text == "/dev/stdin" or text.startswith("/dev/fd/")
                   or text.startswith("/proc/self/fd/")
@@ -3338,6 +3366,66 @@ def only_changed_zsh_equals_lookup_authority_error(resolution):
                     for error in resolution.errors))
 
 
+SHELL_IDENTITY_ASSIGNMENT = re.compile(
+    r"^(?:commands|functions|dis_functions|aliases|galiases|saliases|options)"
+    r"(?:\[.*\])?\+?=")
+
+
+def shell_identity_write(tokens, shell="zsh"):
+    """Identify visible zsh lookup-state writes without simulating their effects.
+
+    A write is questioned even if its target is never called. Ordinary function and
+    alias declarations retain their existing invocation analysis; this boundary covers
+    the special parameter tables and hash assignments that bypass that analysis.
+    """
+    if shell != "zsh":
+        return None
+    items = _without_redirection_tokens(tokens)
+    while items:
+        word = items[0][0]
+        if word in CONTROL_KEYWORDS:
+            items.pop(0)
+        elif word == "repeat":
+            if len(items) < 2 or items[1][0] == "0":
+                return None
+            del items[:2]
+        elif SHELL_IDENTITY_ASSIGNMENT.match(word):
+            return "zsh command lookup or option table assignment is not modelled"
+        elif ASSIGNMENT.match(word):
+            items.pop(0)
+        else:
+            break
+    invocation = _source_command_invocation(items, shell)
+    if invocation is None:
+        return None
+    executable, operands, _noglob = invocation
+    if executable == "hash" and any("=" in word and not word.startswith("-")
+                                     for word, _quoting in operands):
+        return "zsh hash assignment can change command lookup and is not modelled"
+    if executable in {"typeset", "local", "declare", "export", "readonly"}:
+        if any(SHELL_IDENTITY_ASSIGNMENT.match(word) for word, _quoting in operands):
+            return "zsh declaration writes a command lookup or option table"
+    return None
+
+
+def executable_filename_expansion(token, noglob=False):
+    """Whether an executable word depends on filename generation or brace options.
+
+    Do not consult the filesystem or infer global GLOB/BRACE_CCL option state. A local
+    noglob prefix suppresses filename generation, not brace expansion. Quoted/escaped
+    characters and assignment words do not select an executable through this mechanism.
+    """
+    text, _quoting = token
+    if re.match(r"^[A-Za-z_][A-Za-z0-9_]*(?:\[.*\])?\+?=", text):
+        return False
+    if not re.search(r"[*?[{}()#^~]", text):
+        return False
+    modes = _source_operand_modes(token)
+    return live_brace_expansion(token) or any(
+        mode == "U" and not noglob and char in "*?[()#^~"
+        for char, mode in zip(text, modes))
+
+
 def unwrap_command_prefix(tokens, shell="zsh", equals_state=ZSH_EQUALS_ON,
                           command_env=None, lookup_authority_uncertain=False):
     """Resolve the executable boundary shared by both guards.
@@ -3348,18 +3436,25 @@ def unwrap_command_prefix(tokens, shell="zsh", equals_state=ZSH_EQUALS_ON,
     """
     original = list(tokens)
     command_env = dict(os.environ if command_env is None else command_env)
-    items = _resolve_outer_zsh_equals(
-        tokens, shell, equals_state, command_env, lookup_authority_uncertain)
+    items = _without_redirection_tokens(_resolve_outer_zsh_equals(
+        tokens, shell, equals_state, command_env, lookup_authority_uncertain))
     errors = []
     guarded_prefix_hazard = False
     wrapper_depth = 0
     env_splits = 0
     command_bypass_next = False
+    noglob = False
     lookup_authority_uncertain = bool(lookup_authority_uncertain)
     descendant_lookup_authority_uncertain = lookup_authority_uncertain
-    while items:
+    # Only the source shell can perform these writes. After env/nice/sudo consumes its
+    # prefix, the remaining words are external argv, not another zsh builtin invocation.
+    identity_write = shell_identity_write(items, shell)
+    if identity_write is not None:
+        errors.append(identity_write)
+        guarded_prefix_hazard = True
+    while items and identity_write is None:
         while items and items[0][0] in CONTROL_KEYWORDS:
-            items.pop(0)
+            noglob = items.pop(0)[0] == "noglob" or noglob
         while items and ASSIGNMENT.match(items[0][0]):
             key, value = items.pop(0)[0].split("=", 1)
             command_env[key] = value
@@ -3372,6 +3467,11 @@ def unwrap_command_prefix(tokens, shell="zsh", equals_state=ZSH_EQUALS_ON,
         bypasses_shell_identity = command_bypass_next
         command_bypass_next = False
         executable_text = items[0][0]
+        if executable_filename_expansion(items[0], noglob):
+            errors.append(
+                f"executable {executable_text!r} depends on filename or brace expansion")
+            guarded_prefix_hazard = True
+            break
         if _equals_expansion_is_live(*items[0]) and shell == "zsh":
             # Reaching here means `_resolve_outer_zsh_equals` did NOT rewrite this word:
             # it resolves a live `=name` to its realpath before the walk starts, so every
@@ -5359,7 +5459,23 @@ def _classify(command, decisions, _shell_depth, _deadline, _shell, _equals_state
             if UNRESOLVED.search(pattern):
                 unresolved = unresolved or pattern
                 continue
-            scan = scan_pcre_constructs(pattern)
+            literal_pattern = pattern
+            if live_brace_expansion((pattern, _pattern_q)):
+                unresolved = unresolved or pattern
+                # Expansion may alter the brace body, but cannot erase an atom in a
+                # literal segment outside it. Mask bodies instead of deleting them so
+                # the scan cannot invent adjacency across an unresolved segment.
+                modes = _source_operand_modes((pattern, _pattern_q))[-len(pattern):]
+                depth = 0
+                literal = []
+                for char, mode in zip(pattern, modes):
+                    if char == "{" and mode == "U":
+                        depth += 1
+                    literal.append(" " if depth else char)
+                    if char == "}" and mode == "U" and depth:
+                        depth -= 1
+                literal_pattern = "".join(literal)
+            scan = scan_pcre_constructs(literal_pattern)
             bad_atoms.update(scan.atoms)
             uncertain_atoms.update(scan.uncertain)
         if engine is None and AMBIENT_ENGINE_REQUIRES_EXPLICIT:
@@ -6861,6 +6977,22 @@ def check_shell_boundary_behavior():
             failures.append(
                 f"equals-expansion liveness for {text!r} quoted {quoting!r} is not {live}")
     zsh_probes = (
+        ("command table selects an external program",
+         "commands[g]=/usr/bin/printf; g '%s\\n' TABLE", "TABLE\n"),
+        ("hash accepts a non-identifier command name",
+         "hash g-g=/usr/bin/printf; g-g '%s\\n' HASH", "HASH\n"),
+        ("function table supplies executable source",
+         "functions[g]='command printf \"$@\"'; g '%s\\n' FUNCTION", "FUNCTION\n"),
+        ("filename class selects an external program",
+         "/usr/bin/print[f] '%s\\n' CLASS", "CLASS\n"),
+        ("filename group selects an external program",
+         "/usr/bin/(print)f '%s\\n' GROUP", "GROUP\n"),
+        ("extended glob selects an external program",
+         "setopt EXTENDED_GLOB; /usr/bin/print#f '%s\\n' EXTENDED", "EXTENDED\n"),
+        ("brace character class selects an external program",
+         "setopt BRACE_CCL; /usr/bin/print{f} '%s\\n' BRACE", "BRACE\n"),
+        ("noglob does not suppress brace expansion",
+         "setopt BRACE_CCL; noglob /usr/bin/print{f} '%s\\n' NOGLOB", "NOGLOB\n"),
         (
             "function-shadowed echo",
             'echo() { print -r -- "FORWARDED:$*"; }\n'
@@ -8449,6 +8581,121 @@ FIXTURES.append((
 ))
 
 
+# Command-table assignment and executable expansion are unresolved identities, not proof
+# of a Git hazard. These fixtures deliberately include harmless mutations: the guard
+# does not execute or emulate their state. Quoted data and inert declarations stay data.
+FIXTURES += [
+    ("ASK IDENTITY: command table can rename Git",
+     r"commands[g]=/usr/bin/git; g grep -E 'harness\b' -- README.md", "ask"),
+    ("ASK IDENTITY: hash can rename Git",
+     r"hash g=/usr/bin/git; g grep -E 'harness\b' -- README.md", "ask"),
+    ("ASK IDENTITY: function table can forward argv",
+     r'''functions[g]='git "$@"'; g grep -E 'harness\b' -- README.md''', "ask"),
+    ("ASK IDENTITY: function table can carry the entire body",
+     r'''functions[g]='git grep -E "harness\b" -- README.md'; g''', "ask"),
+    ("ASK IDENTITY: called function writes command state",
+     r"f(){ commands[g]=/usr/bin/git; }; f; g grep -E 'harness\b' -- README.md", "ask"),
+    ("ASK IDENTITY: DEBUG action writes command state",
+     r"trap 'commands[g]=/usr/bin/git' DEBUG; g grep -E 'harness\b' -- README.md", "ask"),
+    ("ASK IDENTITY: special trap function writes command state",
+     r"TRAPDEBUG(){ commands[g]=/usr/bin/git; }; g grep -E 'harness\b' -- README.md", "ask"),
+    ("ASK IDENTITY: literal eval writes command state",
+     r"eval 'hash g=/usr/bin/git'; g grep -E 'harness\b' -- README.md", "ask"),
+    ("ASK IDENTITY: builtin hash writes command state", "builtin hash g=/usr/bin/git", "ask"),
+    ("ASK IDENTITY: hash names need not be shell identifiers",
+     "hash g-g=/usr/bin/git; g-g --version", "ask"),
+    ("ASK IDENTITY: indexed declaration writes command state",
+     "typeset 'functions[g]=git status'", "ask"),
+    ("ASK IDENTITY: whole table assignment", "commands=(g /usr/bin/git)", "ask"),
+    ("ASK IDENTITY: alias table assignment", "aliases[g]='git status'", "ask"),
+    ("ASK IDENTITY: global alias table assignment", "galiases[X]='; git status'", "ask"),
+    ("ASK IDENTITY: suffix alias table assignment", "saliases[x]=git", "ask"),
+    ("ASK IDENTITY: disabled function table assignment", "dis_functions[g]='git status'", "ask"),
+    ("ASK IDENTITY: option table assignment", "options[GLOB]=on", "ask"),
+    ("ASK IDENTITY: an unused command-table write is still unmodelled",
+     "commands[g]=/bin/echo; /bin/echo safe", "ask"),
+    ("GREEN IDENTITY: uncalled function does not write a table",
+     "f(){ commands[g]=/usr/bin/git; }; /bin/echo safe", "allow"),
+    ("GREEN IDENTITY: quoted table write is data",
+     "/bin/echo 'commands[g]=/usr/bin/git'", "allow"),
+    ("GREEN IDENTITY: hash display does not install an entry", "hash -L", "allow"),
+    ("GREEN IDENTITY: command query does not invoke hash", "command -v hash", "allow"),
+    ("GREEN IDENTITY: external hash is not the builtin", "/tmp/hash g=/usr/bin/git", "allow"),
+    ("GREEN IDENTITY: an env argument does not write a zsh table",
+     "env 'commands[g]=literal' /bin/echo safe", "allow"),
+    ("GREEN IDENTITY: env does not invoke the parent shell hash builtin",
+     "env hash g=/usr/bin/git", "allow"),
+    ("GREEN IDENTITY: ordinary indexed assignment", "values[g]=literal", "allow"),
+    ("ASK EXECUTABLE: filename class can select Git",
+     r"/usr/bin/gi[t] grep -E 'harness\b' -- README.md", "ask"),
+    ("ASK EXECUTABLE: filename wildcard can select Git",
+     r"/usr/bin/gi? grep -E 'harness\b' -- README.md", "ask"),
+    ("ASK EXECUTABLE: star can select Git",
+     r"/usr/bin/gi* grep -E 'harness\b' -- README.md", "ask"),
+    ("ASK EXECUTABLE: BRACE_CCL expands a single brace member",
+     r"setopt BRACE_CCL; g{i}t grep -E 'harness\b' -- README.md", "ask"),
+    ("ASK EXECUTABLE: option state is not inferred from a prior toggle",
+     r"unsetopt GLOB; f(){ options[GLOB]=on; }; f; /usr/bin/gi[t] grep -E 'harness\b' -- README.md", "ask"),
+    ("ASK EXECUTABLE: global noglob state is not an execution proof",
+     r"unsetopt GLOB; /usr/bin/gi[t] grep -E 'harness\b' -- README.md", "ask"),
+    ("ASK EXECUTABLE: a modelled wrapper retains expansion uncertainty",
+     r"env /usr/bin/gi[t] grep -E 'harness\b' -- README.md", "ask"),
+    ("ASK EXECUTABLE: expansion can select an entire command",
+     "/usr/bin/gi[t] --version", "ask"),
+    ("ASK EXECUTABLE: parenthesized filename group", "/usr/bin/(gi)t --version", "ask"),
+    ("ASK EXECUTABLE: filename alternatives stay one word",
+     "/usr/bin/(git|git) --version", "ask"),
+    ("ASK EXECUTABLE: extended glob can select Git",
+     "setopt EXTENDED_GLOB; /usr/bin/gi#t --version", "ask"),
+    ("ASK EXECUTABLE: a leading redirect does not hide the executable",
+     "2>/dev/null /usr/bin/gi[t] --version", "ask"),
+    ("GREEN EXECUTABLE: noglob disables a grouped filename pattern",
+     "noglob /usr/bin/(gi)t --version", "allow"),
+    ("GREEN EXECUTABLE: noglob applies across an env wrapper",
+     "noglob env /usr/bin/gi[t] --version", "allow"),
+    ("GREEN EXECUTABLE: a quoted grouped filename is literal",
+     "'/usr/bin/(gi)t' --version", "allow"),
+    ("GREEN EXECUTABLE: grouped argument belongs to the data consumer",
+     "/bin/echo /usr/bin/(gi)t", "allow"),
+    ("GREEN IDENTITY: repeat zero does not write a command table",
+     "repeat 0 commands[g]=/usr/bin/git", "allow"),
+    ("ASK IDENTITY: an invoked alias writes a command table",
+     "alias x='hash g=/usr/bin/git'; eval x", "ask"),
+    ("ASK EXECUTABLE: noglob does not suppress braces",
+     "setopt BRACE_CCL; noglob g{i}t --version", "ask"),
+    ("GREEN EXECUTABLE: explicit noglob suppresses filename generation",
+     r"noglob /usr/bin/gi[t] grep -E 'harness\b' -- README.md", "allow"),
+    ("GREEN EXECUTABLE: single-quoted class is literal",
+     r"'/usr/bin/gi[t]' grep -E 'harness\b' -- README.md", "allow"),
+    ("GREEN EXECUTABLE: double-quoted class is literal",
+     r'''"/usr/bin/gi[t]" grep -E 'harness\b' -- README.md''', "allow"),
+    ("GREEN EXECUTABLE: escaped class is literal",
+     r"/usr/bin/gi\[t\] grep -E 'harness\b' -- README.md", "allow"),
+    ("GREEN EXECUTABLE: quoted CCL braces are literal",
+     r"setopt BRACE_CCL; 'g{i}t' grep -E 'harness\b' -- README.md", "allow"),
+    ("GREEN EXECUTABLE: a pattern argument is not an executable",
+     r"git grep -E '[a-z]*' -- README.md", "allow"),
+    ("ASK BRACE OPTION: a single-member brace can synthesize a PCRE atom",
+     r"setopt BRACE_CCL; git grep -E harness{\\}b -- README.md", "ask"),
+    ("ASK BRACE OPTION: attached pattern retains unquoted brace positions",
+     r"setopt BRACE_CCL; git grep -Ee'harness'{\\}b -- README.md", "ask"),
+    ("ASK BRACE OPTION: attached log pattern retains unquoted brace positions",
+     r"setopt BRACE_CCL; git log -E --grep='harness'{\\}b", "ask"),
+    ("GREEN BRACE OPTION: quoted regex quantifier stays literal",
+     "git grep -E 'a{2}' -- README.md", "allow"),
+    ("GREEN BRACE OPTION: attached quoted regex quantifier stays literal",
+     "git grep -Ee'a{2}' -- README.md", "allow"),
+    ("GREEN BRACE OPTION: attached quoted log pattern stays literal",
+     "git log -E --grep='a{2}'", "allow"),
+    ("GREEN EXECUTABLE: data arguments are not executable words",
+     "/bin/echo /usr/bin/gi[t]", "allow"),
+    ("GREEN EXECUTABLE: terminal wrapper option does not execute its argument",
+     "command -v /usr/bin/gi[t]", "allow"),
+    ("RED IDENTITY: uncertainty does not mask an independently proven hazard",
+     r"commands[g]=/usr/bin/git; git grep -E 'harness\b' -- README.md", "deny"),
+]
+
+
 def fixture_pair_duplicates(fixtures):
     """Return repeated public command/expected pairs; labels do not make cases distinct."""
     seen = set()
@@ -8675,9 +8922,9 @@ def selftest():
         absent_failures, absent_checks, absent_skips = check_shell_boundary_behavior()
     finally:
         shutil.which = original_which
-    absence_ok = not absent_failures and absent_checks == 12 and absent_skips == 79
+    absence_ok = not absent_failures and absent_checks == 12 and absent_skips == 87
     bad += 0 if absence_ok else 1
-    print("  %s absent zsh skips 79 atomic zsh probes; 12 portable probes still execute" % (
+    print("  %s absent zsh skips 87 atomic zsh probes; 12 portable probes still execute" % (
         "PASS" if absence_ok else "FAIL"))
 
     # Mutate each production call site, not its helper in isolation. Every representative
@@ -9795,6 +10042,15 @@ def selftest():
     print("  %s implicit-engine classification mutation loses ambient-config ask" % (
         "PASS" if ambient_engine_red else "FAIL"))
 
+    # Filename-pattern uncertainty can independently keep a broken function parse at
+    # ask. Pin the declaration parser's diagnostic as well as the inert-body controls.
+    prefix_probe = r'''scan() { git grep -E 'harness\b' -- README.md; }; time -p scan'''
+    prefix_diagnostic = "a declared function appears behind an unmodelled invocation prefix"
+    prefix_observed = decide(prefix_probe)
+    prefix_live = prefix_observed[0] == "ask" and prefix_diagnostic in prefix_observed[1]
+    bad += 0 if prefix_live else 1
+    print("  %s declaration parser reports the unmodelled function-call prefix" % (
+        "PASS" if prefix_live else "FAIL"))
     original_functions = extract_function_invocations
     globals()["extract_function_invocations"] = (
         lambda source, deadline=None: (source, ()))
@@ -9804,9 +10060,8 @@ def selftest():
             r'''scan() ( git grep -E 'harness\b' -- README.md ); /bin/echo safe''',
             r'''scan() { git grep -E 'harness\b' -- README.md; }; /bin/echo scan''',
         ))
-        declaration_red = declaration_red and decide(
-            r'''scan() { git grep -E 'harness\b' -- README.md; }; time -p scan'''
-        )[0] != "ask"
+        declaration_red = (declaration_red
+                           and prefix_diagnostic not in decide(prefix_probe)[1])
     finally:
         globals()["extract_function_invocations"] = original_functions
     bad += 0 if declaration_red else 1

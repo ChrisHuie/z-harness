@@ -709,26 +709,6 @@ def selftest():
         bad += (not ok); checks += 1
         print(f"  {'PASS' if ok else 'FAIL'} a scratch path that is the filesystem root is refused")
 
-        # An unmodelled exception must become a denial. Unhandled, the process exits 1, and
-        # this host continues the tool call on any exit other than 2 -- so a crash is an allow.
-        def _unmodelled_reserve(path, workspace_root):
-            """Raise a type neither OSError nor ValueError covers."""
-            raise NotImplementedError("mkdir: dir_fd unavailable on this platform")
-
-        real_reserve = reserve_scratch
-        globals()["reserve_scratch"] = _unmodelled_reserve
-        try:
-            unmodelled_payload = {
-                "tool_name": "Agent", "cwd": nested, "session_id": "s1",
-                "tool_input": {"name": "w1", "prompt": f"x\nScratch: {fresh('unmodelled')}\n"}}
-            rc_u, out_u = run_payload(
-                unmodelled_payload, runtime="claude", require_scratch=True)
-        finally:
-            globals()["reserve_scratch"] = real_reserve
-        ok = rc_u == 0 and '"permissionDecision": "deny"' in out_u and "unmodelled" in out_u
-        bad += (not ok); checks += 1
-        print(f"  {'PASS' if ok else 'FAIL'} an unmodelled reservation error denies instead of exiting open")
-
         # The splice: a name that PASSES the path check, then an ancestor swap, then the
         # reservation. Deterministic rather than raced, because a flaky case proves nothing.
         # Without the descriptor walk the swap is invisible and the directory lands in the
@@ -792,6 +772,35 @@ def selftest():
         old_pct = os.environ.get("SPAWN_GUARD_DF_PCT")
         os.environ["SPAWN_GUARD_DF_PCT"] = "50"
         try:
+            # Capacity denial skips reservation, so this injection belongs inside the
+            # allow-capacity fixture. Count entry independently of the denial reason.
+            unmodelled_calls = 0
+            def _unmodelled_reserve(path, workspace_root):
+                nonlocal unmodelled_calls
+                unmodelled_calls += 1
+                raise NotImplementedError("mkdir: dir_fd unavailable on this platform")
+
+            real_reserve = reserve_scratch
+            globals()["reserve_scratch"] = _unmodelled_reserve
+            try:
+                unmodelled_payload = {
+                    "tool_name": "Agent", "cwd": nested, "session_id": "s1",
+                    "tool_input": {"name": "w1", "prompt": f"x\nScratch: {fresh('unmodelled')}\n"}}
+                rc_u, out_u = run_payload(
+                    unmodelled_payload, runtime="claude", require_scratch=True)
+            finally:
+                globals()["reserve_scratch"] = real_reserve
+            try:
+                specific = json.loads(out_u)["hookSpecificOutput"]
+            except (KeyError, TypeError, json.JSONDecodeError):
+                specific = {}
+            ok = (unmodelled_calls == 1 and rc_u == 0
+                  and specific.get("permissionDecision") == "deny"
+                  and "unmodelled NotImplementedError" in
+                  specific.get("permissionDecisionReason", ""))
+            bad += (not ok); checks += 1
+            print(f"  {'PASS' if ok else 'FAIL'} an unmodelled reservation error denies instead of exiting open")
+
             rc, out = run_payload(payload, runtime="claude", require_scratch=True)
             ok = rc == 0 and '"permissionDecision": "deny"' in out and "Scratch:" in out
             bad += (not ok); checks += 1

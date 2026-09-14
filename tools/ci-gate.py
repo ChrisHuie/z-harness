@@ -56,9 +56,9 @@ EVAL_SKILL_FLOOR = 7
 SUITE_FLOORS = {
     "harness_check": 230,
     "render-packages": 192,
-    "bash_command_guard": 1395,
-    "git_grep_engine_guard": 1175,
-    "zsh_rev_modifier_guard": 489,
+    "bash_command_guard": 1466,
+    "git_grep_engine_guard": 1244,
+    "zsh_rev_modifier_guard": 500,
 }
 EXPECTED_WORKFLOW = """name: harness-check
 on:
@@ -1050,7 +1050,7 @@ RETAINED_DECISION_COMMANDS = ROOT / "contracts/goldens/retained-guard-commands.j
 SUITE_SOURCE_GOLDEN = ROOT / "contracts/goldens/suite-sources.json"
 HARNESS_SOURCE = ROOT / "hooks/harness_check.py"
 REPOSITORY_OWNERSHIP_SOURCE = ROOT / "tools/repository_ownership.py"
-DECISION_CORPUS_FLOOR = 1001
+DECISION_CORPUS_FLOOR = 1072
 DECISION_WRITER_SHA256 = "8c4180468fc05a88c69fafba3a79f2387f5df2d1aa728def1670f5497a442e9d"
 RETAINED_DECISION_SCHEMA_VERSION = 1
 RETAINED_DECISION_NOTE = (
@@ -1313,7 +1313,7 @@ MUTATION_SUMMARY = ROOT / "contracts/goldens/mutation-summary.md"
 # only removes cannot express a kill for them. Two of its ten are caught, by fixtures
 # that depend on the removed escape producing a literal backslash.
 MUTATION_SURVIVOR_DEBT_CEILING = 88
-MUTATION_PLAN_FLOOR = 368
+MUTATION_PLAN_FLOOR = 374
 # Kills scored only because the recorded check count moved, with no assertion failing. A
 # guard that increments its counter once per element of the collection under mutation moves
 # that count on any removal, so such a kill is decided by loop structure before any probe
@@ -1402,6 +1402,12 @@ EXPECTED_MUTATION_COLLECTIONS = {
     ("hooks/guards/zsh_rev_modifier_guard.py", "MOD_UNMODELLED"): 1,
 }
 EXPECTED_MUTATION_SITES = {
+    ("hooks/guards/git_grep_engine_guard.py", "pattern brace expansion adoption dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "shell identity write adoption dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "executable filename expansion adoption dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "executable pattern group preservation dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "executable noglob suppression dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "executable leading redirection removal dropped"),
     ("hooks/announced_work_guard.py", "adjectival group ambiguity guard dropped"),
     ("hooks/announced_work_guard.py", "adjectival group modifier state dropped"),
     ("hooks/announced_work_guard.py", "adjectival group subject-resume bridge dropped"),
@@ -1694,7 +1700,7 @@ EXPECTED_MUTATION_SELECTORS = {
         ("a repeated core.worktree binds the effective candidate Git recognises",),
 }
 EXPECTED_MUTATION_SITE_DIGEST = (
-    "5d72b8fdb3c017fdfddd2c35e8463cf1d89bde5d26af3ad6852a0dc301270d6d"
+    "45502481450f6110d4f8e745f351dfdbe701b2f7b70b885102f1bff4f18e03b1"
 )
 EXPECTED_MUTATION_EXCLUSIONS = {
     "hooks/guards/git_grep_engine_guard.py::ALIAS_GUARDED":

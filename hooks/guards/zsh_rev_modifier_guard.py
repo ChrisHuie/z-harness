@@ -1071,6 +1071,32 @@ FIXTURES += [
 ]
 
 
+FIXTURES += [
+    ("ASK IDENTITY: command table can rename a rev-path consumer",
+     "SHA=HEAD; commands[g]=/usr/bin/git; g show $SHA:t", "ask"),
+    ("ASK IDENTITY: hash can rename a rev-path consumer",
+     "SHA=HEAD; hash g=/usr/bin/git; g show $SHA:t", "ask"),
+    ("ASK IDENTITY: function table can forward a rev-path operand",
+     'functions[g]=\'git "$@"\'; g show $SHA:t', "ask"),
+    ("ASK IDENTITY: called function changes command lookup",
+     "f(){ commands[g]=/usr/bin/git; }; f; g show $SHA:t", "ask"),
+    ("ASK IDENTITY: DEBUG action changes command lookup",
+     "trap 'hash g=/usr/bin/git' DEBUG; g show $SHA:t", "ask"),
+    ("ASK EXECUTABLE: filename generation selects a rev-path consumer",
+     "/usr/bin/gi[t] show $SHA:t", "ask"),
+    ("ASK EXECUTABLE: brace character class selects a rev-path consumer",
+     "setopt BRACE_CCL; g{i}t show $SHA:t", "ask"),
+    ("ASK EXECUTABLE: filename group selects a rev-path consumer",
+     "/usr/bin/(gi)t show $SHA:t", "ask"),
+    ("GREEN EXECUTABLE: quoted class does not select Git",
+     "'/usr/bin/gi[t]' show $SHA:t", "allow"),
+    ("GREEN EXECUTABLE: explicit noglob does not select Git",
+     "noglob /usr/bin/gi[t] show $SHA:t", "allow"),
+    ("RED IDENTITY: a direct rev-path hazard retains precedence",
+     "commands[g]=/usr/bin/git; git show $SHA:t", "deny"),
+]
+
+
 def selftest():
     if not FIXTURES:
         print("SCAN SET EMPTY - zero fixtures is an error", file=sys.stderr)

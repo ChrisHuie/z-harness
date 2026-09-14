@@ -56,8 +56,8 @@ EVAL_SKILL_FLOOR = 7
 SUITE_FLOORS = {
     "harness_check": 230,
     "render-packages": 192,
-    "bash_command_guard": 1506,
-    "git_grep_engine_guard": 1281,
+    "bash_command_guard": 1527,
+    "git_grep_engine_guard": 1302,
     "zsh_rev_modifier_guard": 504,
 }
 EXPECTED_WORKFLOW = """name: harness-check
@@ -1050,7 +1050,7 @@ RETAINED_DECISION_COMMANDS = ROOT / "contracts/goldens/retained-guard-commands.j
 SUITE_SOURCE_GOLDEN = ROOT / "contracts/goldens/suite-sources.json"
 HARNESS_SOURCE = ROOT / "hooks/harness_check.py"
 REPOSITORY_OWNERSHIP_SOURCE = ROOT / "tools/repository_ownership.py"
-DECISION_CORPUS_FLOOR = 1111
+DECISION_CORPUS_FLOOR = 1132
 DECISION_WRITER_SHA256 = "8c4180468fc05a88c69fafba3a79f2387f5df2d1aa728def1670f5497a442e9d"
 RETAINED_DECISION_SCHEMA_VERSION = 1
 RETAINED_DECISION_NOTE = (
@@ -1313,7 +1313,7 @@ MUTATION_SUMMARY = ROOT / "contracts/goldens/mutation-summary.md"
 # only removes cannot express a kill for them. Two of its ten are caught, by fixtures
 # that depend on the removed escape producing a literal backslash.
 MUTATION_SURVIVOR_DEBT_CEILING = 88
-MUTATION_PLAN_FLOOR = 385
+MUTATION_PLAN_FLOOR = 389
 # Kills scored only because the recorded check count moved, with no assertion failing. A
 # guard that increments its counter once per element of the collection under mutation moves
 # that count on any removal, so such a kill is decided by loop structure before any probe
@@ -1422,6 +1422,10 @@ EXPECTED_MUTATION_SITES = {
     ("hooks/guards/git_grep_engine_guard.py", "trap declarations read from payload text"),
     ("hooks/guards/zsh_rev_modifier_guard.py", "trap declarations read from payload text"),
     ("hooks/guards/git_grep_engine_guard.py", "case pattern terminator dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "identity mutation gate dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "dynamic command relevance gate dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "file-input program check dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "pipeline scan reads raw lines"),
     ("hooks/guards/git_grep_engine_guard.py", "payload extraction ordered after declarations"),
     ("hooks/guards/git_grep_engine_guard.py", "comment recognition dropped"),
     ("hooks/guards/git_grep_engine_guard.py", "in-word brace pairing dropped"),
@@ -1721,7 +1725,7 @@ EXPECTED_MUTATION_SELECTORS = {
         ("a repeated core.worktree binds the effective candidate Git recognises",),
 }
 EXPECTED_MUTATION_SITE_DIGEST = (
-    "5ed984837c6352d6b8e8e8273f3b8b10180e2af78cd1d05e37d27551edc0d4f0"
+    "7ba65e5426066ba5611644a2784eda0593f2cb4add8f1f262bf8fab4715f23bb"
 )
 EXPECTED_MUTATION_EXCLUSIONS = {
     "hooks/guards/git_grep_engine_guard.py::ALIAS_GUARDED":

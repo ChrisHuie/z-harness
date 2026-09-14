@@ -80,7 +80,7 @@ from git_grep_engine_guard import (  # noqa: E402
     resolve_effective_git_invocation,
     REV_PATH_SUBCOMMANDS,
     split_commands, command_without_heredoc_payloads,
-    UNREADABLE_SOURCE_REASON,
+    UNREADABLE_SOURCE_REASON, identity_mutation_scope,
     unwrap_command_prefix, zsh_equals_states,
     command_environment_states, _strongest_decision,
     _equals_expanded,
@@ -272,6 +272,15 @@ def _classify(command, decisions, _depth, _shell, _equals_state, _deadline,
             "ask", f"the Bash command cannot be parsed safely ({exc}); rewrite it "
             "as a direct command before proceeding."))
         return
+    with identity_mutation_scope(scan_command, _deadline):
+        _classify_source(command, scan_command, decisions, _depth, _shell,
+                         _equals_state, _deadline, _command_env,
+                         _lookup_authority_uncertain)
+
+
+def _classify_source(command, scan_command, decisions, _depth, _shell, _equals_state,
+                     _deadline, _command_env, _lookup_authority_uncertain):
+    """The rev:path findings of one command source, inside its identity-mutation scope."""
     if _shell == "zsh":
         # Declarations are read from shell source, never from heredoc payloads, whose
         # quoting belongs to the interpreter that consumes them.
@@ -592,10 +601,10 @@ FIXTURES = [
      "sh -c \"git grep -P 'harness\\b' -- README.md\"", "allow"),
     ("GREEN NESTED: fully static zsh -c source retains PCRE",
      "zsh -c \"git grep -P 'harness\\b' -- README.md\"", "allow"),
-    ("ASK WRAPPER: bare echo identity is not mechanically fixed",
-     "SHA=x; echo git show $SHA:src/f.py", "ask"),
-    ("ASK WRAPPER: bare printf identity is not mechanically fixed",
-     "SHA=x; printf '%s\\n' git show $SHA:src/f.py", "ask"),
+    ("GREEN WRAPPER: a bare echo with no visible shadow prints its Git-looking argv",
+     "SHA=x; echo git show $SHA:src/f.py", "allow"),
+    ("GREEN WRAPPER: a bare printf with no visible shadow prints its Git-looking argv",
+     "SHA=x; printf '%s\\n' git show $SHA:src/f.py", "allow"),
     ("ASK WRAPPER: a function-shadowed echo may forward literal Git argv",
      "echo() { command \"$@\"; }; SHA=x; echo git show $SHA:src/f.py", "ask"),
     ("ASK WRAPPER: an echo alias may supply Git",

@@ -801,6 +801,32 @@ SITE_MUTATIONS = (
         "allowed_statuses": (),
     },
     {
+        "label": "identity mutation gate dropped", "module": GREP,
+        "anchor": "            or ((bypasses_shell_identity or _IDENTITY_MUTATION_VISIBLE.get() is False)",
+        "replacement": "            or ((bypasses_shell_identity or True)",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "dynamic command relevance gate dropped", "module": GREP,
+        "anchor": "            if _dynamic_command_is_relevant(words):\n                return True",
+        "replacement": "            if True:\n                return True",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "file-input program check dropped", "module": GREP,
+        "anchor": (
+            "            if not _consumer_reads_program_from_stdin(\n"
+            "                    source.line, source.redirect_start, source.word_end, deadline):"),
+        "replacement": "            if False:",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "pipeline scan reads raw lines", "module": GREP,
+        "anchor": "    for line in command_without_heredoc_payloads(command, deadline).splitlines():",
+        "replacement": "    for line in command.splitlines():",
+        "allowed_statuses": (),
+    },
+    {
         "label": "payload extraction ordered after declarations", "module": GREP,
         "anchor": (
             "    cmd, heredoc_sources = extract_heredoc_sources(cmd, _deadline)\n"

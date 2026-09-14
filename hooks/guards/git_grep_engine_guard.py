@@ -100,6 +100,38 @@ ZSH_EQUALS_UNKNOWN = "unknown"
 _FUNCTION_RECORD_CACHE = contextvars.ContextVar(
     "git_grep_function_record_cache", default=None)
 _FUNCTION_RECORD_CACHE_MISS = object()
+# Whether the command being decided shows a way to rebind a bare command name: a function
+# declaration, `alias`, `eval`, `source`/`.`, `hash`, `enable`, `disable`, `autoload`, or a
+# write to a lookup table. Set once per public decision over the command's shell source
+# with quoted bytes blanked, inherited by nested decisions of bodies the command runs, and
+# read where a bare `echo`/`printf` in front of Git-looking text is graded. Unset -- a
+# direct call from outside `decide` -- reads as visible, the conservative answer.
+_IDENTITY_MUTATION_VISIBLE = contextvars.ContextVar(
+    "git_grep_engine_guard_identity_mutation_visible", default=None)
+_IDENTITY_MUTATION = re.compile(
+    r"(?:^|[;&|(){}\s])(?:alias|eval|source|hash|unalias|enable|disable|autoload)(?:$|[\s;&|)])"
+    r"|(?:^|[;&|(){}\s])\.\s"
+    r"|(?:^|[;&|(){}\s])(?:commands|functions|dis_functions|aliases|galiases|saliases"
+    r"|options)(?:\[[^\]]*\])?\+?=")
+
+
+def identity_mutation_visible(source, deadline=None):
+    """Whether shell source declares, aliases, evaluates or sources anything."""
+    if function_declaration_records(source, deadline):
+        return True
+    return bool(_IDENTITY_MUTATION.search(_zsh_option_skeleton(source, deadline)))
+
+
+@contextlib.contextmanager
+def identity_mutation_scope(source, deadline=None):
+    """Publish the command's visible identity mutation to the walk that grades bare names."""
+    inherited = _IDENTITY_MUTATION_VISIBLE.get()
+    visible = True if inherited is True else identity_mutation_visible(source, deadline)
+    token = _IDENTITY_MUTATION_VISIBLE.set(visible)
+    try:
+        yield visible
+    finally:
+        _IDENTITY_MUTATION_VISIBLE.reset(token)
 
 
 @contextlib.contextmanager
@@ -3266,6 +3298,33 @@ def source_has_dynamic_command_word(source, deadline=None):
             words.append(token)
         if words and (_token_has_live_unresolved(words[0])
                       or _token_has_live_command_parameter(words[0])):
+            if _dynamic_command_is_relevant(words):
+                return True
+    return False
+
+
+_SHELL_SCRIPT_OPERAND = re.compile(r"\.(?:sh|bash|zsh|ksh|dash)$", re.IGNORECASE)
+
+
+def _dynamic_command_is_relevant(words):
+    """Whether a command whose executable is an expansion can reach executable source.
+
+    `$VENV/bin/python -m pytest -q` and `"$PY" /tmp/probe.py` name every operand and none
+    of them is Git-shaped, a shell script or itself an expansion, so whatever `$PY` turns
+    out to be it is handed data. Questioning every such command questioned one real
+    command in fifty. A bare expansion, a Git-shaped tail, a shell-script operand, or an
+    operand that is itself an expansion keep the question: `$X` may be `source`, and
+    `$PY "$SCRIPT"` consumes source this guard cannot see.
+    """
+    if len(words) == 1:
+        return True
+    if command_has_git_hazard_hint(words):
+        return True
+    for token in words[1:]:
+        text, _quoting = token
+        if _SHELL_SCRIPT_OPERAND.search(text):
+            return True
+        if _token_has_live_unresolved(token) or _token_has_live_command_parameter(token):
             return True
     return False
 
@@ -3865,9 +3924,16 @@ def unwrap_command_prefix(tokens, shell="zsh", equals_state=ZSH_EQUALS_ON,
         # downgraded `sudo git grep -E 'harness\b'` from a proven deny to a question.
         # With the floor rule in place it decided nothing: neutering it moved no verdict
         # across the 745-command fixture corpus.
+        # A bare `echo` in front of Git-looking text is a hazard only where this command
+        # shows a way to make `echo` something else: a declaration, an alias, an eval, a
+        # sourced file, a lookup-table write. With none in sight, `echo "=== git diff
+        # --check ==="` is a heading, and questioning it questioned one heading in every
+        # hundred real commands while `ls "git diff --check"` passed -- the ambient-state
+        # exposure is the same for every bare name and is not modelled for any other.
         explicit_harmless = (
             executable_text in TRUSTED_EXTERNAL_NON_FORWARDING_COMMANDS
-            or (bypasses_shell_identity and executable_text == executable
+            or ((bypasses_shell_identity or _IDENTITY_MUTATION_VISIBLE.get() is False)
+                and executable_text == executable
                 and executable in SHELL_NON_FORWARDING_COMMANDS)
         )
         bare_identity_hazard = (
@@ -4957,6 +5023,34 @@ def _marked_stdin_command(line, redirect_start, word_end, deadline=None):
     return index, [token for token in tokens if token[0] != marker]
 
 
+# Interpreters that read their program from standard input when told to, or when given no
+# program operand. A shell is decided by `_shell_reads_stdin`; anything else that reads
+# stdin reads data, not commands this guard must inspect.
+_STDIN_PROGRAM_INTERPRETER = re.compile(
+    r"python\d?(?:\.\d+)?|perl\d?|ruby|node|nodejs|php|lua|tclsh")
+
+
+def _consumer_reads_program_from_stdin(line, redirect_start, word_end, deadline=None):
+    """Whether the command a stdin source feeds would execute that input as a program."""
+    marked = _marked_stdin_command(line, redirect_start, word_end, deadline)
+    if marked is None:
+        return True
+    _index, stripped = marked
+    resolution = unwrap_command_prefix(_without_redirection_tokens(stripped))
+    if resolution.errors or not resolution.items:
+        return True
+    words = [word for word, _quoting in resolution.items]
+    name = os.path.basename(words[0])
+    if name in SHELLS:
+        return _shell_reads_stdin(words)
+    if _STDIN_PROGRAM_INTERPRETER.fullmatch(name):
+        operands = [word for word in words[1:] if not word.startswith("-") or word == "-"]
+        return not operands or operands[0] == "-"
+    if _token_has_live_unresolved(resolution.items[0]):
+        return True
+    return False
+
+
 def associated_stdin_consumer(
         line, redirect_start, word_end, deadline=None):
     """Resolve one input source to its command record without cross-command joins."""
@@ -5158,6 +5252,13 @@ def interpreter_stdin_provenance(
             detail = "dynamic" if source.dynamic else "guarded"
         else:
             detail = "uninspected"
+            if not _consumer_reads_program_from_stdin(
+                    source.line, source.redirect_start, source.word_end, deadline):
+                # A literal file with no Git-shaped path, fed to `wc`, `sort`, `grep`,
+                # `python3 script.py` or any other command that reads stdin as data. Only
+                # a shell, or an interpreter whose program comes from stdin, turns that
+                # file into something this guard needs to read.
+                continue
         findings.append(StdinProvenance(
             "ask", f"a {detail} file-input source can reach an executable interpreter; "
             "use an explicit script operand or a directly classified source"))
@@ -5167,7 +5268,12 @@ def interpreter_stdin_provenance(
             return None
         return _reduce_stdin_provenance(findings)
     has_pipeline = False
-    for line in command.splitlines():
+    # Pipes are read from the shell's view of the command with heredoc operators and
+    # payloads removed. A raw physical line keeps the operator without its payload, so
+    # the tail of `... | tail -4 && python3 - <<'EOF'` could not be tokenized and every
+    # such header read as a pipeline hazard; a payload line holding a `|` -- a Markdown
+    # table, a Python expression -- was read as a pipeline too.
+    for line in command_without_heredoc_payloads(command, deadline).splitlines():
         for position in _live_shell_operator_positions(line, "|"):
             try:
                 downstream = split_commands(
@@ -5345,6 +5451,15 @@ def _classify(command, decisions, _shell_depth, _deadline, _shell, _equals_state
             "ask", f"the Bash command cannot be parsed safely ({exc}); "
             "rewrite it as a direct command before proceeding."))
         return
+    with identity_mutation_scope(scan_command, _deadline):
+        _classify_source(command, scan_command, decisions, _shell_depth, _deadline,
+                         _shell, _equals_state, _command_env,
+                         _lookup_authority_uncertain)
+
+
+def _classify_source(command, scan_command, decisions, _shell_depth, _deadline, _shell,
+                     _equals_state, _command_env, _lookup_authority_uncertain):
+    """The findings of one command source, inside its identity-mutation scope."""
     if _shell == "zsh":
         # Declarations are read from shell source. A heredoc payload is data to the
         # shell, and its quoting follows the interpreter that consumes it, so a Python
@@ -5741,8 +5856,8 @@ FIXTURES = [
      """git grep -nE '^(def|class) [A-Za-z_]+\\(' -- src/""", "allow"),
     ("GREEN -F fixed strings",
      """git grep -nF 'a\\sb' -- src/""", "allow"),
-    ("ASK bare echo identity is not proven even for quoted Git text",
-     '''echo "=== git grep -E lacks \\s support ===" ''', "ask"),
+    ("GREEN IDENTITY: a bare echo heading with no visible shadow prints its text",
+     '''echo "=== git grep -E lacks \\s support ===" ''', "allow"),
     ("GREEN plain grep, not git grep",
      """grep -rnE 'foo\\s+bar' src/""", "allow"),
     ("GREEN -E pattern where the atom is in the PATHSPEC not the pattern",
@@ -5967,10 +6082,10 @@ FIXTURES = [
      """zsh -c \"git grep -nP 'harness\\b' -- README.md\"""", "allow"),
     ("GREEN WRAPPER: arch without a guarded Git tail is outside this guard",
      """arch uname -m""", "allow"),
-    ("ASK WRAPPER: bare echo identity is not mechanically fixed",
-     """echo git grep -nE 'harness\\b' -- README.md""", "ask"),
-    ("ASK WRAPPER: bare printf identity is not mechanically fixed",
-     """printf '%s\\n' git grep -nE 'harness\\b' -- README.md""", "ask"),
+    ("GREEN WRAPPER: a bare echo with no visible shadow prints its Git-looking argv",
+     """echo git grep -nE 'harness\\b' -- README.md""", "allow"),
+    ("GREEN WRAPPER: a bare printf with no visible shadow prints its Git-looking argv",
+     """printf '%s\\n' git grep -nE 'harness\\b' -- README.md""", "allow"),
     ("ASK WRAPPER: a function-shadowed echo may forward literal Git argv",
      """echo() { command \"$@\"; }; echo git grep -nE 'harness\\b' -- README.md""",
      "ask"),
@@ -6133,8 +6248,8 @@ FIXTURES = [
      """nohup ls -la""", "allow"),
     ("GREEN ROUND 10: wrapper help terminates without executing trailing git tokens",
      """timeout --help git grep -nE 'harness\\b' -- README.md""", "allow"),
-    ("ASK ROUND 10: a bare command name is not an explicit harmless identity",
-     """echo git log -E --grep='harness\\b'""", "ask"),
+    ("GREEN ROUND 10: a bare echo with a Git tail and no visible shadow prints it",
+     """echo git log -E --grep='harness\\b'""", "allow"),
 ]
 
 
@@ -8461,8 +8576,16 @@ FIXTURES += [
     ("GREEN SOURCE: repeat zero inside an alias installs no source identity",
      ("eval 'alias a=\"repeat 0 builtin alias s=source\"'; eval a; "
       "eval 's \"$FILE\"'"), "allow"),
-    ("ASK SOURCE: fully dynamic executable identity cannot prove both hazards absent",
-     '$CMD --version', "ask"),
+    ("GREEN SOURCE: a dynamic executable handed only data is not questioned",
+     '$CMD --version', "allow"),
+    ("ASK  SOURCE: a bare dynamic executable may be anything",
+     'X=ls; $X', "ask"),
+    ("ASK  SOURCE: a dynamic executable with a Git-shaped tail is unresolved",
+     "CMD=git; $CMD grep -nE 'harness\\b' -- README.md", "ask"),
+    ("ASK  SOURCE: a dynamic executable with a dynamic operand consumes unseen source",
+     'PY=python3; SCRIPT=/tmp/x.py; $PY "$SCRIPT"', "ask"),
+    ("ASK  SOURCE: a dynamic executable with a shell-script operand consumes source",
+     'SH=bash; $SH ./run.sh', "ask"),
     ("ASK SOURCE: zsh split parameter selects executable source", 'source $=FILE',
      "ask"),
     ("ASK SOURCE: zsh array parameter selects executable source", 'source $^FILES',
@@ -8945,6 +9068,47 @@ FIXTURES += [
     ("RED  PAYLOAD ORDER: the hazard after such a payload is still read",
      "python3 - <<'EOF'\nx = 'it\\'s'.upper()\nEOF\ngit grep -nE 'harness\\b' -- README.md",
      "deny"),
+]
+
+
+# A bare `echo` or `printf` is questioned only where the command shows a way to rebind it;
+# a dynamic executable only where its argv could carry source; a literal `< file` only where
+# its consumer would run it. Each allow stands beside the question the same construct keeps.
+FIXTURES += [
+    ("ASK  IDENTITY: an alias earlier on the line can make echo run Git",
+     "alias echo=git\necho grep -nE 'harness\\b' -- README.md", "ask"),
+    ("ASK  IDENTITY: a sourced file in the command can make echo run Git",
+     "source ./env.sh; echo git grep -nE 'harness\\b' -- README.md", "ask"),
+    ("ASK  IDENTITY: an eval in the command can make echo run Git",
+     "eval 'alias echo=git'; echo git grep -nE 'harness\\b' -- README.md", "ask"),
+    ("ASK  IDENTITY: a declared function in the command can make echo run Git",
+     "f() { :; }; echo git grep -nE 'harness\\b' -- README.md", "ask"),
+    ("GREEN IDENTITY: a quoted alias word is data, not a rebinding",
+     "printf '%s\\n' 'alias echo=git'; echo git show HEAD:README.md", "allow"),
+    ("RED  IDENTITY: a heading before a real hazard does not soften it",
+     'echo "=== x ==="; git grep -nE "harness\\b" -- README.md', "deny"),
+    ("GREEN FILE INPUT: a literal file into a data consumer is data",
+     "wc -l < README.md", "allow"),
+    ("GREEN FILE INPUT: a literal file into a script with its own program is data",
+     "python3 /tmp/x.py < README.md", "allow"),
+    ("GREEN FILE INPUT: a literal file into a pipeline data consumer is data",
+     "sort < README.md | head", "allow"),
+    ("ASK  FILE INPUT: a shell reads a literal file as commands",
+     "sh < /tmp/script.sh", "ask"),
+    ("ASK  FILE INPUT: an interpreter told to read its program from stdin",
+     "python3 - < /tmp/x.py", "ask"),
+    ("ASK  FILE INPUT: an interpreter with no program operand reads stdin",
+     "python3 < /tmp/x.py", "ask"),
+    ("ASK  FILE INPUT: a dynamic consumer may be a shell",
+     "X=wc; $X -l < README.md", "ask"),
+    ("ASK  FILE INPUT: a dynamic source is unseen",
+     "F=README.md; wc -l < $F", "ask"),
+    ("GREEN PIPELINE: a pipe before a heredoc command is not its stdin",
+     "X=$(true); python3 /tmp/a.py | tail -4 && python3 - <<'EOF'\nprint(1)\nEOF", "allow"),
+    ("GREEN PIPELINE: a bar inside a payload is not a pipe",
+     "X=$(true); cat > x.md <<'EOF'\n| a | b |\nEOF", "allow"),
+    ("ASK  PIPELINE: a heredoc piped into a shell is still questioned",
+     "X=$(true); cat <<'EOF' | sh\ngit grep -nE 'harness\\b' -- README.md\nEOF", "ask"),
 ]
 
 

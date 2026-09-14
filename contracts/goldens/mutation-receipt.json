@@ -2,15 +2,15 @@
  "schema_version": 3,
  "generated_by": "tools/write-mutation-receipt.py --aggregate",
  "note": "which guard mutations the shipped suites catch; each result's reason is an observation from the host that generated it, not a cross-platform fact",
- "generator_sha256": "3ffcc0376293ec66a08ffbcabc93994cb12dba2f97f0f21f247682a37ad06b98",
+ "generator_sha256": "213fe3f459ff050e050ad96267b050dbef5afaddd2ab7506df6975f78c66b84a",
  "source_digests": {
-  "hooks/guards/git_grep_engine_guard.py": "3ab406fdb884a32ac7928495018c03233cc306b492f80f56e32700c8bed979a9",
-  "hooks/guards/zsh_rev_modifier_guard.py": "3b8e7006160e81d11e96fa1ac82896284b0fb354c65a6e9c5a8add8fddf9627f",
-  "hooks/bash_command_guard.py": "4dbd2f3857241ace4d7ae588775ce8e07267b3943cda59c5bcaabde4a40993d5",
+  "hooks/guards/git_grep_engine_guard.py": "60b6cdaa10ebf3740a16d96ea4ceab681d86d59f6444cde7d4337d7e62ac496c",
+  "hooks/guards/zsh_rev_modifier_guard.py": "cea68abb87e3832303675b61c744049a684159bc5b5bbd1b721f772b1a19ab1e",
+  "hooks/bash_command_guard.py": "db16bbe5e3fa9ccdc7e5f4d941b332e3a33f68dee9127fe963dfa560d591d81b",
   "hooks/announced_work_guard.py": "2075db2aa7ee281666327b1d5686d5e342cfa79a61132fba1b1852aa9c8832d7",
   "tools/repository_ownership.py": "d72b23ef0e037f81bb0c1eefc93c2198a5355c1820b542ce285a83d8661f35ca"
  },
- "plan_sha256": "06e05434c0c24517e04f53dea8647f73c26ad583811ef184f959e89da711a8f0",
+ "plan_sha256": "ec13b9d37b6d3449821b2330f876b60689d57c8127558f83879ac3a8b5cfc70e",
  "baseline": {
   "hooks/guards/git_grep_engine_guard.py": "passed",
   "hooks/guards/zsh_rev_modifier_guard.py": "passed",
@@ -1071,6 +1071,17 @@
    "anchor_sha256": "ea2c3efd25ec453865e8bbbb78c42022035ea45b704a01add3c82e38f332f1d3",
    "replacement_sha256": "0da1cefc34e5ba522bb43811b0070fde5797d04e18b6dd5b9d1b632f9295d10c",
    "id": "408c02f3582b8a17e31d25a95d45e26e2a6872c412e4436ee26e3c18aa4b2859",
+   "outcome": "caught",
+   "reason": "suite-failure"
+  },
+  "4102a11d86694529a6762b451e86f9ea89277a62c97e9d7b7b6cbf79afc21dd1": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "label": "identity mutation gate dropped",
+   "anchor_sha256": "be5d35cccfe578edf6fecffbe22e283360554234b116d64f44d49123a26caf4d",
+   "replacement_sha256": "e9b31145a8f9e58a3b785ab620bb2cf7bff3e7eaddab6209a6af7959ef9cdd7b",
+   "id": "4102a11d86694529a6762b451e86f9ea89277a62c97e9d7b7b6cbf79afc21dd1",
    "outcome": "caught",
    "reason": "suite-failure"
   },
@@ -2255,6 +2266,17 @@
    "outcome": "caught",
    "reason": "suite-failure"
   },
+  "848fc15bbde258b89127727b9b28b9a68965a743be1dc51e046a41e017f36ddf": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "label": "file-input program check dropped",
+   "anchor_sha256": "e68c697b76d50f98b92f187d51fa2836312dd78c0fe67b3d208ac8a16cd0484f",
+   "replacement_sha256": "36a9238d46288e170848b186a55d0bbe012967c0200d0e6c19cbada4be2a6cfb",
+   "id": "848fc15bbde258b89127727b9b28b9a68965a743be1dc51e046a41e017f36ddf",
+   "outcome": "caught",
+   "reason": "suite-failure"
+  },
   "84cfaaddf49723a820ff1744b6440acf389c70dcb8b45c86ef3698a2f0c742b5": {
    "version": 1,
    "kind": "set-element",
@@ -3056,6 +3078,17 @@
    "outcome": "survived",
    "reason": "survived"
   },
+  "acbc7707e90539ee4b121b75ce25211033b83c65910c33cb71001ceb13030854": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "label": "pipeline scan reads raw lines",
+   "anchor_sha256": "0d1bfe6a5be0c4447ebd7aba87693835735bdbb026277f22ea00d839de42097e",
+   "replacement_sha256": "bd1d369afb853e821ffa24ab74446b953059d1c3b3d2cb4b0859b52a1e1a0c12",
+   "id": "acbc7707e90539ee4b121b75ce25211033b83c65910c33cb71001ceb13030854",
+   "outcome": "caught",
+   "reason": "suite-failure"
+  },
   "adcb98384e895cd459341fb036b1ab39cef34fc276c38e0cf88bb31ff2ec0814": {
    "version": 1,
    "kind": "set-addition",
@@ -3360,6 +3393,17 @@
    "collection_kind": "set",
    "element": "!",
    "id": "c3cb374aad824a4bb79e494e852608b062a940ea08cc0cecc62047e357ca66d6",
+   "outcome": "caught",
+   "reason": "suite-failure"
+  },
+  "c4b7ebefe209b980e81d5ae104ab1db7cd027be9529bdc983eb97d47f5c7d49d": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "label": "dynamic command relevance gate dropped",
+   "anchor_sha256": "a6dd0175b530685b845ec81027cc0a02412c68d6f90da9481dc81e7373f90351",
+   "replacement_sha256": "508fc6e854df1f388a03a083ddfa15f440b27123b19e81652cca847fbb846faa",
+   "id": "c4b7ebefe209b980e81d5ae104ab1db7cd027be9529bdc983eb97d47f5c7d49d",
    "outcome": "caught",
    "reason": "suite-failure"
   },
@@ -4597,6 +4641,6 @@
  "unasserted_kills": [
   "dc81a81f5f1adeb7a11175829b5e7c583a2349b9b18d23721110544ad9d55274"
  ],
- "caught": 297,
- "total": 385
+ "caught": 301,
+ "total": 389
 }

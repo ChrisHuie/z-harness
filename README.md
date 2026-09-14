@@ -158,6 +158,14 @@ a heredoc payload is data whose quoting belongs to the interpreter that consumes
 `case` pattern's `)` closes the pattern. `instruments/corpus_delta.py` measures what a guard
 change does to the real command corpus, base against head, and prints only aggregates.
 
+Uncertainty is questioned where it is relevant. A bare `echo` or `printf` in front of Git-looking
+text is questioned only where the command shows a way to rebind it -- a function declaration, an
+`alias`, `eval`, `source`, `hash`, or a lookup-table write; with none in sight it prints. A command
+whose executable is an expansion is questioned when the expansion stands alone, when its argv is
+Git-shaped, or when an operand is a shell script or itself an expansion; `"$PY" script.py` and
+`$VENV/bin/python -m pytest` are handed data. A literal `< file` is questioned when its consumer is
+a shell, an interpreter reading its program from stdin, or an expansion; `wc -l < file` reads data.
+
 Claude receives `ask` for uncertainty; the Codex adapter maps it to `deny`. A separately proven
 regex-engine or rev-path hazard retains `deny` precedence. Prefer a direct literal executable and
 an explicit pattern engine when rewriting a questioned command.

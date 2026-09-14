@@ -102,6 +102,7 @@ Collections are enumerated for `hooks/bash_command_guard.py`, `hooks/guards/git_
 | `git_grep_engine_guard.py` | cross-line quote state dropped | caught |
 | `git_grep_engine_guard.py` | decision-budget checkpoint neutered | caught |
 | `git_grep_engine_guard.py` | declared helper function alias traversal dropped | caught |
+| `git_grep_engine_guard.py` | dynamic command relevance gate dropped | caught |
 | `git_grep_engine_guard.py` | dynamic source adoption removed | caught |
 | `git_grep_engine_guard.py` | dynamic source command identity dropped | caught |
 | `git_grep_engine_guard.py` | exec single-dash terminator dropped | caught |
@@ -110,6 +111,7 @@ Collections are enumerated for `hooks/bash_command_guard.py`, `hooks/guards/git_
 | `git_grep_engine_guard.py` | executable noglob suppression dropped | caught |
 | `git_grep_engine_guard.py` | executable pattern group preservation dropped | caught |
 | `git_grep_engine_guard.py` | executed alias Git traversal dropped | caught |
+| `git_grep_engine_guard.py` | file-input program check dropped | caught |
 | `git_grep_engine_guard.py` | function record cache cap raised | caught |
 | `git_grep_engine_guard.py` | function record decision cache dropped | caught |
 | `git_grep_engine_guard.py` | git config count cap dropped | caught |
@@ -117,6 +119,7 @@ Collections are enumerated for `hooks/bash_command_guard.py`, `hooks/guards/git_
 | `git_grep_engine_guard.py` | git hazard union adoption dropped | caught |
 | `git_grep_engine_guard.py` | guarded-tail predicate rescans per word | caught |
 | `git_grep_engine_guard.py` | home-relative tilde exemption dropped | caught |
+| `git_grep_engine_guard.py` | identity mutation gate dropped | caught |
 | `git_grep_engine_guard.py` | in-word brace pairing dropped | caught |
 | `git_grep_engine_guard.py` | invoked alias body state transition dropped | caught |
 | `git_grep_engine_guard.py` | native command checked after alias | caught |
@@ -127,6 +130,7 @@ Collections are enumerated for `hooks/bash_command_guard.py`, `hooks/guards/git_
 | `git_grep_engine_guard.py` | parse-failure label dropped | caught |
 | `git_grep_engine_guard.py` | pattern brace expansion adoption dropped | caught |
 | `git_grep_engine_guard.py` | payload extraction ordered after declarations | caught |
+| `git_grep_engine_guard.py` | pipeline scan reads raw lines | caught |
 | `git_grep_engine_guard.py` | process substitution loses typed operand | caught |
 | `git_grep_engine_guard.py` | repeat zero execution boundary dropped | caught |
 | `git_grep_engine_guard.py` | same-shell alias mutation wrapper resolution dropped | caught |
@@ -153,7 +157,7 @@ Collections are enumerated for `hooks/bash_command_guard.py`, `hooks/guards/git_
 | `zsh_rev_modifier_guard.py` | zsh unmodelled modifier uncertainty dropped | caught |
 | `repository_ownership.py` | effective core.worktree scalar lookup dropped | caught |
 
-297 of 385 planned mutations are caught; 88 exact mutation IDs remain recorded coverage debt.
+301 of 389 planned mutations are caught; 88 exact mutation IDs remain recorded coverage debt.
 
 A kill scored only because the recorded check count moved is not evidence that the suites observe the change. That count is recorded per result and reported by the gate rather than shown here, because whether an assertion fires can differ between hosts and this file is compared across them.
 

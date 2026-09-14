@@ -2,15 +2,15 @@
  "schema_version": 3,
  "generated_by": "tools/write-mutation-receipt.py --aggregate",
  "note": "which guard mutations the shipped suites catch; each result's reason is an observation from the host that generated it, not a cross-platform fact",
- "generator_sha256": "e7202e500a4a5bb7d39d9a88433346ec9ffa47d37f53cab2b547be43dfebeff5",
+ "generator_sha256": "3ffcc0376293ec66a08ffbcabc93994cb12dba2f97f0f21f247682a37ad06b98",
  "source_digests": {
-  "hooks/guards/git_grep_engine_guard.py": "0f251ba1953f41a368c8265ac48eb17a8dfee20f1014debff4a6e1a62ebc3835",
-  "hooks/guards/zsh_rev_modifier_guard.py": "6aa3c8ae17ef1cfbc93a71d6c4936ada1a5da79aaf5b26059280a137b363eec5",
+  "hooks/guards/git_grep_engine_guard.py": "3ab406fdb884a32ac7928495018c03233cc306b492f80f56e32700c8bed979a9",
+  "hooks/guards/zsh_rev_modifier_guard.py": "3b8e7006160e81d11e96fa1ac82896284b0fb354c65a6e9c5a8add8fddf9627f",
   "hooks/bash_command_guard.py": "4dbd2f3857241ace4d7ae588775ce8e07267b3943cda59c5bcaabde4a40993d5",
   "hooks/announced_work_guard.py": "2075db2aa7ee281666327b1d5686d5e342cfa79a61132fba1b1852aa9c8832d7",
   "tools/repository_ownership.py": "d72b23ef0e037f81bb0c1eefc93c2198a5355c1820b542ce285a83d8661f35ca"
  },
- "plan_sha256": "40368eb0726f7a84359ebc1dcbceee583de060ff67d78f9d890ae6cb4402fd28",
+ "plan_sha256": "06e05434c0c24517e04f53dea8647f73c26ad583811ef184f959e89da711a8f0",
  "baseline": {
   "hooks/guards/git_grep_engine_guard.py": "passed",
   "hooks/guards/zsh_rev_modifier_guard.py": "passed",
@@ -209,17 +209,6 @@
    "outcome": "caught",
    "reason": "suite-failure"
   },
-  "0b4976ffa02b31fee1de20b3c6652604a004c328c072899731091a94f0f92aa3": {
-   "version": 1,
-   "kind": "site",
-   "module": "hooks/guards/zsh_rev_modifier_guard.py",
-   "label": "zsh trap function traversal dropped",
-   "anchor_sha256": "2722a3d8fe8af72153608c622d05d265300b40190d027ea7e53eb134d0e2b0a2",
-   "replacement_sha256": "8887fd830fc0ab65f5a0bbd3c8579033f6fb13bd85c120bd84b79fb373d5d4ab",
-   "id": "0b4976ffa02b31fee1de20b3c6652604a004c328c072899731091a94f0f92aa3",
-   "outcome": "caught",
-   "reason": "suite-failure"
-  },
   "0ed2521a397bd4c73e18651e5fb4dda736077aa53024d3aa29e9f0bdbf9f0a9e": {
    "version": 1,
    "kind": "set-element",
@@ -380,6 +369,17 @@
    "collection_kind": "set",
    "element": "time",
    "id": "16439528e542d76db64a86284232b9c31ed06c37531b727576b35f6c0b4ea607",
+   "outcome": "caught",
+   "reason": "suite-failure"
+  },
+  "1920562dbc01150b38387a59b9876bdd6642909b9a9d722e00433efe605dd7ed": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "label": "case pattern terminator dropped",
+   "anchor_sha256": "425dde5e263b099d0ea8865146bbd801ee2a31fccb50461421d142c577988a3d",
+   "replacement_sha256": "0f91a7e6ed97c62c8f690e4a23012a429581feaa06efd978e712a841e577dad9",
+   "id": "1920562dbc01150b38387a59b9876bdd6642909b9a9d722e00433efe605dd7ed",
    "outcome": "caught",
    "reason": "suite-failure"
   },
@@ -614,6 +614,17 @@
    "id": "248d14b754edff0b5e325ef6024fc0491b8256e728b7e523392b7d8fc0c00923",
    "outcome": "survived",
    "reason": "survived"
+  },
+  "24d0abe6384c4dce86eaa08c5690b0ce60fb19d416e4a62e7c53ef213a9386e9": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "label": "trap declarations read from payload text",
+   "anchor_sha256": "10b9881ee0adffeca31e351117d0655f57fa4b1d7008bb0bf888292b4b077874",
+   "replacement_sha256": "f3d5d87a0a4d069aaaf08e9f450c8fbcf1c1fce19639a78d0f7181604bf49401",
+   "id": "24d0abe6384c4dce86eaa08c5690b0ce60fb19d416e4a62e7c53ef213a9386e9",
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "24e53f2d7994c29d8e1418e2434a22bcc70e4481caa25a3af5e119f60c9a3626": {
    "version": 1,
@@ -1217,6 +1228,17 @@
    "outcome": "survived",
    "reason": "survived"
   },
+  "4bb0d8b4b02fa83781d8211d04e6ffe1215dc507dfe870fc5fcfcb52e0b36ac3": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "label": "cross-line quote state dropped",
+   "anchor_sha256": "5370d77ae50aad4455d12b684900e524f8e4f42db429df877d9874d709f9e763",
+   "replacement_sha256": "4e551414779cb740cd2d909f072cfce86ba92c6e7523bfe3dbae088064e7b380",
+   "id": "4bb0d8b4b02fa83781d8211d04e6ffe1215dc507dfe870fc5fcfcb52e0b36ac3",
+   "outcome": "caught",
+   "reason": "suite-failure"
+  },
   "4be88c308b9275fc80990865b49e815d842e7291a22aefbdf814badb330188cb": {
    "version": 1,
    "kind": "site",
@@ -1340,6 +1362,17 @@
    "collection_kind": "set",
    "element": "zsh",
    "id": "520aa3a7cb3cce12e545c4e955bc5de5e3d215faa7dccb384e3af2dca748e2d0",
+   "outcome": "caught",
+   "reason": "suite-failure"
+  },
+  "528d8941439ecbf9427ba8f36dc3721677c8c217279e7c973d7fef013e36f46e": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "label": "bracket closer requirement dropped",
+   "anchor_sha256": "9fdaee768bcf167b5dd20f8be73cb8ec61eb34a0d37d409890c886c99daeda66",
+   "replacement_sha256": "70793bbb8cf84be429acd71b9cdba8ff4eea4a390fa8f140202ceefc8a408aa5",
+   "id": "528d8941439ecbf9427ba8f36dc3721677c8c217279e7c973d7fef013e36f46e",
    "outcome": "caught",
    "reason": "suite-failure"
   },
@@ -1607,17 +1640,6 @@
    "outcome": "caught",
    "reason": "suite-failure"
   },
-  "5d9a3263012cb336d74c212bbeccdc484b273506df06c1420909de3c4b38cdbe": {
-   "version": 1,
-   "kind": "site",
-   "module": "hooks/guards/git_grep_engine_guard.py",
-   "label": "zsh trap function source traversal dropped",
-   "anchor_sha256": "2722a3d8fe8af72153608c622d05d265300b40190d027ea7e53eb134d0e2b0a2",
-   "replacement_sha256": "8887fd830fc0ab65f5a0bbd3c8579033f6fb13bd85c120bd84b79fb373d5d4ab",
-   "id": "5d9a3263012cb336d74c212bbeccdc484b273506df06c1420909de3c4b38cdbe",
-   "outcome": "caught",
-   "reason": "suite-failure"
-  },
   "5e0de333e4532c19a4fe46b818c34ab5dd73d37e706551cc39af881fcd1e427a": {
    "version": 1,
    "kind": "set-element",
@@ -1681,17 +1703,6 @@
    "collection_kind": "charset",
    "element": "B",
    "id": "61e7569762ec2e2587b7b131d21ab946c6fed9abe77758b16136d92bf6a5496f",
-   "outcome": "caught",
-   "reason": "suite-failure"
-  },
-  "62b540b0ddb60ec48fb95401724bb3ba1f5372d1d5a400caac0e156c33d364f9": {
-   "version": 1,
-   "kind": "site",
-   "module": "hooks/guards/git_grep_engine_guard.py",
-   "label": "budget wrap deleted",
-   "anchor_sha256": "a83ef1af3fcdd293aceefc6fbbb8100d125757f659af06f4c3999e2bdb58eb4b",
-   "replacement_sha256": "36d4d3ecaae67f17154e4361eba4b297cd34b959f603c280da5e5f9695d53906",
-   "id": "62b540b0ddb60ec48fb95401724bb3ba1f5372d1d5a400caac0e156c33d364f9",
    "outcome": "caught",
    "reason": "suite-failure"
   },
@@ -2817,6 +2828,20 @@
    "outcome": "caught",
    "reason": "suite-failure"
   },
+  "9ff1e7b242cafa71c5c6a53d9cd77eeda896bc6c97500cd659526f0f2512a526": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "label": "parse-failure label dropped",
+   "anchor_sha256": "a5ba22e1ac2167ea5796a01916e8c6df95a47a0444f41c8b4b9c1c37ededfded",
+   "replacement_sha256": "f43639d8e21e27781a2ca7a535954ec79903088aa237a7160cc71b17726f4bdf",
+   "selectors": [
+    "an unreadable source is reported as unreadable, not as budget exhaustion"
+   ],
+   "id": "9ff1e7b242cafa71c5c6a53d9cd77eeda896bc6c97500cd659526f0f2512a526",
+   "outcome": "caught",
+   "reason": "selector-failure"
+  },
   "a02349ff13167125b7cc42d326b5a16aa8e07bc33214f9ddab8a04a70140e983": {
    "version": 1,
    "kind": "site",
@@ -3095,6 +3120,17 @@
    "id": "b3c4aec71762607e667e469e264f55ede152ca24e567ea0751fd2872f35b30f1",
    "outcome": "survived",
    "reason": "survived"
+  },
+  "b3d92e3afd914e1b10c9a81b779b67794aae90ab8af2ecf376cc83539b4be29c": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/guards/zsh_rev_modifier_guard.py",
+   "label": "zsh trap function traversal dropped",
+   "anchor_sha256": "43d24f0fa178410db127151a3af0bc994a49599eb1fda15feb29e1d7ed06b87e",
+   "replacement_sha256": "de3bc542df400ce5f94fd77b1af4545547aa8218a50758f02940bced71867743",
+   "id": "b3d92e3afd914e1b10c9a81b779b67794aae90ab8af2ecf376cc83539b4be29c",
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "b3e6dc0025fb23691d7bb8bc3802ee0e0094ce56594db71d62fa94890a62d07e": {
    "version": 1,
@@ -3572,6 +3608,17 @@
    "outcome": "caught",
    "reason": "timeout"
   },
+  "d2cc09ae82c632332ff4687cd23236cb473c317b42b160078f1f8b063b4969fd": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "label": "home-relative tilde exemption dropped",
+   "anchor_sha256": "63643c9d2c46581e383d19f8c08cf549b232a184bde2073cd416df95e22ee848",
+   "replacement_sha256": "60f744d995806ab626e416ba2a8921947dd8e12d0d5f144e74e36d58e7227a72",
+   "id": "d2cc09ae82c632332ff4687cd23236cb473c317b42b160078f1f8b063b4969fd",
+   "outcome": "caught",
+   "reason": "suite-failure"
+  },
   "d2f776d7e3efd8273cff0c915b02c41e0b9f2489c2e6a54fd874b889c42cc3d9": {
    "version": 1,
    "kind": "site",
@@ -3701,6 +3748,17 @@
    "outcome": "caught",
    "reason": "suite-failure"
   },
+  "dabe6ef6a4c8aeb1975d897ad70ec667d04cfffa6f2314e50523cc1d4d99e8ac": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "label": "payload extraction ordered after declarations",
+   "anchor_sha256": "ea3d504110e9d29bd7683d92f2ac79ff8953229c0cdf7cbfa1390fe8ee2030bc",
+   "replacement_sha256": "391f06c59af0d3843862db28bed364034b2d8437f42355c7f9614431da886e39",
+   "id": "dabe6ef6a4c8aeb1975d897ad70ec667d04cfffa6f2314e50523cc1d4d99e8ac",
+   "outcome": "caught",
+   "reason": "suite-failure"
+  },
   "db48865a0f7719615b15e9a963a60d03875390da99b41878386f9859f0871c99": {
    "version": 1,
    "kind": "site",
@@ -3770,7 +3828,7 @@
    "element": "W",
    "id": "dc81a81f5f1adeb7a11175829b5e7c583a2349b9b18d23721110544ad9d55274",
    "outcome": "caught",
-   "reason": "suite-failure"
+   "reason": "exact-check-count"
   },
   "dca9232a446a6dda26ceff3048e7cbf5e743449263fe4f5456aac5c31fb5a58c": {
    "version": 1,
@@ -3846,6 +3904,17 @@
    "id": "df0a040a763d702ba5a22c9a4b0d88b1158f52d9e998f6d2b49743fdbc5ea442",
    "outcome": "caught",
    "reason": "selector-failure"
+  },
+  "e035b4e6324d164c6fdfdb11744c290c407041b183fc8354999b6a292abcd7c5": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/guards/zsh_rev_modifier_guard.py",
+   "label": "trap declarations read from payload text",
+   "anchor_sha256": "10b9881ee0adffeca31e351117d0655f57fa4b1d7008bb0bf888292b4b077874",
+   "replacement_sha256": "f3d5d87a0a4d069aaaf08e9f450c8fbcf1c1fce19639a78d0f7181604bf49401",
+   "id": "e035b4e6324d164c6fdfdb11744c290c407041b183fc8354999b6a292abcd7c5",
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "e069adc99f3b5e6adb6651811707e655bf30b3b00dac4224f834724d485e29b3": {
    "version": 1,
@@ -3973,6 +4042,17 @@
    "outcome": "caught",
    "reason": "suite-failure"
   },
+  "e7bb5d71392bd965f768b621db3ccc59cb717eef7f02051b92f44fb85b4dd4e6": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "label": "source lines include heredoc payloads",
+   "anchor_sha256": "fec6715e7a44eb82eda9bded6a99ce394aa02a21bde914ed51d81ef11e24faaf",
+   "replacement_sha256": "440e0a9e051178aa0a1a9fe44f86545ec1a08dbd0ea5133f6631a79ad59834f9",
+   "id": "e7bb5d71392bd965f768b621db3ccc59cb717eef7f02051b92f44fb85b4dd4e6",
+   "outcome": "caught",
+   "reason": "suite-failure"
+  },
   "ea017592316c99fbf046550fd37941cdeb09445f8ce0ec6772f3d50020b0cdaa": {
    "version": 1,
    "kind": "set-element",
@@ -3983,6 +4063,17 @@
    "id": "ea017592316c99fbf046550fd37941cdeb09445f8ce0ec6772f3d50020b0cdaa",
    "outcome": "survived",
    "reason": "survived"
+  },
+  "ead63834f988eab63ca4db9ca5d1c8f67e1cfe03f062733b9d556e0b8a625ba3": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "label": "budget wrap deleted",
+   "anchor_sha256": "055ee2cb51d0c44c68594166d583daa4071bdb17d5d71378cd8a96af9a26bc83",
+   "replacement_sha256": "36d4d3ecaae67f17154e4361eba4b297cd34b959f603c280da5e5f9695d53906",
+   "id": "ead63834f988eab63ca4db9ca5d1c8f67e1cfe03f062733b9d556e0b8a625ba3",
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "ec48aa911fbbed00c5474b4e26d8c88afca0bce4a7de001f691e8776f54dbc79": {
    "version": 1,
@@ -4025,6 +4116,17 @@
    "collection_kind": "computed-set",
    "element": "difftool",
    "id": "ec5ceb563ce1595dc97bb84ce31ad94e07e121f241c9876484758d5c68ecc8b0",
+   "outcome": "caught",
+   "reason": "suite-failure"
+  },
+  "ec9770e9bde0f2e1e9dd1d2040120c0d031522ed42db1348b40300670df3829b": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "label": "zsh trap function source traversal dropped",
+   "anchor_sha256": "b13afffd26a183fdb08bfa6cb86c8a3057a55c81c35297bd291aea74bf90fa42",
+   "replacement_sha256": "de3bc542df400ce5f94fd77b1af4545547aa8218a50758f02940bced71867743",
+   "id": "ec9770e9bde0f2e1e9dd1d2040120c0d031522ed42db1348b40300670df3829b",
    "outcome": "caught",
    "reason": "suite-failure"
   },
@@ -4243,6 +4345,17 @@
    "outcome": "survived",
    "reason": "survived"
   },
+  "f90b3fb0415c59a3a0832f541521f9803b21652cde09d5f429374e36fb93eeb2": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "label": "in-word brace pairing dropped",
+   "anchor_sha256": "cbe2a45660923c7a908ee52419cfdf51c3c563f44b18a12041ae7617ae4c2b0c",
+   "replacement_sha256": "4145179c82b44548c60dcaa3520a355489ca790c43252f94516bf2acc3be01ae",
+   "id": "f90b3fb0415c59a3a0832f541521f9803b21652cde09d5f429374e36fb93eeb2",
+   "outcome": "caught",
+   "reason": "suite-failure"
+  },
   "faba6a2af568106c3399303264f0b121a62f2eaa0ee919b5ef9baaa2dd04bea5": {
    "version": 1,
    "kind": "set-element",
@@ -4253,6 +4366,17 @@
    "id": "faba6a2af568106c3399303264f0b121a62f2eaa0ee919b5ef9baaa2dd04bea5",
    "outcome": "survived",
    "reason": "survived"
+  },
+  "fabf552a2349b798b9cfd7b66fbf9a18402a2a0ca5012db916428e78d192c4d6": {
+   "version": 1,
+   "kind": "site",
+   "module": "hooks/guards/git_grep_engine_guard.py",
+   "label": "comment recognition dropped",
+   "anchor_sha256": "9ad01b76dabca7882557f7120bdba6543bbc49658e04a9e99f0db63da1da0706",
+   "replacement_sha256": "7edfa58c111acc81c0bd205ab30926c8640e50756615f528af18aae36e473595",
+   "id": "fabf552a2349b798b9cfd7b66fbf9a18402a2a0ca5012db916428e78d192c4d6",
+   "outcome": "caught",
+   "reason": "suite-failure"
   },
   "fb600f4a9c7acd6b49b7dbe78799bdbc7229567f5dc9626b022bd764f0a16a89": {
    "version": 1,
@@ -4470,7 +4594,9 @@
   "fd184bbcd495c26efea779733d9d5a3a44f03286e95d4447fcfc8c3ab07baf73",
   "ffc1c94b7cea5f3c3c6fe3ed1a8467bd1748e0b906434e9fb8621863f86bdbd6"
  ],
- "unasserted_kills": [],
- "caught": 286,
- "total": 374
+ "unasserted_kills": [
+  "dc81a81f5f1adeb7a11175829b5e7c583a2349b9b18d23721110544ad9d55274"
+ ],
+ "caught": 297,
+ "total": 385
 }

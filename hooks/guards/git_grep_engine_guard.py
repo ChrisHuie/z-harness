@@ -847,17 +847,23 @@ def _heredoc_expansion_sources(body):
     return tuple(sources)
 
 
-def _find_heredoc_operator(line):
-    """Return (offset, strip-tabs) for one live heredoc operator in a header."""
-    # A line with no `<<` can only produce one other outcome here, the unclosed-quote
-    # raise, so a line with no quote characters either has nothing to find. Two C-level
-    # substring tests replace a per-character walk that probed four prefixes per byte:
-    # this function alone cost 1.23 s over three calls on a 600 KiB single-token line.
+def _scan_heredoc_operator(line, quote="", arithmetic_depth=0):
+    """Scan one physical line for a live heredoc operator, carrying lexical state.
+
+    Returns ``(found, quote, arithmetic_depth)`` where ``found`` is ``None`` or
+    ``(offset, strip-tabs)``. The state that comes back is the state at the end of the
+    line, so a caller walking a command line by line can continue a quoted string --
+    an awk program, a GraphQL query, a ``python3 -c`` body -- across the newline it
+    contains instead of reading every such line as an unclosed quote. A ``<<`` inside
+    that string is text, not an operator, exactly as the shell reads it.
+    """
+    # A line with no `<<` and no quote character cannot open, close or find anything:
+    # the state passes through. Two C-level substring tests replace a per-character walk
+    # that probed four prefixes per byte; this function alone cost 1.23 s over three
+    # calls on a 600 KiB single-token line.
     if "<<" not in line and '"' not in line and "'" not in line:
-        return None
-    quote = ""
+        return None, quote, arithmetic_depth
     index = 0
-    arithmetic_depth = 0
     while index < len(line):
         char = line[index]
         if quote:
@@ -876,7 +882,9 @@ def _find_heredoc_operator(line):
             index += 2
             continue
         if char == "#" and (index == 0 or line[index - 1].isspace()):
-            return None
+            # A comment runs to the end of the physical line and cannot carry a quote
+            # into the next one; the state at this point is unquoted by construction.
+            return None, quote, arithmetic_depth
         if line.startswith("$((", index):
             arithmetic_depth += 2
             index += 3
@@ -900,11 +908,17 @@ def _find_heredoc_operator(line):
             if arithmetic_depth:
                 index += 2
                 continue
-            return index, line.startswith("<<-", index)
+            return (index, line.startswith("<<-", index)), quote, arithmetic_depth
         index += 1
-    if quote:
+    return None, quote, arithmetic_depth
+
+
+def _find_heredoc_operator(line):
+    """Return (offset, strip-tabs) for one live heredoc operator in a self-contained line."""
+    found, quote, _depth = _scan_heredoc_operator(line)
+    if found is None and quote:
         raise CommandParseError("heredoc header has an unclosed quote")
-    return None
+    return found
 
 
 def _parse_heredoc_delimiter_word(line, start):
@@ -964,27 +978,57 @@ def _parse_heredoc_delimiter_word(line, start):
 def extract_heredoc_sources(cmd, deadline=None, equals_findings=None,
                             equals_subcommands=None, shell_findings=None,
                             expansion_findings=None,
-                            classify_non_direct_shell_bodies=False):
-    """Remove heredoc payloads from argv text and return executable shell bodies."""
+                            classify_non_direct_shell_bodies=False,
+                            source_lines=None):
+    """Remove heredoc payloads from argv text and return executable shell bodies.
+
+    ``source_lines``, when a list, receives every line of shell source the shell itself
+    would read: ordinary commands and heredoc headers with their operators intact, one
+    entry per logical line, so a quoted string that spans physical lines stays one entry.
+    Heredoc bodies never appear in it. Scanners that need shell structure read that list
+    rather than ``cmd.splitlines()``, which hands them body text as if it were a command.
+    """
     _check_decision_budget(deadline)
     bodies = []
     cleaned = []
     cursor = 0
+    quote = ""
+    arithmetic_depth = 0
+    logical = []
     while cursor < len(cmd):
         _check_decision_budget(deadline)
         header_end = cmd.find("\n", cursor)
         if header_end < 0:
             header_end = len(cmd)
         header_line = cmd[cursor:header_end]
-        first_operator = _find_heredoc_operator(header_line)
+        first_operator, quote, arithmetic_depth = _scan_heredoc_operator(
+            header_line, quote, arithmetic_depth)
         if first_operator is None:
             cleaned.append(cmd[cursor:header_end])
+            logical.append(header_line)
+            if not quote and not arithmetic_depth and source_lines is not None:
+                source_lines.append("\n".join(logical))
+            if not quote and not arithmetic_depth:
+                logical = []
             if header_end < len(cmd):
                 cleaned.append("\n")
                 cursor = header_end + 1
                 continue
             cursor = header_end
             break
+        if quote or arithmetic_depth:
+            # The operator is live but the line ends inside a quote or arithmetic: the
+            # body would start after a newline the shell reads as part of a word. That
+            # is outside this model, so say so rather than guess where the payload begins.
+            raise CommandParseError("heredoc header line ends inside a quote or arithmetic")
+        if logical:
+            # A continued quoted string cannot end on a header line and stay clean, so
+            # anything pending here is a completed logical line preceding this header.
+            if source_lines is not None:
+                source_lines.append("\n".join(logical))
+            logical = []
+        if source_lines is not None:
+            source_lines.append(header_line)
         redirects = []
         search = 0
         while True:
@@ -1096,7 +1140,20 @@ def extract_heredoc_sources(cmd, deadline=None, equals_findings=None,
             body_start = terminator_end
         cleaned.append(clean_header + "\n")
         cursor = body_start
+    if quote:
+        raise CommandParseError("command source has an unclosed quote")
+    if arithmetic_depth:
+        raise CommandParseError("command source has unclosed arithmetic")
+    if logical and source_lines is not None:
+        source_lines.append("\n".join(logical))
     return "".join(cleaned), tuple(bodies)
+
+
+def command_source_lines(command, deadline=None):
+    """Return the logical shell source lines of a command, heredoc bodies excluded."""
+    lines = []
+    extract_heredoc_sources(command, deadline, [], (), [], [], source_lines=lines)
+    return tuple(lines)
 
 
 def command_without_heredoc_payloads(command, deadline=None):
@@ -1116,6 +1173,10 @@ def _function_scope_pairs(cmd, records, deadline=None):
     by_start = {record.start: record for record in records}
     pairs = []
     stack = []
+    # Each open `case ... in` records the subshell depth at its keyword. Until the
+    # matching `esac`, a `)` at that depth terminates a pattern -- `a.md) ...;;` -- and
+    # is not a subshell closer; the parenthesised form `(a.md)` still pairs normally.
+    case_depths = []
     quote = ""
     arithmetic_depth = 0
     index = 0
@@ -1160,9 +1221,20 @@ def _function_scope_pairs(cmd, records, deadline=None):
                 arithmetic_depth -= 1
             index += 1
             continue
+        if _shell_keyword_at(cmd, index, "case"):
+            case_depths.append(len(stack))
+            index += 4
+            continue
+        if case_depths and _shell_keyword_at(cmd, index, "esac"):
+            case_depths.pop()
+            index += 4
+            continue
         if char == "(":
             stack.append(index)
         elif char == ")":
+            if case_depths and len(stack) == case_depths[-1]:
+                index += 1
+                continue
             if not stack:
                 raise CommandParseError("function scope has an unmatched closing subshell")
             pairs.append((stack.pop(), index))
@@ -1170,6 +1242,16 @@ def _function_scope_pairs(cmd, records, deadline=None):
     if quote or arithmetic_depth or stack:
         raise CommandParseError("function scope has an unclosed quote, arithmetic, or subshell")
     return tuple(sorted(pairs))
+
+
+def _shell_keyword_at(cmd, index, word):
+    """Whether ``word`` stands alone as a shell word at ``index``."""
+    if not cmd.startswith(word, index):
+        return False
+    before = cmd[index - 1] if index > 0 else ""
+    after = cmd[index + len(word)] if index + len(word) < len(cmd) else ""
+    return ((before == "" or before in " \t\n;|&(){")
+            and (after == "" or after in " \t\n;|&)"))
 
 
 def _conditional_function_intervals(cmd, records, deadline=None):
@@ -1619,12 +1701,18 @@ def split_commands(cmd, _parse_depth=0, _deadline=None):
     if len(cmd) > MAX_COMMAND_CHARS:
         raise CommandParseError(
             f"command source exceeds the {MAX_COMMAND_CHARS}-byte parse limit")
-    cmd, function_sources = extract_function_invocations(cmd, _deadline)
+    # Payloads leave first. A heredoc body is data to the shell, and its quoting belongs
+    # to the interpreter that consumes it; read after it, a declaration scanner meets a
+    # Python 'it\'s' as a shell quote and reports source it could not read. Declarations
+    # inside a function body keep their headers, and every body is still classified by
+    # the consumer its header names.
     cmd, heredoc_sources = extract_heredoc_sources(cmd, _deadline)
+    cmd, function_sources = extract_function_invocations(cmd, _deadline)
     out, cur, embedded = [], [], []
     tok_parts, tok_mode_parts, tok_modes, q, i = [], [], set(), "", 0
     brace_depth = 0
     pattern_depth = 0
+    word_brace_open = 0
     token_count = 0
     n = len(cmd)
 
@@ -1636,7 +1724,8 @@ def split_commands(cmd, _parse_depth=0, _deadline=None):
             tok_modes.add(mode)
 
     def flush_tok():
-        nonlocal tok_parts, tok_mode_parts, tok_modes, token_count
+        nonlocal tok_parts, tok_mode_parts, tok_modes, token_count, word_brace_open
+        word_brace_open = 0
         if tok_parts or tok_modes:
             token_count += 1
             if token_count > MAX_TOKENS:
@@ -1739,6 +1828,15 @@ def split_commands(cmd, _parse_depth=0, _deadline=None):
                 append_tok(cmd[i + 1], "escaped")
             i += 2
             continue
+        if c == "#" and not tok_parts and not tok_modes:
+            # A `#` that begins a word begins a comment, and the comment runs to the end
+            # of the physical line: a backslash inside it continues nothing, a quote
+            # inside it opens nothing. Both hook runtimes read comments this way (zsh
+            # with INTERACTIVE_COMMENTS set, bash always). Reading `# don't` as a command
+            # word named `#` with an unclosed quote asked on every commented line.
+            newline = cmd.find("\n", i)
+            i = n if newline < 0 else newline
+            continue
         # A parenthesis attached to a word can be a zsh filename pattern, not a
         # subshell boundary. Keep its alternatives in one token so the executable
         # resolver can question them. Array assignments and output process
@@ -1774,14 +1872,23 @@ def split_commands(cmd, _parse_depth=0, _deadline=None):
             if c == "{":
                 delimiter = at_word_start and not cur
             else:
+                # Measured against zsh 5.9: `{ echo a{b}; }` prints `a{b}` and
+                # `{ echo x{}}` prints `x{}`. A `}` that pairs with an earlier `{` in the
+                # same word is that word's character; only an unpaired one at a word end
+                # closes the open group. Without the pairing, `xargs -I{}` inside a group
+                # closed the group at `-I{}` and left the real `}` as a command word.
                 following = cmd[i + 1] if i + 1 < len(cmd) else ""
-                delimiter = brace_depth > 0 and (
+                delimiter = brace_depth > 0 and word_brace_open == 0 and (
                     following == "" or following.isspace() or following in ";|&()")
             if delimiter:
                 brace_depth += 1 if c == "{" else -1
                 flush_cmd()
                 i += 1
                 continue
+            if c == "{":
+                word_brace_open += 1
+            elif word_brace_open:
+                word_brace_open -= 1
             append_tok(c)
             i += 1
             continue
@@ -3420,10 +3527,42 @@ def executable_filename_expansion(token, noglob=False):
         return False
     if not re.search(r"[*?[{}()#^~]", text):
         return False
+    if "__COMMAND__" in text or "__PROCESS__" in text or "__ARITH__" in text:
+        # A substitution placeholder is dynamic for its own reason and is answered by
+        # the unresolved-expansion path; its parentheses are not a filename pattern.
+        return False
     modes = _source_operand_modes(token)
-    return live_brace_expansion(token) or any(
-        mode == "U" and not noglob and char in "*?[()#^~"
-        for char, mode in zip(text, modes))
+    if live_brace_expansion(token):
+        return True
+    for index, (char, mode) in enumerate(zip(text, modes)):
+        if mode != "U":
+            continue
+        if char in "*?" and not noglob:
+            return True
+        if char == "[" and not noglob and "]" in text[index + 1:]:
+            # `[` alone is the test builtin and `[a` is a loud bad pattern; only a
+            # bracket with a closer in the same word generates filenames.
+            return True
+        if char == "(" and not noglob and ")" in text[index + 1:]:
+            return True
+        if char == "^" and not noglob:
+            return True
+        if char == "#" and index > 0 and not noglob:
+            # A leading `#` is a comment under every option state; EXTENDED_GLOB's
+            # repetition operator needs something before it to repeat.
+            return True
+        if char == "~":
+            if index == 0:
+                # `~/` and a bare `~` resolve through HOME only. `~name` consults the
+                # named-directory table, which `hash -d` and `nameddirs[...]=` write, and
+                # `~+`/`~-` consult the directory stack -- all of those can select a
+                # different executable, so they stay unresolved.
+                if len(text) == 1 or text[1] == "/":
+                    continue
+                return True
+            if not noglob:
+                return True
+    return False
 
 
 def unwrap_command_prefix(tokens, shell="zsh", equals_state=ZSH_EQUALS_ON,
@@ -5045,7 +5184,8 @@ def interpreter_stdin_provenance(
         if has_pipeline:
             break
     has_process_input = False
-    for line in command.splitlines():
+    source_lines = command_source_lines(command, deadline)
+    for line in source_lines:
         for kind, prefix, descriptor in _live_interpreter_input_redirects(line):
             if kind != "process substitution" or descriptor != 0:
                 continue
@@ -5055,7 +5195,7 @@ def interpreter_stdin_provenance(
                 break
         if has_process_input:
             break
-    heredoc_headers = [line for line in command.splitlines()
+    heredoc_headers = [line for line in source_lines
                        if _find_heredoc_operator(line) is not None]
     has_unproven_heredoc = any(
         not _direct_heredoc_header(line, deadline)
@@ -5154,6 +5294,10 @@ BUDGET_EXHAUSTED_REASON = (
     "the Bash guard could not finish classifying this command within its internal "
     "decision budget (%s); rerun it as a smaller direct command."
 )
+UNREADABLE_SOURCE_REASON = (
+    "the Bash guard could not read this command as shell source (%s); rewrite it as "
+    "a direct command before proceeding."
+)
 
 
 def decide(command, _shell_depth=0, _deadline=None, _shell="zsh",
@@ -5182,15 +5326,30 @@ def _decide(command, _shell_depth, _deadline, _shell, _equals_state,
         _classify(command, decisions, _shell_depth, _deadline, _shell, _equals_state,
                   _command_env, _lookup_authority_uncertain)
     except CommandParseError as exc:
-        decisions.append(("ask", BUDGET_EXHAUSTED_REASON % exc))
+        # The closed parse limits and the wall-clock budget raise the same type; only
+        # the budget's own message names the budget, so only that one is reported as
+        # exhaustion. Everything else is the source the guard could not read, and says so.
+        template = (BUDGET_EXHAUSTED_REASON if "decision budget" in str(exc)
+                    else UNREADABLE_SOURCE_REASON)
+        decisions.append(("ask", template % exc))
     return _strongest_decision(decisions) if decisions else ("allow", "")
 
 
 def _classify(command, decisions, _shell_depth, _deadline, _shell, _equals_state,
               _command_env, _lookup_authority_uncertain):
     """Append every non-allow finding for one command source to `decisions`."""
+    try:
+        scan_command = command_without_heredoc_payloads(command, _deadline)
+    except CommandParseError as exc:
+        decisions.append((
+            "ask", f"the Bash command cannot be parsed safely ({exc}); "
+            "rewrite it as a direct command before proceeding."))
+        return
     if _shell == "zsh":
-        for body in zsh_trap_function_sources(command, _deadline):
+        # Declarations are read from shell source. A heredoc payload is data to the
+        # shell, and its quoting follows the interpreter that consumes it, so a Python
+        # string such as 'it\'s' must never reach a shell quote scanner.
+        for body in zsh_trap_function_sources(scan_command, _deadline):
             trap_decision, trap_reason = decide(
                 body, _shell_depth + 1, _deadline, _shell, _equals_state,
                 _command_env, _lookup_authority_uncertain)
@@ -5206,7 +5365,6 @@ def _classify(command, decisions, _shell_depth, _deadline, _shell, _equals_state
     if equals_heredoc is not None:
         decisions.append(equals_heredoc)
     try:
-        scan_command = command_without_heredoc_payloads(command, _deadline)
         commands = split_commands(scan_command, _deadline=_deadline)
     except CommandParseError as exc:
         decisions.append((
@@ -8696,6 +8854,100 @@ FIXTURES += [
 ]
 
 
+# Shell source is read the way the shell reads it: a quoted string continues across the
+# newline it contains, a heredoc payload is data whose quoting belongs to its consumer,
+# and a `case` pattern's `)` closes a pattern. Each allow below is a shape the shell runs
+# without complaint; each red or ask beside it keeps the hazard visible through the same
+# construct, so the model cannot be widened by ignoring the construct altogether.
+FIXTURES += [
+    ("GREEN SOURCE LINES: a quoted program spanning lines is one word",
+     "awk '\n/alpha/ { print $2 }\n' README.md", "allow"),
+    ("GREEN SOURCE LINES: a double-quoted string spanning lines is one word",
+     'echo "line one\nline two" | wc -l', "allow"),
+    ("GREEN SOURCE LINES: a heredoc operator inside a spanning string is text",
+     "echo 'a\n<<EOF\nb'; ls README.md", "allow"),
+    ("RED  SOURCE LINES: the hazard after a spanning string is still read",
+     "awk '\n/x/\n' README.md; git grep -nE 'harness\\b' -- README.md", "deny"),
+    ("ASK  SOURCE LINES: a heredoc header that ends inside a quote is unmodelled",
+     "cat <<'EOF' 'a\nb'\nx\nEOF", "ask"),
+    ("GREEN SOURCE LINES: a heredoc payload is not scanned as shell headers",
+     "cat > x.md <<'EOF'\n## Title\n\nIt's `code` and \"quoted\".\nEOF", "allow"),
+    ("RED  SOURCE LINES: a shell heredoc payload is still classified",
+     "sh <<'EOF'\ngit grep -nE 'harness\\b' -- README.md\nEOF", "deny"),
+    ("GREEN SOURCE LINES: an interpreter payload keeps its own quoting",
+     "python3 - <<'EOF'\nx = 'it\\'s'.upper()\nprint(x)\nEOF", "allow"),
+    ("RED  SOURCE LINES: a trap declaration beside an interpreter payload is read",
+     "TRAPDEBUG(){ git grep -nE 'harness\\b' -- README.md; }\n"
+     "python3 - <<'EOF'\nx = 'it\\'s'\nEOF", "deny"),
+    ("GREEN SOURCE LINES: guarded evidence beside an interpreter payload is tokenized",
+     "python3 - <<'EOF'\nx = 'it\\'s'\nEOF\ngit grep -nP 'harness\\b' -- README.md",
+     "allow"),
+    ("GREEN CASE: a pattern terminator is not a subshell",
+     'for f in *.md; do case "$f" in a.md) echo hit;; esac; done', "allow"),
+    ("RED  CASE: a hazard in a pattern branch is still read",
+     "case x in x) git grep -nE 'harness\\b' -- README.md;; esac", "deny"),
+    ("RED  CASE: the parenthesised pattern form still pairs",
+     "case x in (x) git grep -nE 'harness\\b' -- README.md;; esac", "deny"),
+    ("ASK  CASE: a stray closing parenthesis outside any case is still unmatched",
+     "echo a); ls", "ask"),
+]
+
+
+# A `#` that begins a word begins a comment; the test builtin `[` is a word, not a pattern;
+# a `}` pairs with a `{` in its own word before it can close a group; `~/` resolves through
+# HOME while `~name` consults a table the shell can write. Each allow stands beside the
+# hazard the same construct must still expose.
+FIXTURES += [
+    ("GREEN COMMENT: a comment line before a command is not a command",
+     "# note\nls README.md", "allow"),
+    ("GREEN COMMENT: an apostrophe in a comment opens no quote",
+     "# don't forget\nls README.md", "allow"),
+    ("GREEN COMMENT: a parenthesis in a comment opens no pattern",
+     "# a BARE Error( site\nls README.md", "allow"),
+    ("GREEN COMMENT: a comment after a separator runs to the end of its line",
+     "true; # note\nls README.md", "allow"),
+    ("GREEN COMMENT: a hazard quoted in a comment is not run",
+     "# git grep -nE 'harness\\b' -- README.md\ngit grep -nP 'harness\\b' -- README.md",
+     "allow"),
+    ("RED  COMMENT: the command after a comment line is still read",
+     "# note\ngit grep -nE 'harness\\b' -- README.md", "deny"),
+    ("RED  COMMENT: a trailing comment does not hide the command before it",
+     "git grep -nE 'harness\\b' -- README.md # note", "deny"),
+    ("RED  COMMENT: a mid-word hash is a character, not a comment",
+     "echo a#b; git grep -nE 'harness\\b' -- README.md", "deny"),
+    ("RED  COMMENT: a quoted hash is a character, not a comment",
+     "echo '#'; git grep -nE 'harness\\b' -- README.md", "deny"),
+    ("GREEN TEST: the test builtin is a word, not a filename class",
+     "[ -f README.md ] && echo yes", "allow"),
+    ("GREEN TEST: the conditional expression is a word, not a filename class",
+     "[[ -f README.md ]] && echo yes", "allow"),
+    ("RED  TEST: the command after a test is still read",
+     "[ -f README.md ] && git grep -nE 'harness\\b' -- README.md", "deny"),
+    ("GREEN GROUP: a paired brace inside a word does not close the group",
+     '{ echo a | xargs -I{} echo "<{}>"; echo ok; }', "allow"),
+    ("RED  GROUP: the hazard after a paired brace is still inside the group",
+     "{ echo a | xargs -I{} echo \"<{}>\"; git grep -nE 'harness\\b' -- README.md; }",
+     "deny"),
+    ("RED  GROUP: an unpaired brace at a word end still closes the group",
+     "{ git grep -nE 'harness\\b' -- README.md; echo x}", "deny"),
+    ("GREEN TILDE: a home-relative executable resolves through HOME alone",
+     "~/bin/git grep -nP 'harness\\b' -- README.md", "allow"),
+    ("RED  TILDE: a home-relative Git keeps a proven hazard",
+     "~/bin/git grep -nE 'harness\\b' -- README.md", "deny"),
+    ("ASK  TILDE: a named directory can select the executable",
+     "~d/git grep -nP 'harness\\b' -- README.md", "ask"),
+    ("ASK  TILDE: the directory stack can select the executable",
+     "~+/git --version", "ask"),
+    ("ASK  TILDE: noglob does not suppress named-directory expansion",
+     "noglob ~d/git --version", "ask"),    ("GREEN PAYLOAD ORDER: a payload with a call and an interpreter quote is data",
+     "python3 - <<'EOF'\nx = 'it\\'s'.upper()\nEOF\ngit grep -nP 'harness\\b' -- README.md",
+     "allow"),
+    ("RED  PAYLOAD ORDER: the hazard after such a payload is still read",
+     "python3 - <<'EOF'\nx = 'it\\'s'.upper()\nEOF\ngit grep -nE 'harness\\b' -- README.md",
+     "deny"),
+]
+
+
 def fixture_pair_duplicates(fixtures):
     """Return repeated public command/expected pairs; labels do not make cases distinct."""
     seen = set()
@@ -10051,6 +10303,17 @@ def selftest():
     bad += 0 if prefix_live else 1
     print("  %s declaration parser reports the unmodelled function-call prefix" % (
         "PASS" if prefix_live else "FAIL"))
+    # The closed parse limits and the wall-clock budget raise one type. Only the budget
+    # may be reported as exhaustion: an unclosed quote is source the guard could not
+    # read, and saying "budget" about it sends the operator to the wrong remedy.
+    unreadable = decide("echo a); ls")
+    budget_probe = decide("/bin/echo safe", _deadline=time.monotonic() - 1)
+    label_ok = (unreadable[0] == "ask" and "could not read" in unreadable[1]
+                and "decision budget" not in unreadable[1]
+                and budget_probe[0] == "ask" and "decision budget" in budget_probe[1])
+    bad += 0 if label_ok else 1
+    print("  %s an unreadable source is reported as unreadable, not as budget exhaustion" % (
+        "PASS" if label_ok else "FAIL"))
     original_functions = extract_function_invocations
     globals()["extract_function_invocations"] = (
         lambda source, deadline=None: (source, ()))
@@ -10300,14 +10563,17 @@ def selftest():
     print("  %s heredoc shell-identity mutation misclassifies sh EQUALS syntax" % (
         "PASS" if heredoc_shell_red else "FAIL"))
 
-    original_find_heredoc = _find_heredoc_operator
-    def confuse_redirection_context(line):
+    # The mutant replaces the scanner production reads, not a wrapper around it: a patch
+    # on a name the extractor no longer calls would leave every verdict unchanged and
+    # this arm green for the wrong reason.
+    original_scan_heredoc = _scan_heredoc_operator
+    def confuse_redirection_context(line, quote="", arithmetic_depth=0):
         if "<<<" in line:
-            return line.index("<<<"), False
+            return (line.index("<<<"), False), quote, arithmetic_depth
         if "<<" in line:
-            return line.index("<<"), False
-        return original_find_heredoc(line)
-    globals()["_find_heredoc_operator"] = confuse_redirection_context
+            return (line.index("<<"), False), quote, arithmetic_depth
+        return original_scan_heredoc(line, quote, arithmetic_depth)
+    globals()["_scan_heredoc_operator"] = confuse_redirection_context
     try:
         here_string_red = decide(
             r'''/bin/cat <<< "git grep -E 'harness\b' -- README.md"''')[0] != "allow"
@@ -10317,7 +10583,7 @@ def selftest():
             r'''for ((i = 1; i << 2; i++)); do /bin/echo "$i"; done''',
         ))
     finally:
-        globals()["_find_heredoc_operator"] = original_find_heredoc
+        globals()["_scan_heredoc_operator"] = original_scan_heredoc
     bad += 0 if here_string_red and shift_red else 1
     print("  %s redirection-context mutation misclassifies here-string and shift" % (
         "PASS" if here_string_red and shift_red else "FAIL"))
@@ -10341,9 +10607,11 @@ def selftest():
     def drop_heredoc_body(source, deadline=None, equals_findings=None,
                           equals_subcommands=None, shell_findings=None,
                           expansion_findings=None,
-                          classify_non_direct_shell_bodies=False):
+                          classify_non_direct_shell_bodies=False,
+                          source_lines=None):
         cleaned, _bodies = original_heredoc(
-            source, deadline, equals_findings, equals_subcommands, None)
+            source, deadline, equals_findings, equals_subcommands, None,
+            source_lines=source_lines)
         return cleaned, ()
     globals()["extract_heredoc_sources"] = drop_heredoc_body
     try:
@@ -10359,13 +10627,14 @@ def selftest():
     def keep_winning_heredoc_only(source, deadline=None, equals_findings=None,
                                   equals_subcommands=None, shell_findings=None,
                                   expansion_findings=None,
-                                  classify_non_direct_shell_bodies=False):
+                                  classify_non_direct_shell_bodies=False,
+                                  source_lines=None):
         expansion_start = (len(expansion_findings)
                            if expansion_findings is not None else 0)
         cleaned, bodies = original_heredoc(
             source, deadline, equals_findings, equals_subcommands,
             shell_findings, expansion_findings,
-            classify_non_direct_shell_bodies)
+            classify_non_direct_shell_bodies, source_lines=source_lines)
         if "<<A <<'B'" in source:
             if expansion_findings is not None:
                 del expansion_findings[expansion_start:]

@@ -753,8 +753,107 @@ SITE_MUTATIONS = (
         "label": "budget wrap deleted", "module": GREP,
         "anchor": (
             "    except CommandParseError as exc:\n"
-            "        decisions.append((\"ask\", BUDGET_EXHAUSTED_REASON % exc))"),
+            "        # The closed parse limits and the wall-clock budget raise the same type; only\n"
+            "        # the budget's own message names the budget, so only that one is reported as\n"
+            "        # exhaustion. Everything else is the source the guard could not read, and says so.\n"
+            "        template = (BUDGET_EXHAUSTED_REASON if \"decision budget\" in str(exc)\n"
+            "                    else UNREADABLE_SOURCE_REASON)\n"
+            "        decisions.append((\"ask\", template % exc))"),
         "replacement": "    except CommandParseError:\n        pass",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "parse-failure label dropped", "module": GREP,
+        "anchor": (
+            "        template = (BUDGET_EXHAUSTED_REASON if \"decision budget\" in str(exc)\n"
+            "                    else UNREADABLE_SOURCE_REASON)"),
+        "replacement": "        template = BUDGET_EXHAUSTED_REASON",
+        "selectors": (
+            "an unreadable source is reported as unreadable, not as budget exhaustion",),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "cross-line quote state dropped", "module": GREP,
+        "anchor": (
+            "        first_operator, quote, arithmetic_depth = _scan_heredoc_operator(\n"
+            "            header_line, quote, arithmetic_depth)"),
+        "replacement": (
+            "        first_operator, quote, arithmetic_depth = _scan_heredoc_operator(\n"
+            "            header_line)"),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "source lines include heredoc payloads", "module": GREP,
+        "anchor": "    source_lines = command_source_lines(command, deadline)",
+        "replacement": "    source_lines = command.splitlines()",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "trap declarations read from payload text", "module": GREP,
+        "anchor": "        for body in zsh_trap_function_sources(scan_command, _deadline):",
+        "replacement": "        for body in zsh_trap_function_sources(command, _deadline):",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "trap declarations read from payload text", "module": ZSH,
+        "anchor": "        for body in zsh_trap_function_sources(scan_command, _deadline):",
+        "replacement": "        for body in zsh_trap_function_sources(command, _deadline):",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "payload extraction ordered after declarations", "module": GREP,
+        "anchor": (
+            "    cmd, heredoc_sources = extract_heredoc_sources(cmd, _deadline)\n"
+            "    cmd, function_sources = extract_function_invocations(cmd, _deadline)"),
+        "replacement": (
+            "    cmd, function_sources = extract_function_invocations(cmd, _deadline)\n"
+            "    cmd, heredoc_sources = extract_heredoc_sources(cmd, _deadline)"),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "comment recognition dropped", "module": GREP,
+        "anchor": "        if c == \"#\" and not tok_parts and not tok_modes:",
+        "replacement": "        if False and not tok_parts and not tok_modes:",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "in-word brace pairing dropped", "module": GREP,
+        "anchor": (
+            "                delimiter = brace_depth > 0 and word_brace_open == 0 and (\n"
+            "                    following == \"\" or following.isspace() or following in \";|&()\")"),
+        "replacement": (
+            "                delimiter = brace_depth > 0 and (\n"
+            "                    following == \"\" or following.isspace() or following in \";|&()\")"),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "bracket closer requirement dropped", "module": GREP,
+        "anchor": "        if char == \"[\" and not noglob and \"]\" in text[index + 1:]:",
+        "replacement": "        if char == \"[\" and not noglob:",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "home-relative tilde exemption dropped", "module": GREP,
+        "anchor": (
+            "                if len(text) == 1 or text[1] == \"/\":\n"
+            "                    continue\n"
+            "                return True"),
+        "replacement": (
+            "                if False:\n"
+            "                    continue\n"
+            "                return True"),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "case pattern terminator dropped", "module": GREP,
+        "anchor": (
+            "            if case_depths and len(stack) == case_depths[-1]:\n"
+            "                index += 1\n"
+            "                continue"),
+        "replacement": (
+            "            if False:\n"
+            "                index += 1\n"
+            "                continue"),
         "allowed_statuses": (),
     },
     {
@@ -1069,8 +1168,15 @@ SITE_MUTATIONS = (
     },
     {
         "label": "zsh trap function source traversal dropped", "module": GREP,
-        "anchor": "    if _shell == \"zsh\":\n        for body in zsh_trap_function_sources(command, _deadline):",
-        "replacement": "    if False:\n        for body in zsh_trap_function_sources(command, _deadline):",
+        "anchor": (
+            "    if _shell == \"zsh\":\n"
+            "        # Declarations are read from shell source. A heredoc payload is data to the\n"
+            "        # shell, and its quoting follows the interpreter that consumes it, so a Python\n"
+            "        # string such as 'it\\'s' must never reach a shell quote scanner.\n"
+            "        for body in zsh_trap_function_sources(scan_command, _deadline):"),
+        "replacement": (
+            "    if False:\n"
+            "        for body in zsh_trap_function_sources(scan_command, _deadline):"),
         "allowed_statuses": (),
     },
     {
@@ -1134,8 +1240,14 @@ SITE_MUTATIONS = (
     },
     {
         "label": "zsh trap function traversal dropped", "module": ZSH,
-        "anchor": "    if _shell == \"zsh\":\n        for body in zsh_trap_function_sources(command, _deadline):",
-        "replacement": "    if False:\n        for body in zsh_trap_function_sources(command, _deadline):",
+        "anchor": (
+            "    if _shell == \"zsh\":\n"
+            "        # Declarations are read from shell source, never from heredoc payloads, whose\n"
+            "        # quoting belongs to the interpreter that consumes them.\n"
+            "        for body in zsh_trap_function_sources(scan_command, _deadline):"),
+        "replacement": (
+            "    if False:\n"
+            "        for body in zsh_trap_function_sources(scan_command, _deadline):"),
         "allowed_statuses": (),
     },
 )

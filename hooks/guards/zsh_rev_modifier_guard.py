@@ -80,6 +80,7 @@ from git_grep_engine_guard import (  # noqa: E402
     resolve_effective_git_invocation,
     REV_PATH_SUBCOMMANDS,
     split_commands, command_without_heredoc_payloads,
+    UNREADABLE_SOURCE_REASON,
     unwrap_command_prefix, zsh_equals_states,
     command_environment_states, _strongest_decision,
     _equals_expanded,
@@ -253,16 +254,28 @@ def decide(command, _depth=0, _shell="zsh", _equals_state=ZSH_EQUALS_ON,
                   _command_env, _lookup_authority_uncertain)
     except CommandParseError as exc:
         # Same contract as the sibling guard: a source the parser could not finish
-        # reading is unresolved, not proven safe and not proven hazardous.
-        decisions.append(("ask", BUDGET_EXHAUSTED_REASON % exc))
+        # reading is unresolved, not proven safe and not proven hazardous. Only the
+        # budget's own message is reported as exhaustion; the rest is unreadable source.
+        template = (BUDGET_EXHAUSTED_REASON if "decision budget" in str(exc)
+                    else UNREADABLE_SOURCE_REASON)
+        decisions.append(("ask", template % exc))
     return _strongest_decision(decisions) if decisions else ("allow", "")
 
 
 def _classify(command, decisions, _depth, _shell, _equals_state, _deadline,
               _command_env, _lookup_authority_uncertain):
     """Append every non-allow rev:path finding for one command source."""
+    try:
+        scan_command = command_without_heredoc_payloads(command, _deadline)
+    except CommandParseError as exc:
+        decisions.append((
+            "ask", f"the Bash command cannot be parsed safely ({exc}); rewrite it "
+            "as a direct command before proceeding."))
+        return
     if _shell == "zsh":
-        for body in zsh_trap_function_sources(command, _deadline):
+        # Declarations are read from shell source, never from heredoc payloads, whose
+        # quoting belongs to the interpreter that consumes them.
+        for body in zsh_trap_function_sources(scan_command, _deadline):
             trap_decision, trap_reason = decide(
                 body, _depth + 1, _shell, _equals_state, _deadline,
                 _command_env, _lookup_authority_uncertain)
@@ -300,7 +313,6 @@ def _classify(command, decisions, _depth, _shell, _equals_state, _deadline,
         if nested_decision != "allow":
             decisions.append((nested_decision, nested_reason))
     try:
-        scan_command = command_without_heredoc_payloads(command, _deadline)
         commands = split_commands(scan_command, _deadline=_deadline)
     except CommandParseError as exc:
         decisions.append((
@@ -1094,6 +1106,18 @@ FIXTURES += [
      "noglob /usr/bin/gi[t] show $SHA:t", "allow"),
     ("RED IDENTITY: a direct rev-path hazard retains precedence",
      "commands[g]=/usr/bin/git; git show $SHA:t", "deny"),
+]
+
+
+FIXTURES += [
+    ("GREEN SOURCE LINES: an interpreter payload keeps its own quoting",
+     "python3 - <<'EOF'\nx = 'it\\'s'.upper()\nprint(x)\nEOF", "allow"),
+    ("RED  SOURCE LINES: a trap declaration beside an interpreter payload is read",
+     "TRAPDEBUG(){ git show $SHA:t; }\npython3 - <<'EOF'\nx = 'it\\'s'\nEOF", "deny"),
+    ("GREEN SOURCE LINES: a quoted program spanning lines is one word",
+     "awk '\n/x/\n' README.md; git show HEAD:t", "allow"),
+    ("RED  SOURCE LINES: the rev-path hazard after a spanning string is still read",
+     "awk '\n/x/\n' README.md; git show $SHA:t", "deny"),
 ]
 
 

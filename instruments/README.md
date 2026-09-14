@@ -20,6 +20,21 @@ starting and ending snapshots, not transient changes restored by the code under 
 arbitrary undeclared file reads. JSON is written to stdout, progress to stderr, and the
 checkout is not modified.
 
+## Corpus delta
+
+    python3 corpus_delta.py --base <checkout> --head <checkout> [--transcripts GLOB] [--top N]
+
+Every other instrument here asks whether a hazard gets through. This one asks what a guard
+change does to ordinary commands. It extracts every distinct Bash tool command from the
+local transcripts (`~/.claude/projects/*/*.jsonl` by default), decides each with the Bash
+guard at a base checkout and at a head checkout, and prints the base-by-head verdict matrix,
+the moved verdicts by direction, and the head's grouped reasons for every command the base
+allowed and the head does not. Each checkout's guard is imported in isolation. Only
+aggregates are printed: transcripts are private, and no command text leaves the process. An
+empty corpus and a checkout without a guard are errors (exit 2), never a clean delta. The
+measurement it exists for: a head whose fixtures, sweep and fuzz were all green answered
+`ask` on 23.6% of the commands main allowed, and nothing else in the gate could see it.
+
 ## Differential judge fuzz
 
     python3 fuzz_judge_diff.py <oracle_guard.py> <candidate_guard.py> <seed> <count>

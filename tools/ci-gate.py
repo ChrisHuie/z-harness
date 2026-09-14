@@ -56,9 +56,9 @@ EVAL_SKILL_FLOOR = 7
 SUITE_FLOORS = {
     "harness_check": 230,
     "render-packages": 192,
-    "bash_command_guard": 1466,
-    "git_grep_engine_guard": 1244,
-    "zsh_rev_modifier_guard": 500,
+    "bash_command_guard": 1506,
+    "git_grep_engine_guard": 1281,
+    "zsh_rev_modifier_guard": 504,
 }
 EXPECTED_WORKFLOW = """name: harness-check
 on:
@@ -1050,7 +1050,7 @@ RETAINED_DECISION_COMMANDS = ROOT / "contracts/goldens/retained-guard-commands.j
 SUITE_SOURCE_GOLDEN = ROOT / "contracts/goldens/suite-sources.json"
 HARNESS_SOURCE = ROOT / "hooks/harness_check.py"
 REPOSITORY_OWNERSHIP_SOURCE = ROOT / "tools/repository_ownership.py"
-DECISION_CORPUS_FLOOR = 1072
+DECISION_CORPUS_FLOOR = 1111
 DECISION_WRITER_SHA256 = "8c4180468fc05a88c69fafba3a79f2387f5df2d1aa728def1670f5497a442e9d"
 RETAINED_DECISION_SCHEMA_VERSION = 1
 RETAINED_DECISION_NOTE = (
@@ -1313,7 +1313,7 @@ MUTATION_SUMMARY = ROOT / "contracts/goldens/mutation-summary.md"
 # only removes cannot express a kill for them. Two of its ten are caught, by fixtures
 # that depend on the removed escape producing a literal backslash.
 MUTATION_SURVIVOR_DEBT_CEILING = 88
-MUTATION_PLAN_FLOOR = 374
+MUTATION_PLAN_FLOOR = 385
 # Kills scored only because the recorded check count moved, with no assertion failing. A
 # guard that increments its counter once per element of the collection under mutation moves
 # that count on any removal, so such a kill is decided by loop structure before any probe
@@ -1339,12 +1339,20 @@ MUTATION_PLAN_FLOOR = 374
 # field exists to prevent. Pinning the committed set by identity puts it back under review --
 # laundering it now requires editing this constant, which a reader sees. This constrains the
 # committed artifact only; it does not claim any host observes the same set.
-# Empty because the committed receipt was measured on a host whose zsh consumes "W" as a
-# modifier, so that mutation reddens a real probe there. The committed receipt currently
-# records no unasserted kills. Pinning the exact identity set makes a future non-empty
-# committed observation review-visible; fresh aggregation separately derives and applies
-# the writer-owned ceiling before comparing platform-stable outcomes.
-EXPECTED_UNASSERTED_KILLS: set[tuple] = set()
+# One identity: deleting "W" from MOD_UNMODELLED. The probe that grades it asks the installed
+# zsh what `$v:Wrest` prints, and zsh 5.9 answers with uninitialized memory -- `:W` takes `r`
+# as its delimiter and `e` as the modifier and reads past the word. Which bytes come back
+# depends on the process that launched it: from an interactive shell the literal survives and
+# the probe reads "not consumed"; from a Python child it is garbage and the probe reads
+# "consumed" and the assertion fires. The committed receipt was measured under the sweep,
+# where only the check count moved; run directly on the same host the assertion fires three
+# times out of three, and it fired on the CI runner that measured the previous receipt. The
+# kill is real; which channel reports it is not a fact about the guards. Pinning the identity
+# keeps that observation review-visible; fresh aggregation separately derives and applies the
+# writer-owned ceiling before comparing platform-stable outcomes.
+EXPECTED_UNASSERTED_KILLS: set[tuple] = {
+    ("hooks/guards/zsh_rev_modifier_guard.py", "MOD_UNMODELLED", "W"),
+}
 EXPECTED_MUTATION_ADDITIONS = {
     (
         "hooks/guards/git_grep_engine_guard.py", "_GIT_TERMINAL_OPTIONS", "set",
@@ -1408,6 +1416,17 @@ EXPECTED_MUTATION_SITES = {
     ("hooks/guards/git_grep_engine_guard.py", "executable pattern group preservation dropped"),
     ("hooks/guards/git_grep_engine_guard.py", "executable noglob suppression dropped"),
     ("hooks/guards/git_grep_engine_guard.py", "executable leading redirection removal dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "parse-failure label dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "cross-line quote state dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "source lines include heredoc payloads"),
+    ("hooks/guards/git_grep_engine_guard.py", "trap declarations read from payload text"),
+    ("hooks/guards/zsh_rev_modifier_guard.py", "trap declarations read from payload text"),
+    ("hooks/guards/git_grep_engine_guard.py", "case pattern terminator dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "payload extraction ordered after declarations"),
+    ("hooks/guards/git_grep_engine_guard.py", "comment recognition dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "in-word brace pairing dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "bracket closer requirement dropped"),
+    ("hooks/guards/git_grep_engine_guard.py", "home-relative tilde exemption dropped"),
     ("hooks/announced_work_guard.py", "adjectival group ambiguity guard dropped"),
     ("hooks/announced_work_guard.py", "adjectival group modifier state dropped"),
     ("hooks/announced_work_guard.py", "adjectival group subject-resume bridge dropped"),
@@ -1505,6 +1524,8 @@ EXPECTED_MUTATION_SITES = {
      "zsh unmodelled modifier prefix grammar dropped"),
 }
 EXPECTED_MUTATION_SELECTORS = {
+    ("hooks/guards/git_grep_engine_guard.py", "parse-failure label dropped"):
+        ("an unreadable source is reported as unreadable, not as budget exhaustion",),
     ("hooks/announced_work_guard.py", "adjectival group ambiguity guard dropped"):
         ("main string blocks a group-modified failure adjective before the activity noun",
          "main content blocks a group-modified failure adjective before the activity noun",
@@ -1700,7 +1721,7 @@ EXPECTED_MUTATION_SELECTORS = {
         ("a repeated core.worktree binds the effective candidate Git recognises",),
 }
 EXPECTED_MUTATION_SITE_DIGEST = (
-    "45502481450f6110d4f8e745f351dfdbe701b2f7b70b885102f1bff4f18e03b1"
+    "5ed984837c6352d6b8e8e8273f3b8b10180e2af78cd1d05e37d27551edc0d4f0"
 )
 EXPECTED_MUTATION_EXCLUSIONS = {
     "hooks/guards/git_grep_engine_guard.py::ALIAS_GUARDED":

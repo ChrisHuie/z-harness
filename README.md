@@ -140,14 +140,23 @@ The command guards inspect shell source without executing it. Visible zsh assign
 They are not interpreted as proof that Git will execute. Ordinary function and alias declarations
 retain their separate invocation analysis.
 
-An unquoted executable containing filename-pattern or brace syntax also produces uncertainty.
-The guards do not enumerate matching files or infer global `GLOB`, `EXTENDED_GLOB`, or `BRACE_CCL`
-state. Quoting and a command-local `noglob` prefix suppress filename-generation uncertainty;
-`noglob` does not suppress braces. Live braces in a grep/log pattern remain unresolved because
+An unquoted executable that zsh could generate or expand also produces uncertainty: `*`, `?`, a
+`[` with its `]` in the same word, a `(` with its `)`, `^`, a `#` after the first character, a
+`~name` or `~+` prefix, or a live brace group. A lone `[` is the test builtin, a leading `#` is a
+comment, and `~/` resolves through HOME alone, so none of those is questioned. The guards do not
+enumerate matching files or infer global `GLOB`, `EXTENDED_GLOB`, or `BRACE_CCL` state. Quoting
+and a command-local `noglob` prefix suppress filename-generation uncertainty; `noglob` does not
+suppress braces or tilde expansion. Live braces in a grep/log pattern remain unresolved because
 expansion can introduce regex constructs that are absent from the written pattern. Quoted regex
 quantifiers remain literal. These are bounded syntax checks, not a general shell interpreter or
 security sandbox. Non-shell interpreter bodies and the contents of literal script files are not
 inspected.
+
+The guards read shell source the way the shell does: a quoted string continues across the
+newline it contains, a `#` that begins a word begins a comment that runs to the end of its line,
+a heredoc payload is data whose quoting belongs to the interpreter that consumes it, and a
+`case` pattern's `)` closes the pattern. `instruments/corpus_delta.py` measures what a guard
+change does to the real command corpus, base against head, and prints only aggregates.
 
 Claude receives `ask` for uncertainty; the Codex adapter maps it to `deny`. A separately proven
 regex-engine or rev-path hazard retains `deny` precedence. Prefer a direct literal executable and

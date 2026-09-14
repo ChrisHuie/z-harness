@@ -92,10 +92,14 @@ Collections are enumerated for `hooks/bash_command_guard.py`, `hooks/guards/git_
 | `git_grep_engine_guard.py` | TRAPDEBUG function alias state dropped | caught |
 | `git_grep_engine_guard.py` | alias shadowing failure channel dropped | caught |
 | `git_grep_engine_guard.py` | attached exec argv-zero grammar dropped | caught |
+| `git_grep_engine_guard.py` | bracket closer requirement dropped | caught |
 | `git_grep_engine_guard.py` | budget wrap deleted | caught |
 | `git_grep_engine_guard.py` | builtin trap wrapper adoption dropped | caught |
 | `git_grep_engine_guard.py` | called function alias state dropped | caught |
 | `git_grep_engine_guard.py` | candidate authority forced trusted | caught |
+| `git_grep_engine_guard.py` | case pattern terminator dropped | caught |
+| `git_grep_engine_guard.py` | comment recognition dropped | caught |
+| `git_grep_engine_guard.py` | cross-line quote state dropped | caught |
 | `git_grep_engine_guard.py` | decision-budget checkpoint neutered | caught |
 | `git_grep_engine_guard.py` | declared helper function alias traversal dropped | caught |
 | `git_grep_engine_guard.py` | dynamic source adoption removed | caught |
@@ -112,13 +116,17 @@ Collections are enumerated for `hooks/bash_command_guard.py`, `hooks/guards/git_
 | `git_grep_engine_guard.py` | git config loop budget dropped | caught |
 | `git_grep_engine_guard.py` | git hazard union adoption dropped | caught |
 | `git_grep_engine_guard.py` | guarded-tail predicate rescans per word | caught |
+| `git_grep_engine_guard.py` | home-relative tilde exemption dropped | caught |
+| `git_grep_engine_guard.py` | in-word brace pairing dropped | caught |
 | `git_grep_engine_guard.py` | invoked alias body state transition dropped | caught |
 | `git_grep_engine_guard.py` | native command checked after alias | caught |
 | `git_grep_engine_guard.py` | nested source shell identity dropped | caught |
 | `git_grep_engine_guard.py` | nonordinary alias mode tracking dropped | caught |
 | `git_grep_engine_guard.py` | nonordinary alias use detection dropped | caught |
 | `git_grep_engine_guard.py` | ordinary shell alias Git classification dropped | caught |
+| `git_grep_engine_guard.py` | parse-failure label dropped | caught |
 | `git_grep_engine_guard.py` | pattern brace expansion adoption dropped | caught |
+| `git_grep_engine_guard.py` | payload extraction ordered after declarations | caught |
 | `git_grep_engine_guard.py` | process substitution loses typed operand | caught |
 | `git_grep_engine_guard.py` | repeat zero execution boundary dropped | caught |
 | `git_grep_engine_guard.py` | same-shell alias mutation wrapper resolution dropped | caught |
@@ -134,15 +142,18 @@ Collections are enumerated for `hooks/bash_command_guard.py`, `hooks/guards/git_
 | `git_grep_engine_guard.py` | source alias wrapper resolution dropped | caught |
 | `git_grep_engine_guard.py` | source command wrapper omitted | caught |
 | `git_grep_engine_guard.py` | source exec wrapper omitted | caught |
+| `git_grep_engine_guard.py` | source lines include heredoc payloads | caught |
 | `git_grep_engine_guard.py` | trap action traversal dropped | caught |
+| `git_grep_engine_guard.py` | trap declarations read from payload text | caught |
 | `git_grep_engine_guard.py` | zsh trap function source traversal dropped | caught |
+| `zsh_rev_modifier_guard.py` | trap declarations read from payload text | caught |
 | `zsh_rev_modifier_guard.py` | zsh shared resolver bypassed | caught |
 | `zsh_rev_modifier_guard.py` | zsh trap function traversal dropped | caught |
 | `zsh_rev_modifier_guard.py` | zsh unmodelled modifier prefix grammar dropped | caught |
 | `zsh_rev_modifier_guard.py` | zsh unmodelled modifier uncertainty dropped | caught |
 | `repository_ownership.py` | effective core.worktree scalar lookup dropped | caught |
 
-286 of 374 planned mutations are caught; 88 exact mutation IDs remain recorded coverage debt.
+297 of 385 planned mutations are caught; 88 exact mutation IDs remain recorded coverage debt.
 
 A kill scored only because the recorded check count moved is not evidence that the suites observe the change. That count is recorded per result and reported by the gate rather than shown here, because whether an assertion fires can differ between hosts and this file is compared across them.
 

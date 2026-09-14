@@ -57,9 +57,9 @@ editing: `pulls/N/reviews` · `pulls/N/comments` · `issues/N/comments` · Graph
 
 ## Delivering findings
 
-- **Anchor every finding to `path:line`; an inline thread is its delivery shape.** A finding
-  in a PR-level paragraph has no lifecycle and drops out unaddressed — that comment is the
-  roll-up's (`outbound-drafts`). Never reuse a finding ID.
+- **Anchor every finding to `path:line`; an inline thread is its delivery shape.** A
+  head-specific handoff (`outbound-drafts`) summarizes evidence; it never owns a finding.
+  Never reuse a finding ID.
 - **Compute the commentable set from the diff hunks before building the payload.** An
   anchor outside it is a scope signal — never fall back to the nearest commentable line.
   Post as `COMMENT` and verify they landed only once Chris has asked; otherwise stop at the

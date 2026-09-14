@@ -39,6 +39,9 @@ Merge, force-push, review comments or thread resolution, issue creation, reposit
 other outward mutations still require an explicit user instruction aimed at that operation. Local
 git operations are authorized.
 
+Published pull-request narrative is append-only. After a PR is created, leave its title, body, and
+existing comments unchanged; publish corrections, later-head evidence, and handoffs as new comments.
+
 Do not add AI co-author trailers to commits. If one is already public, offer an amend plus
 `--force-with-lease`; do not assume permission to rewrite it.
 
@@ -68,8 +71,20 @@ batch at 3–4 concurrent agents and wait for the batch. Infrastructure failure 
 fail. Decide the reclaim order before the volume is full; otherwise point `TMPDIR` at a volume
 with room.
 
-Let workers inherit the current model unless the task explicitly requires a different one. Give
-every worker a Step 0 read list of absolute paths. Mutation workers use isolated worktrees or
+Let workers inherit the current model unless the task explicitly requires a different one.
+
+Every dispatched worker owns an exclusive scratch directory, assigned at spawn, that is never the
+checkout. Concurrent workers sharing one writable directory overwrite each other under the obvious
+names, and the loss is silent: the loser reads the winner's bytes and reports a confident wrong
+number. The parent never reads a scratch path it did not assign. Runtimes differ in what they hand a
+worker, so the adapter names the concrete path and this rule fixes the property. Express the
+assignment as one line in the worker's prompt reading `Scratch: <absolute path>`; the spawn guard
+requires exactly one, refuses a relative, pre-existing, or symlink-component path, resolves
+containment against the complete Git worktree, and atomically reserves the fresh directory mode
+0700. This prevents two spawns from claiming one writable directory; it is not an OS sandbox
+because workers share a uid.
+
+Give every worker a Step 0 read list of absolute paths. Mutation workers use isolated worktrees or
 in-memory copies, never a shared checkout. Commit the baseline first so a worker's revert cannot
 discard uncommitted work.
 

@@ -24,6 +24,17 @@
   },
   "model": "fable",
   "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/hooks/announced_work_guard.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "AskUserQuestion",
@@ -52,7 +63,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.claude/hooks/spawn_preflight_guard.py",
+            "command": "python3 ~/.claude/hooks/spawn_preflight_guard.py --require-scratch",
             "timeout": 5
           }
         ]

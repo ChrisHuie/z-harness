@@ -32,13 +32,51 @@ itself. Promote this the moment a null is being carried across tiers.*
 Relaunching the same lanes by hand reproduces the fan-out and drops the selection and
 consolidation discipline that lives in the wrapper, and can silently skip a lane. A
 harness's value is in the parts that are not agents. *Nearest always-on coverage:
-CLAUDE.md:34 "Named a tool? Run exactly that and stop." The registry notes R189 is the
-sharper mechanism; if CLAUDE.md:34 is ever trimmed, promote this.*
+`AGENTS.md`, "Named a tool? Run exactly that and stop." The registry notes R189 is the
+sharper mechanism; if that sentence is ever trimmed, promote this.*
+
+**R288 — power-validate a prioritiser BEFORE dispatching on it, not after.** The body's
+power-validation rule covers believing a *null*; a *ranking* you act on needs the same proof
+and gets it far less often, because a ranking produces work rather than silence and so never
+looks suspicious. Score it against a hand-labelled sample before it decides anything.
+Observed: a five-file ranking measured **26% recall** only after three agents were already
+dispatched against it, and the file it deprioritised produced both of that round's
+refutations. *Displaced because the `agent-dispatch` body sits at its cap; `hooks/harness_check.py`
+carries `BODY_CHAR_CAP` and the live margin is whatever that check reports, so a literal here
+goes stale the next time the body is edited.*
+
+**R289 — a dispatched worker owns its scratch directory, or the fan-out corrupts its own
+evidence.** Concurrent workers reach for the same obvious filenames — `probe.py`, `mutate.py`,
+`base.py` — in whatever writable directory they share. The lost-file case announces itself; the
+dangerous one does not, because the loser reads the winner's bytes and measures the wrong thing,
+which is a wrong number rather than an error. What a runtime provides differs: one hands every
+subagent the same session scratchpad, another hands none and leaves `cwd` on the repository, which
+turns the same pressure toward the checkout the mutation-worker rule already protects. So the rule
+is a property, not a path — assign an exclusive directory per worker at spawn, use a fresh
+physical absolute path with no symlink components, name it in the prompt as one line reading
+`Scratch: <absolute path>`, and never read a scratch path you did not assign. Observed on a
+fan-out over this branch:
+several hundred files at one shared root and one file lost mid-run. `ls -1 <root> | wc -l`
+regenerates the count; a literal here drifts with the session that produced it.
+
+
+**R290 — ground an injection channel in the installed CLI, not in a remembered flag name.**
+R285 previously asserted an append-to-subagent-system-prompt flag that pierces every nesting
+depth. `claude --help` at **2.1.234** lists no such flag: the prompt and agent options are
+`--agent`, `--agents`, `--append-system-prompt`, `--system-prompt`,
+`--exclude-dynamic-system-prompt-sections`, `--prompt-suggestions`, and
+`--forward-subagent-text`, and the last forwards output rather than injecting anything. A
+hidden flag is not excluded, so the claim is unverifiable against the artifact rather than
+proven false — which is the same reason not to build on it. What is verified: a `PreToolUse`
+hook returns a decision and cannot write into the child, `settings.json` `env` is session-wide
+and cannot vary per worker, and `--agents` carries a per-agent-type prompt that is constant
+per type. No channel assigns a distinct directory per worker, so the parent assigns it in the
+worker's prompt. A CLI claim is version-bound; re-verify it after an upgrade.
 
 ## MACHINE rows judged non-dispatch
 
 The MACHINE ruling put the machine facts that are dispatch/environment knowledge into the
-body — R285 (append-flag pierces every nesting depth; hooks see the agent type), R277
+body — R285 (hooks see the agent type), R277
 (crash-forensics signature), R284 (process-group kill). These are not:
 
 **R282 (rank B) — a stale exported env from an earlier container generation desyncs from the

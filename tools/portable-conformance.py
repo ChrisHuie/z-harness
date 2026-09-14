@@ -283,6 +283,16 @@ def download(
     except urllib.error.HTTPError as exc:
         # The server answered. A pinned artifact that returns 404/410 is a fact about the
         # pin, not an outage, so it must not be excused as transport.
+        #
+        # 429 and 5xx are the opposite fact: the host is rate-limiting or broken and has
+        # said nothing about this artifact. Reading those as a conformance breach reported a
+        # GitHub incident as a failed pin -- observed as HTTP 429 from raw.githubusercontent
+        # during an API outage. `unavailable` still exits 1, so this excuses nothing; it
+        # only separates the run an operator repeats from the one they investigate.
+        if exc.code == 429 or 500 <= exc.code < 600:
+            raise TransportError(
+                f"upstream refused to serve {url}: HTTP {exc.code} {exc.reason}"
+            ) from exc
         raise ConformanceError(
             f"pinned artifact unavailable at {url}: HTTP {exc.code} {exc.reason}"
         ) from exc
@@ -1773,6 +1783,31 @@ def selftest() -> int:
         )
         and not classify(
             _raise(urllib.error.HTTPError("u", 404, "Not Found", None, None)),
+            TransportError,
+        ),
+    )
+    # TransportError subclasses ConformanceError, so "is not a ConformanceError" is not
+    # assertable and would pass for the wrong reason. The property is the DIVERGENCE: a
+    # host that rate-limited or broke said nothing about the pin, while 404/410 did.
+    expect(
+        "HTTP 429 is transport, where 404 down the same path is not",
+        classify(
+            _raise(urllib.error.HTTPError("u", 429, "Too Many Requests", None, None)),
+            TransportError,
+        )
+        and not classify(
+            _raise(urllib.error.HTTPError("u", 404, "Not Found", None, None)),
+            TransportError,
+        ),
+    )
+    expect(
+        "HTTP 503 is transport, where 410 down the same path is not",
+        classify(
+            _raise(urllib.error.HTTPError("u", 503, "Service Unavailable", None, None)),
+            TransportError,
+        )
+        and not classify(
+            _raise(urllib.error.HTTPError("u", 410, "Gone", None, None)),
             TransportError,
         ),
     )

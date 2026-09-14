@@ -64,7 +64,8 @@ def validate(root, out=sys.stdout):
             for named in s.get("skills", []):
                 if not os.path.isdir(os.path.join(root, "skills", named)):
                     errs.append(f"names unknown skill {named!r}")
-            if not s.get("expected_behavior"):
+            # A list holding only blanks is not an expectation. Truthiness accepts [""].
+            if not [b for b in (s.get("expected_behavior") or []) if str(b).strip()]:
                 errs.append("empty expected_behavior")
             if not s.get("query", "").strip():
                 errs.append("empty query")
@@ -83,9 +84,13 @@ def validate(root, out=sys.stdout):
     scenario_count = sum(len(v) for v in corpus.values())
     p(f"\n  {scenario_count} scenarios, {bad} failure(s)")
     code = 1 if bad else 0
+    # Shape, not content: nothing above reads what an expectation asserts, so a scenario
+    # whose expectation is inverted still validates. This receipt is evidence that the corpus
+    # is well-formed and complete, never that any behaviour was graded. Said in the receipt
+    # so a green line is not mistaken for behavioural coverage.
     p(
         f"EVAL-VALIDATE-SUMMARY scenarios={scenario_count} skills={len(corpus)} "
-        f"failures={bad} exit={code}"
+        f"failures={bad} scope=shape-only exit={code}"
     )
     return code
 

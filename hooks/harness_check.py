@@ -205,7 +205,9 @@ def expected_selftest_checks(name):
 # loaded one, which none of these are. They are not regenerable from a green run either:
 # C1 prints a suite's elapsed time only when it exceeds its margin, so a number here is a
 # hand-timing on one host and drifts silently until the day it reddens. announced_work_guard
-# was raised from 30 s the day that happened, on a run that changed none of its checks. The
+# was raised from 30 s the day that happened, on a run that changed none of its checks;
+# ci-gate from 60 s the day its nested run took 36.5 s against a 36 s margin on the Ubuntu
+# runner, after the plan grew to 389 sites and the golden to 1,132 with no check changed. The
 # ratios these figures imply are not quoted here: the loaded and unloaded numbers give
 # different answers, and the earlier attempt to state one contradicted the ci-gate figure
 # three lines above it.
@@ -213,7 +215,7 @@ SELFTEST_TIMEOUTS = {
     "bash_command_guard": 90,
     "git_grep_engine_guard": 60,
     "announced_work_guard": 60,
-    "ci-gate": 60,
+    "ci-gate": 90,
 }
 DEFAULT_SELFTEST_TIMEOUT = 15
 # A suite may use this much of its registered timeout before C1 says so. Without it the
@@ -2032,7 +2034,7 @@ def selftest():
         )
         expect_red(
             "the registered CI-gate timeout retains measured headroom",
-            lambda: SELFTEST_TIMEOUTS["ci-gate"] == 60,
+            lambda: SELFTEST_TIMEOUTS["ci-gate"] == 90,
         )
 
         announced_timeouts = []

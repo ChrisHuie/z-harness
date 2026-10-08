@@ -29,8 +29,10 @@ change does to ordinary commands. It extracts every distinct Bash tool command f
 local transcripts (`~/.claude/projects/*/*.jsonl` by default), decides each with the Bash
 guard at a base checkout and at a head checkout, and prints the base-by-head verdict matrix,
 the moved verdicts by direction, and the head's grouped reasons for every command the base
-allowed and the head does not. Each checkout's guard is imported in isolation. Only
-aggregates are printed: transcripts are private, and no command text leaves the process. An
+allowed and the head does not. Each checkout's guard is imported in isolation. Reasons map to
+fixed categories; unrecognized diagnostics use `other`, never raw diagnostic text or a prefix
+that could contain a command-derived path. Only aggregates are printed: transcripts are private,
+and no command text leaves the process. An
 empty corpus and a checkout without a guard are errors (exit 2), never a clean delta. The
 measurement it exists for: a head whose fixtures, sweep and fuzz were all green answered
 `ask` on 23.6% of the commands main allowed, and nothing else in the gate could see it.

@@ -26,11 +26,10 @@ import glob
 import importlib.util
 import json
 import os
-import re
 import sys
 import tempfile
 
-VERSION = "1.0"
+VERSION = "1.1"
 RECEIPT = "CORPUS-DELTA-SUMMARY"
 DEFAULT_TRANSCRIPTS = "~/.claude/projects/*/*.jsonl"
 GUARD_MODULES = ("bash_command_guard", "git_grep_engine_guard", "zsh_rev_modifier_guard")
@@ -86,10 +85,34 @@ def transcript_commands(pattern: str) -> tuple[list[str], int, int]:
     return list(seen), sum(seen.values()), len(files)
 
 
+REASON_CATEGORIES = (
+    ("guarded or dynamic stdin source syntax", "unresolved-stdin-association"),
+    ("a uninspected file-input source", "uninspected-file-input"),
+    ("a dynamic file-input source", "dynamic-file-input"),
+    ("a guarded file-input source", "guarded-file-input"),
+    ("a live expansion selects the command", "dynamic-command"),
+    ("a computed script operand", "computed-script-operand"),
+    ("a shell -c command string", "dynamic-shell-source"),
+    ("this command may launch Git through a prefix", "unresolved-command-prefix"),
+    ("a possible Git invocation crosses an unresolved", "unresolved-command-prefix"),
+    ("the Bash command cannot be parsed safely", "unreadable-shell-source"),
+    ("the Bash guard could not read", "unreadable-shell-source"),
+    ("the Bash guard exhausted", "decision-budget"),
+    ("the Bash guard could not finish", "decision-budget"),
+    ("git grep has no command-resolved regex engine", "ambient-pattern-engine"),
+    ("git grep -E with a shell-expanded pattern", "dynamic-grep-pattern"),
+    ("git grep with the ERE engine", "grep-engine"),
+    ("a here-string", "here-string-source"),
+    ("a directly associated shell here-string", "here-string-source"),
+)
+
+
 def reason_key(reason: str) -> str:
-    """The head's first sentence with its parenthetical detail removed, for grouping."""
-    first = reason.split("\n", 1)[0]
-    return re.sub(r"\s*\(.*", "", first).strip()[:96]
+    """Return a fixed category, never a substring of a command-derived diagnostic."""
+    for prefix, category in REASON_CATEGORIES:
+        if reason.startswith(prefix):
+            return category
+    return "other" if reason else "unspecified"
 
 
 def decide(module, command: str) -> tuple[str, str]:
@@ -268,9 +291,9 @@ def selftest() -> int:
               dict(result["moved"]) == {("allow", "ask"): 1})
         check("newly-not-allowed is measured against the base-allowed set",
               result["base_allowed"] == 2 and result["newly_not_allowed"] == 1)
-        check("head reasons are grouped without their parenthetical detail",
+        check("head reasons are grouped under a fixed category",
               list(result["reasons"]) == [
-                  ("ask", "this command may launch Git through a prefix the guard cannot resolve")])
+                  ("ask", "unresolved-command-prefix")])
         report = render(result, files, occurrences, 5)
         check("the report carries only aggregates: no command text leaves the process",
               secret not in report and "/very/private" not in report
@@ -286,7 +309,32 @@ def selftest() -> int:
               and result_raise["matrix"][("allow", "raised:ValueError")] == 1)
         os.environ.pop("CORPUS_DELTA_STUB", None)
 
-        check("reason keys survive an empty reason", reason_key("") == "")
+        check("reason keys survive an empty reason", reason_key("") == "unspecified")
+        private_marker = "/private/customer/DO_NOT_DISCLOSE.env"
+        for diagnostic, expected_category in (
+            (f"a computed script operand '{private_marker}' is consumed by source/dot",
+             "computed-script-operand"),
+            (f"git grep has no command-resolved regex engine: {private_marker}",
+             "ambient-pattern-engine"),
+            (f"new diagnostic containing {private_marker}", "other"),
+            (f"{private_marker}\nsecond diagnostic", "other"),
+            (f"error ({private_marker})", "other"),
+        ):
+            classified = reason_key(diagnostic)
+            check("command-derived diagnostic maps to its fixed category",
+                  classified == expected_category and private_marker not in classified)
+
+        class PrivateReasonGuard:
+            @staticmethod
+            def decide(_command):
+                return "ask", f"a computed script operand '{private_marker}' is consumed by source/dot"
+
+        private_result = delta(base, PrivateReasonGuard, [secret])
+        private_report = render(private_result, 1, 1, 12)
+        check("aggregate rendering never prints a private path carried by a reason",
+              private_marker not in private_report and secret not in private_report
+              and "computed-script-operand" in private_report
+              and private_result["newly_not_allowed"] == 1)
         check("main refuses an empty corpus with exit 2",
               main(["corpus_delta.py", "--base", base_root, "--head", head_root,
                     "--transcripts", os.path.join(raw, "nothing", "*.jsonl")]) == 2)

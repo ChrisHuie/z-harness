@@ -102,8 +102,8 @@ _FUNCTION_RECORD_CACHE = contextvars.ContextVar(
 _FUNCTION_RECORD_CACHE_MISS = object()
 # Whether the command being decided shows a way to rebind a bare command name: a function
 # declaration, `alias`, `eval`, `source`/`.`, `hash`, `enable`, `disable`, `autoload`, or a
-# write to a lookup table. Set once per public decision over the command's shell source
-# with quoted bytes blanked, inherited by nested decisions of bodies the command runs, and
+# write to a lookup table. Set once per public decision over parser-decoded command names,
+# inherited by nested decisions of bodies the command runs, and
 # read where a bare `echo`/`printf` in front of Git-looking text is graded. Unset -- a
 # direct call from outside `decide` -- reads as visible, the conservative answer.
 _IDENTITY_MUTATION_VISIBLE = contextvars.ContextVar(
@@ -119,7 +119,25 @@ def identity_mutation_visible(source, deadline=None):
     """Whether shell source declares, aliases, evaluates or sources anything."""
     if function_declaration_records(source, deadline):
         return True
-    return bool(_IDENTITY_MUTATION.search(_zsh_option_skeleton(source, deadline)))
+    # This is only a candidate filter: removing quoting/escapes admits every literal
+    # spelling the command parser decodes, without reparsing large inert data tokens.
+    # The parsed command position below, not a word inside a data argument, is authority.
+    candidate = source.translate(str.maketrans("", "", "'\"\\"))
+    if "\\\n" not in source and not _IDENTITY_MUTATION.search(candidate):
+        return False
+    for tokens in split_commands(source, _deadline=deadline):
+        if shell_identity_write(tokens) is not None:
+            return True
+        # Conservatively include command-prefixed setters: POSIX children can execute
+        # builtins there even though zsh's command prefix performs external lookup.
+        invocation = _source_command_invocation(tokens, current_shell="sh")
+        if invocation is not None and invocation[0].startswith("-"):
+            # A same-shell keyword can have options this prefix walk does not model.
+            # The candidate setter cannot be dismissed as an ordinary data argument.
+            return True
+        if invocation is not None and _IDENTITY_MUTATION.fullmatch(invocation[0] + " "):
+            return True
+    return False
 
 
 @contextlib.contextmanager
@@ -889,11 +907,12 @@ def _scan_heredoc_operator(line, quote="", arithmetic_depth=0):
     contains instead of reading every such line as an unclosed quote. A ``<<`` inside
     that string is text, not an operator, exactly as the shell reads it.
     """
-    # A line with no `<<` and no quote character cannot open, close or find anything:
-    # the state passes through. Two C-level substring tests replace a per-character walk
+    # Skip quote-free lines only outside arithmetic and without an arithmetic opener:
+    # continuation lines still have to close carried arithmetic state. Substring tests replace a per-character walk
     # that probed four prefixes per byte; this function alone cost 1.23 s over three
     # calls on a 600 KiB single-token line.
-    if "<<" not in line and '"' not in line and "'" not in line:
+    if (not arithmetic_depth and "((" not in line and "<<" not in line
+            and '"' not in line and "'" not in line):
         return None, quote, arithmetic_depth
     index = 0
     while index < len(line):
@@ -1820,6 +1839,10 @@ def split_commands(cmd, _parse_depth=0, _deadline=None):
                 continue
             else:
                 append_tok(c, q)
+            i += 1
+            continue
+        if c in " \t" and not pattern_depth:
+            flush_tok()
             i += 1
             continue
         if c in ("'", '"'):
@@ -3248,6 +3271,8 @@ def source_has_git_hazard_hint(command, deadline=None):
 def _token_has_live_unresolved(token):
     """Whether a token has an expansion active in its recorded quoting mode."""
     text, quoting = token
+    if "$" not in text and "`" not in text and "{" not in text:
+        return False
     if quoting == "'" or quoting == "escaped":
         return False
     if quoting.startswith("mixed:"):
@@ -3306,22 +3331,53 @@ def source_has_dynamic_command_word(source, deadline=None):
 _SHELL_SCRIPT_OPERAND = re.compile(r"\.(?:sh|bash|zsh|ksh|dash)$", re.IGNORECASE)
 
 
+def _dynamic_executable_is_single_word(token):
+    """Prove only quoted scalar parameters and quoted substitution results are one word.
+
+    Unquoted expansions can splice argv through zsh arrays, explicit splitting, shell
+    options, or a POSIX child shell. Quoting alone is insufficient for ``"$@"`` and
+    flagged/array parameter forms. Unmodelled expansions retain uncertainty.
+    """
+    text, _quoting = token
+    modes = _source_operand_modes(token)
+    scalar = re.compile(
+        r"\$(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|\{(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+)\}"
+        r"|\(__COMMAND__\))|`__COMMAND__`")
+    index = 0
+    while index < len(text):
+        if text[index] not in "$`" or modes[index] not in "UD":
+            index += 1
+            continue
+        match = scalar.match(text, index)
+        if (match is None
+                or any(mode != "D" for mode in modes[index:match.end()])):
+            return False
+        index = match.end()
+    return True
+
+
 def _dynamic_command_is_relevant(words):
     """Whether a command whose executable is an expansion can reach executable source.
 
-    `$VENV/bin/python -m pytest -q` and `"$PY" /tmp/probe.py` name every operand and none
-    of them is Git-shaped, a shell script or itself an expansion, so whatever `$PY` turns
-    out to be it is handed data. Questioning every such command questioned one real
-    command in fifty. A bare expansion, a Git-shaped tail, a shell-script operand, or an
-    operand that is itself an expansion keep the question: `$X` may be `source`, and
-    `$PY "$SCRIPT"` consumes source this guard cannot see.
+    A quoted scalar executable such as `"$PY" /tmp/probe.py` names one command word.
+    Its literal operands can then be classified as data. An expansion that can splice
+    argv may supply the entire Git invocation before those operands, so the written tail
+    alone cannot prove it harmless. Visible rebinding also leaves a quoted name uncertain.
     """
     if len(words) == 1:
+        return True
+    if not _dynamic_executable_is_single_word(words[0]):
+        return True
+    if _IDENTITY_MUTATION_VISIBLE.get() is not False:
         return True
     if command_has_git_hazard_hint(words):
         return True
     for token in words[1:]:
         text, _quoting = token
+        # An unknown scalar command can be eval. Its operands would then be reparsed,
+        # so outer quoting is not proof that embedded shell syntax remains data.
+        if any(char in text for char in "$`\\\"';&|<>(){}\n"):
+            return True
         if _SHELL_SCRIPT_OPERAND.search(text):
             return True
         if _token_has_live_unresolved(token) or _token_has_live_command_parameter(token):
@@ -3332,7 +3388,7 @@ def _dynamic_command_is_relevant(words):
 def _token_has_live_command_parameter(token):
     """Source-specific positional/special parameters missed by generic `$NAME`."""
     text, quoting = token
-    if quoting in {"'", "escaped"}:
+    if "$" not in text or quoting in {"'", "escaped"}:
         return False
     modes = (quoting.split(":", 1)[1] if quoting.startswith("mixed:")
              else {"": "U", '"': "D"}.get(quoting, "E") * len(text))
@@ -3686,8 +3742,15 @@ def unwrap_command_prefix(tokens, shell="zsh", equals_state=ZSH_EQUALS_ON,
                     "zsh EQUALS expansion is disabled" if equals_state == ZSH_EQUALS_OFF
                     else "zsh EQUALS expansion state is uncertain")
                 break
-        if UNRESOLVED.search(executable_text):
+        if (UNRESOLVED.search(executable_text)
+                or _token_has_live_command_parameter(items[0])):
             errors.append(f"dynamic executable {executable_text!r} cannot be resolved")
+            # Direct command words are graded by dynamic_source_findings. This seam
+            # owns the executable exposed after a wrapper has consumed its prefix.
+            if (wrapper_depth and (_token_has_live_unresolved(items[0])
+                 or _token_has_live_command_parameter(items[0]))
+                    and _dynamic_command_is_relevant(items)):
+                guarded_prefix_hazard = True
             break
         executable = os.path.basename(executable_text)
 
@@ -3700,6 +3763,14 @@ def unwrap_command_prefix(tokens, shell="zsh", equals_state=ZSH_EQUALS_ON,
                 items.pop(0)
                 if not items:
                     break
+            if (_token_has_live_unresolved(items[0])
+                    or _token_has_live_command_parameter(items[0])):
+                # Expansion happens before builtin dispatch and can supply `eval`
+                # plus an entire command; it is not a proven non-builtin refusal.
+                if _dynamic_command_is_relevant(items):
+                    errors.append("dynamic builtin dispatch cannot be resolved")
+                    guarded_prefix_hazard = True
+                break
             if items[0][0] in {"builtin", "command", "exec", "trap"}:
                 continue
             if items[0][0] == "eval":
@@ -5043,9 +5114,18 @@ def _consumer_reads_program_from_stdin(line, redirect_start, word_end, deadline=
     name = os.path.basename(words[0])
     if name in SHELLS:
         return _shell_reads_stdin(words)
+    if (words[0] == name and _IDENTITY_MUTATION_VISIBLE.get() is not False):
+        # The visible function/alias may forward stdin even when its name looks like
+        # a data consumer. The enclosing source scope survives declaration extraction.
+        return True
     if _STDIN_PROGRAM_INTERPRETER.fullmatch(name):
-        operands = [word for word in words[1:] if not word.startswith("-") or word == "-"]
-        return not operands or operands[0] == "-"
+        # Only an explicit first script operand proves stdin is data. Skipping options
+        # without their arity mistakes `python3 -W ignore` for a script named `ignore`.
+        # Option-bearing forms stay uncertain rather than guessing across interpreter
+        # grammars, as does an expansion that could become `-` or an option.
+        return (len(words) < 2 or words[1].startswith("-")
+                or _token_has_live_unresolved(resolution.items[1])
+                or _token_has_live_command_parameter(resolution.items[1]))
     if _token_has_live_unresolved(resolution.items[0]):
         return True
     return False
@@ -8576,8 +8656,8 @@ FIXTURES += [
     ("GREEN SOURCE: repeat zero inside an alias installs no source identity",
      ("eval 'alias a=\"repeat 0 builtin alias s=source\"'; eval a; "
       "eval 's \"$FILE\"'"), "allow"),
-    ("GREEN SOURCE: a dynamic executable handed only data is not questioned",
-     '$CMD --version', "allow"),
+    ("ASK SOURCE: an unquoted command expansion may supply more than one word",
+     '$CMD --version', "ask"),
     ("ASK  SOURCE: a bare dynamic executable may be anything",
      'X=ls; $X', "ask"),
     ("ASK  SOURCE: a dynamic executable with a Git-shaped tail is unresolved",
@@ -9112,6 +9192,110 @@ FIXTURES += [
 ]
 
 
+FIXTURES += [
+    ("ASK SETTER WORD: a quoted source command can rebind echo",
+     "'source' ./setup.zsh; echo grep -E 'harness\\b' -- README.md", "ask"),
+    ("ASK SETTER WORD: a double-quoted source command can rebind echo",
+     '\"source\" ./setup.zsh; echo grep -E \'harness\\b\' -- README.md', "ask"),
+    ("ASK SETTER WORD: a mixed-quoted source command can rebind echo",
+     "s'ource' ./setup.zsh; echo grep -E 'harness\\b' -- README.md", "ask"),
+    ("ASK SETTER WORD: an escaped source command can rebind echo",
+     r"s\ource ./setup.zsh; echo grep -E 'harness\b' -- README.md", "ask"),
+    ("ASK SETTER WORD: a continued source command can rebind echo",
+     "s\\\nource ./setup.zsh; echo grep -E 'harness\\b' -- README.md", "ask"),
+    ("ASK SETTER WORD: a continuation after another command keeps its word boundary",
+     "echo safe\ns\\\nource ./setup.zsh; echo grep -E 'harness\\b' -- README.md", "ask"),
+    ("ASK SETTER WORD: a quoted dot command can rebind echo",
+     "'.' ./setup.zsh; echo grep -E 'harness\\b' -- README.md", "ask"),
+    ("ASK SETTER WORD: a builtin wrapper retains the decoded setter name",
+     "builtin s'ource' ./setup.zsh; echo grep -E 'harness\\b' -- README.md", "ask"),
+    ("ASK SETTER WORD: a POSIX command prefix can execute a quoted source builtin",
+     r'''bash -c "command 'source' ./setup.zsh; echo grep -E 'harness\\b' -- README.md"''',
+     "ask"),
+    ("ASK SETTER WORD: an unmodelled same-shell option prefix retains uncertainty",
+     r'''bash -c "time -p source ./setup.zsh; echo grep -E 'harness\\b' -- README.md"''',
+     "ask"),
+    ("ASK SETTER WORD: quoted source retains stdin-consumer uncertainty",
+     "'source' ./setup.zsh; wc -l < input.txt", "ask"),
+    ("GREEN SETTER WORD: a setter named in an argument is data",
+     "printf '%s\\n' source; echo git show HEAD:README.md", "allow"),
+    ("GREEN SETTER WORD: a command query does not execute the named setter",
+     "command -v 'source'; echo git show HEAD:README.md", "allow"),
+]
+
+
+FIXTURES += [
+    ("ASK ARGV EXPANSION: explicit zsh splitting can supply the entire Git invocation",
+     r"CMD='git grep -E harness\b'; $=CMD README.md", "ask"),
+    ("ASK ARGV EXPANSION: zsh option-driven splitting can supply the invocation",
+     r"setopt SH_WORD_SPLIT; CMD='git grep -E harness\b'; $CMD README.md", "ask"),
+    ("ASK ARGV EXPANSION: a POSIX child expands the command into multiple words",
+     r'''bash -c 'CMD="git grep -E harness\b"; $CMD README.md' ''', "ask"),
+    ("ASK ARGV EXPANSION: substitution output can supply hidden Git arguments",
+     r'''$(printf 'git grep -E harness\\b') README.md''', "ask"),
+    ("ASK ARGV EXPANSION: env forwards the expanded argv",
+     r"CMD='git grep -E harness\b'; env $=CMD README.md", "ask"),
+    ("ASK ARGV EXPANSION: command forwards the expanded argv",
+     r"CMD='git grep -E harness\b'; command $=CMD README.md", "ask"),
+    ("ASK ARGV EXPANSION: exec forwards the expanded argv",
+     r"CMD='git grep -E harness\b'; exec $=CMD README.md", "ask"),
+    ("ASK ARGV EXPANSION: builtin can dispatch eval from expanded argv",
+     r"CMD='eval git grep -E harness\\b'; builtin $=CMD README.md", "ask"),
+    ("ASK ARGV EXPANSION: quoted positional argv is still multiple words",
+     '"$@" README.md', "ask"),
+    ("ASK ARGV EXPANSION: quoted array expansion is still multiple words",
+     '"${args[@]}" README.md', "ask"),
+    ("ASK ARGV EXPANSION: quoting a zsh split flag does not prove scalar expansion",
+     '"${(@s: :)CMD}" README.md', "ask"),
+    ("ASK ARGV EXPANSION: a quoted command may eval a quoted expansion operand",
+     r'''CMD=eval; BODY='git grep -E harness\b'; "$CMD" '$=BODY' ''', "ask"),
+    ("ASK ARGV EXPANSION: a quoted command may reparse escaped Git spelling",
+     r'''CMD=eval; "$CMD" 'g\it gr\ep -E harness\\b' ''', "ask"),
+    ("ASK ARGV EXPANSION: a wrapper preserves the reparsed operand uncertainty",
+     r'''exec "$CMD" '$BODY' ''', "ask"),
+    ("GREEN ARGV EXPANSION: quoted scalar executable has literal data arguments",
+     '"$PY" /tmp/probe.py', "allow"),
+    ("GREEN ARGV EXPANSION: quoted path prefix stays one executable word",
+     '"$VENV"/bin/python -m pytest -q', "allow"),
+    ("GREEN ARGV EXPANSION: quoted braced scalar stays one executable word",
+     '"${PY}" /tmp/probe.py', "allow"),
+    ("GREEN ARGV EXPANSION: quoted substitution result stays one executable word",
+     '"$(printf python3)" /tmp/probe.py', "allow"),
+    ("GREEN ARGV EXPANSION: env preserves a quoted scalar executable",
+     'env "$PY" /tmp/probe.py', "allow"),
+    ("GREEN ARGV EXPANSION: a command query does not run the expanded argv",
+     'command -v $=CMD README.md', "allow"),
+    ("ASK ARGV EXPANSION: visible function can supply hidden behavior for a quoted name",
+     r'''f(){ git grep -E 'harness\b' -- README.md; }; CMD=f; "$CMD" --version''', "ask"),
+    ("RED ARGV EXPANSION: uncertainty cannot hide a separate proven hazard",
+     r'''$=CMD README.md; git grep -E 'harness\b' -- README.md''', "deny"),
+    ("ASK FILE INPUT IDENTITY: a function can pass stdin to a shell",
+     'f(){ sh; }; f < input.txt', "ask"),
+    ("ASK FILE INPUT IDENTITY: a data-consumer name can be rebound to a shell",
+     'wc(){ sh; }; wc -l < input.txt', "ask"),
+    ("ASK FILE INPUT IDENTITY: a prior-line definition retains stdin uncertainty",
+     'f(){ sh; }\nf < input.txt', "ask"),
+    ("ASK FILE INPUT IDENTITY: an eval-installed alias can consume stdin",
+     "alias reader=sh; eval 'reader < input.txt'", "ask"),
+    ("GREEN FILE INPUT IDENTITY: an exact data consumer bypasses a visible function",
+     'cat(){ sh; }; /bin/cat < input.txt', "allow"),
+    ("ASK FILE INPUT OPTIONS: a Python option value is not a script operand",
+     'python3 -W ignore < input.txt', "ask"),
+    ("ASK FILE INPUT OPTIONS: a Perl option value is not a script operand",
+     'perl -I lib < input.txt', "ask"),
+    ("ASK FILE INPUT OPTIONS: a dynamic program selector may request stdin",
+     'python3 "$PROGRAM" < input.txt', "ask"),
+    ("GREEN SOURCE ARITHMETIC: a quote-free continuation closes its arithmetic",
+     'x=$((1 << 1\n)); /bin/echo result', "allow"),
+    ("GREEN SOURCE ARITHMETIC: a quote-free opener carries state into a shift line",
+     'x=$((1\n<< 1\n)); /bin/echo result', "allow"),
+    ("ASK SOURCE ARITHMETIC: an unclosed multiline arithmetic remains unresolved",
+     'x=$((1 << 1\n; /bin/echo result', "ask"),
+    ("RED SOURCE ARITHMETIC: a following command keeps its proven hazard",
+     "x=$((1 << 1\n)); git grep -E 'harness\\b' -- README.md", "deny"),
+]
+
+
 def fixture_pair_duplicates(fixtures):
     """Return repeated public command/expected pairs; labels do not make cases distinct."""
     seen = set()
@@ -9187,6 +9371,59 @@ def selftest():
         "PASS" if uniqueness_ok else "FAIL"))
     if duplicates:
         print("        duplicate pairs: %r" % duplicates)
+    # Work counts are independent of host scheduling. Each fast path avoids only
+    # impossible matches, and a positive control proves the counter observes a live call.
+    import cProfile
+    profile = cProfile.Profile()
+    profile.enable()
+    prefix_control = "positive".startswith("pos")
+    whitespace_tokens = split_commands(" \t" * 1000)
+    profile.disable()
+    prefix_calls = sum(entry.callcount for entry in profile.getstats()
+                       if isinstance(entry.code, str) and "'startswith'" in entry.code)
+    whitespace_work = prefix_control and whitespace_tokens == [] and 0 < prefix_calls < 128
+    bad += 0 if whitespace_work else 1
+    print("  %s literal whitespace skips impossible tokenizer prefix probes" % (
+        "PASS" if whitespace_work else "FAIL"))
+
+    original_unresolved = UNRESOLVED
+    unresolved_calls = []
+    class CountUnresolved:
+        def finditer(self, text):
+            unresolved_calls.append(text)
+            return original_unresolved.finditer(text)
+    globals()["UNRESOLVED"] = CountUnresolved()
+    try:
+        literal_unresolved = (_token_has_live_unresolved((":", "")), len(unresolved_calls))
+        unresolved_calls.clear()
+        active_unresolved = (_token_has_live_unresolved(("$VALUE", "")), len(unresolved_calls))
+    finally:
+        globals()["UNRESOLVED"] = original_unresolved
+    for label, observed, want_decision, want_calls in (
+            ("literal tokens skip unresolved regex work", literal_unresolved, False, 0),
+            ("active expansions exercise unresolved regex work", active_unresolved, True, 1)):
+        expected = (want_decision, want_calls)
+        bad += 0 if observed == expected else 1
+        print("  %s %s" % ("PASS" if observed == expected else "FAIL", label))
+
+    original_compile = re.compile
+    parameter_calls = []
+    def count_parameter_compile(*args, **kwargs):
+        parameter_calls.append(args)
+        return original_compile(*args, **kwargs)
+    re.compile = count_parameter_compile
+    try:
+        literal_parameter = (_token_has_live_command_parameter((":", "")), len(parameter_calls))
+        parameter_calls.clear()
+        active_parameter = (_token_has_live_command_parameter(("$VALUE", "")), len(parameter_calls))
+    finally:
+        re.compile = original_compile
+    for label, observed, want_decision, want_calls in (
+            ("literal tokens skip parameter regex work", literal_parameter, False, 0),
+            ("active parameters exercise regex work", active_parameter, True, 1)):
+        expected = (want_decision, want_calls)
+        bad += 0 if observed == expected else 1
+        print("  %s %s" % ("PASS" if observed == expected else "FAIL", label))
     # The fixtures above test the table against itself. This one tests it against the
     # tool, which is the only thing that can catch the table going stale under a git
     # upgrade or on a host whose git differs from the authoring one.

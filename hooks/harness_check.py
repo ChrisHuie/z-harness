@@ -132,7 +132,7 @@ DESC_CAP = 400                # house cap (spec ceiling is 1024)
 # checks=111, so a suite can be gutted with nothing failing. Raise a floor in the same
 # commit that adds the checks; lowering one is a deliberate, reviewable edit.
 SELFTEST_SUITES = [
-    ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"], 1527),
+    ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"], 1574),
     ("askq_timeout_guard", ["hooks/askq_timeout_guard.py", "--selftest"], 13),
     ("announced_work_guard", ["hooks/announced_work_guard.py", "--selftest"], 916),
     ("harness_report", ["hooks/harness_report.py", "--selftest"], 12),
@@ -151,10 +151,10 @@ SELFTEST_SUITES = [
     ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 65),
     ("enumerate-survivors", ["instruments/enumerate_survivors.py", "--selftest"], 28),
     ("fuzz-judge-diff", ["instruments/fuzz_judge_diff.py", "--selftest"], 65),
-    ("corpus-delta", ["instruments/corpus_delta.py", "--selftest"], 14),
+    ("corpus-delta", ["instruments/corpus_delta.py", "--selftest"], 20),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
     ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 88),
-    ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 1302),
+    ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 1354),
     ("zsh_rev_modifier_guard", ["hooks/guards/zsh_rev_modifier_guard.py", "--selftest"], 504),
 ]
 
@@ -166,14 +166,14 @@ def expected_selftest_checks(name):
         "ci-gate": 369,
         "enumerate-survivors": 28,
         "fuzz-judge-diff": 65,
-        "corpus-delta": 14,
+        "corpus-delta": 20,
         "spawn_preflight_guard": 88,
         "verify-review-publication": 94,
     }
     if name in fixed:
         return fixed[name]
     if name == "bash_command_guard":
-        return 1527
+        return 1574
     if name == "zsh_rev_modifier_guard":
         return 504
     if name != "git_grep_engine_guard":
@@ -189,9 +189,9 @@ def expected_selftest_checks(name):
         if real not in seen:
             seen.add(real)
             binaries.append(real)
-    # The portable corpus is 1302 checks for one Git. Every additional executable adds
+    # The portable corpus is 1354 checks for one Git. Every additional executable adds
     # one version probe, one fixture setup, and 22 alias-proof-name probes.
-    return 1302 + 24 * (max(1, len(binaries)) - 1)
+    return 1354 + 24 * (max(1, len(binaries)) - 1)
 # The public Bash-guard selftest intentionally runs five independent process-level timing
 # observations for each runtime. Give that aggregate suite enough wall-clock without
 # weakening the five-second deadline each individual hook process must meet.

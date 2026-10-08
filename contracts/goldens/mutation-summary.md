@@ -89,6 +89,7 @@ Collections are enumerated for `hooks/bash_command_guard.py`, `hooks/guards/git_
 | `announced_work_guard.py` | whole report-token membership dropped | caught |
 | `bash_command_guard.py` | merged guard function cache scope dropped | caught |
 | `git_grep_engine_guard.py` | DEBUG trap alias state dropped | caught |
+| `git_grep_engine_guard.py` | POSIX setter command-prefix visibility dropped | caught |
 | `git_grep_engine_guard.py` | TRAPDEBUG function alias state dropped | caught |
 | `git_grep_engine_guard.py` | alias shadowing failure channel dropped | caught |
 | `git_grep_engine_guard.py` | attached exec argv-zero grammar dropped | caught |
@@ -102,7 +103,12 @@ Collections are enumerated for `hooks/bash_command_guard.py`, `hooks/guards/git_
 | `git_grep_engine_guard.py` | cross-line quote state dropped | caught |
 | `git_grep_engine_guard.py` | decision-budget checkpoint neutered | caught |
 | `git_grep_engine_guard.py` | declared helper function alias traversal dropped | caught |
+| `git_grep_engine_guard.py` | decoded identity setter visibility dropped | caught |
+| `git_grep_engine_guard.py` | dynamic builtin dispatch uncertainty dropped | caught |
 | `git_grep_engine_guard.py` | dynamic command relevance gate dropped | caught |
+| `git_grep_engine_guard.py` | dynamic executable operand reparse uncertainty dropped | caught |
+| `git_grep_engine_guard.py` | dynamic executable rebinding uncertainty dropped | caught |
+| `git_grep_engine_guard.py` | dynamic executable single-word proof dropped | caught |
 | `git_grep_engine_guard.py` | dynamic source adoption removed | caught |
 | `git_grep_engine_guard.py` | dynamic source command identity dropped | caught |
 | `git_grep_engine_guard.py` | exec single-dash terminator dropped | caught |
@@ -112,16 +118,22 @@ Collections are enumerated for `hooks/bash_command_guard.py`, `hooks/guards/git_
 | `git_grep_engine_guard.py` | executable pattern group preservation dropped | caught |
 | `git_grep_engine_guard.py` | executed alias Git traversal dropped | caught |
 | `git_grep_engine_guard.py` | file-input program check dropped | caught |
+| `git_grep_engine_guard.py` | file-input rebinding uncertainty dropped | caught |
 | `git_grep_engine_guard.py` | function record cache cap raised | caught |
 | `git_grep_engine_guard.py` | function record decision cache dropped | caught |
 | `git_grep_engine_guard.py` | git config count cap dropped | caught |
 | `git_grep_engine_guard.py` | git config loop budget dropped | caught |
 | `git_grep_engine_guard.py` | git hazard union adoption dropped | caught |
 | `git_grep_engine_guard.py` | guarded-tail predicate rescans per word | caught |
+| `git_grep_engine_guard.py` | heredoc fast path ignores arithmetic state | caught |
 | `git_grep_engine_guard.py` | home-relative tilde exemption dropped | caught |
 | `git_grep_engine_guard.py` | identity mutation gate dropped | caught |
 | `git_grep_engine_guard.py` | in-word brace pairing dropped | caught |
+| `git_grep_engine_guard.py` | interpreter option values treated as scripts | caught |
 | `git_grep_engine_guard.py` | invoked alias body state transition dropped | caught |
+| `git_grep_engine_guard.py` | literal parameter fast path dropped | caught |
+| `git_grep_engine_guard.py` | literal unresolved fast path dropped | caught |
+| `git_grep_engine_guard.py` | literal whitespace fast path dropped | caught |
 | `git_grep_engine_guard.py` | native command checked after alias | caught |
 | `git_grep_engine_guard.py` | nested source shell identity dropped | caught |
 | `git_grep_engine_guard.py` | nonordinary alias mode tracking dropped | caught |
@@ -134,6 +146,8 @@ Collections are enumerated for `hooks/bash_command_guard.py`, `hooks/guards/git_
 | `git_grep_engine_guard.py` | process substitution loses typed operand | caught |
 | `git_grep_engine_guard.py` | repeat zero execution boundary dropped | caught |
 | `git_grep_engine_guard.py` | same-shell alias mutation wrapper resolution dropped | caught |
+| `git_grep_engine_guard.py` | setter candidate dequoting dropped | caught |
+| `git_grep_engine_guard.py` | setter continuation candidate fallback dropped | caught |
 | `git_grep_engine_guard.py` | shell alias depth context corrupted | caught |
 | `git_grep_engine_guard.py` | shell alias forwarding dropped | caught |
 | `git_grep_engine_guard.py` | shell identity write adoption dropped | caught |
@@ -149,6 +163,8 @@ Collections are enumerated for `hooks/bash_command_guard.py`, `hooks/guards/git_
 | `git_grep_engine_guard.py` | source lines include heredoc payloads | caught |
 | `git_grep_engine_guard.py` | trap action traversal dropped | caught |
 | `git_grep_engine_guard.py` | trap declarations read from payload text | caught |
+| `git_grep_engine_guard.py` | unmodelled setter option-prefix uncertainty dropped | caught |
+| `git_grep_engine_guard.py` | wrapped dynamic argv hazard dropped | caught |
 | `git_grep_engine_guard.py` | zsh trap function source traversal dropped | caught |
 | `zsh_rev_modifier_guard.py` | trap declarations read from payload text | caught |
 | `zsh_rev_modifier_guard.py` | zsh shared resolver bypassed | caught |
@@ -157,7 +173,7 @@ Collections are enumerated for `hooks/bash_command_guard.py`, `hooks/guards/git_
 | `zsh_rev_modifier_guard.py` | zsh unmodelled modifier uncertainty dropped | caught |
 | `repository_ownership.py` | effective core.worktree scalar lookup dropped | caught |
 
-301 of 389 planned mutations are caught; 88 exact mutation IDs remain recorded coverage debt.
+317 of 405 planned mutations are caught; 88 exact mutation IDs remain recorded coverage debt.
 
 A kill scored only because the recorded check count moved is not evidence that the suites observe the change. That count is recorded per result and reported by the gate rather than shown here, because whether an assertion fires can differ between hosts and this file is compared across them.
 

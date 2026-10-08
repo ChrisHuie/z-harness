@@ -103,6 +103,116 @@ CHARSET_COLLECTIONS = {
 # ``timeout`` is an allowed kill only for the edit that restores an unbounded traversal.
 SITE_MUTATIONS = (
     {
+        "label": "literal unresolved fast path dropped", "module": GREP,
+        "anchor": '''    if "$" not in text and "`" not in text and "{" not in text:''',
+        "replacement": "    if False:",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "literal whitespace fast path dropped", "module": GREP,
+        "anchor": '        if c in " \\t" and not pattern_depth:',
+        "replacement": '        if False and not pattern_depth:',
+        "allowed_statuses": (),
+    },
+    {
+        "label": "literal parameter fast path dropped", "module": GREP,
+        "anchor": '''    if "$" not in text or quoting in {"'", "escaped"}:''',
+        "replacement": '''    if quoting in {"'", "escaped"}:''',
+        "allowed_statuses": (),
+    },
+    {
+        "label": "unmodelled setter option-prefix uncertainty dropped", "module": GREP,
+        "anchor": '        if invocation is not None and invocation[0].startswith("-"):',
+        "replacement": "        if False:",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "POSIX setter command-prefix visibility dropped", "module": GREP,
+        "anchor": '        invocation = _source_command_invocation(tokens, current_shell="sh")',
+        "replacement": '        invocation = _source_command_invocation(tokens, current_shell="zsh")',
+        "allowed_statuses": (),
+    },
+    {
+        "label": "setter candidate dequoting dropped", "module": GREP,
+        "anchor": "    candidate = source.translate(str.maketrans(\"\", \"\", \"'\\\"\\\\\"))",
+        "replacement": "    candidate = source",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "setter continuation candidate fallback dropped", "module": GREP,
+        "anchor": "    if \"\\\\\\n\" not in source and not _IDENTITY_MUTATION.search(candidate):",
+        "replacement": "    if not _IDENTITY_MUTATION.search(candidate):",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "decoded identity setter visibility dropped", "module": GREP,
+        "anchor": '        if invocation is not None and _IDENTITY_MUTATION.fullmatch(invocation[0] + " "):',
+        "replacement": "        if False:",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "dynamic executable operand reparse uncertainty dropped", "module": GREP,
+        "anchor": "        if any(char in text for char in \"$`\\\\\\\"';&|<>(){}\\n\"):\n            return True",
+        "replacement": "        if False:\n            return True",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "dynamic executable single-word proof dropped", "module": GREP,
+        "anchor": "    if not _dynamic_executable_is_single_word(words[0]):\n        return True",
+        "replacement": "    if False:\n        return True",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "dynamic executable rebinding uncertainty dropped", "module": GREP,
+        "anchor": "    if _IDENTITY_MUTATION_VISIBLE.get() is not False:\n        return True",
+        "replacement": "    if False:\n        return True",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "wrapped dynamic argv hazard dropped", "module": GREP,
+        "anchor": (
+            "            if (wrapper_depth and (_token_has_live_unresolved(items[0])\n"
+            "                 or _token_has_live_command_parameter(items[0]))\n"
+            "                    and _dynamic_command_is_relevant(items)):\n"
+            "                guarded_prefix_hazard = True"),
+        "replacement": "            if False:\n                guarded_prefix_hazard = True",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "dynamic builtin dispatch uncertainty dropped", "module": GREP,
+        "anchor": (
+            "                if _dynamic_command_is_relevant(items):\n"
+            "                    errors.append(\"dynamic builtin dispatch cannot be resolved\")\n"
+            "                    guarded_prefix_hazard = True"),
+        "replacement": "                pass",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "file-input rebinding uncertainty dropped", "module": GREP,
+        "anchor": "    if (words[0] == name and _IDENTITY_MUTATION_VISIBLE.get() is not False):",
+        "replacement": "    if False:",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "interpreter option values treated as scripts", "module": GREP,
+        "anchor": (
+            "        return (len(words) < 2 or words[1].startswith(\"-\")\n"
+            "                or _token_has_live_unresolved(resolution.items[1])\n"
+            "                or _token_has_live_command_parameter(resolution.items[1]))"),
+        "replacement": (
+            "        operands = [word for word in words[1:] if not word.startswith(\"-\") or word == \"-\"]\n"
+            "        return not operands or operands[0] == \"-\""),
+        "allowed_statuses": (),
+    },
+    {
+        "label": "heredoc fast path ignores arithmetic state", "module": GREP,
+        "anchor": (
+            "    if (not arithmetic_depth and \"((\" not in line and \"<<\" not in line\n"
+            "            and '\"' not in line and \"'\" not in line):"),
+        "replacement": "    if \"<<\" not in line and '\"' not in line and \"'\" not in line:",
+        "allowed_statuses": (),
+    },
+    {
         "label": "pattern brace expansion adoption dropped", "module": GREP,
         "anchor": "            if live_brace_expansion((pattern, _pattern_q)):",
         "replacement": "            if False:",

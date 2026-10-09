@@ -80,6 +80,11 @@ UNRESOLVED = re.compile(
     r"\$[A-Za-z_{(]|`"
     r"|\{[^{},\s;|&()]*,[^{}\s;|&()]*\}"
     r"|\{[^{}.\s;|&()]*\.\.[^{}\s;|&()]*\}")
+# A regex pattern's braces are an interval quantifier unless the shell expands them, and
+# whether it does depends on quoting, which `live_brace_expansion` reads from the token.
+# Searching a pattern with UNRESOLVED read the quoted `'harness\b.{0,80}'` as a brace
+# expansion, called it shell-expanded, and skipped the atom scan that denies it.
+PATTERN_EXPANSION = re.compile(r"\$[A-Za-z_{(]|`")
 
 MAX_COMMAND_CHARS = 1024 * 1024
 MAX_SUBCOMMANDS = 16384
@@ -5831,7 +5836,10 @@ def _classify_source(command, scan_command, decisions, _shell_depth, _deadline, 
         bad_atoms = set()
         uncertain_atoms = set()
         for pattern, _pattern_q in patterns:
-            if UNRESOLVED.search(pattern):
+            # `$1`, `$@` and `$*` are values too; `PATTERN_EXPANSION` names only `$`
+            # followed by a name, a brace or a parenthesis.
+            if (PATTERN_EXPANSION.search(pattern)
+                    or _token_has_live_command_parameter((pattern, _pattern_q))):
                 unresolved = unresolved or pattern
                 continue
             literal_pattern = pattern
@@ -9343,6 +9351,36 @@ FIXTURES += [
      "2>/dev/null alias g='git grep -E'\ng 'harness\\b' -- README.md", "ask"),
     ("GREEN REDIRECTED SETTER: a redirected data command names no setter",
      "2>/dev/null printf '%s\\n' source; echo git show HEAD:README.md", "allow"),
+]
+
+
+FIXTURES += [
+    ("RED  INTERVAL: a single-quoted interval does not hide the atom before it",
+     "git grep -nE 'harness\\b.{0,80}' -- README.md", "deny"),
+    ("RED  INTERVAL: a double-quoted interval does not hide the atom before it",
+     'git grep -nE "harness\\b.{0,80}" -- README.md', "deny"),
+    ("RED  INTERVAL: an open interval keeps the whitespace atom live",
+     "git grep -nE '^\\s*#.*\\(#[0-9]{3,}\\)' HEAD -- src/", "deny"),
+    ("RED  INTERVAL: a log pattern interval keeps its atom live",
+     "git log -E --grep='fix\\b.{0,5}'", "deny"),
+    ("GREEN INTERVAL: a quoted interval with no atom is a literal ERE",
+     "git grep -nE '[0-9]{3,}' -- README.md", "allow"),
+    ("GREEN INTERVAL: a quoted bounded interval with no atom is a literal ERE",
+     "git grep -nE '[0-9]{1,3}\\.[0-9]{1,3}' -- README.md", "allow"),
+    ("RED  INTERVAL: an atom outside a live brace survives expansion",
+     "git grep -nE harness{a,b}\\\\b -- README.md", "deny"),
+    ("ASK  INTERVAL: a live brace with no atom outside it stays unresolved",
+     "git grep -nE 'harness'{a,b} -- README.md", "ask"),
+    ("ASK  POSITIONAL: a quoted positional parameter is the pattern's value",
+     'git grep -E "$1" -- README.md', "ask"),
+    ("ASK  POSITIONAL: an unquoted positional parameter is the pattern's value",
+     "git grep -E $1 -- README.md", "ask"),
+    ("ASK  POSITIONAL: the argument list can supply the pattern",
+     'git grep -E "$@" -- README.md', "ask"),
+    ("ASK  POSITIONAL: a function argument can supply the pattern",
+     "f(){ git grep -E \"$1\" -- README.md; }; f 'harness\\b'", "ask"),
+    ("GREEN POSITIONAL: a single-quoted dollar-digit is literal text",
+     "git grep -E 'cost: $1' -- README.md", "allow"),
 ]
 
 

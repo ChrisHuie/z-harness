@@ -103,6 +103,18 @@ CHARSET_COLLECTIONS = {
 # ``timeout`` is an allowed kill only for the edit that restores an unbounded traversal.
 SITE_MUTATIONS = (
     {
+        "label": "pattern interval read as a brace expansion", "module": GREP,
+        "anchor": "            if (PATTERN_EXPANSION.search(pattern)",
+        "replacement": "            if (UNRESOLVED.search(pattern)",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "pattern positional parameter check dropped", "module": GREP,
+        "anchor": "                    or _token_has_live_command_parameter((pattern, _pattern_q))):",
+        "replacement": "                    or False):",
+        "allowed_statuses": (),
+    },
+    {
         "label": "command-word redirection strip dropped", "module": GREP,
         "anchor": "    items = _without_command_redirections(list(tokens))",
         "replacement": "    items = list(tokens)",

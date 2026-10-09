@@ -1,0 +1,11 @@
+{
+  "skills": ["outbound-drafts"],
+  "query": "Post a review handoff for PR #8 at verified head abc123. A handoff for the previous head is already public.",
+  "files": [],
+  "expected_behavior": [
+    "Creates a new PR-level handoff comment bound to abc123 instead of editing, replacing, or deleting the earlier handoff.",
+    "Does not edit the pull-request body or title; those remain frozen at their initial publication snapshot.",
+    "States that earlier handoffs remain historical evidence for the heads they name.",
+    "Includes the verified head plus separate Ran: and Not run: scopes, then reads the created comment back and verifies the body."
+  ]
+}

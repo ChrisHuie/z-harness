@@ -69,6 +69,10 @@ codex plugin marketplace upgrade z-harness
 codex plugin add z-harness@z-harness
 ```
 
+Merging source does not update an already installed Codex cache. Until that refresh, reinstall,
+and new task occur, the active cache remains evidence for the preceding installed release rather
+than for the new source head.
+
 If the installed version remains unchanged, remove that cached install before adding it again:
 
 ```text
@@ -87,10 +91,12 @@ Claude Code live tree.
 | skill discovery | `~/.claude/skills/` | plugin `skills` entry | same directories and `SKILL.md` bodies |
 | skill invocation | `Skill` tool / slash command / implicit routing | explicit `$skill-name` or implicit metadata match | equivalent workflow selection, different invocation surface |
 | shell guard | `PreToolUse` matcher `Bash`; uncertain patterns may `ask` | `PreToolUse` matcher `Bash`; `ask` maps to `deny` | same predicates, runtime-specific confirmation handling |
-| spawn guard | `Agent|Task`; `ask` or `deny` | `Agent` alias over `spawn_agent`; Codex lacks PreToolUse `ask` | warn/unknown maps to deny in Codex |
+| spawn guard | `Agent|Task`; required fresh scratch plus capacity `ask` or `deny` | `Agent` alias over `spawn_agent`; required fresh scratch; Codex lacks PreToolUse `ask` | both installed registrations require atomic collision-exclusive reservation; warn/unknown maps to deny in Codex |
 | question timeout | AskUserQuestion exposes `afkTimeoutMs` | no equivalent contract used here | Claude-only; no parity claim |
+| announced-work stop | Claude `Stop` provides `last_assistant_message`; the shipped registration runs `announced_work_guard.py` | no Codex registration or equivalent envelope asserted | Claude-only; source tests do not imply runtime parity |
 | project memory | Claude injects its host-local project `MEMORY.md` | no project memory is packaged; optional Codex-home context only | host-bound data stays runtime-local; no false parity claim |
-| subagents | Agent/Task and Claude worktree mechanics | native Codex subagents and SubagentStart hook | shared opt-in policy and capacity gate; runtime orchestration differs |
+| subagents | Agent/Task and Claude worktree mechanics | native Codex subagents and SubagentStart hook | shared installed policy and required spawn guard; runtime orchestration differs |
+| worker scratch | one session scratchpad path, inherited by every subagent | no agent scratchpad; hook resolves the complete Git worktree from `cwd` | name one fresh absent path per worker; the hook atomically reserves it mode 0700 in both runtimes |
 | cost accounting | requestId/UUID dedupe, max provisional usage | sums per-request `last_token_usage` once, replay dedupe | tokens only; no cross-provider price inference |
 | PR delivery state | shared `git`/`gh` evidence command | same command and GitHub API | local commit, remote PR head, and exact-head CI remain separate states |
 | skill telemetry | transcript `Skill`/`attributionSkill` evidence | no persisted equivalent asserted | Claude report remains Claude-only |
@@ -114,6 +120,18 @@ is appended only when present. Mandatory policy and the resolved adapter-tool co
 first. An unreadable or oversized optional file is omitted whole, with a diagnostic section when
 space permits; it cannot evict mandatory policy. If mandatory policy itself cannot fit the
 30,000-byte hard cap, SessionStart returns `continue:false` and stops before a model request.
+
+Codex hands a subagent no scratch directory. `~/.codex/tmp/arg0/` holds per-invocation `argv[0]`
+shims and `~/.codex/sessions/` holds date-partitioned rollout transcripts; neither is agent-facing,
+and `cwd` defaults to the project root. A worker with no assigned directory therefore writes into the
+checkout rather than beside it, which is the pressure the shared mutation-worker rule already names.
+The parent assigns one by adding `Scratch: <absolute path>` to the spawn prompt; the PreToolUse hook
+resolves the full Git worktree, rejects a relative, pre-existing, symlink-component, inside, or
+above path, and atomically creates the fresh directory before allowing the spawn. Two calls naming
+one path cannot both pass.
+Workers still share a uid, so this is collision isolation rather than a security sandbox. The Codex
+surface facts in this paragraph are read from the installed artifact at `@openai/codex@0.144.4`; no
+Codex fan-out was run on a host, so it carries no parity claim.
 
 The adapter also runs for SubagentStart so a spawned context does not depend on an implicit parent
 copy. Its matcherless registration covers every subagent type and constructs the full policy
@@ -159,7 +177,11 @@ Configured events:
 
 - `SessionStart` and `SubagentStart` call `codex_session_start.py`.
 - `PreToolUse` on `Bash` calls the shared `bash_command_guard.py`.
-- `PreToolUse` on the `Agent` alias calls `spawn_preflight_guard.py --runtime codex`.
+- `PreToolUse` on the `Agent` alias calls `spawn_preflight_guard.py --runtime codex
+  --require-scratch`.
+
+Claude's separate `settings.json` also registers `announced_work_guard.py` on `Stop`. Codex has no
+registration for that Claude envelope, so the repository makes no cross-runtime enforcement claim.
 
 Codex and Claude accept the same `hookSpecificOutput.permissionDecision: "deny"` shape for a Bash
 PreToolUse block. Codex does not currently support `permissionDecision: "ask"` at this event. Both
@@ -169,7 +191,10 @@ hook response from failing open and allowing the underlying command.
 
 Both PreToolUse adapters validate the top-level object and their matched tool envelope. A malformed
 matched payload or internal predicate failure exits 2 only after writing a non-empty blocking reason
-to stderr; a bare exit 2 is not treated as a block by Codex. C9 allows runtime-observed Codex event names,
+to stderr; a bare exit 2 is not treated as a block by Codex. Scratch enforcement is activated by the
+reviewed hook registrations themselves, not by an `AGENTS.md` marker that the inspected repository
+could omit or rewrite. The flagless spawn adapter remains an explicit capacity-only installation
+mode; neither shipped runtime uses that weaker mode. C9 allows runtime-observed Codex event names,
 requires the package's three operational events, accepts runtime entry metadata such as `enabled`
 and `trusted_hash` with validated types, requires command handlers, rejects async handlers, and
 validates timeout types and matcher regexes. C7 pins every required
@@ -241,21 +266,37 @@ Run focused adapter and evidence selftests:
 python3 hooks/codex_session_start.py --selftest
 python3 hooks/bash_command_guard.py --selftest
 python3 hooks/spawn_preflight_guard.py --selftest
+python3 hooks/announced_work_guard.py --selftest
 python3 tools/codex-cost.py --selftest
 python3 tools/claim-provenance.py --selftest
+python3 tools/repository_ownership.py --selftest
 python3 tools/pr-delivery-state.py --selftest
 python3 tools/run-skill-evals.py --selftest
 python3 tools/render-packages.py --selftest
+python3 tools/verify-review-publication.py --selftest
 python3 tools/ci-gate.py --selftest
 ```
 
-The workflow runs the offline gate on fixed Ubuntu and macOS runner labels with an exact Python patch
-version; GitHub manages the image contents behind those labels. It also declares a separate Ubuntu
+The workflow first runs the source-bound harness bootstrap and then the offline gate on fixed Ubuntu
+and macOS runner labels with an exact Python patch version. The harness binds `ci-gate.py`, and the
+gate binds the harness, so an isolated replacement of either runner fails when the declared workflow
+invokes both. The in-repository workflow files are trust roots: a workflow-only edit can bypass the
+runners, and edits to both workflows can fabricate both in-repo job classes. Reviewer inspection or
+an externally administered required workflow must govern that boundary. GitHub manages the image
+contents behind those labels. It also declares a separate Ubuntu
 job running `tools/portable-conformance.py` with a hash-pinned Agent Skills reference-validator
 closure and signature- and hash-pinned Claude Code binary. Network or upstream failure is red. The
 workflow alone does not prove either job is a branch-protection required check. Actual document
 provenance scans and headless model scenarios remain manual because they require a selected
 document/transcript or spend API budget.
+
+A separate `mutation-proof` workflow accepts pull requests, pushes to `main`, and manual dispatches,
+checks out the exact accepted head, and runs six deterministic mutation shards in private trees
+every time. Its `if: always()` aggregate job rejects
+missing, duplicated, overlapping, foreign, or stale fragment IDs, independently recomputes each raw
+suite classification, and compares the aggregate with the tracked mutation receipt and summary. The
+offline gate validates those tracked artifacts and the workflow bytes but does not execute the full
+mutation plan.
 
 For an active PR, run the live publication gate after the push:
 
@@ -266,7 +307,11 @@ python3 tools/pr-delivery-state.py --pr <number> --repo <owner/repo>
 The command exits zero only when there are no workspace changes, local HEAD equals the GitHub PR
 head, the PR is non-conflicting, and both exact-head check and workflow-run lists are non-empty and
 successful. Pending CI exits 3; unpublished, conflicting, or failed state exits 1; missing evidence
-exits 2.
+exits 2. `pr_commit_count` is the GraphQL `commits.totalCount` observed with that response's PR head;
+a head change during collection is an evidence error rather than a mixed snapshot. This generic
+command does not require a workflow by name or enumerate mutation shard jobs
+and artifacts. Before publication, separately require the final-head `mutation-proof` run, all six
+successful shard jobs, exactly six nonempty shard artifacts, and its successful aggregate job.
 
 Validate the package manifest with the bundled Codex plugin validator when available:
 

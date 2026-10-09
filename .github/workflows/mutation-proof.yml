@@ -1,0 +1,117 @@
+name: mutation-proof
+# The sweep re-measures every mutation to prove the committed receipt is truthful rather than
+# merely self-consistent, which is the one thing the offline gate cannot do: it recomputes
+# from the receipt's own contents and can never re-measure. It is the only check that tells a
+# real measurement from a fabricated one, so it must reach every head.
+#
+# Every accepted head is measured afresh by the same six shards. A path filter, selector, or
+# inherited receipt would leave the result dependent on unverified prior workflow and runner
+# state; absence and self-consistency are not measurement evidence.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mutations:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: 3.13.14
+      - name: install zsh and assert the exact accepted head
+        timeout-minutes: 10
+        run: |
+          # A stalled mirror does not fail, it hangs: `update` sat on one InRelease fetch
+          # until the step budget killed it, so `|| true` never fired -- that guards against
+          # a non-zero exit, not against never exiting. Each refresh is bounded instead, and
+          # is advisory because the runner image ships package lists an install can already
+          # satisfy. `zsh --version` remains the assertion: an absent interpreter still fails
+          # this step, so resilience is not bought with coverage.
+          # No backslash continuations here: this file is pinned byte-for-byte inside a
+          # Python string literal, where a trailing backslash is a line continuation and
+          # would collapse, so the pin could never match the file.
+          APT_OPTS="-o Acquire::Retries=2 -o Acquire::http::Timeout=15"
+          for attempt in 1 2 3; do
+            sudo timeout 120 apt-get update $APT_OPTS || true
+            sudo apt-get install -y zsh && break
+            echo "apt attempt $attempt did not yield zsh; retrying"
+            sleep 10
+          done
+          zsh --version
+          git rev-parse HEAD | grep -Fx '${{ github.event.pull_request.head.sha || github.sha }}'
+      - name: run mutation shard
+        run: >-
+          python3 tools/write-mutation-receipt.py
+          --shard-index ${{ matrix.shard }}
+          --shard-count 6
+          --fragment mutation-fragment-${{ matrix.shard }}.json
+          --expected-head '${{ github.event.pull_request.head.sha || github.sha }}'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mutation-fragment-${{ matrix.shard }}
+          path: mutation-fragment-${{ matrix.shard }}.json
+          if-no-files-found: error
+          retention-days: 7
+
+  aggregate:
+    if: always()
+    needs: mutations
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: 3.13.14
+      - name: install zsh and assert the exact accepted head
+        timeout-minutes: 10
+        run: |
+          # A stalled mirror does not fail, it hangs: `update` sat on one InRelease fetch
+          # until the step budget killed it, so `|| true` never fired -- that guards against
+          # a non-zero exit, not against never exiting. Each refresh is bounded instead, and
+          # is advisory because the runner image ships package lists an install can already
+          # satisfy. `zsh --version` remains the assertion: an absent interpreter still fails
+          # this step, so resilience is not bought with coverage.
+          # No backslash continuations here: this file is pinned byte-for-byte inside a
+          # Python string literal, where a trailing backslash is a line continuation and
+          # would collapse, so the pin could never match the file.
+          APT_OPTS="-o Acquire::Retries=2 -o Acquire::http::Timeout=15"
+          for attempt in 1 2 3; do
+            sudo timeout 120 apt-get update $APT_OPTS || true
+            sudo apt-get install -y zsh && break
+            echo "apt attempt $attempt did not yield zsh; retrying"
+            sleep 10
+          done
+          zsh --version
+          git rev-parse HEAD | grep -Fx '${{ github.event.pull_request.head.sha || github.sha }}'
+      - name: refuse a head whose shards did not all succeed
+        if: needs.mutations.result != 'success'
+        run: |
+          echo "mutations result: ${{ needs.mutations.result }}"
+          exit 1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: mutation-fragment-*
+          path: mutation-fragments
+          merge-multiple: true
+      - name: reject incomplete evidence and compare the tracked receipt
+        run: >-
+          python3 tools/write-mutation-receipt.py
+          --aggregate mutation-fragments/*.json

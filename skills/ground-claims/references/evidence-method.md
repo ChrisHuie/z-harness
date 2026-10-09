@@ -84,4 +84,6 @@ This verifier cannot detect a claim that cites no path or a quotation outside it
 - Using one `[V]` badge for mixed evidence.
 - Promoting a contradicted claim or non-clearing verifier result to `[V]` because its evidence was inspected.
 - Trusting a tool's semantics without confirming them. A sort order, version comparison, glob, or regex dialect can return a confident wrong answer with no error; when a tool's output is load-bearing, confirm it did what you think.
+- Applying a `[D]` claim as if it were `[V]`. Nothing downstream carries the tier unless you do — promote by re-reading, or mark what you write `[D]` too. `agent-dispatch`'s disagreement rule fires only on conflicting reports, so a lone agreeing report trips nothing.
+- Grading an extracted line without opening its enclosing block. Subject, version and the claim's own positive controls sit routinely one to three lines away, so a line graded alone is graded against a subject you inferred rather than read.
 - Lowering the bar after a run of corroborating reads. A confirming streak never trips a re-check, so the least-verified step is the one after several that agreed.

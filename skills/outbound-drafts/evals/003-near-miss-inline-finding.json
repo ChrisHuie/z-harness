@@ -1,0 +1,9 @@
+{
+  "skills": ["outbound-drafts", "pr-review-method"],
+  "query": "Review this pull request and post the bug you found on src/parser.py line 84.",
+  "files": [],
+  "expected_behavior": [
+    "Routes the path-and-line finding to pr-review-method as an inline review thread rather than a PR-level handoff.",
+    "Does not use a handoff comment as the lifecycle for an individual finding."
+  ]
+}

@@ -2,7 +2,7 @@
 
 31 rank-A rules (violating one ships a false green or a false finding) plus 13 rank-B/C rules,
 kept here because the body could not hold them without stripping the mechanism from a rule it
-already carries. Registry ids are `PRINCIPLE-REGISTRY.md` §3 row numbers.
+already carries. Registry ids are stable R-numbers; they identify a rule, not a document in this repository.
 
 Read this file when the body's rule fired and did not resolve the case, or when the work is in
 one of the sections below. All seven headings are name-cited from the body; they are marked

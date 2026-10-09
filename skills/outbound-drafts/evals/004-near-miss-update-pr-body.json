@@ -1,0 +1,11 @@
+{
+  "skills": ["outbound-drafts"],
+  "query": "Update the PR body with the latest head and replace the old evidence block.",
+  "files": [],
+  "expected_behavior": [
+    "Does not edit or replace the published pull-request body or title.",
+    "Creates a new exact-head comment containing the correction or current evidence instead.",
+    "Leaves the earlier body and comments as historical records and links the superseded evidence where useful.",
+    "Reads the new comment back and verifies its bytes and metadata after publication."
+  ]
+}

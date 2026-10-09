@@ -103,6 +103,36 @@ CHARSET_COLLECTIONS = {
 # ``timeout`` is an allowed kill only for the edit that restores an unbounded traversal.
 SITE_MUTATIONS = (
     {
+        "label": 'stdin script path read as a file in a POSIX shell', "module": GREP,
+        "anchor": '    return explicit_stdin or not operands or operands[0] in STDIN_SCRIPT_PATHS',
+        "replacement": '    return explicit_stdin or not operands',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'stdin script path read as a file in zsh', "module": GREP,
+        "anchor": '        and (not operands or words[operands[0]] in STDIN_SCRIPT_PATHS))',
+        "replacement": '        and not operands)',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'shell script operand not checked', "module": GREP,
+        "anchor": '        script = shell_script_operand(resolution.items)\n        if script is not None:',
+        "replacement": '        script = None\n        if script is not None:',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'POSIX script operand index not found', "module": GREP,
+        "anchor": '        return index\n    return None\n\n\ndef shell_script_operand(items):',
+        "replacement": '        return None\n    return None\n\n\ndef shell_script_operand(items):',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'zsh script operand index not recorded', "module": GREP,
+        "anchor": '    operand_index = operands[0] if operands and not command_mode else None',
+        "replacement": '    operand_index = None',
+        "allowed_statuses": (),
+    },
+    {
         "label": 'find exec argv not launched', "module": GREP,
         "anchor": '            if words[index] in ("-exec", "-execdir", "-ok", "-okdir"):',
         "replacement": '            if False:',
@@ -506,14 +536,15 @@ SITE_MUTATIONS = (
     },
     {
         "label": "command-word redirection strip dropped", "module": GREP,
-        "anchor": "    items = _without_command_redirections(list(tokens))",
+        "anchor": "    items = _without_redirection_tokens(list(tokens))",
         "replacement": "    items = list(tokens)",
         "allowed_statuses": (),
     },
     {
         "label": "process substitution read as a redirection", "module": GREP,
-        "anchor": '        if token[0].startswith(("<(", ">(")):',
-        "replacement": "        if False:",
+        "anchor": ('        match = (None if text.startswith(("<(", ">("))\n'
+                   '                 else _REDIRECTION_TOKEN.match(text))'),
+        "replacement": "        match = _REDIRECTION_TOKEN.match(text)",
         "allowed_statuses": (),
     },
     {

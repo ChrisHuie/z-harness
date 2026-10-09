@@ -185,6 +185,11 @@ and otherwise asks, because an appended `-P` can change the engine. A modifier t
 expands in the launcher's argv reaches a launched rev:path whatever the launcher does. A `sh -c`
 body handed to any other command -- `ssh`, a container runtime -- asks unless it is proven
 harmless.
+
+A shell whose script operand is `/dev/stdin`, `/dev/fd/0`, or `/proc/self/fd/0` reads standard
+input exactly as one with no operand does, so its here-string or redirect is the source it runs.
+A process-substitution or computed script operand -- `bash <(...)`, `sh "$SCRIPT"` -- is
+unresolved, as it is for `source`; a literal script file is outside inspection.
 A literal `< file` is questioned when its consumer is a shell, a potentially rebound bare name,
 an interpreter without an explicit first literal script operand, or an expansion. Interpreter
 options are not skipped to guess a program operand. `wc -l < file` with no visible rebinding and

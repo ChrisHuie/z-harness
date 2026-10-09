@@ -56,8 +56,8 @@ EVAL_SKILL_FLOOR = 7
 SUITE_FLOORS = {
     "harness_check": 230,
     "render-packages": 192,
-    "bash_command_guard": 1715,
-    "git_grep_engine_guard": 1481,
+    "bash_command_guard": 1728,
+    "git_grep_engine_guard": 1494,
     "zsh_rev_modifier_guard": 518,
 }
 EXPECTED_WORKFLOW = """name: harness-check
@@ -1050,7 +1050,7 @@ RETAINED_DECISION_COMMANDS = ROOT / "contracts/goldens/retained-guard-commands.j
 SUITE_SOURCE_GOLDEN = ROOT / "contracts/goldens/suite-sources.json"
 HARNESS_SOURCE = ROOT / "hooks/harness_check.py"
 REPOSITORY_OWNERSHIP_SOURCE = ROOT / "tools/repository_ownership.py"
-DECISION_CORPUS_FLOOR = 1320
+DECISION_CORPUS_FLOOR = 1333
 DECISION_WRITER_SHA256 = "8c4180468fc05a88c69fafba3a79f2387f5df2d1aa728def1670f5497a442e9d"
 RETAINED_DECISION_SCHEMA_VERSION = 1
 RETAINED_DECISION_NOTE = (
@@ -1313,7 +1313,7 @@ MUTATION_SUMMARY = ROOT / "contracts/goldens/mutation-summary.md"
 # only removes cannot express a kill for them. Two of its ten are caught, by fixtures
 # that depend on the removed escape producing a literal backslash.
 MUTATION_SURVIVOR_DEBT_CEILING = 88
-MUTATION_PLAN_FLOOR = 488
+MUTATION_PLAN_FLOOR = 496
 # Kills scored only because the recorded check count moved, with no assertion failing. A
 # guard that increments its counter once per element of the collection under mutation moves
 # that count on any removal, so such a kill is decided by loop structure before any probe
@@ -1409,8 +1409,14 @@ EXPECTED_MUTATION_COLLECTIONS = {
     ("hooks/guards/zsh_rev_modifier_guard.py", "MOD_PREFIXES"): 4,
     ("hooks/guards/zsh_rev_modifier_guard.py", "MOD_UNMODELLED"): 1,
     ("hooks/guards/git_grep_engine_guard.py", "_ANSI_C_SIMPLE_ESCAPES"): 13,
+    ("hooks/guards/git_grep_engine_guard.py", "STDIN_SCRIPT_PATHS"): 3,
 }
 EXPECTED_MUTATION_SITES = {
+    ("hooks/guards/git_grep_engine_guard.py", 'stdin script path read as a file in a POSIX shell'),
+    ("hooks/guards/git_grep_engine_guard.py", 'stdin script path read as a file in zsh'),
+    ("hooks/guards/git_grep_engine_guard.py", 'shell script operand not checked'),
+    ("hooks/guards/git_grep_engine_guard.py", 'POSIX script operand index not found'),
+    ("hooks/guards/git_grep_engine_guard.py", 'zsh script operand index not recorded'),
     ("hooks/guards/git_grep_engine_guard.py", "find exec argv not launched"),
     ("hooks/guards/git_grep_engine_guard.py", "xargs argv not launched"),
     ("hooks/guards/git_grep_engine_guard.py", "xargs replacement placeholder ignored"),
@@ -1812,7 +1818,7 @@ EXPECTED_MUTATION_SELECTORS = {
         ("a repeated core.worktree binds the effective candidate Git recognises",),
 }
 EXPECTED_MUTATION_SITE_DIGEST = (
-    "9142f8c74984850c81bc836044039770d069a6bded190a943da1d87d7519cb38"
+    "419ba606c353bf583c9187423894cfbd853561621865bcd60b6e44226bc20234"
 )
 EXPECTED_MUTATION_EXCLUSIONS = {
     "hooks/guards/git_grep_engine_guard.py::ALIAS_GUARDED":

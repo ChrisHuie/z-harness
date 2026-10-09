@@ -275,7 +275,7 @@ def _has_dynamic_command_word(source, deadline=None):
     except CommandParseError:
         return True
     for tokens in commands:
-        words = [token for token in _without_command_redirections(tokens)
+        words = [token for token in _without_redirection_tokens(tokens)
                  if token[0] not in CONTROL_KEYWORDS and not ASSIGNMENT.match(token[0])]
         while words and words[0][0] in {"builtin", "command", "exec"}:
             words = words[1:]
@@ -582,6 +582,11 @@ class ZshArgvState(NamedTuple):
     command_index: object
     reads_stdin: bool
     emulation: str = "zsh"
+    operand_index: object = None
+
+
+# A script operand naming standard input is read from stdin, exactly like no operand.
+STDIN_SCRIPT_PATHS = ("/dev/stdin", "/dev/fd/0", "/proc/self/fd/0")
 
 
 def scan_pcre_constructs(pattern):
@@ -1130,8 +1135,11 @@ def _zsh_argv_state(words, default=ZSH_EQUALS_ON):
         operands.append(index)
         break
     command_index = operands[0] if command_mode and operands else None
-    reads_stdin = explicit_stdin or (not command_mode and not operands)
-    return ZshArgvState(state, command_index, reads_stdin, emulation)
+    reads_stdin = explicit_stdin or (
+        not command_mode
+        and (not operands or words[operands[0]] in STDIN_SCRIPT_PATHS))
+    operand_index = operands[0] if operands and not command_mode else None
+    return ZshArgvState(state, command_index, reads_stdin, emulation, operand_index)
 
 
 def _shell_reads_stdin(words):
@@ -1165,7 +1173,43 @@ def _shell_reads_stdin(words):
             continue
         operands.append(word)
         index += 1
-    return explicit_stdin or not operands
+    return explicit_stdin or not operands or operands[0] in STDIN_SCRIPT_PATHS
+
+
+def _posix_shell_operand_index(words):
+    """Index of the script operand a POSIX-family shell runs, or None."""
+    options_with_values = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
+    index = 1
+    while index < len(words):
+        word = words[index]
+        if word == "--":
+            return index + 1 if index + 1 < len(words) else None
+        if word in options_with_values:
+            index += 2
+            continue
+        if word.startswith("--"):
+            index += 1
+            continue
+        if word.startswith(("-", "+")):
+            if "c" in word[1:] or "s" in word[1:]:
+                return None
+            index += 1
+            continue
+        return index
+    return None
+
+
+def shell_script_operand(items):
+    """The script operand a directly named shell runs, or None for `-c` or stdin."""
+    words = [word for word, _quoting in items]
+    if not words or os.path.basename(words[0]) not in SHELLS:
+        return None
+    if os.path.basename(words[0]) == "zsh":
+        state = _zsh_argv_state(words)
+        index = None if state.reads_stdin else state.operand_index
+    else:
+        index = None if _shell_reads_stdin(words) else _posix_shell_operand_index(words)
+    return None if index is None else items[index]
 
 
 def _header_stdin_shell(header, suffix="", deadline=None):
@@ -2401,31 +2445,13 @@ def _consume_exec_options(items):
     return None
 
 
-def _without_command_redirections(tokens):
-    """Drop redirection words, keeping process substitutions as the operands they are.
-
-    ``_REDIRECTION_TOKEN`` reads ``<(__PROCESS__)`` as an input redirection, so a plain
-    strip turned ``source <(...)`` into a bare ``source`` and allowed it.
-    """
-    kept, pending = [], []
-    for token in tokens:
-        if token[0].startswith(("<(", ">(")):
-            kept.extend(_without_redirection_tokens(pending))
-            pending = []
-            kept.append(token)
-        else:
-            pending.append(token)
-    kept.extend(_without_redirection_tokens(pending))
-    return kept
-
-
 def _source_command_invocation(tokens, current_shell="zsh"):
     """Return a wrapper-resolved command identity, remaining argv, and noglob state."""
     # A redirection may precede the command word: `2>/dev/null source <(...)` runs
     # source. Read with the redirection in place, the command word was `2>/dev/null`
     # and every caller -- setter visibility, computed source operands, alias state --
     # saw no command at all.
-    items = _without_command_redirections(list(tokens))
+    items = _without_redirection_tokens(list(tokens))
     noglob = False
     while items:
         word = items[0][0]
@@ -5736,7 +5762,11 @@ def _without_redirection_tokens(tokens):
     index = 0
     while index < len(tokens):
         text, quoting = tokens[index]
-        match = _REDIRECTION_TOKEN.match(text)
+        # A process substitution is an operand -- a /dev/fd path the command opens --
+        # never a redirection, though its `<(` reads as the input operator. Stripped,
+        # `source <(...)` and `bash <(...)` lost the operand that runs their code.
+        match = (None if text.startswith(("<(", ">("))
+                 else _REDIRECTION_TOKEN.match(text))
         if match is not None and quoting.startswith("mixed:"):
             modes = quoting.split(":", 1)[1]
             if any(mode != "U" for mode in modes[:match.start("tail")]):
@@ -6302,6 +6332,16 @@ def _classify_source(command, scan_command, decisions, _shell_depth, _deadline, 
                 "prefix (" + "; ".join(resolution.errors) + "); invoke Git directly "
                 "so the pattern engine can be verified."))
             continue
+        script = shell_script_operand(resolution.items)
+        if script is not None:
+            # A shell's script operand is the same boundary as `source`'s: a literal file
+            # is outside inspection, a computed one is source this guard never sees.
+            script_reason = _dynamic_source_operand_reason(script, False, _shell, equals_state)
+            if script_reason is not None:
+                decisions.append((
+                    "ask", f"{script_reason} {script[0]!r} is the script a shell runs; the "
+                    "emitted shell code is not executed by this guard, so use a literal "
+                    "script path or inspect and run the command directly"))
         invocation = nested_shell_invocation(resolution, _shell, _deadline)
         if invocation is not None:
             # Inspect the body first. Returning `ask` on `dynamic` before recursing meant
@@ -10280,6 +10320,36 @@ FIXTURES += [
      "git submodule foreach 'git status'", 'allow'),
     ('GREEN LAUNCHER: xargs removing files',
      'xargs -0 rm -f < list.txt', 'allow'),
+]
+
+
+FIXTURES += [
+    ('RED  STDIN SCRIPT: /dev/stdin as the script reads the here-string',
+     'sh /dev/stdin <<< "git grep -E \\"harness\\\\b\\" -- README.md"', 'deny'),
+    ('RED  STDIN SCRIPT: /dev/fd/0 as the script reads the here-string',
+     'bash /dev/fd/0 <<< "git grep -E \\"harness\\\\b\\" -- README.md"', 'deny'),
+    ('RED  STDIN SCRIPT: /proc/self/fd/0 as the script reads the here-string',
+     'zsh /proc/self/fd/0 <<< "git grep -E \\"harness\\\\b\\" -- README.md"', 'deny'),
+    ('RED  STDIN SCRIPT: a zsh option before the stdin path keeps it the script',
+     'zsh -f /dev/stdin <<< "git grep -E \\"harness\\\\b\\" -- README.md"', 'deny'),
+    ('ASK  STDIN SCRIPT: a dynamic here-string read through /dev/fd/0',
+     'zsh /dev/fd/0 <<< "$X"', 'ask'),
+    ('ASK  STDIN SCRIPT: a literal file fed to a /dev/stdin script',
+     'sh /dev/stdin < script.txt', 'ask'),
+    ('ASK  SCRIPT OPERAND: a process substitution is the script bash runs',
+     'bash <(echo "git grep -E \\"harness\\\\b\\" -- README.md")', 'ask'),
+    ('ASK  SCRIPT OPERAND: a process substitution is the script zsh runs',
+     "zsh <(printf '%s\\n' x)", 'ask'),
+    ('ASK  SCRIPT OPERAND: a computed script path',
+     'sh "$SCRIPT"', 'ask'),
+    ('GREEN SCRIPT OPERAND: a literal script file is outside inspection',
+     'bash script.sh', 'allow'),
+    ('GREEN STDIN SCRIPT: /dev/null fed to a /dev/stdin script',
+     'sh /dev/stdin < /dev/null', 'allow'),
+    ("GREEN STDIN SCRIPT: /dev/stdin after -c is the body's $0",
+     "bash -c 'echo hi' /dev/stdin", 'allow'),
+    ('GREEN SCRIPT OPERAND: process substitutions handed to a non-shell are files',
+     'diff <(sort a.txt) <(sort b.txt)', 'allow'),
 ]
 
 

@@ -56,7 +56,8 @@ EVAL_SKILL_FLOOR = 7
 SUITE_FLOORS = {
     "harness_check": 230,
     "render-packages": 192,
-    "bash_command_guard": 1864,
+    "bash_command_guard": 1871,
+    "credential_reach_guard": 73,
     "git_grep_engine_guard": 1630,
     "zsh_rev_modifier_guard": 522,
 }
@@ -949,6 +950,8 @@ def command_specs(render_root: Path) -> List[Tuple[List[str], ReceiptSpec]]:
          selftest_receipt("git_grep_engine_guard", SUITE_FLOORS["git_grep_engine_guard"])),
         ([python, "hooks/guards/zsh_rev_modifier_guard.py", "--selftest"],
          selftest_receipt("zsh_rev_modifier_guard", SUITE_FLOORS["zsh_rev_modifier_guard"])),
+        ([python, "hooks/guards/credential_reach_guard.py", "--selftest"],
+         selftest_receipt("credential_reach_guard", SUITE_FLOORS["credential_reach_guard"])),
         (
             [python, "tools/run-skill-evals.py", "--validate"],
             ReceiptSpec(
@@ -1350,11 +1353,13 @@ MUTATION_PLAN_FLOOR = 600
 # kill is real; which channel reports it is not a fact about the guards. Pinning the identity
 # keeps that observation review-visible; fresh aggregation separately derives and applies the
 # writer-owned ceiling before comparing platform-stable outcomes.
-# The receipt measured at cc9cdf7 recorded no count-only kill: on that mutation-proof run the
-# "W" deletion was caught by an assertion, while the runs at 3558407, 50baebb and 4df0012
-# reported it by check count alone. The reviewed set follows the committed measurement; the
-# ceiling of one still admits the count-only report a later run may observe.
-EXPECTED_UNASSERTED_KILLS: set[tuple] = set()
+# The receipt measured at b0cba01 records the "W" deletion by check count alone, as the runs
+# at 3558407, 50baebb, 4df0012 and 1f26536 did; only the run at cc9cdf7 caught it by an
+# assertion. The reviewed set follows the committed measurement, within the writer's ceiling
+# of one.
+EXPECTED_UNASSERTED_KILLS: set[tuple] = {
+    ("hooks/guards/zsh_rev_modifier_guard.py", "MOD_UNMODELLED", "W"),
+}
 EXPECTED_MUTATION_ADDITIONS = {
     (
         "hooks/guards/git_grep_engine_guard.py", "_GIT_TERMINAL_OPTIONS", "set",
@@ -2250,6 +2255,7 @@ REQUIRED_REVIEW_INCLUDES = {}
 REGISTERED_REVIEW_PATHS = frozenset({
     "README.md",
     "pr-8/frozen-publication.json",
+    "pr-25/frozen-publication.json",
 })
 HANDOFF_DOCTRINE = {
     "AGENTS.md": (
@@ -5244,10 +5250,15 @@ def selftest() -> int:
                     path.unlink()
                 elif path.is_dir():
                     path.rmdir()
-            (inventory_root / "pr-8").mkdir(exist_ok=True)
-            (inventory_root / "README.md").write_text("policy\n", encoding="utf-8")
-            (inventory_root / "pr-8/frozen-publication.json").write_text(
-                "{}\n", encoding="utf-8")
+            # Built from the registered set rather than from a second copy of it: a
+            # fixture that lists the paths itself goes stale the moment another pull
+            # request is registered, and reads as an inventory defect when it does.
+            for relative in sorted(REGISTERED_REVIEW_PATHS):
+                target = inventory_root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(
+                    "{}\n" if target.suffix == ".json" else "policy\n",
+                    encoding="utf-8")
 
         reset_review_inventory()
         expect("an exact review-document relative-path inventory clears",
@@ -5439,6 +5450,8 @@ def selftest() -> int:
             return Result(0, f"SELFTEST-SUMMARY suite=git_grep_engine_guard checks={expected_selftest_checks('git_grep_engine_guard')} failures=0\n")
         if "zsh_rev_modifier_guard.py" in joined:
             return Result(0, f"SELFTEST-SUMMARY suite=zsh_rev_modifier_guard checks={expected_selftest_checks('zsh_rev_modifier_guard')} failures=0\n")
+        if "credential_reach_guard.py" in joined:
+            return Result(0, f"SELFTEST-SUMMARY suite=credential_reach_guard checks={SUITE_FLOORS['credential_reach_guard']} failures=0\n")
         if "run-skill-evals.py" in joined:
             return Result(0, f"EVAL-VALIDATE-SUMMARY scenarios={EVAL_SCENARIO_FLOOR} "
                           f"skills={EVAL_SKILL_FLOOR} failures=0 scope=shape-only exit=0\n")
@@ -5450,7 +5463,7 @@ def selftest() -> int:
         "fake runner covers the production command registry",
         gate(fake_runner, emit_child_output=False) == 0,
     )
-    expect("production registry is non-empty", len(fake_calls) == 9)
+    expect("production registry is non-empty", len(fake_calls) == 10)
 
     def timeout_subprocess(argv, **_kwargs):
         if tuple(argv) == tuple(harness_argv):

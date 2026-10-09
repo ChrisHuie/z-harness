@@ -103,6 +103,18 @@ CHARSET_COLLECTIONS = {
 # ``timeout`` is an allowed kill only for the edit that restores an unbounded traversal.
 SITE_MUTATIONS = (
     {
+        "label": "command-word redirection strip dropped", "module": GREP,
+        "anchor": "    items = _without_command_redirections(list(tokens))",
+        "replacement": "    items = list(tokens)",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "process substitution read as a redirection", "module": GREP,
+        "anchor": '        if token[0].startswith(("<(", ">(")):',
+        "replacement": "        if False:",
+        "allowed_statuses": (),
+    },
+    {
         "label": "literal unresolved fast path dropped", "module": GREP,
         "anchor": '''    if "$" not in text and "`" not in text and "{" not in text:''',
         "replacement": "    if False:",

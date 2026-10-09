@@ -2021,9 +2021,31 @@ def _consume_exec_options(items):
     return None
 
 
+def _without_command_redirections(tokens):
+    """Drop redirection words, keeping process substitutions as the operands they are.
+
+    ``_REDIRECTION_TOKEN`` reads ``<(__PROCESS__)`` as an input redirection, so a plain
+    strip turned ``source <(...)`` into a bare ``source`` and allowed it.
+    """
+    kept, pending = [], []
+    for token in tokens:
+        if token[0].startswith(("<(", ">(")):
+            kept.extend(_without_redirection_tokens(pending))
+            pending = []
+            kept.append(token)
+        else:
+            pending.append(token)
+    kept.extend(_without_redirection_tokens(pending))
+    return kept
+
+
 def _source_command_invocation(tokens, current_shell="zsh"):
     """Return a wrapper-resolved command identity, remaining argv, and noglob state."""
-    items = list(tokens)
+    # A redirection may precede the command word: `2>/dev/null source <(...)` runs
+    # source. Read with the redirection in place, the command word was `2>/dev/null`
+    # and every caller -- setter visibility, computed source operands, alias state --
+    # saw no command at all.
+    items = _without_command_redirections(list(tokens))
     noglob = False
     while items:
         word = items[0][0]
@@ -9293,6 +9315,34 @@ FIXTURES += [
      'x=$((1 << 1\n; /bin/echo result', "ask"),
     ("RED SOURCE ARITHMETIC: a following command keeps its proven hazard",
      "x=$((1 << 1\n)); git grep -E 'harness\\b' -- README.md", "deny"),
+]
+
+
+FIXTURES += [
+    ("ASK REDIRECTED SETTER: a redirected source can rebind echo",
+     "2>/dev/null source ./setup.zsh; echo grep -E 'harness\\b' -- README.md", "ask"),
+    ("ASK REDIRECTED SETTER: a separated redirection keeps source visible",
+     "2> /dev/null source ./setup; echo grep -E 'harness\\b' -- README.md", "ask"),
+    ("ASK REDIRECTED SETTER: an input redirection keeps source visible",
+     "</dev/null source ./setup; echo grep -E 'harness\\b' -- README.md", "ask"),
+    ("ASK REDIRECTED SETTER: a redirected eval can define echo",
+     ">/dev/null eval 'echo(){ git \"$@\"; }'; echo grep -E 'harness\\b' -- README.md",
+     "ask"),
+    ("ASK REDIRECTED SOURCE: a redirected process-substitution source is unresolved",
+     "2>/dev/null source <(/usr/bin/printf '%s\\n' "
+     "\"git grep -E 'harness\\\\b' -- README.md\")", "ask"),
+    ("ASK REDIRECTED SOURCE: a redirected dot of a process substitution is unresolved",
+     "</dev/null . <(/usr/bin/printf '%s\\n' x)", "ask"),
+    ("ASK REDIRECTED SOURCE: a redirected computed operand is unresolved",
+     '2>/dev/null source "$FILE"', "ask"),
+    ("ASK REDIRECTED SOURCE: a trailing redirection leaves the operand in place",
+     "source <(/usr/bin/printf '%s\\n' x) 2>/dev/null", "ask"),
+    ("ASK REDIRECTED SOURCE: a process substitution is an operand, not a redirection",
+     "source <(/usr/bin/printf '%s\\n' x)", "ask"),
+    ("ASK REDIRECTED ALIAS: a redirected alias definition reaches its later use",
+     "2>/dev/null alias g='git grep -E'\ng 'harness\\b' -- README.md", "ask"),
+    ("GREEN REDIRECTED SETTER: a redirected data command names no setter",
+     "2>/dev/null printf '%s\\n' source; echo git show HEAD:README.md", "allow"),
 ]
 
 

@@ -1446,9 +1446,13 @@ def selftest():
     failures += (not ok)
     print(f"  {'PASS' if ok else 'FAIL'} tokenizer-linear   256 KiB in {elapsed:.3f}s (cap 1.5s)")
     def _verdict(command, runtime="claude", **extra):
+        """Grade one payload; a production exception is a failed case, never an allow."""
         payload = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
                    "tool_input": {"command": command}, **extra}
-        output = evaluate_payload(payload, runtime=runtime)
+        try:
+            output = evaluate_payload(payload, runtime=runtime)
+        except BaseException as exc:
+            return "<error>", f"{type(exc).__name__}: {exc}"
         spec = (output or {}).get("hookSpecificOutput", {})
         return spec.get("permissionDecision"), spec.get("permissionDecisionReason", "")
     for label, args, kwargs, want in (

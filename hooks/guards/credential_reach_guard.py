@@ -292,7 +292,7 @@ FIXTURES = [
     ("RED  sub reads codex auth file", "cat ~/.codex/auth.json | head -c 50", "sub", "claude", "deny"),
     ("RED  sub python reads hermes auth", "python3 - <<'EOF'\nimport json,os\njson.load(open(os.path.expanduser('~/.hermes/auth.json')))\nEOF", "sub", "claude", "deny"),
     ("RED  sub reads gh hosts file", "sed -n 1,5p $HOME/.config/gh/hosts.yml", "sub", "claude", "deny"),
-    ("RED  sub reads netrc", "grep machine /Users/q/.netrc", "sub", "claude", "deny"),
+    ("RED  sub reads netrc", "grep machine ~/.netrc", "sub", "claude", "deny"),
     ("RED  sub reads ssh private key", "cat ~/.ssh/id_ed25519", "sub", "claude", "deny"),
     ("RED  sub curl bearer header", "curl -sS -H 'Authorization: Bearer abc' https://api.example.com", "sub", "claude", "deny"),
     ("RED  sub curl attached header", "curl -sS -H'x-api-key: abc' https://api.example.com", "sub", "claude", "deny"),
@@ -348,10 +348,18 @@ MUTATION_PROBES = [("MODEL_CLIS", n) for n in ("codex", "hermes", "claude")] + \
     [("SHELLS", n) for n in ("bash", "zsh")]
 
 
+def _graded(cmd, subagent, runtime="claude"):
+    """A raising predicate is a failed case with its error, never a crash or an allow."""
+    try:
+        return decide(cmd, subagent=subagent, runtime=runtime)
+    except BaseException as exc:
+        return "<error>", f"{type(exc).__name__}: {exc}"
+
+
 def _run_fixtures():
     results = []
     for label, cmd, caller, runtime, want in FIXTURES:
-        got, _reason = decide(cmd, subagent=(caller == "sub"), runtime=runtime)
+        got, _reason = _graded(cmd, caller == "sub", runtime)
         results.append((label, want, got))
     return results
 
@@ -380,8 +388,8 @@ def selftest():
         failures += (not ok)
         print(f"  {'PASS' if ok else 'FAIL'} mutation  removing {name!r} from {coll} "
               f"changes {flipped} verdict(s)")
-    sub_deny, _ = decide("gh pr list", subagent=True)
-    main_allow, _ = decide("gh pr list", subagent=False)
+    sub_deny, _ = _graded("gh pr list", True)
+    main_allow, _ = _graded("gh pr list", False)
     ok = sub_deny == "deny" and main_allow == "allow"
     total += 1
     failures += (not ok)

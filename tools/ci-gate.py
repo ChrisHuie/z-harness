@@ -1350,9 +1350,11 @@ MUTATION_PLAN_FLOOR = 600
 # kill is real; which channel reports it is not a fact about the guards. Pinning the identity
 # keeps that observation review-visible; fresh aggregation separately derives and applies the
 # writer-owned ceiling before comparing platform-stable outcomes.
-EXPECTED_UNASSERTED_KILLS: set[tuple] = {
-    ("hooks/guards/zsh_rev_modifier_guard.py", "MOD_UNMODELLED", "W"),
-}
+# The receipt measured at cc9cdf7 recorded no count-only kill: on that mutation-proof run the
+# "W" deletion was caught by an assertion, while the runs at 3558407, 50baebb and 4df0012
+# reported it by check count alone. The reviewed set follows the committed measurement; the
+# ceiling of one still admits the count-only report a later run may observe.
+EXPECTED_UNASSERTED_KILLS: set[tuple] = set()
 EXPECTED_MUTATION_ADDITIONS = {
     (
         "hooks/guards/git_grep_engine_guard.py", "_GIT_TERMINAL_OPTIONS", "set",

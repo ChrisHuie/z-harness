@@ -103,6 +103,90 @@ CHARSET_COLLECTIONS = {
 # ``timeout`` is an allowed kill only for the edit that restores an unbounded traversal.
 SITE_MUTATIONS = (
     {
+        "label": 'eval-only source skips the call walk', "module": GREP,
+        "anchor": '    if not records and not _may_declare_through_eval(cmd):',
+        "replacement": '    if not records:',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'eval declaration gate closed', "module": GREP,
+        "anchor": '    return (not _EVAL_BINDING_WALK.get() and "eval" in source',
+        "replacement": '    return (False and "eval" in source',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'eval-declared functions not bound', "module": GREP,
+        "anchor": '        elif eval_possible:\n            bound, maybe_bound = _eval_declared_functions(tokens, deadline)',
+        "replacement": '        elif False:\n            bound, maybe_bound = _eval_declared_functions(tokens, deadline)',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'called function declarations not bound', "module": GREP,
+        "anchor": '            bound, maybe_bound = _source_declared_functions(declarations[name], deadline)',
+        "replacement": '            pass',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'binding outside a plain list made definite', "module": GREP,
+        "anchor": '        if not plain:\n            maybe_bound |= set(bound)\n            bound = {}',
+        "replacement": '        if False:\n            maybe_bound |= set(bound)\n            bound = {}',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'uncertain binding dropped', "module": GREP,
+        "anchor": '        for name in maybe_bound:\n            declarations.pop(name, None)\n            uncertain.add(name)',
+        "replacement": '        for name in ():\n            declarations.pop(name, None)\n            uncertain.add(name)',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'definite binding dropped', "module": GREP,
+        "anchor": '        for name, body in bound.items():\n            declarations[name] = body\n            uncertain.discard(name)\n    return tuple(invoked)',
+        "replacement": '        for name, body in ():\n            declarations[name] = body\n            uncertain.discard(name)\n    return tuple(invoked)',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'plain list accepts a conditional or pipeline operator', "module": GREP,
+        "anchor": '    if any(operator[2] != ";" or operator[3] != -1',
+        "replacement": '    if any(operator[3] != -1',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'plain list accepts a background &', "module": GREP,
+        "anchor": ' or source[operator[0]] == "&"\n           for operator in operators):',
+        "replacement": '\n           for operator in operators):',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'plain list accepts a subshell', "module": GREP,
+        "anchor": '    return not (_function_scope_pairs(source, (), deadline)\n                or _conditional_function_intervals',
+        "replacement": '    return not (False\n                or _conditional_function_intervals',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'plain list accepts a conditional block', "module": GREP,
+        "anchor": '                or _conditional_function_intervals(source, (), deadline))',
+        "replacement": '                or False)',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'plain list accepts a backtick substitution', "module": GREP,
+        "anchor": '    if "`" in source:\n        return False',
+        "replacement": '    if False:\n        return False',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'executed source conditional declaration trusted', "module": GREP,
+        "anchor": '        if (record.scope_start != -1 or record.pipeline_start >= 0\n                or record.conditional or record.maybe):\n            uncertain.add(record.name)\n            definite.pop(record.name, None)',
+        "replacement": '        if False:\n            uncertain.add(record.name)\n            definite.pop(record.name, None)',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'nested eval declarations trusted', "module": GREP,
+        "anchor": '            for name in set(inner_definite) | inner_uncertain:\n                uncertain.add(name)\n                definite.pop(name, None)',
+        "replacement": '            for name in ():\n                uncertain.add(name)\n                definite.pop(name, None)',
+        "allowed_statuses": (),
+    },
+    {
         "label": 'pickaxe flag after -- read', "module": GREP,
         "anchor": 'words[:words.index("--") if "--" in words\n                                                else len(words)]',
         "replacement": 'words',

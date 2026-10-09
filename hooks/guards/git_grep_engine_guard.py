@@ -105,6 +105,9 @@ ZSH_EQUALS_UNKNOWN = "unknown"
 _FUNCTION_RECORD_CACHE = contextvars.ContextVar(
     "git_grep_function_record_cache", default=None)
 _FUNCTION_RECORD_CACHE_MISS = object()
+# Set while a call walk splits its own segment, so that split does not start a second walk
+# for the same `eval`.
+_EVAL_BINDING_WALK = contextvars.ContextVar("git_grep_eval_binding_walk", default=False)
 # Whether the command being decided shows a way to rebind a bare command name: a function
 # declaration, `alias`, `eval`, `source`/`.`, `hash`, `enable`, `disable`, `autoload`, or a
 # write to a lookup table. Set once per public decision over parser-decoded command names,
@@ -2021,31 +2024,120 @@ def function_declaration_records(cmd, deadline=None):
     return annotated
 
 
+def _may_declare_through_eval(source):
+    """Whether a literal `eval` in ``source`` could declare a function for later calls."""
+    return (not _EVAL_BINDING_WALK.get() and "eval" in source
+            and any(mark in source for mark in ("(", ")", "function", "$'")))
+
+
+def _eval_declared_functions(tokens, deadline=None, depth=0):
+    """-> (definite {name: body}, uncertain names) a literal eval leaves in its shell."""
+    body = _literal_eval_source(tokens, "zsh")
+    if body is None:
+        return {}, set()
+    return _source_declared_functions(body, deadline, depth)
+
+
+def _source_declared_functions(body, deadline=None, depth=0):
+    """-> (definite {name: body}, uncertain names) source run in this shell leaves behind.
+
+    zsh runs an eval body and a called function's body in the calling shell, so a
+    function either declares is callable by every later command. A declaration the body
+    itself makes conditional, scopes to a subshell, or places in a pipeline is uncertain,
+    and so is one a nested eval makes.
+    """
+    definite, uncertain = {}, set()
+    for record in function_declaration_records(body, deadline):
+        if (record.scope_start != -1 or record.pipeline_start >= 0
+                or record.conditional or record.maybe):
+            uncertain.add(record.name)
+            definite.pop(record.name, None)
+        else:
+            definite[record.name] = record.body
+            uncertain.discard(record.name)
+    if "eval" in body:
+        if depth >= MAX_SOURCE_DEPTH:
+            raise CommandParseError(
+                f"eval nesting exceeds depth {MAX_SOURCE_DEPTH}")
+        for inner in split_commands(body, depth + 1, deadline):
+            inner_definite, inner_uncertain = _eval_declared_functions(
+                inner, deadline, depth + 1)
+            for name in set(inner_definite) | inner_uncertain:
+                uncertain.add(name)
+                definite.pop(name, None)
+    return definite, uncertain
+
+
+def _plain_command_list(source, deadline=None):
+    """Whether every command in ``source`` runs in this shell, unconditionally, in order."""
+    operators, _braces = _function_list_operators(source, (), deadline)
+    # `_function_list_operators` reads a backgrounding `&` as a separator; it forks.
+    if any(operator[2] != ";" or operator[3] != -1 or source[operator[0]] == "&"
+           for operator in operators):
+        return False
+    # Substitutions run in subshells and are walked after the main list, so a source with
+    # one is not plain; `$(` and `<(` are subshell pairs below, a backtick is not.
+    if "`" in source:
+        return False
+    return not (_function_scope_pairs(source, (), deadline)
+                or _conditional_function_intervals(source, (), deadline))
+
+
 def _invoked_function_contexts(source, declarations, uncertain=(), deadline=None):
     _check_decision_budget(deadline)
-    if not declarations and not uncertain:
+    eval_possible = _may_declare_through_eval(source)
+    if not declarations and not uncertain and not eval_possible:
         return ()
-    if source_has_dynamic_command_word(source, deadline):
+    walk = _EVAL_BINDING_WALK.set(True)
+    try:
+        return _walk_function_calls(
+            source, declarations, uncertain, eval_possible, deadline)
+    finally:
+        _EVAL_BINDING_WALK.reset(walk)
+
+
+def _walk_function_calls(source, declarations, uncertain, eval_possible, deadline):
+    # A binding an eval makes below needs no second check: `eval` is a visible rebinding,
+    # so every dynamic command word in this decision is already questioned.
+    if (declarations or uncertain) and source_has_dynamic_command_word(source, deadline):
         raise CommandParseError(
             "a dynamic command word may invoke a declared function")
+    commands = split_commands(source, _deadline=deadline)
+    plain = None
     invoked = []
-    for tokens in split_commands(source, _deadline=deadline):
+    for tokens in commands:
         words = [text for text, _quoting in tokens
                  if text not in CONTROL_KEYWORDS and not ASSIGNMENT.match(text)]
         if words and words[0] in uncertain:
             raise CommandParseError(
                 f"function {words[0]!r} is conditionally defined at this call site")
+        bound, maybe_bound = {}, set()
         if words and words[0] in declarations:
             name = words[0]
             invoked.append(FunctionInvocation(
                 name, declarations[name], tuple(declarations.items()),
                 frozenset(uncertain)))
-            continue
-        if (words and words[0] not in {"builtin", "command"}
+            bound, maybe_bound = _source_declared_functions(declarations[name], deadline)
+        elif (words and words[0] not in {"builtin", "command"}
                 and words[0] not in TRUSTED_EXTERNAL_NON_FORWARDING_COMMANDS
                 and any(name in words[1:] for name in set(declarations) | set(uncertain))):
             raise CommandParseError(
                 "a declared function appears behind an unmodelled invocation prefix")
+        elif eval_possible:
+            bound, maybe_bound = _eval_declared_functions(tokens, deadline)
+        if not bound and not maybe_bound:
+            continue
+        if plain is None:
+            plain = _plain_command_list(source, deadline)
+        if not plain:
+            maybe_bound |= set(bound)
+            bound = {}
+        for name in maybe_bound:
+            declarations.pop(name, None)
+            uncertain.add(name)
+        for name, body in bound.items():
+            declarations[name] = body
+            uncertain.discard(name)
     return tuple(invoked)
 
 
@@ -2132,7 +2224,7 @@ def extract_function_call_contexts(cmd, deadline=None):
     """Return calls with the declarations live at each proven invocation."""
     _check_decision_budget(deadline)
     records = function_declaration_records(cmd, deadline)
-    if not records:
+    if not records and not _may_declare_through_eval(cmd):
         return cmd, ()
     return _extract_function_region(
         cmd, records, 0, len(cmd), -1, {}, set(), None, deadline)
@@ -10906,6 +10998,60 @@ FIXTURES += [
      "alias g='git stash'; g", 'ask'),
     ('ASK  HAZARD ROUTE: a shell alias running config',
      "alias g='git config user.name'; g", 'ask'),
+]
+
+
+FIXTURES += [
+    ('RED  EVAL FUNCTION: a function an eval declares is called later',
+     'eval \'g() { git grep -E "harness\\b" -- README.md; }\'; g', 'deny'),
+    ('RED  EVAL FUNCTION: the call on the next line',
+     'eval \'g() { git grep -E "harness\\b" -- README.md; }\'\ng', 'deny'),
+    ('RED  EVAL FUNCTION: the function keyword form',
+     'eval \'function g { git grep -E "harness\\b" -- README.md; }\'; g', 'deny'),
+    ('RED  EVAL FUNCTION: an eval redefinition replaces the earlier body',
+     'g() { /bin/echo safe; }; eval \'g() { git grep -E "harness\\b" -- README.md; }\'; g', 'deny'),
+    ('RED  EVAL FUNCTION: a redirection before eval',
+     '2>/dev/null eval \'g() { git grep -E "harness\\b" -- README.md; }\'; g', 'deny'),
+    ('RED  CALLED FUNCTION: a function a called function declares',
+     'f() { g() { git grep -E "harness\\b" -- README.md; }; }; f; g', 'deny'),
+    ('GREEN EVAL FUNCTION: a declaration that is never called',
+     'eval \'g() { git grep -E "harness\\b" -- README.md; }\'', 'allow'),
+    ('GREEN EVAL FUNCTION: a call before the eval runs',
+     'g; eval \'g() { git grep -E "harness\\b" -- README.md; }\'', 'allow'),
+    ('GREEN EVAL FUNCTION: a later declaration replaces the eval body',
+     'eval \'g() { git grep -E "harness\\b" -- README.md; }\'; g() { /bin/echo safe; }; g', 'allow'),
+    ('GREEN EVAL FUNCTION: command skips functions',
+     'eval \'g() { git grep -E "harness\\b" -- README.md; }\'; command g', 'allow'),
+    ('GREEN CALLED FUNCTION: an outer function that is never called',
+     'f() { g() { git grep -E "harness\\b" -- README.md; }; }; g', 'allow'),
+    ('ASK  EVAL FUNCTION: an eval in a pipeline',
+     'eval \'g() { git grep -E "harness\\b" -- README.md; }\' | cat; g', 'ask'),
+    ('ASK  EVAL FUNCTION: an eval after &&',
+     'true && eval \'g() { git grep -E "harness\\b" -- README.md; }\'; g', 'ask'),
+    ('ASK  EVAL FUNCTION: an eval in a subshell',
+     '( eval \'g() { git grep -E "harness\\b" -- README.md; }\' ); g', 'ask'),
+    ('ASK  EVAL FUNCTION: a backgrounded eval',
+     'eval \'g() { git grep -E "harness\\b" -- README.md; }\' & g', 'ask'),
+    ('ASK  EVAL FUNCTION: an eval inside if',
+     'if true; then eval \'g() { git grep -E "harness\\b" -- README.md; }\'; fi; g', 'ask'),
+    ('GREEN EVAL FUNCTION: an eval in backticks runs in a subshell',
+     'x=`eval \'g() { git grep -E "harness\\b" -- README.md; }\'`; g', 'allow'),
+    ('GREEN EVAL FUNCTION: an eval in a heredoc runs in the child shell',
+     'bash <<\'EOF\'\neval \'g() { git grep -E "harness\\b" -- README.md; }\'\nEOF\ng', 'allow'),
+    ('GREEN EVAL FUNCTION: an eval in a command substitution runs in a subshell',
+     'x=$(eval \'g() { git grep -E "harness\\b" -- README.md; }\'); g', 'allow'),
+    ('RED  EVAL FUNCTION: a here-string does not fork the eval',
+     'eval \'g() { git grep -E "harness\\b" -- README.md; }\' <<< x; g', 'deny'),
+    ('ASK  EVAL FUNCTION: an eval and a call in separate backtick substitutions',
+     'x=`eval \'g() { git grep -E "harness\\b" -- README.md; }\'`; y=`g`', 'ask'),
+    ('ASK  EVAL FUNCTION: a nested eval',
+     'eval "eval \'g() { git grep -E "harness\\b" -- README.md; }\'"; g', 'ask'),
+    ('ASK  EVAL FUNCTION: a declaration the eval body makes conditional',
+     'eval \'true && g() { git grep -E "harness\\b" -- README.md; }\'; g', 'ask'),
+    ('ASK  CALLED FUNCTION: an eval inside a called function',
+     'f() { eval \'g() { git grep -E "harness\\b" -- README.md; }\'; }; f; g', 'ask'),
+    ('ASK  CALLED FUNCTION: a called function in a pipeline',
+     'f() { g() { git grep -E "harness\\b" -- README.md; }; }; f | cat; g', 'ask'),
 ]
 
 

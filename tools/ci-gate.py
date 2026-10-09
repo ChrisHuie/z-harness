@@ -56,9 +56,9 @@ EVAL_SKILL_FLOOR = 7
 SUITE_FLOORS = {
     "harness_check": 230,
     "render-packages": 192,
-    "bash_command_guard": 1816,
-    "git_grep_engine_guard": 1586,
-    "zsh_rev_modifier_guard": 518,
+    "bash_command_guard": 1845,
+    "git_grep_engine_guard": 1611,
+    "zsh_rev_modifier_guard": 522,
 }
 EXPECTED_WORKFLOW = """name: harness-check
 on:
@@ -1050,7 +1050,7 @@ RETAINED_DECISION_COMMANDS = ROOT / "contracts/goldens/retained-guard-commands.j
 SUITE_SOURCE_GOLDEN = ROOT / "contracts/goldens/suite-sources.json"
 HARNESS_SOURCE = ROOT / "hooks/harness_check.py"
 REPOSITORY_OWNERSHIP_SOURCE = ROOT / "tools/repository_ownership.py"
-DECISION_CORPUS_FLOOR = 1421
+DECISION_CORPUS_FLOOR = 1450
 DECISION_WRITER_SHA256 = "8c4180468fc05a88c69fafba3a79f2387f5df2d1aa728def1670f5497a442e9d"
 RETAINED_DECISION_SCHEMA_VERSION = 1
 RETAINED_DECISION_NOTE = (
@@ -1313,7 +1313,7 @@ MUTATION_SUMMARY = ROOT / "contracts/goldens/mutation-summary.md"
 # only removes cannot express a kill for them. Two of its ten are caught, by fixtures
 # that depend on the removed escape producing a literal backslash.
 MUTATION_SURVIVOR_DEBT_CEILING = 88
-MUTATION_PLAN_FLOOR = 572
+MUTATION_PLAN_FLOOR = 586
 # Kills scored only because the recorded check count moved, with no assertion failing. A
 # guard that increments its counter once per element of the collection under mutation moves
 # that count on any removal, so such a kill is decided by loop structure before any probe
@@ -1418,6 +1418,20 @@ EXPECTED_MUTATION_COLLECTIONS = {
     ("hooks/guards/git_grep_engine_guard.py", "GIT_CONFIG_SHORT_VALUE_OPTIONS"): 2,
 }
 EXPECTED_MUTATION_SITES = {
+    ("hooks/guards/git_grep_engine_guard.py", 'eval-only source skips the call walk'),
+    ("hooks/guards/git_grep_engine_guard.py", 'eval declaration gate closed'),
+    ("hooks/guards/git_grep_engine_guard.py", 'eval-declared functions not bound'),
+    ("hooks/guards/git_grep_engine_guard.py", 'called function declarations not bound'),
+    ("hooks/guards/git_grep_engine_guard.py", 'binding outside a plain list made definite'),
+    ("hooks/guards/git_grep_engine_guard.py", 'uncertain binding dropped'),
+    ("hooks/guards/git_grep_engine_guard.py", 'definite binding dropped'),
+    ("hooks/guards/git_grep_engine_guard.py", 'plain list accepts a conditional or pipeline operator'),
+    ("hooks/guards/git_grep_engine_guard.py", 'plain list accepts a background &'),
+    ("hooks/guards/git_grep_engine_guard.py", 'plain list accepts a subshell'),
+    ("hooks/guards/git_grep_engine_guard.py", 'plain list accepts a conditional block'),
+    ("hooks/guards/git_grep_engine_guard.py", 'plain list accepts a backtick substitution'),
+    ("hooks/guards/git_grep_engine_guard.py", 'executed source conditional declaration trusted'),
+    ("hooks/guards/git_grep_engine_guard.py", 'nested eval declarations trusted'),
     ("hooks/guards/git_grep_engine_guard.py", 'pickaxe flag after -- read'),
     ("hooks/guards/git_grep_engine_guard.py", 'git hazard log-family union dropped'),
     ("hooks/guards/git_grep_engine_guard.py", 'git hazard diff-regex union dropped'),
@@ -1851,7 +1865,7 @@ EXPECTED_MUTATION_SELECTORS = {
         ("a repeated core.worktree binds the effective candidate Git recognises",),
 }
 EXPECTED_MUTATION_SITE_DIGEST = (
-    "230330d190f62f225f0ef19c7ebdd1da79fa35ac2ba2d4c6ee169739a0bd5a65"
+    "9df9ee4c75414e4511e9a386038aa0e76e24aaef4715d3b4bbdf0a8b9380e465"
 )
 EXPECTED_MUTATION_EXCLUSIONS = {
     "hooks/guards/git_grep_engine_guard.py::ALIAS_GUARDED":

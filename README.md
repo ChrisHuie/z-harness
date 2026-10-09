@@ -138,7 +138,10 @@ The command guards inspect shell source without executing it. Visible zsh assign
 `commands`, `functions`, `dis_functions`, `aliases`, `galiases`, `saliases`, or `options`, and
 `hash name=path` writes, produce uncertainty even when the assigned name is unused or harmless.
 They are not interpreted as proof that Git will execute. Ordinary function and alias declarations
-retain their separate invocation analysis.
+retain their separate invocation analysis. zsh runs a literal `eval` body and a called function's
+body in the calling shell, so a function either one declares is graded at every later call. When
+that eval or call sits in a pipeline, a subshell, a substitution, a background job, or a
+condition, the later call is a question.
 
 An unquoted executable that zsh could generate or expand also produces uncertainty: `*`, `?`, a
 `[` with its `]` in the same word, a `(` with its `)`, `^`, a `#` after the first character, a

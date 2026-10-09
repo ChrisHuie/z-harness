@@ -1210,6 +1210,18 @@ FIXTURES += [
 ]
 
 
+FIXTURES += [
+    ('RED  EVAL FUNCTION: a function an eval declares is called later',
+     "eval 'g() { git show $SHA:src/f.py; }'; g", 'deny'),
+    ('RED  CALLED FUNCTION: a function a called function declares',
+     'f() { g() { git show $SHA:src/f.py; }; }; f; g', 'deny'),
+    ('GREEN EVAL FUNCTION: a declaration that is never called',
+     "eval 'g() { git show $SHA:src/f.py; }'", 'allow'),
+    ('GREEN CALLED FUNCTION: an outer function that is never called',
+     'f() { g() { git show $SHA:src/f.py; }; }; g', 'allow'),
+]
+
+
 def selftest():
     if not FIXTURES:
         print("SCAN SET EMPTY - zero fixtures is an error", file=sys.stderr)

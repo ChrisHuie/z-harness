@@ -128,7 +128,9 @@ def identity_mutation_visible(source, deadline=None):
     # spelling the command parser decodes, without reparsing large inert data tokens.
     # The parsed command position below, not a word inside a data argument, is authority.
     candidate = source.translate(str.maketrans("", "", "'\"\\"))
-    if "\\\n" not in source and not _IDENTITY_MUTATION.search(candidate):
+    # ANSI-C escapes spell a setter the dequoted text cannot show: `$'\x73ource'`.
+    if ("\\\n" not in source and "$'" not in source
+            and not _IDENTITY_MUTATION.search(candidate)):
         return False
     for tokens in split_commands(source, _deadline=deadline):
         if shell_identity_write(tokens) is not None:
@@ -543,6 +545,92 @@ def _has_unmodelled_case_pattern(body):
     ))
 
 
+def _ansi_c_quote_end(cmd, start):
+    """Return the index just past the ``$'...'`` string that opens at ``start``.
+
+    Inside ANSI-C quoting a backslash escapes the next character, so `\\'` does not close
+    the string. Every shell-source scanner shares this boundary: one that closed at `\\'`
+    read `$'a\\'b' && git show $REV:t/f.py # '` as a single quoted word and never saw
+    the Git command zsh runs.
+    """
+    index = start + 2
+    while index < len(cmd):
+        char = cmd[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "'":
+            return index + 1
+        index += 1
+    raise CommandParseError("command source has an unclosed ANSI-C quote")
+
+
+def _ansi_c_quote_end_in_line(line, start):
+    """Like ``_ansi_c_quote_end`` for scanners that read one physical line at a time.
+
+    Those scanners treat an unclosed quote as running to the end of the line, and an
+    ANSI-C string that continues onto the next line is read the same way.
+    """
+    try:
+        return _ansi_c_quote_end(line, start)
+    except CommandParseError:
+        return len(line)
+
+
+_ANSI_C_SIMPLE_ESCAPES = {
+    "a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r",
+    "t": "\t", "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?",
+}
+
+
+def decode_ansi_c(body):
+    """Decode the body of ``$'...'`` where zsh 5.9 and bash agree, else raise.
+
+    Measured on zsh 5.9: octal takes up to three digits and `\\x` up to two hex digits.
+    `\\c`, an unknown letter, and `\\x`, `\\u` or `\\U` without digits differ between
+    zsh and bash, and `\\u`/`\\U` are absent from bash 3.2, so those raise and the
+    command asks. A NUL ends the argument the program receives, so it raises too.
+    """
+    out = []
+    index = 0
+    while index < len(body):
+        char = body[index]
+        if char != "\\" or index + 1 >= len(body):
+            out.append(char)
+            index += 1
+            continue
+        escape = body[index + 1]
+        if escape in _ANSI_C_SIMPLE_ESCAPES:
+            out.append(_ANSI_C_SIMPLE_ESCAPES[escape])
+            index += 2
+            continue
+        if escape in "01234567":
+            end = index + 1
+            while end < len(body) and end - index - 1 < 3 and body[end] in "01234567":
+                end += 1
+            value = int(body[index + 1:end], 8)
+            if value == 0 or value > 0xFF:
+                raise CommandParseError("ANSI-C octal escape is NUL or out of byte range")
+            out.append(chr(value))
+            index = end
+            continue
+        if escape == "x":
+            end = index + 2
+            while end < len(body) and end - index - 2 < 2 and body[end] in string.hexdigits:
+                end += 1
+            if end == index + 2:
+                raise CommandParseError("ANSI-C `\\x` escape has no hex digits")
+            value = int(body[index + 2:end], 16)
+            if value == 0:
+                raise CommandParseError("ANSI-C hex escape is NUL")
+            out.append(chr(value))
+            index = end
+            continue
+        raise CommandParseError(
+            f"ANSI-C escape \\{escape} is read differently by zsh and bash")
+    return "".join(out)
+
+
 def _command_substitution(cmd, start):
     """Return (body, next-index) for a live ``$(...)`` command substitution."""
     depth = 1
@@ -558,6 +646,9 @@ def _command_substitution(cmd, start):
             if char == quote:
                 quote = ""
             index += 1
+            continue
+        if cmd.startswith("$'", index):
+            index = _ansi_c_quote_end(cmd, index)
             continue
         if char in ("'", '"'):
             quote = char
@@ -622,6 +713,9 @@ def _arithmetic_expansion(cmd, start, _depth=0):
                 quote = ""
             index += 1
             continue
+        if cmd.startswith("$'", index):
+            index = _ansi_c_quote_end(cmd, index)
+            continue
         if char in ("'", '"'):
             quote = char
             index += 1
@@ -682,6 +776,9 @@ def _parameter_expansion(cmd, start, _depth=0):
             if char == quote:
                 quote = ""
             index += 1
+            continue
+        if cmd.startswith("$'", index):
+            index = _ansi_c_quote_end(cmd, index)
             continue
         if char in ("'", '"'):
             quote = char
@@ -923,12 +1020,18 @@ def _scan_heredoc_operator(line, quote="", arithmetic_depth=0):
     while index < len(line):
         char = line[index]
         if quote:
-            if char == "\\" and quote == '"' and index + 1 < len(line):
+            # `$'` carries ANSI-C state across lines: there a backslash escapes the
+            # next character, so `\'` does not end the string.
+            if char == "\\" and quote in ('"', "$'") and index + 1 < len(line):
                 index += 2
                 continue
-            if char == quote:
+            if char == quote[-1]:
                 quote = ""
             index += 1
+            continue
+        if line.startswith("$'", index):
+            quote = "$'"
+            index += 2
             continue
         if char in ("'", '"'):
             quote = char
@@ -1251,6 +1354,9 @@ def _function_scope_pairs(cmd, records, deadline=None):
                 quote = ""
             index += 1
             continue
+        if cmd.startswith("$'", index):
+            index = _ansi_c_quote_end(cmd, index)
+            continue
         if char in ("'", '"'):
             quote = char
             index += 1
@@ -1330,6 +1436,11 @@ def _conditional_function_intervals(cmd, records, deadline=None):
                 quote = ""
             index += 1
             continue
+        if char == "$" and cmd.startswith("$'", index):
+            end = _ansi_c_quote_end(cmd, index)
+            masked[index:end] = " " * (end - index)
+            index = end
+            continue
         if char in ("'", '"'):
             masked[index] = " "
             quote = char
@@ -1395,6 +1506,9 @@ def _function_list_operators(cmd, records, deadline=None):
             if char == quote:
                 quote = ""
             index += 1
+            continue
+        if cmd.startswith("$'", index):
+            index = _ansi_c_quote_end(cmd, index)
             continue
         if char in ("'", '"'):
             quote = char
@@ -1552,6 +1666,11 @@ def function_declaration_records(cmd, deadline=None):
                 quote = ""
             index += 1
             continue
+        if cmd.startswith("$'", index):
+            end = _ansi_c_quote_end(cmd, index)
+            live[index:end] = [False] * (end - index)
+            index = end
+            continue
         if char in ("'", '"'):
             live[index] = False
             quote = char
@@ -1580,6 +1699,9 @@ def function_declaration_records(cmd, deadline=None):
                     continue
                 if char == quote:
                     quote = ""
+            elif cmd.startswith("$'", index):
+                index = _ansi_c_quote_end(cmd, index)
+                continue
             elif char in ("'", '"'):
                 quote = char
             elif char == "\\":
@@ -1849,6 +1971,14 @@ def split_commands(cmd, _parse_depth=0, _deadline=None):
         if c in " \t" and not pattern_depth:
             flush_tok()
             i += 1
+            continue
+        if c == "$" and cmd.startswith("$'", i):
+            # ANSI-C quoting is literal text after its escapes are decoded, so it joins
+            # the word as single-quoted bytes: `$'\x67it'` is the command word `git`.
+            end = _ansi_c_quote_end(cmd, i)
+            tok_modes.add("'")
+            append_tok(decode_ansi_c(cmd[i + 2:end - 1]), "'")
+            i = end
             continue
         if c in ("'", '"'):
             q = c
@@ -2970,6 +3100,11 @@ def _zsh_option_skeleton(source, deadline=None):
             if char == quote:
                 quote = ""
             index += 1
+            continue
+        if source.startswith("$'", index):
+            end = _ansi_c_quote_end_in_line(source, index)
+            live.extend(" " * (end - index))
+            index = end
             continue
         if char in ("'", '"'):
             quote = char
@@ -4809,6 +4944,9 @@ def _live_shell_operator_positions(line, operator):
                 quote = ""
             index += 1
             continue
+        if line.startswith("$'", index):
+            index = _ansi_c_quote_end_in_line(line, index)
+            continue
         if char in ("'", '"'):
             quote = char
             index += 1
@@ -4838,6 +4976,9 @@ def _live_interpreter_input_redirects(line):
             if char == quote:
                 quote = ""
             index += 1
+            continue
+        if line.startswith("$'", index):
+            index = _ansi_c_quote_end_in_line(line, index)
             continue
         if char in ("'", '"'):
             quote = char
@@ -4908,6 +5049,12 @@ def _parse_shell_input_word(line, start):
             continue
         if char.isspace() or char in ";|&<>":
             break
+        if line.startswith("$'", index):
+            end = _ansi_c_quote_end(line, index)
+            output.append(decode_ansi_c(line[index + 2:end - 1]))
+            consumed = True
+            index = end
+            continue
         if char in ("'", '"'):
             quote = char
             consumed = True
@@ -4957,6 +5104,9 @@ def live_here_string_sources(command):
                     quote = ""
                 index += 1
                 continue
+            if line.startswith("$'", index):
+                index = _ansi_c_quote_end_in_line(line, index)
+                continue
             if char in ("'", '"'):
                 quote = char
                 index += 1
@@ -5005,6 +5155,9 @@ def live_file_input_sources(command):
                 if char == quote:
                     quote = ""
                 index += 1
+                continue
+            if line.startswith("$'", index):
+                index = _ansi_c_quote_end_in_line(line, index)
                 continue
             if char in ("'", '"'):
                 quote = char
@@ -9381,6 +9534,76 @@ FIXTURES += [
      "f(){ git grep -E \"$1\" -- README.md; }; f 'harness\\b'", "ask"),
     ("GREEN POSITIONAL: a single-quoted dollar-digit is literal text",
      "git grep -E 'cost: $1' -- README.md", "allow"),
+]
+
+
+FIXTURES += [
+    ("RED  ANSI-C: a hex escape spells the Git executable",
+     "$'\\x67it' grep -E 'harness\\b' -- README.md", "deny"),
+    ("RED  ANSI-C: an escaped backslash completes the atom",
+     "git grep -E 'harness'$'\\\\b' -- README.md", "deny"),
+    ("RED  ANSI-C: a quoted option still selects the engine",
+     "git grep $'-E' 'harness\\b' -- README.md", "deny"),
+    ("RED  ANSI-C: a hex backslash completes the atom",
+     "git grep -E $'harness\\x5cb' -- README.md", "deny"),
+    ("RED  ANSI-C: a decoded shell body carries the hazard",
+     "sh -c $'git grep -E \\'harness\\\\b\\' -- README.md'", "deny"),
+    ("RED  ANSI-C: an escaped quote does not close the string before the hazard",
+     "echo $'a\\'b' && git grep -E 'harness\\b' -- README.md # '", "deny"),
+    ("RED  ANSI-C: an assignment's escaped quote does not hide the next command",
+     "x=$'a\\'b'; git grep -E 'harness\\b' -- README.md", "deny"),
+    ("RED  ANSI-C: a string spanning lines hides no heredoc operator",
+     "echo $'it\\'s\n<<EOF'\ngit grep -E 'harness\\b' -- README.md", "deny"),
+    ("RED  ANSI-C: a redirect target's escaped quote does not hide the hazard",
+     "wc -l < $'in\\'put.txt'; git grep -E 'harness\\b' -- README.md # '", "deny"),
+    ("RED  ANSI-C: a here-string's escaped quote does not hide the hazard",
+     "cat <<< $'a\\'b'; git grep -E 'harness\\b' -- README.md # '", "deny"),
+    ("ASK  ANSI-C: a hex escape can spell a setter",
+     "$'\\x73ource' ./setup; echo grep -E 'harness\\b' -- README.md", "ask"),
+    ("ASK  ANSI-C: an escape zsh and bash read differently stays unresolved",
+     "git grep -E $'harness\\d' -- README.md", "ask"),
+    ("ASK  ANSI-C: a NUL escape ends the argument the program receives",
+     "git grep -E $'harness\\x00' -- README.md", "ask"),
+    ("GREEN ANSI-C: a decoded commit message is data",
+     "git commit -m $'subject\\n\\nbody'", "allow"),
+    ("GREEN ANSI-C: dollar-quote inside double quotes is literal text",
+     "echo \"$'not ansi inside double quotes'\"; git status", "allow"),
+    ("GREEN ANSI-C: a decoded option cluster supplies its own pattern",
+     "git grep -E $'\\x2dharness' -- README.md", "allow"),
+]
+
+
+FIXTURES += [
+    ('RED  ANSI-C: a command substitution reads past an escaped quote',
+     "x=$(echo $'a)\\'b'; git grep -E 'harness\\b' -- README.md)", 'deny'),
+    ('RED  ANSI-C: arithmetic reads past an escaped quote',
+     "echo $(( $'\\'' )); git grep -E 'harness\\b' -- README.md", 'deny'),
+    ('RED  ANSI-C: a parameter default reads past an escaped quote',
+     "echo ${x:-$'a}\\'b'}; git grep -E 'harness\\b' -- README.md", 'deny'),
+    ('RED  ANSI-C: a declaration after an escaped quote is live',
+     "echo $'\\''; f() { git grep -E 'harness\\b' -- README.md; }; f # '", 'deny'),
+    ('RED  ANSI-C: a declaration body reads past an escaped quote',
+     "f() { echo $'}\\''; git grep -E 'harness\\b' -- README.md; }; f", 'deny'),
+    ('RED  ANSI-C: an escaped quote does not hide the closing keyword',
+     "if true; then echo $'\\''; fi; f() { git grep -E 'harness\\b' -- README.md; }; f # '", 'deny'),
+    ('RED  ANSI-C: an escaped quote does not hide a list separator',
+     "true && echo $'\\''; f() { git grep -E 'harness\\b' -- README.md; }; f # '", 'deny'),
+    ('RED  ANSI-C: an option setter quoted in the string leaves EQUALS on',
+     "echo $'\\' && setopt noequals \\''; =git grep -E 'harness\\b' -- README.md", 'deny'),
+    ('ASK  ANSI-C: a pipe to a shell after an escaped quote is live',
+     'echo $\'\\\'\' "$X" | sh # \'', 'ask'),
+    ('ASK  ANSI-C: process input to a shell after an escaped quote is live',
+     'echo $\'\\\'\'; sh < <(echo "$X") # \'', 'ask'),
+    ('GREEN ANSI-C: a decoded redirect target is a literal file',
+     "wc -l < $'input.txt'", 'allow'),
+    ('ASK  ANSI-C: a here-string to a shell after an escaped quote is live',
+     'echo $\'\\\'\'; sh <<< "$X" # \'', 'ask'),
+    ('ASK  ANSI-C: file input to a shell after an escaped quote is live',
+     "echo $'\\''; sh < script.txt # '", 'ask'),
+    ('ASK  ANSI-C: an octal NUL ends the argument the program receives',
+     "git grep -E $'harness\\0' -- README.md", 'ask'),
+    ('RED  ANSI-C: every simple escape decodes, so the atom before them stays live',
+     'git grep -E $\'harness\\\\b\\a\\b\\e\\E\\f\\n\\r\\t\\v\\\\\\\'\\"\\?\' -- README.md', 'deny'),
 ]
 
 

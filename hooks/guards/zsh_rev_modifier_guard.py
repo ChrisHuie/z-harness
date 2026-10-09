@@ -1130,6 +1130,14 @@ FIXTURES += [
 ]
 
 
+FIXTURES += [
+    ("RED  ANSI-C: an escaped quote does not close the string before the hazard",
+     "echo $'a\\'b' && git show $SHA:src/f.py # '", "deny"),
+    ("GREEN ANSI-C: a modifier spelled inside the string is literal text",
+     "git show HEAD$':t/f.py'", "allow"),
+]
+
+
 def selftest():
     if not FIXTURES:
         print("SCAN SET EMPTY - zero fixtures is an error", file=sys.stderr)

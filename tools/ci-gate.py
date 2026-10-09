@@ -56,9 +56,9 @@ EVAL_SKILL_FLOOR = 7
 SUITE_FLOORS = {
     "harness_check": 230,
     "render-packages": 192,
-    "bash_command_guard": 1598,
-    "git_grep_engine_guard": 1378,
-    "zsh_rev_modifier_guard": 504,
+    "bash_command_guard": 1631,
+    "git_grep_engine_guard": 1409,
+    "zsh_rev_modifier_guard": 506,
 }
 EXPECTED_WORKFLOW = """name: harness-check
 on:
@@ -1050,7 +1050,7 @@ RETAINED_DECISION_COMMANDS = ROOT / "contracts/goldens/retained-guard-commands.j
 SUITE_SOURCE_GOLDEN = ROOT / "contracts/goldens/suite-sources.json"
 HARNESS_SOURCE = ROOT / "hooks/harness_check.py"
 REPOSITORY_OWNERSHIP_SOURCE = ROOT / "tools/repository_ownership.py"
-DECISION_CORPUS_FLOOR = 1203
+DECISION_CORPUS_FLOOR = 1236
 DECISION_WRITER_SHA256 = "8c4180468fc05a88c69fafba3a79f2387f5df2d1aa728def1670f5497a442e9d"
 RETAINED_DECISION_SCHEMA_VERSION = 1
 RETAINED_DECISION_NOTE = (
@@ -1313,7 +1313,7 @@ MUTATION_SUMMARY = ROOT / "contracts/goldens/mutation-summary.md"
 # only removes cannot express a kill for them. Two of its ten are caught, by fixtures
 # that depend on the removed escape producing a literal backslash.
 MUTATION_SURVIVOR_DEBT_CEILING = 88
-MUTATION_PLAN_FLOOR = 409
+MUTATION_PLAN_FLOOR = 444
 # Kills scored only because the recorded check count moved, with no assertion failing. A
 # guard that increments its counter once per element of the collection under mutation moves
 # that count on any removal, so such a kill is decided by loop structure before any probe
@@ -1408,8 +1408,31 @@ EXPECTED_MUTATION_COLLECTIONS = {
     ("hooks/guards/zsh_rev_modifier_guard.py", "MOD_MEANING"): 13,
     ("hooks/guards/zsh_rev_modifier_guard.py", "MOD_PREFIXES"): 4,
     ("hooks/guards/zsh_rev_modifier_guard.py", "MOD_UNMODELLED"): 1,
+    ("hooks/guards/git_grep_engine_guard.py", "_ANSI_C_SIMPLE_ESCAPES"): 13,
 }
 EXPECTED_MUTATION_SITES = {
+    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C escaped quote closes the string'),
+    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C cross-shell escape accepted'),
+    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C hex NUL accepted'),
+    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C decode dropped in the tokenizer'),
+    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C skip dropped in command substitution'),
+    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C skip dropped in arithmetic expansion'),
+    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C skip dropped in parameter expansion'),
+    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C state dropped in the heredoc scanner'),
+    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C escapes dropped in carried heredoc state'),
+    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C skip dropped in function scope pairs'),
+    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C mask dropped in conditional intervals'),
+    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C skip dropped in function list operators'),
+    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C mask dropped in declaration liveness'),
+    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C skip dropped in declaration bodies'),
+    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C mask dropped in the option skeleton'),
+    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C skip dropped in shell operator positions'),
+    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C skip dropped in interpreter input redirects'),
+    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C decode dropped in shell input words'),
+    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C skip dropped in here-string sources'),
+    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C skip dropped in file-input sources'),
+    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C octal NUL accepted'),
+    ("hooks/guards/git_grep_engine_guard.py", "setter ANSI-C candidate fallback dropped"),
     ("hooks/guards/git_grep_engine_guard.py", "pattern interval read as a brace expansion"),
     ("hooks/guards/git_grep_engine_guard.py", "pattern positional parameter check dropped"),
     ("hooks/guards/git_grep_engine_guard.py", "command-word redirection strip dropped"),
@@ -1745,7 +1768,7 @@ EXPECTED_MUTATION_SELECTORS = {
         ("a repeated core.worktree binds the effective candidate Git recognises",),
 }
 EXPECTED_MUTATION_SITE_DIGEST = (
-    "976806ce3514c02f033bfdaffbb4f425f50e070acce287e938c28032325802d4"
+    "aa5b0dc8b109c59ab10b51dba4f7974304a7e2fe8d82db625082b592038588c8"
 )
 EXPECTED_MUTATION_EXCLUSIONS = {
     "hooks/guards/git_grep_engine_guard.py::ALIAS_GUARDED":

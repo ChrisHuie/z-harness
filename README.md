@@ -155,7 +155,10 @@ inspected.
 The guards read shell source the way the shell does: a quoted string continues across the
 newline it contains, a `#` that begins a word begins a comment that runs to the end of its line,
 a heredoc payload is data whose quoting belongs to the interpreter that consumes it, and a
-`case` pattern's `)` closes the pattern. `instruments/corpus_delta.py` measures what a guard
+`case` pattern's `)` closes the pattern. ANSI-C `$'...'` strings are decoded as zsh 5.9 decodes
+them, so `$'\x67it'` is `git` and `\'` does not close the string; an escape zsh and bash read
+differently (`\c`, an unknown letter, `\u`, `\U`, a digitless `\x`) or one that yields NUL is
+unresolved. `instruments/corpus_delta.py` measures what a guard
 change does to the real command corpus, base against head, and prints only aggregates.
 
 Uncertainty is questioned where it is relevant. A bare `echo` or `printf` in front of Git-looking

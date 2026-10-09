@@ -103,6 +103,18 @@ CHARSET_COLLECTIONS = {
 # ``timeout`` is an allowed kill only for the edit that restores an unbounded traversal.
 SITE_MUTATIONS = (
     {
+        "label": 'occurrence scan restarted per command', "module": GREP,
+        "anchor": '        scan = self.scans.get(pattern)\n        if scan is None:',
+        "replacement": '        scan = None\n        if scan is None:',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'absent-word occurrence shortcut dropped', "module": GREP,
+        "anchor": '            if not present:\n                return None',
+        "replacement": '            if False:\n                return None',
+        "allowed_statuses": (),
+    },
+    {
         "label": 'eval-only source skips the call walk', "module": GREP,
         "anchor": '    if not records and not _may_declare_through_eval(cmd):',
         "replacement": '    if not records:',

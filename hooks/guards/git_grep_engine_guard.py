@@ -3518,6 +3518,39 @@ def _zsh_option_skeleton(source, deadline=None):
     return "".join(live)
 
 
+class _CommandOccurrences:
+    """The first unused occurrence of each command's words in a quote-blanked source.
+
+    Commands are located in walk order, and a position one command takes is not given to
+    a later one. A word absent from the source rules its command out without a scan, and
+    commands that repeat one word sequence share one forward scan, so thousands of
+    `eval` or `source` commands cost one pass rather than one pass each.
+    """
+
+    def __init__(self, source):
+        self.source = source
+        self.used = set()
+        self.present = {}
+        self.scans = {}
+
+    def locate(self, words):
+        for word in words:
+            present = self.present.get(word)
+            if present is None:
+                present = self.present[word] = word in self.source
+            if not present:
+                return None
+        pattern = r"(?<![A-Za-z0-9_])" + r"\s+".join(re.escape(word) for word in words)
+        scan = self.scans.get(pattern)
+        if scan is None:
+            scan = self.scans[pattern] = re.finditer(pattern, self.source)
+        for match in scan:
+            if match.start() not in self.used:
+                self.used.add(match.start())
+                return match.start()
+        return None
+
+
 def zsh_equals_states(source, commands, initial=ZSH_EQUALS_ON, deadline=None):
     """State before each parsed command, preserving only proven straight-line changes.
 
@@ -3555,20 +3588,15 @@ def zsh_equals_states(source, commands, initial=ZSH_EQUALS_ON, deadline=None):
     )
     if complex_setter:
         state = ZSH_EQUALS_UNKNOWN
-    used_action_positions = set()
+    occurrences = _CommandOccurrences(lexical_source)
     for tokens in commands:
+        _check_decision_budget(deadline)
         states.append(state)
         action = _zsh_equals_option_action(tokens)
         if action is not None:
-            action_words = [re.escape(text) for text, _quoting in tokens
-                            if text not in CONTROL_KEYWORDS
-                            and not ASSIGNMENT.match(text)]
-            pattern = r"(?<![A-Za-z0-9_])" + r"\s+".join(action_words)
-            positions = [match.start() for match in re.finditer(
-                pattern, lexical_source) if match.start() not in used_action_positions]
-            position = positions[0] if positions else None
-            if position is not None:
-                used_action_positions.add(position)
+            position = occurrences.locate(
+                [text for text, _quoting in tokens
+                 if text not in CONTROL_KEYWORDS and not ASSIGNMENT.match(text)])
             inside_excluded_scope = (position is not None and any(
                 start <= position < end for start, end in excluded))
             if inside_excluded_scope:
@@ -3637,29 +3665,24 @@ def command_environment_states(
     dynamic_path_mutation = invoked_path_mutation or bool(re.search(
         r"(?:^|[;\s])(?:source|\.)\s+|\beval\b[^;\n]*\bPATH\b", lexical_source))
     operators, _record_braces = _function_list_operators(source, records, deadline)
-    used_positions = set()
+    first_list_operator = min((operator[0] for operator in operators
+                               if operator[2] in {"&&", "||", "|"}), default=None)
+    occurrences = _CommandOccurrences(lexical_source)
     for tokens in commands:
         _check_decision_budget(deadline)
         states.append((dict(current_env), current_lookup))
         action = _path_environment_action(tokens)
         if action is None:
             continue
-        words = [re.escape(word) for word, _quoting in tokens]
-        pattern = r"(?<![A-Za-z0-9_])" + r"\s+".join(words)
-        positions = [match.start() for match in re.finditer(pattern, lexical_source)
-                     if match.start() not in used_positions]
-        position = positions[0] if positions else None
-        if position is not None:
-            used_positions.add(position)
+        position = occurrences.locate([word for word, _quoting in tokens])
         if position is not None and any(start <= position < end
                                         for start, end in excluded):
             continue
         maybe = (position is None or dynamic_path_mutation
                  or (position is not None and any(
                      start < position < end for start, end in conditional))
-                 or (position is not None and any(
-                     operator[0] < position and operator[2] in {"&&", "||", "|"}
-                     for operator in operators)))
+                 or (position is not None and first_list_operator is not None
+                     and first_list_operator < position))
         if maybe:
             current_lookup = True
             continue

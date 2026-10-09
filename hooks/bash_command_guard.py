@@ -1284,6 +1284,33 @@ def selftest():
               f"{max(item[3] for item in observations):.3f}s (cap 4.5s)"
               f"{_budget_note(faults, len(observations))}")
 
+    # Each command that may move option or PATH state -- a dynamic command word, a
+    # `PATH=` assignment, `source` -- once cost a scan of the whole source. A few thousand
+    # of them ran past the five-second hook timeout, which lets the command through, or
+    # spent the decision budget and asked where main denied in half a second.
+    flood_hazard = "git grep -E 'harness\\b' -- README.md"
+    for label, command in (
+            ("dynamic-word", "$X a; " * 6000 + flood_hazard),
+            ("path-assignment", "PATH=/x:$PATH; " * 4000 + flood_hazard),
+            ("quoted-source",
+             "".join(f"source 'x{index}'; " for index in range(3000)) + flood_hazard)):
+        raw = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+        started = time.monotonic()
+        try:
+            result = subprocess.run(
+                [sys.executable, __file__], input=raw, capture_output=True, text=True,
+                timeout=5)
+            faults = _budget_faults([(result.returncode, result.stdout, result.stderr,
+                                      time.monotonic() - started)], "deny", 4.5)
+        except subprocess.TimeoutExpired:
+            faults = ["was killed at the 5s hook timeout"]
+        ok = not faults
+        total += 1
+        failures += (not ok)
+        print(f"  {'PASS' if ok else 'FAIL'} action-flood       {label:<16} "
+              f"want=deny {time.monotonic() - started:.3f}s (cap 4.5s)"
+              f"{_budget_note(faults, 1)}")
+
     cache_probe_source = "f(){ /bin/echo safe; }; f;" + "( : );" * 64
     annotation_calls = []
     original_annotate = grep_guard.annotate_function_declarations

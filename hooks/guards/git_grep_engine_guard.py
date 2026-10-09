@@ -159,6 +159,237 @@ def identity_mutation_scope(source, deadline=None):
         _IDENTITY_MUTATION_VISIBLE.reset(token)
 
 
+# How an unquoted `$NAME` in command position expands in the source being decided. zsh
+# keeps a scalar one word unless SH_WORD_SPLIT is on, but an array expands to one word per
+# element. An array cannot arrive through the environment and shell state does not survive
+# between tool calls, so a command that uses one also builds it where it can be seen; zsh's
+# own special arrays (`path`, `argv`, `funcstack`, ...) are all lowercase. The facts are
+# computed only when such a word is graded. Unset -- a direct call from outside `decide`
+# -- reads as splitting, the conservative answer.
+_SCALAR_WORD_CONTEXT = contextvars.ContextVar(
+    "git_grep_engine_guard_scalar_word_context", default=None)
+# Set around the nested decision of a `zsh -y`/`-o shwordsplit`/`--emulate sh` body.
+_WORD_SPLIT_INHERITED = contextvars.ContextVar(
+    "git_grep_engine_guard_word_split_inherited", default=False)
+_SCALAR_WORD_HINT = re.compile(
+    r"setopt|unsetopt|(?:^|[;&|(){}\s])set(?:$|[\s;&|)])|emulate|=\(|\]\+?="
+    r"|typeset|declare|local|readonly|export|integer|float|read|vared|zparseopts")
+
+
+class _ScalarWordContext:
+    """The source, shell and inherited splitting an unquoted command word is read under."""
+
+    def __init__(self, source, shell, inherited_split, deadline):
+        self.source = source
+        self.shell = shell
+        self.inherited_split = inherited_split
+        self.deadline = deadline
+        self._facts = None
+        self._dynamic = None
+
+    # Parsing the source can grade a dynamic command word, which asks for these facts
+    # again. The conservative answer stands in while they are being computed.
+    def facts(self):
+        if self._facts is None:
+            self._facts = (True, None)
+            self._facts = _scalar_word_facts(self.source, self.deadline)
+        return self._facts
+
+    def dynamic_command_word(self):
+        if self._dynamic is None:
+            self._dynamic = True
+            self._dynamic = _has_dynamic_command_word(self.source, self.deadline)
+        return self._dynamic
+
+    def splitting_possible(self):
+        split, arrays = self.facts()
+        return self.inherited_split or split or arrays is None or bool(arrays)
+
+
+def _scalar_word_facts(source, deadline=None):
+    """-> (SH_WORD_SPLIT may be on, names that may be arrays or None for any name)."""
+    if not _SCALAR_WORD_HINT.search(source):
+        return False, frozenset()
+    try:
+        commands = split_commands(source, _deadline=deadline)
+        skeleton = _zsh_option_skeleton(source, deadline)
+    except CommandParseError:
+        return True, None
+    arrays = {match.group(1) for match in re.finditer(
+        r"(?:^|[;&|(){}\s])([A-Za-z_][A-Za-z0-9_]*)(?:\+?=\(|\[[^\]\s]*\]\+?=)",
+        skeleton)}
+    word_split = False
+    any_array = False
+    for tokens in commands:
+        resolved = _source_command_invocation(tokens, "zsh")
+        if resolved is None:
+            continue
+        executable, items, _noglob = resolved
+        words = [text for text, _quoting in items]
+        dynamic = any(_token_has_live_unresolved(token)
+                      or _token_has_live_command_parameter(token) for token in items)
+        if executable in {"typeset", "declare", "local", "export", "readonly", "integer",
+                          "float", "read", "vared", "zparseopts"}:
+            if dynamic or any(word.startswith(("-", "+"))
+                              and ("a" in word[1:] or "A" in word[1:]) for word in words):
+                any_array = True
+        elif executable == "set":
+            word_split = word_split or dynamic
+            index = 0
+            while index < len(words):
+                word = words[index]
+                if word == "--" or len(word) < 2 or not word.startswith(("-", "+")):
+                    break
+                sign, letters = word[0], word[1:]
+                any_array = any_array or "A" in letters
+                option_at = letters.find("o")
+                flags = letters if option_at < 0 else letters[:option_at]
+                if sign == "-" and "y" in flags:
+                    word_split = True
+                if option_at >= 0:
+                    name = letters[option_at + 1:]
+                    if not name and index + 1 < len(words):
+                        index += 1
+                        name = words[index]
+                    normalized = re.sub(r"[-_]", "", name.lower())
+                    if ((sign == "-" and normalized == "shwordsplit")
+                            or (sign == "+" and normalized == "noshwordsplit")):
+                        word_split = True
+                index += 1
+        elif executable in {"setopt", "unsetopt"}:
+            wanted = "shwordsplit" if executable == "setopt" else "noshwordsplit"
+            word_split = word_split or dynamic or any(
+                re.sub(r"[-_]", "", word.lower()) == wanted for word in words)
+        elif executable == "emulate":
+            mode = next((word for word in words if not word.startswith(("-", "+"))), None)
+            word_split = word_split or dynamic or (mode is not None and mode != "zsh")
+    return word_split, (None if any_array else frozenset(arrays))
+
+
+def _has_dynamic_command_word(source, deadline=None):
+    """Whether an expansion chooses any command word in ``source``."""
+    if "$" not in source and "`" not in source:
+        return False
+    try:
+        commands = split_commands(source, _deadline=deadline)
+    except CommandParseError:
+        return True
+    for tokens in commands:
+        words = [token for token in _without_command_redirections(tokens)
+                 if token[0] not in CONTROL_KEYWORDS and not ASSIGNMENT.match(token[0])]
+        while words and words[0][0] in {"builtin", "command", "exec"}:
+            words = words[1:]
+            while words and words[0][0].startswith("-"):
+                words = words[1:]
+        if words and (_token_has_live_unresolved(words[0])
+                      or _token_has_live_command_parameter(words[0])):
+            return True
+    return False
+
+
+def _dynamic_command_word_visible():
+    """Whether the source being decided lets an expansion choose a command word.
+
+    Such a word can be `source`, `.` or `eval`, so it can rebind a bare name later in
+    the same source as a visible setter can. Unset reads as visible.
+    """
+    context = _SCALAR_WORD_CONTEXT.get()
+    return True if context is None else context.dynamic_command_word()
+
+
+def _zsh_startup_word_split(words):
+    """Whether a zsh invocation's startup options turn on SH_WORD_SPLIT or emulation."""
+    index = 1
+    while index < len(words):
+        word = words[index]
+        if word == "--" or not word.startswith(("-", "+")):
+            break
+        normalized = re.sub(r"[-_]", "", word.lower())
+        if word.startswith("--"):
+            if normalized == "shwordsplit":
+                return True
+            if normalized == "emulate":
+                mode = words[index + 1] if index + 1 < len(words) else ""
+                if mode != "zsh":
+                    return True
+                index += 1
+            index += 1
+            continue
+        letters = word[1:]
+        option_at = letters.find("o")
+        flags = letters if option_at < 0 else letters[:option_at]
+        if word[0] == "-" and "y" in flags:
+            return True
+        if option_at >= 0:
+            name = letters[option_at + 1:]
+            if not name and index + 1 < len(words):
+                index += 1
+                name = words[index]
+            normalized = re.sub(r"[-_]", "", name.lower())
+            if ((word[0] == "-" and normalized == "shwordsplit")
+                    or (word[0] == "+" and normalized == "noshwordsplit")):
+                return True
+        if "c" in flags:
+            break
+        index += 1
+    return False
+
+
+@contextlib.contextmanager
+def nested_word_split_scope(resolution, invocation):
+    """Carry a `zsh -y`, `-o shwordsplit` or `--emulate` startup option into the body."""
+    launcher = os.path.basename(resolution.items[0][0])
+    if launcher in {"eval", "trap"}:
+        # The body runs in this shell, under this source's options and arrays.
+        context = _SCALAR_WORD_CONTEXT.get()
+        startup_split = context is None or context.splitting_possible()
+    else:
+        startup_split = (
+            invocation.shell == "zsh" and launcher == "zsh"
+            and _zsh_startup_word_split([word for word, _quoting in resolution.items]))
+    token = _WORD_SPLIT_INHERITED.set(startup_split)
+    try:
+        yield startup_split
+    finally:
+        _WORD_SPLIT_INHERITED.reset(token)
+
+
+def nested_body_has_dynamic_command_word(resolution, invocation, deadline=None):
+    """Grade a nested body's command words under the shell and options that run it."""
+    with nested_word_split_scope(resolution, invocation), \
+            scalar_word_scope(invocation.command, invocation.shell, deadline):
+        return source_has_dynamic_command_word(invocation.command, deadline)
+
+
+@contextlib.contextmanager
+def scalar_word_scope(source, shell, deadline=None):
+    """Publish how unquoted command words expand while this source is decided."""
+    context = _ScalarWordContext(source, shell, _WORD_SPLIT_INHERITED.get(), deadline)
+    token = _SCALAR_WORD_CONTEXT.set(context)
+    # A further nested shell is a new process with its own startup options.
+    inherited_token = _WORD_SPLIT_INHERITED.set(False)
+    try:
+        yield context
+    finally:
+        _WORD_SPLIT_INHERITED.reset(inherited_token)
+        _SCALAR_WORD_CONTEXT.reset(token)
+
+
+def _unquoted_scalar_is_one_word(expansion):
+    """Whether an unquoted `$NAME`, `${NAME}` or `$N` command word stays one word."""
+    context = _SCALAR_WORD_CONTEXT.get()
+    if context is None or context.shell != "zsh" or context.inherited_split:
+        return False
+    # zsh splits unquoted command substitution output; only parameters are kept whole.
+    name = expansion[2:-1] if expansion.startswith("${") else expansion[1:]
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*|[0-9]+", name):
+        return False
+    if any(char.islower() for char in name):
+        return False
+    word_split, arrays = context.facts()
+    return not word_split and arrays is not None and name not in arrays
+
+
 @contextlib.contextmanager
 def function_record_cache_scope():
     """Share immutable function analysis inside one public guard decision."""
@@ -336,6 +567,7 @@ class HeredocFinding(NamedTuple):
     body: str
     prefix: str
     header_offset: int
+    quoted: bool = True
 
 
 class HeredocExpansionFinding(NamedTuple):
@@ -1298,7 +1530,7 @@ def extract_heredoc_sources(cmd, deadline=None, equals_findings=None,
                 if shell_findings is not None and single_shell_body:
                     shell_findings.append(HeredocFinding(
                         stdin_shell, clean_header, body, cmd[:cursor],
-                        clean_redirect_offsets[_start]))
+                        clean_redirect_offsets[_start], bool(quoted)))
             if not quoted:
                 expansion_sources = _heredoc_expansion_sources(body)
                 bodies.extend(expansion_sources)
@@ -2311,7 +2543,20 @@ def live_brace_expansion(token):
     if not text or not ("{" in text or "}" in text):
         return False
     modes = _source_operand_modes(token)[-len(text):]
-    return any(char in "{}" and mode == "U" for char, mode in zip(text, modes))
+    # The braces of an unquoted `${NAME}` delimit a parameter expansion, which the
+    # unresolved-expansion checks own; read as a brace group they questioned `${PY} x`.
+    index = 0
+    while index < len(text):
+        if text.startswith("${", index) and modes[index] == "U":
+            depth, index = 1, index + 2
+            while index < len(text) and depth:
+                depth += {"{": 1, "}": -1}.get(text[index], 0)
+                index += 1
+            continue
+        if text[index] in "{}" and modes[index] == "U":
+            return True
+        index += 1
+    return False
 
 
 def _dynamic_source_operand_reason(
@@ -3507,10 +3752,12 @@ _SHELL_SCRIPT_OPERAND = re.compile(r"\.(?:sh|bash|zsh|ksh|dash)$", re.IGNORECASE
 
 
 def _dynamic_executable_is_single_word(token):
-    """Prove only quoted scalar parameters and quoted substitution results are one word.
+    """Prove a command word's expansions cannot splice extra words into argv.
 
-    Unquoted expansions can splice argv through zsh arrays, explicit splitting, shell
-    options, or a POSIX child shell. Quoting alone is insufficient for ``"$@"`` and
+    Quoted scalar parameters and quoted substitution results are one word. Unquoted, zsh
+    keeps a scalar parameter whole and splits substitution output; a POSIX child shell,
+    a visible SH_WORD_SPLIT or a visible array splits the parameter too
+    (`_unquoted_scalar_is_one_word`). Quoting alone is insufficient for ``"$@"`` and
     flagged/array parameter forms. Unmodelled expansions retain uncertainty.
     """
     text, _quoting = token
@@ -3524,8 +3771,12 @@ def _dynamic_executable_is_single_word(token):
             index += 1
             continue
         match = scalar.match(text, index)
-        if (match is None
-                or any(mode != "D" for mode in modes[index:match.end()])):
+        if match is None:
+            return False
+        span = modes[index:match.end()]
+        if any(mode != "D" for mode in span) and not (
+                all(mode == "U" for mode in span)
+                and _unquoted_scalar_is_one_word(match.group(0))):
             return False
         index = match.end()
     return True
@@ -4178,7 +4429,9 @@ def unwrap_command_prefix(tokens, shell="zsh", equals_state=ZSH_EQUALS_ON,
         # exposure is the same for every bare name and is not modelled for any other.
         explicit_harmless = (
             executable_text in TRUSTED_EXTERNAL_NON_FORWARDING_COMMANDS
-            or ((bypasses_shell_identity or _IDENTITY_MUTATION_VISIBLE.get() is False)
+            or ((bypasses_shell_identity
+                 or (_IDENTITY_MUTATION_VISIBLE.get() is False
+                     and not _dynamic_command_word_visible()))
                 and executable_text == executable
                 and executable in SHELL_NON_FORWARDING_COMMANDS)
         )
@@ -4370,9 +4623,18 @@ def heredoc_equals_decision(
                       else f"a {finding.shell} heredoc contains guarded `=git` syntax but its "
                       "executable identity is not proven")
         else:
-            decision, reason = classifier(
-                finding.body, finding.shell, state, deadline,
-                resolved_env, resolved_lookup)
+            # With an unquoted delimiter the calling shell substitutes each expansion
+            # into the payload before the consumer reads it, so a value becomes source
+            # text -- any number of words -- not a parameter the consumer keeps whole.
+            outer_expanded = (not finding.quoted
+                              and ("$" in finding.body or "`" in finding.body))
+            inherited_token = _WORD_SPLIT_INHERITED.set(outer_expanded)
+            try:
+                decision, reason = classifier(
+                    finding.body, finding.shell, state, deadline,
+                    resolved_env, resolved_lookup)
+            finally:
+                _WORD_SPLIT_INHERITED.reset(inherited_token)
         if decision != "allow":
             decisions.append((decision, reason))
     if classifier is not None:
@@ -5309,7 +5571,8 @@ def _consumer_reads_program_from_stdin(line, redirect_start, word_end, deadline=
     name = os.path.basename(words[0])
     if name in SHELLS:
         return _shell_reads_stdin(words)
-    if (words[0] == name and _IDENTITY_MUTATION_VISIBLE.get() is not False):
+    if (words[0] == name and (_IDENTITY_MUTATION_VISIBLE.get() is not False
+                              or _dynamic_command_word_visible())):
         # The visible function/alias may forward stdin even when its name looks like
         # a data consumer. The enclosing source scope survives declaration extraction.
         return True
@@ -5726,7 +5989,8 @@ def _classify(command, decisions, _shell_depth, _deadline, _shell, _equals_state
             "ask", f"the Bash command cannot be parsed safely ({exc}); "
             "rewrite it as a direct command before proceeding."))
         return
-    with identity_mutation_scope(scan_command, _deadline):
+    with identity_mutation_scope(scan_command, _deadline), \
+            scalar_word_scope(scan_command, _shell, _deadline):
         _classify_source(command, scan_command, decisions, _shell_depth, _deadline,
                          _shell, _equals_state, _command_env,
                          _lookup_authority_uncertain)
@@ -5808,11 +6072,12 @@ def _classify_source(command, scan_command, decisions, _shell_depth, _deadline, 
             if invocation.command:
                 nested_equals_state = nested_shell_equals_state(
                     resolution, invocation, equals_state)
-                nested_decision, nested_reason = decide(
-                    invocation.command, _shell_depth + 1, _deadline,
-                    invocation.shell, nested_equals_state,
-                    invocation.command_env,
-                    invocation.lookup_authority_uncertain)
+                with nested_word_split_scope(resolution, invocation):
+                    nested_decision, nested_reason = decide(
+                        invocation.command, _shell_depth + 1, _deadline,
+                        invocation.shell, nested_equals_state,
+                        invocation.command_env,
+                        invocation.lookup_authority_uncertain)
                 if nested_decision != "allow":
                     decisions.append((nested_decision, nested_reason))
             # Uncertainty about the body only matters once Git is actually in it.
@@ -5820,7 +6085,8 @@ def _classify_source(command, scan_command, decisions, _shell_depth, _deadline, 
             # including a git grep. An unknown ARGUMENT to a named command is not -- that
             # is judged on what is written.
             if (not invocation.command
-                    or source_has_dynamic_command_word(invocation.command, _deadline)):
+                    or nested_body_has_dynamic_command_word(
+                        resolution, invocation, _deadline)):
                 decisions.append((
                     "ask", "a shell -c command string is empty, or chooses its "
                     "executable from an expansion, so the Git grep engine cannot be "
@@ -8854,8 +9120,8 @@ FIXTURES += [
     ("GREEN SOURCE: repeat zero inside an alias installs no source identity",
      ("eval 'alias a=\"repeat 0 builtin alias s=source\"'; eval a; "
       "eval 's \"$FILE\"'"), "allow"),
-    ("ASK SOURCE: an unquoted command expansion may supply more than one word",
-     '$CMD --version', "ask"),
+    ("GREEN SOURCE: an unquoted scalar command word is one zsh word handed data",
+     '$CMD --version', "allow"),
     ("ASK  SOURCE: a bare dynamic executable may be anything",
      'X=ls; $X', "ask"),
     ("ASK  SOURCE: a dynamic executable with a Git-shaped tail is unresolved",
@@ -9627,6 +9893,90 @@ FIXTURES += [
      'zsh --emulate sh -c "git grep -E \'harness\\b\' -- README.md"', 'deny'),
     ('RED  EMULATE: a zsh emulation mode still reaches the -c body',
      'zsh --emulate zsh -c "git grep -E \'harness\\b\' -- README.md"', 'deny'),
+]
+
+
+FIXTURES += [
+    ('GREEN SCALAR WORD: an unquoted path-prefixed parameter is one zsh word',
+     '$VENV/bin/python -m pytest -q', 'allow'),
+    ('GREEN SCALAR WORD: an unquoted parameter handed a script operand is one zsh word',
+     '$PY script.py', 'allow'),
+    ('GREEN SCALAR WORD: an unquoted braced parameter is one zsh word',
+     '${PY} script.py', 'allow'),
+    ('GREEN SCALAR WORD: an unrelated set option leaves scalars whole',
+     'set -euo pipefail; $PY script.py', 'allow'),
+    ('GREEN SCALAR WORD: zsh emulation leaves scalars whole',
+     'emulate zsh; $PY script.py', 'allow'),
+    ('GREEN SCALAR WORD: a nested zsh without splitting options keeps the word',
+     "zsh -c '$PY script.py'", 'allow'),
+    ('ASK  SCALAR WORD: setopt shwordsplit splits the parameter',
+     'setopt shwordsplit; $PY script.py', 'ask'),
+    ('ASK  SCALAR WORD: set -y splits the parameter',
+     'set -y; $PY script.py', 'ask'),
+    ('ASK  SCALAR WORD: set -o shwordsplit splits the parameter',
+     'set -o shwordsplit; $PY script.py', 'ask'),
+    ('ASK  SCALAR WORD: unsetopt noshwordsplit splits the parameter',
+     'unsetopt noshwordsplit; $PY script.py', 'ask'),
+    ('ASK  SCALAR WORD: sh emulation splits the parameter',
+     'emulate sh; $PY script.py', 'ask'),
+    ('ASK  SCALAR WORD: a dynamic option name may enable splitting',
+     'setopt "$OPT"; $PY script.py', 'ask'),
+    ('ASK  SCALAR WORD: a visibly assigned array expands to several words',
+     'CMD=(python3 -u); $CMD script.py', 'ask'),
+    ('ASK  SCALAR WORD: an appended array expands to several words',
+     'CMD+=(-u); $CMD script.py', 'ask'),
+    ('ASK  SCALAR WORD: a declared array expands to several words',
+     'typeset -a CMD; $CMD script.py', 'ask'),
+    ('ASK  SCALAR WORD: set -A assigns an array',
+     'set -A CMD python3 -u; $CMD script.py', 'ask'),
+    ('ASK  SCALAR WORD: read -A assigns an array',
+     'read -A CMD < args.txt; $CMD script.py', 'ask'),
+    ('ASK  SCALAR WORD: a subscript assignment makes an array',
+     'CMD[1]=python3; $CMD script.py', 'ask'),
+    ('ASK  SCALAR WORD: a lowercase name may be a zsh special array',
+     '$cmd script.py', 'ask'),
+    ('ASK  SCALAR WORD: unquoted substitution output is split by zsh',
+     '$(command -v python3) script.py', 'ask'),
+    ('ASK  SCALAR WORD: unquoted backtick output is split by zsh',
+     '`command -v python3` script.py', 'ask'),
+    ("ASK  SCALAR WORD: a zsh started with -y splits its body's parameters",
+     "zsh -y -c '$PY script.py'", 'ask'),
+    ("ASK  SCALAR WORD: a zsh started with shwordsplit splits its body's parameters",
+     "zsh -o shwordsplit -c '$PY script.py'", 'ask'),
+    ("ASK  SCALAR WORD: a zsh emulating sh splits its body's parameters",
+     "zsh --emulate sh -c '$PY script.py'", 'ask'),
+    ('ASK  SCALAR WORD: a bash body splits the parameter',
+     "bash -c '$PY script.py'", 'ask'),
+    ('ASK  SCALAR WORD: a quoted dynamic command word may be source before echo',
+     'S=source; "$S" ./setup; echo grep -E \'harness\\b\' -- README.md', 'ask'),
+    ('ASK  SCALAR WORD: an unquoted dynamic command word may be source before echo',
+     "S=source; $S ./setup; echo grep -E 'harness\\b' -- README.md", 'ask'),
+    ('ASK  SCALAR WORD: a dynamic command word may rebind a stdin consumer',
+     'S=source; "$S" ./setup; wc -l < input.txt', 'ask'),
+    ('GREEN SCALAR WORD: a dynamic command beside an echo of plain text',
+     '$PY script.py; echo finished', 'allow'),
+    ('GREEN SCALAR WORD: a grandchild zsh does not inherit -y',
+     'zsh -y -c "zsh -c \'\\$PY script.py\'"', 'allow'),
+    ('GREEN SCALAR WORD: a fresh zsh reading a here-string does not inherit -y',
+     'zsh -y -c "zsh <<< \'\\$PY script.py\'"', 'allow'),
+    ('ASK  SCALAR WORD: an unquoted heredoc substitutes the value into source',
+     'zsh -s <<EOF\n$PY script.py\nEOF', 'ask'),
+    ('GREEN SCALAR WORD: a quoted heredoc leaves the parameter to the consumer',
+     "zsh -s <<'EOF'\n$PY script.py\nEOF", 'allow'),
+    ('GREEN SCALAR WORD: a data heredoc does not split a later command word',
+     'cat <<EOF\n$HOME\nEOF\n$PY script.py', 'allow'),
+    ('ASK  SCALAR WORD: a nested heredoc body is decided without recursion',
+     "zsh -y -c 'zsh -s <<EOF\n$PY script.py\nEOF'", 'ask'),
+    ('ASK  SCALAR WORD: a trap action runs under the -y shell that sets it',
+     'zsh -y -c \'trap "\\$PY script.py" EXIT\'', 'ask'),
+    ("ASK  SCALAR WORD: a trap action runs under this shell's splitting",
+     "setopt shwordsplit; trap '$PY script.py' EXIT", 'ask'),
+    ("ASK  SCALAR WORD: a trap action sees this shell's arrays",
+     "CMD=(python3 -u); trap '$CMD script.py' EXIT", 'ask'),
+    ('GREEN SCALAR WORD: a trap action in a plain zsh keeps the word',
+     "trap '$PY script.py' EXIT", 'allow'),
+    ('ASK  SCALAR WORD: the facts a function walk asks for again do not recurse',
+     'set -e; f() { :; }; $PY script.py; f', 'ask'),
 ]
 
 

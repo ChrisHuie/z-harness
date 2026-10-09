@@ -103,6 +103,150 @@ CHARSET_COLLECTIONS = {
 # ``timeout`` is an allowed kill only for the edit that restores an unbounded traversal.
 SITE_MUTATIONS = (
     {
+        "label": 'scalar word facts recomputed reentrantly', "module": GREP,
+        "anchor": '            self._facts = (True, None)\n            self._facts = _scalar_word_facts(self.source, self.deadline)',
+        "replacement": '            self._facts = _scalar_word_facts(self.source, self.deadline)',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'dynamic command word recomputed reentrantly', "module": GREP,
+        "anchor": '            self._dynamic = True\n            self._dynamic = _has_dynamic_command_word(self.source, self.deadline)',
+        "replacement": '            self._dynamic = _has_dynamic_command_word(self.source, self.deadline)',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'outer-expanded heredoc read as quoted', "module": GREP,
+        "anchor": '            outer_expanded = (not finding.quoted\n                              and ("$" in finding.body or "`" in finding.body))',
+        "replacement": '            outer_expanded = False',
+        "allowed_statuses": (),
+    },
+    {
+        "label": "same-shell body ignores this shell's splitting", "module": GREP,
+        "anchor": '        startup_split = context is None or context.splitting_possible()',
+        "replacement": '        startup_split = False',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'unquoted scalar command word refused', "module": GREP,
+        "anchor": '                and _unquoted_scalar_is_one_word(match.group(0))):',
+        "replacement": '                and False):',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'scalar word splitting visibility dropped', "module": GREP,
+        "anchor": '    return not word_split and arrays is not None and name not in arrays',
+        "replacement": '    return arrays is not None and name not in arrays',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'scalar word array visibility dropped', "module": GREP,
+        "anchor": '    return not word_split and arrays is not None and name not in arrays',
+        "replacement": '    return not word_split',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'lowercase special array name accepted', "module": GREP,
+        "anchor": '    if any(char.islower() for char in name):\n        return False\n    word_split, arrays = context.facts()',
+        "replacement": '    if False:\n        return False\n    word_split, arrays = context.facts()',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'unquoted substitution output kept whole', "module": GREP,
+        "anchor": '    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*|[0-9]+", name):\n        return False\n    if any(char.islower()',
+        "replacement": '    if False:\n        return False\n    if any(char.islower()',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'zsh startup splitting not inherited', "module": GREP,
+        "anchor": '    token = _WORD_SPLIT_INHERITED.set(startup_split)',
+        "replacement": '    token = _WORD_SPLIT_INHERITED.set(False)',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'inherited splitting leaks into a further shell', "module": GREP,
+        "anchor": '    inherited_token = _WORD_SPLIT_INHERITED.set(False)',
+        "replacement": '    inherited_token = _WORD_SPLIT_INHERITED.set(_WORD_SPLIT_INHERITED.get())',
+        "allowed_statuses": (),
+    },
+    {
+        "label": "nested body graded in the parent's scope", "module": GREP,
+        "anchor": '    with nested_word_split_scope(resolution, invocation), \\\n            scalar_word_scope(invocation.command, invocation.shell, deadline):\n        return source_has_dynamic_command_word(invocation.command, deadline)',
+        "replacement": '    return source_has_dynamic_command_word(invocation.command, deadline)',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'dynamic command word ignored before echo', "module": GREP,
+        "anchor": '                     and not _dynamic_command_word_visible()))',
+        "replacement": '                     and True))',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'dynamic command word ignored before a stdin consumer', "module": GREP,
+        "anchor": '                              or _dynamic_command_word_visible())):',
+        "replacement": '                              or False)):',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'parameter braces read as a brace group', "module": GREP,
+        "anchor": '        if text.startswith("${", index) and modes[index] == "U":',
+        "replacement": '        if False:',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'visible array assignment dropped', "module": GREP,
+        "anchor": '        skeleton)}\n    word_split = False',
+        "replacement": '        skeleton) if False}\n    word_split = False',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'declared array dropped', "module": GREP,
+        "anchor": '                              and ("a" in word[1:] or "A" in word[1:]) for word in words):\n                any_array = True',
+        "replacement": '                              and ("a" in word[1:] or "A" in word[1:]) for word in words):\n                any_array = False',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'set -y splitting dropped', "module": GREP,
+        "anchor": '                if sign == "-" and "y" in flags:\n                    word_split = True',
+        "replacement": '                if False:\n                    word_split = True',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'set -o shwordsplit dropped', "module": GREP,
+        "anchor": '                    if ((sign == "-" and normalized == "shwordsplit")',
+        "replacement": '                    if False and ((sign == "-" and normalized == "shwordsplit")',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'set -A array dropped', "module": GREP,
+        "anchor": '                any_array = any_array or "A" in letters',
+        "replacement": '                any_array = any_array',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'setopt splitting dropped', "module": GREP,
+        "anchor": '            word_split = word_split or dynamic or any(\n                re.sub(r"[-_]", "", word.lower()) == wanted for word in words)',
+        "replacement": '            word_split = word_split or dynamic or False and any(\n                re.sub(r"[-_]", "", word.lower()) == wanted for word in words)',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'emulate splitting dropped', "module": GREP,
+        "anchor": '            word_split = word_split or dynamic or (mode is not None and mode != "zsh")',
+        "replacement": '            word_split = word_split or dynamic',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'zsh -y startup splitting dropped', "module": GREP,
+        "anchor": '        if word[0] == "-" and "y" in flags:\n            return True',
+        "replacement": '        if False:\n            return True',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'zsh -o shwordsplit startup dropped', "module": GREP,
+        "anchor": '            if ((word[0] == "-" and normalized == "shwordsplit")',
+        "replacement": '            if False and ((word[0] == "-" and normalized == "shwordsplit")',
+        "allowed_statuses": (),
+    },
+    {
         "label": "zsh --emulate value read as an operand", "module": GREP,
         "anchor": '        if word == "--emulate":',
         "replacement": "        if False:",
@@ -357,7 +501,8 @@ SITE_MUTATIONS = (
     },
     {
         "label": "file-input rebinding uncertainty dropped", "module": GREP,
-        "anchor": "    if (words[0] == name and _IDENTITY_MUTATION_VISIBLE.get() is not False):",
+        "anchor": ("    if (words[0] == name and (_IDENTITY_MUTATION_VISIBLE.get() is not False\n"
+                   "                              or _dynamic_command_word_visible())):"),
         "replacement": "    if False:",
         "allowed_statuses": (),
     },
@@ -1080,7 +1225,9 @@ SITE_MUTATIONS = (
     },
     {
         "label": "identity mutation gate dropped", "module": GREP,
-        "anchor": "            or ((bypasses_shell_identity or _IDENTITY_MUTATION_VISIBLE.get() is False)",
+        "anchor": ("            or ((bypasses_shell_identity\n"
+                   "                 or (_IDENTITY_MUTATION_VISIBLE.get() is False\n"
+                   "                     and not _dynamic_command_word_visible()))"),
         "replacement": "            or ((bypasses_shell_identity or True)",
         "allowed_statuses": (),
     },

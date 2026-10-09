@@ -75,12 +75,13 @@ from git_grep_engine_guard import (  # noqa: E402
     ZSH_EQUALS_OFF, ZSH_EQUALS_ON,
     fixture_pair_duplicates,
     only_changed_zsh_equals_lookup_authority_error,
-    source_has_dynamic_command_word, source_has_git_hazard_hint,
+    source_has_git_hazard_hint,
     zsh_trap_function_sources,
     resolve_effective_git_invocation,
     REV_PATH_SUBCOMMANDS,
     split_commands, command_without_heredoc_payloads,
-    UNREADABLE_SOURCE_REASON, identity_mutation_scope,
+    UNREADABLE_SOURCE_REASON, identity_mutation_scope, scalar_word_scope,
+    nested_word_split_scope, nested_body_has_dynamic_command_word,
     unwrap_command_prefix, zsh_equals_states,
     command_environment_states, _strongest_decision,
     _equals_expanded,
@@ -272,7 +273,8 @@ def _classify(command, decisions, _depth, _shell, _equals_state, _deadline,
             "ask", f"the Bash command cannot be parsed safely ({exc}); rewrite it "
             "as a direct command before proceeding."))
         return
-    with identity_mutation_scope(scan_command, _deadline):
+    with identity_mutation_scope(scan_command, _deadline), \
+            scalar_word_scope(scan_command, _shell, _deadline):
         _classify_source(command, scan_command, decisions, _depth, _shell,
                          _equals_state, _deadline, _command_env,
                          _lookup_authority_uncertain)
@@ -402,10 +404,11 @@ def _classify_source(command, scan_command, decisions, _depth, _shell, _equals_s
         if invocation.command:
             nested_equals_state = nested_shell_equals_state(
                 resolution, invocation, equals_state)
-            decision, reason = decide(
-                invocation.command, _depth + 1, invocation.shell,
-                nested_equals_state, _deadline, invocation.command_env,
-                invocation.lookup_authority_uncertain)
+            with nested_word_split_scope(resolution, invocation):
+                decision, reason = decide(
+                    invocation.command, _depth + 1, invocation.shell,
+                    nested_equals_state, _deadline, invocation.command_env,
+                    invocation.lookup_authority_uncertain)
             if decision != "allow":
                 decisions.append((decision, reason))
         # Only then does an uninspectable body matter, and only when Git is actually in
@@ -413,8 +416,8 @@ def _classify_source(command, scan_command, decisions, _depth, _shell, _equals_s
         # sh, bash, dash and ksh apply no history modifier whatever the value expands
         # to, so an unresolved argument in their body is not this guard's hazard.
         if (not invocation.command
-                or source_has_dynamic_command_word(
-                    invocation.command, _deadline)):
+                or nested_body_has_dynamic_command_word(
+                    resolution, invocation, _deadline)):
             decisions.append((
                 "ask", "a shell -c command string is empty or dynamic, so its Git "
                 "arguments cannot be inspected before execution"))

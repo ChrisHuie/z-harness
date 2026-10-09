@@ -166,11 +166,16 @@ text is questioned only where the command shows a way to rebind it -- a function
 `alias`, `eval`, `source`, `hash`, or a lookup-table write; with none in sight it prints. A setter
 name is decoded in command position: quoted or escaped `source` still counts, while a setter
 name printed as data does not. A command
-whose executable is an expansion is questioned unless its expansion is a quoted scalar parameter
-or quoted substitution result, its written operands are literal data, and no visible rebinding is
-present. Unquoted expansion, positional/array splicing, flagged parameter forms, Git-shaped argv,
-and shell-script operands remain uncertain. `"$PY" script.py` and `"$VENV"/bin/python -m pytest`
-retain the one-command-word control without assuming zsh options or POSIX word-splitting state.
+whose executable is an expansion is questioned unless the expansion is one word, its written
+operands are literal data, and no visible rebinding is present. A quoted scalar parameter or
+quoted substitution result is one word. Unquoted, zsh keeps a scalar parameter whole --
+`$VENV/bin/python -m pytest`, `${PY} script.py` -- unless the command visibly turns on
+`SH_WORD_SPLIT` (`setopt`, `set -y`, `set -o`, a non-zsh `emulate`, a `zsh -y` or `--emulate`
+start), visibly builds the name as an array, or names a lowercase parameter, which may be one of
+zsh's special arrays; zsh splits unquoted substitution output, and a POSIX child shell splits
+both. Positional/array splicing, flagged parameter forms, Git-shaped argv, and shell-script
+operands remain uncertain. A dynamic command word may itself be `source` or `eval`, so it makes
+a later bare `echo`/`printf` or stdin consumer as uncertain as a visible setter does.
 A literal `< file` is questioned when its consumer is a shell, a potentially rebound bare name,
 an interpreter without an explicit first literal script operand, or an expansion. Interpreter
 options are not skipped to guess a program operand. `wc -l < file` with no visible rebinding and

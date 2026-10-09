@@ -103,6 +103,18 @@ CHARSET_COLLECTIONS = {
 # ``timeout`` is an allowed kill only for the edit that restores an unbounded traversal.
 SITE_MUTATIONS = (
     {
+        "label": 'stdin provenance runs before command grading', "module": GREP,
+        "anchor": '    for tokens, equals_state, (command_env, lookup_uncertain) in zip(\n            commands, equals_states, environment_states):\n',
+        "replacement": '    interpreter_stdin_provenance(\n        command, commands, _shell_depth, _deadline, _shell, _equals_state,\n        _command_env, _lookup_authority_uncertain)\n    for tokens, equals_state, (command_env, lookup_uncertain) in zip(\n            commands, equals_states, environment_states):\n',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'dynamic source findings run before command grading', "module": GREP,
+        "anchor": '    for tokens, equals_state, (command_env, lookup_uncertain) in zip(\n            commands, equals_states, environment_states):\n',
+        "replacement": '    list(dynamic_source_findings(\n        scan_command, commands, _deadline, _shell, equals_states))\n    for tokens, equals_state, (command_env, lookup_uncertain) in zip(\n            commands, equals_states, environment_states):\n',
+        "allowed_statuses": (),
+    },
+    {
         "label": 'occurrence scan restarted per command', "module": GREP,
         "anchor": '        scan = self.scans.get(pattern)\n        if scan is None:',
         "replacement": '        scan = None\n        if scan is None:',

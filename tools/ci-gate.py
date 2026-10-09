@@ -57,7 +57,7 @@ SUITE_FLOORS = {
     "harness_check": 230,
     "render-packages": 192,
     "bash_command_guard": 1848,
-    "git_grep_engine_guard": 1611,
+    "git_grep_engine_guard": 1613,
     "zsh_rev_modifier_guard": 522,
 }
 EXPECTED_WORKFLOW = """name: harness-check
@@ -1313,7 +1313,7 @@ MUTATION_SUMMARY = ROOT / "contracts/goldens/mutation-summary.md"
 # only removes cannot express a kill for them. Two of its ten are caught, by fixtures
 # that depend on the removed escape producing a literal backslash.
 MUTATION_SURVIVOR_DEBT_CEILING = 88
-MUTATION_PLAN_FLOOR = 588
+MUTATION_PLAN_FLOOR = 590
 # Kills scored only because the recorded check count moved, with no assertion failing. A
 # guard that increments its counter once per element of the collection under mutation moves
 # that count on any removal, so such a kill is decided by loop structure before any probe
@@ -1418,6 +1418,8 @@ EXPECTED_MUTATION_COLLECTIONS = {
     ("hooks/guards/git_grep_engine_guard.py", "GIT_CONFIG_SHORT_VALUE_OPTIONS"): 2,
 }
 EXPECTED_MUTATION_SITES = {
+    ("hooks/guards/git_grep_engine_guard.py", 'stdin provenance runs before command grading'),
+    ("hooks/guards/git_grep_engine_guard.py", 'dynamic source findings run before command grading'),
     ("hooks/guards/git_grep_engine_guard.py", 'occurrence scan restarted per command'),
     ("hooks/guards/git_grep_engine_guard.py", 'absent-word occurrence shortcut dropped'),
     ("hooks/guards/git_grep_engine_guard.py", 'eval-only source skips the call walk'),
@@ -1867,7 +1869,7 @@ EXPECTED_MUTATION_SELECTORS = {
         ("a repeated core.worktree binds the effective candidate Git recognises",),
 }
 EXPECTED_MUTATION_SITE_DIGEST = (
-    "9881a341a8b1fb0dc9673e2528f2112f5173425f3a5a2ecae00017e1c811894c"
+    "d0ecb65e11a096604d90dce11156b729d29b2156bf058b586660ae1cdfa80ca4"
 )
 EXPECTED_MUTATION_EXCLUSIONS = {
     "hooks/guards/git_grep_engine_guard.py::ALIAS_GUARDED":

@@ -6605,28 +6605,6 @@ def _classify_source(command, scan_command, decisions, _shell_depth, _deadline, 
     equals_states = zsh_equals_states(
         scan_command, commands,
         _equals_state if _shell == "zsh" else ZSH_EQUALS_OFF, _deadline)
-    for finding in dynamic_source_findings(
-            scan_command, commands, _deadline, _shell, equals_states):
-        if finding.context == "guarded-git":
-            decisions.append((
-                "ask", f"{finding.reason} at {finding.operand!r}; the alias body is not "
-                "executed by this guard, so invoke Git directly with literal argv"))
-        else:
-            decisions.append((
-                "ask", f"{finding.reason} {finding.operand!r} is consumed by source/dot; "
-                "the emitted shell code is not executed by this guard, so use a literal "
-                "script path or inspect and run the command directly"))
-    try:
-        stdin_provenance = interpreter_stdin_provenance(
-            command, commands, _shell_depth, _deadline, _shell, _equals_state,
-            _command_env, _lookup_authority_uncertain)
-    except CommandParseError as exc:
-        decisions.append((
-            "ask", f"interpreter stdin provenance cannot be parsed safely ({exc}); "
-            "rewrite it as one direct source before proceeding."))
-        return
-    if stdin_provenance is not None:
-        decisions.append((stdin_provenance.decision, stdin_provenance.reason))
     environment_states = command_environment_states(
         scan_command, commands, _command_env, _lookup_authority_uncertain,
         _deadline)
@@ -6927,6 +6905,30 @@ def _classify_source(command, scan_command, decisions, _shell_depth, _deadline, 
                 "only and CANNOT see the final pattern, so regex-engine compatibility is "
                 "UNCHECKED here. Out of scope for this guard - verify by hand or use -P."
                 % unresolved[:60]))
+    # The whole-source passes run after every command is graded, so a budget they
+    # exhaust appends a question beside a deny already proven, not in place of it.
+    for finding in dynamic_source_findings(
+            scan_command, commands, _deadline, _shell, equals_states):
+        if finding.context == "guarded-git":
+            decisions.append((
+                "ask", f"{finding.reason} at {finding.operand!r}; the alias body is not "
+                "executed by this guard, so invoke Git directly with literal argv"))
+        else:
+            decisions.append((
+                "ask", f"{finding.reason} {finding.operand!r} is consumed by source/dot; "
+                "the emitted shell code is not executed by this guard, so use a literal "
+                "script path or inspect and run the command directly"))
+    try:
+        stdin_provenance = interpreter_stdin_provenance(
+            command, commands, _shell_depth, _deadline, _shell, _equals_state,
+            _command_env, _lookup_authority_uncertain)
+    except CommandParseError as exc:
+        decisions.append((
+            "ask", f"interpreter stdin provenance cannot be parsed safely ({exc}); "
+            "rewrite it as one direct source before proceeding."))
+        return
+    if stdin_provenance is not None:
+        decisions.append((stdin_provenance.decision, stdin_provenance.reason))
     fallback_uncertainty = conservative_allow_uncertainty(command, _deadline)
     if fallback_uncertainty:
         decisions.append((
@@ -12561,6 +12563,26 @@ def selftest():
     bad += 0 if collapse_red else 1
     print("  %s global-definition collapse mutation loses temporal function outcomes" % (
         "PASS" if collapse_red else "FAIL"))
+
+    # A whole-source pass that spends the budget appends a question. A long pipeline after
+    # a proven hazard once spent it in the stdin-provenance pass, before any command was
+    # graded, and the deny became that question.
+    exhausted = []
+    def exhaust_budget(*_args, **_kwargs):
+        exhausted.append(True)
+        _check_decision_budget(0.0)
+    for budget_pass in ("interpreter_stdin_provenance", "dynamic_source_findings"):
+        original_pass = globals()[budget_pass]
+        globals()[budget_pass] = exhaust_budget
+        exhausted.clear()
+        try:
+            kept = decide("git grep -E 'harness\\b' -- README.md | cat")
+        finally:
+            globals()[budget_pass] = original_pass
+        kept_ok = kept[0] == "deny" and bool(exhausted)
+        bad += 0 if kept_ok else 1
+        print("  %s a budget %s spends keeps the deny already proven (got %s)" % (
+            "PASS" if kept_ok else "FAIL", budget_pass, kept[0]))
 
     original_annotation = annotate_function_declarations
     def ignore_conditional_reachability(source, records, deadline=None):

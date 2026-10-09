@@ -56,8 +56,8 @@ EVAL_SKILL_FLOOR = 7
 SUITE_FLOORS = {
     "harness_check": 230,
     "render-packages": 192,
-    "bash_command_guard": 1728,
-    "git_grep_engine_guard": 1494,
+    "bash_command_guard": 1816,
+    "git_grep_engine_guard": 1586,
     "zsh_rev_modifier_guard": 518,
 }
 EXPECTED_WORKFLOW = """name: harness-check
@@ -1050,7 +1050,7 @@ RETAINED_DECISION_COMMANDS = ROOT / "contracts/goldens/retained-guard-commands.j
 SUITE_SOURCE_GOLDEN = ROOT / "contracts/goldens/suite-sources.json"
 HARNESS_SOURCE = ROOT / "hooks/harness_check.py"
 REPOSITORY_OWNERSHIP_SOURCE = ROOT / "tools/repository_ownership.py"
-DECISION_CORPUS_FLOOR = 1333
+DECISION_CORPUS_FLOOR = 1421
 DECISION_WRITER_SHA256 = "8c4180468fc05a88c69fafba3a79f2387f5df2d1aa728def1670f5497a442e9d"
 RETAINED_DECISION_SCHEMA_VERSION = 1
 RETAINED_DECISION_NOTE = (
@@ -1313,7 +1313,7 @@ MUTATION_SUMMARY = ROOT / "contracts/goldens/mutation-summary.md"
 # only removes cannot express a kill for them. Two of its ten are caught, by fixtures
 # that depend on the removed escape producing a literal backslash.
 MUTATION_SURVIVOR_DEBT_CEILING = 88
-MUTATION_PLAN_FLOOR = 496
+MUTATION_PLAN_FLOOR = 572
 # Kills scored only because the recorded check count moved, with no assertion failing. A
 # guard that increments its counter once per element of the collection under mutation moves
 # that count on any removal, so such a kill is decided by loop structure before any probe
@@ -1380,10 +1380,10 @@ EXPECTED_MUTATION_COLLECTIONS = {
     ("hooks/guards/git_grep_engine_guard.py", "CROSS_VERSION_ALIAS_PROOF"): 22,
     ("hooks/guards/git_grep_engine_guard.py", "ENV_SPLIT_ESCAPES"): 10,
     ("hooks/guards/git_grep_engine_guard.py", "EXEC_WRAPPERS"): 6,
-    ("hooks/guards/git_grep_engine_guard.py", "GIT_HAZARD_SUBCOMMANDS"): 17,
+    ("hooks/guards/git_grep_engine_guard.py", "GIT_HAZARD_SUBCOMMANDS"): 28,
     ("hooks/guards/git_grep_engine_guard.py", "GIT_LOG_ENGINE_TOKENS"): 7,
-    ("hooks/guards/git_grep_engine_guard.py", "GIT_LOG_GREP_SUBCOMMANDS"): 3,
-    ("hooks/guards/git_grep_engine_guard.py", "GIT_LOG_PATTERN_OPTIONS"): 3,
+    ("hooks/guards/git_grep_engine_guard.py", "GIT_LOG_GREP_SUBCOMMANDS"): 10,
+    ("hooks/guards/git_grep_engine_guard.py", "GIT_LOG_PATTERN_OPTIONS"): 4,
     ("hooks/guards/git_grep_engine_guard.py", "GREP_LONG_BOOLEAN_OPTIONS"): 37,
     ("hooks/guards/git_grep_engine_guard.py", "GREP_LONG_ENGINE"): 4,
     ("hooks/guards/git_grep_engine_guard.py", "GREP_LONG_NEGATED_ENGINE"): 4,
@@ -1410,8 +1410,41 @@ EXPECTED_MUTATION_COLLECTIONS = {
     ("hooks/guards/zsh_rev_modifier_guard.py", "MOD_UNMODELLED"): 1,
     ("hooks/guards/git_grep_engine_guard.py", "_ANSI_C_SIMPLE_ESCAPES"): 13,
     ("hooks/guards/git_grep_engine_guard.py", "STDIN_SCRIPT_PATHS"): 3,
+    ("hooks/guards/git_grep_engine_guard.py", "DIFF_REGEX_SUBCOMMANDS"): 10,
+    ("hooks/guards/git_grep_engine_guard.py", "STASH_DIFF_REGEX_ACTIONS"): 2,
+    ("hooks/guards/git_grep_engine_guard.py", "GIT_CONFIG_OPTIONS"): 9,
+    ("hooks/guards/git_grep_engine_guard.py", "GIT_CONFIG_VALUE_PATTERN_ACTIONS"): 4,
+    ("hooks/guards/git_grep_engine_guard.py", "GIT_CONFIG_SUBCOMMANDS"): 3,
+    ("hooks/guards/git_grep_engine_guard.py", "GIT_CONFIG_SHORT_VALUE_OPTIONS"): 2,
 }
 EXPECTED_MUTATION_SITES = {
+    ("hooks/guards/git_grep_engine_guard.py", 'pickaxe flag after -- read'),
+    ("hooks/guards/git_grep_engine_guard.py", 'git hazard log-family union dropped'),
+    ("hooks/guards/git_grep_engine_guard.py", 'git hazard diff-regex union dropped'),
+    ("hooks/guards/git_grep_engine_guard.py", 'stash list log argv not lifted'),
+    ("hooks/guards/git_grep_engine_guard.py", 'stash diff action check dropped'),
+    ("hooks/guards/git_grep_engine_guard.py", 'config subcommand form ignored'),
+    ("hooks/guards/git_grep_engine_guard.py", 'config options read past the first operand'),
+    ("hooks/guards/git_grep_engine_guard.py", 'config -- terminator dropped'),
+    ("hooks/guards/git_grep_engine_guard.py", 'config long prefix resolution dropped'),
+    ("hooks/guards/git_grep_engine_guard.py", 'config negation ignored'),
+    ("hooks/guards/git_grep_engine_guard.py", 'config short value option not consumed'),
+    ("hooks/guards/git_grep_engine_guard.py", 'config negated option given a value'),
+    ("hooks/guards/git_grep_engine_guard.py", 'config negated value-pattern kept'),
+    ("hooks/guards/git_grep_engine_guard.py", 'config attached long value read as separated'),
+    ("hooks/guards/git_grep_engine_guard.py", 'config separated option value not consumed'),
+    ("hooks/guards/git_grep_engine_guard.py", 'config --value pattern ignored'),
+    ("hooks/guards/git_grep_engine_guard.py", 'config fixed-value ignored for an operand pattern'),
+    ("hooks/guards/git_grep_engine_guard.py", 'config implicit value-pattern slot dropped'),
+    ("hooks/guards/git_grep_engine_guard.py", 'config get --regexp name ignored'),
+    ("hooks/guards/git_grep_engine_guard.py", 'config fixed-value ignored for --value'),
+    ("hooks/guards/git_grep_engine_guard.py", 'always-ERE findings dropped'),
+    ("hooks/guards/git_grep_engine_guard.py", 'pickaxe regex not detected'),
+    ("hooks/guards/git_grep_engine_guard.py", 'separated diff regex value ignored'),
+    ("hooks/guards/git_grep_engine_guard.py", 'attached diff regex value ignored'),
+    ("hooks/guards/git_grep_engine_guard.py", 'long diff regex options ignored'),
+    ("hooks/guards/git_grep_engine_guard.py", 'config get-regexp pattern ignored'),
+    ("hooks/guards/git_grep_engine_guard.py", 'always-ERE expansion check dropped'),
     ("hooks/guards/git_grep_engine_guard.py", 'stdin script path read as a file in a POSIX shell'),
     ("hooks/guards/git_grep_engine_guard.py", 'stdin script path read as a file in zsh'),
     ("hooks/guards/git_grep_engine_guard.py", 'shell script operand not checked'),
@@ -1818,7 +1851,7 @@ EXPECTED_MUTATION_SELECTORS = {
         ("a repeated core.worktree binds the effective candidate Git recognises",),
 }
 EXPECTED_MUTATION_SITE_DIGEST = (
-    "419ba606c353bf583c9187423894cfbd853561621865bcd60b6e44226bc20234"
+    "230330d190f62f225f0ef19c7ebdd1da79fa35ac2ba2d4c6ee169739a0bd5a65"
 )
 EXPECTED_MUTATION_EXCLUSIONS = {
     "hooks/guards/git_grep_engine_guard.py::ALIAS_GUARDED":

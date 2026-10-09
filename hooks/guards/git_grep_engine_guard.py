@@ -2410,10 +2410,32 @@ REV_PATH_SUBCOMMANDS = {
     "restore", "grep", "rev-parse", "blame", "push", "fetch", "pull",
     "difftool",
 }
+# Subcommands whose --grep/--author/--committer patterns go through the same engine
+# selection as `git grep`. Verified on git 2.46.1: `git log -E --grep='foo\b'` returns
+# the commit whose subject contains `foob`, `-P` returns the intended one.
+# Measured on git 2.46.1 with an interval subject: each of these filters `--grep` with the
+# engine its flags select, so `-E` with a PCRE atom is the same silent wrong commit set as
+# for `log`. `cherry-pick` and `revert` act on that set.
+GIT_LOG_GREP_SUBCOMMANDS = {
+    "log", "shortlog", "rev-list", "whatchanged", "show", "reflog", "format-patch",
+    "fast-export", "cherry-pick", "revert",
+}
+# Subcommands whose diff options take regexes Git compiles as POSIX ERE whatever the
+# engine flags select (measured on git 2.46.1: `-G'harness\b'` finds nothing where
+# `-G'harness'` finds the change). `diff-files`, `diff-index`, and `difftool` filter by
+# `-G` as `diff` does; `rev-list` rejects `-G`, and `shortlog`, `blame`, `range-diff`,
+# `cherry-pick`, and `fast-export` accept it and print the same result as without it.
+DIFF_REGEX_SUBCOMMANDS = {
+    "log", "show", "whatchanged", "diff", "diff-tree", "format-patch", "reflog",
+    "diff-files", "diff-index", "difftool",
+}
+# Every subcommand whose argv this guard grades: a route the guard cannot read through --
+# a shell alias body, a script piped into a shell -- is questioned when one of these
+# appears in it.
 GIT_HAZARD_SUBCOMMANDS = {
     "grep", "show", "diff", "cat-file", "log", "ls-tree", "archive", "checkout",
-    "restore", "rev-parse", "blame", "shortlog", "rev-list",
-} | REV_PATH_SUBCOMMANDS
+    "restore", "rev-parse", "blame", "shortlog", "rev-list", "stash", "config",
+} | REV_PATH_SUBCOMMANDS | GIT_LOG_GREP_SUBCOMMANDS | DIFF_REGEX_SUBCOMMANDS
 
 
 def _consume_exec_options(items):
@@ -5377,6 +5399,11 @@ def git_grep_argv(tokens, resolution=None, deadline=None):
     # `git grep`: measured on git 2.46.1, `-E --grep='foo\b'` returns the commit whose
     # subject contains `foob` while `-P` returns the intended one. The pattern rides an
     # option rather than sitting in argv, so it is lifted out here.
+    # Measured on git 2.46.1: `git stash list -E --grep='WI+P'` lists the entry that the
+    # same pattern without `-E` does not, so its options are a log argv.
+    if subcommand == "stash" and rest and rest[0][0] == "list":
+        rest = rest[1:]
+        subcommand = "log"
     if subcommand in GIT_LOG_GREP_SUBCOMMANDS:
         # These three do NOT share git grep's argv grammar, and reusing it was a
         # fail-open. Measured on git 2.46.1: `git log` takes no positional PATTERN
@@ -5423,11 +5450,180 @@ def git_grep_argv(tokens, resolution=None, deadline=None):
     return None
 
 
-# Subcommands whose --grep/--author/--committer patterns go through the same engine
-# selection as `git grep`. Verified on git 2.46.1: `git log -E --grep='foo\b'` returns
-# the commit whose subject contains `foob`, `-P` returns the intended one.
-GIT_LOG_GREP_SUBCOMMANDS = {"log", "shortlog", "rev-list"}
-GIT_LOG_PATTERN_OPTIONS = {"--grep", "--author", "--committer"}
+GIT_LOG_PATTERN_OPTIONS = {"--grep", "--author", "--committer", "--grep-reflog"}
+# `git stash list` walks the stash reflog as `log` does and `git stash show` prints a
+# diff; both filter by the diff regexes, and `stash list` filters `--grep` with the
+# selected engine.
+STASH_DIFF_REGEX_ACTIONS = {"list", "show"}
+# `git config` compiles its name regex and every value-pattern as POSIX ERE: measured on
+# git 2.46.1, `fo+ bar` selects the value `foo bar` in each slot read below. Its options
+# are parse-options options, so they stop at the first operand, take a unique long
+# prefix, read `--no-<option>` last-one-wins, and bundle short letters. A value the
+# command sets is data. An option absent here takes no value and selects no pattern, so
+# it is read as a bare flag.
+GIT_CONFIG_OPTIONS = {
+    "file": "value", "blob": "value", "type": "value", "default": "value",
+    "comment": "value", "url": "value", "value": "value-pattern",
+    "fixed-value": "fixed", "regexp": "name-pattern",
+}
+# Legacy actions whose operand 1 is the value-pattern. `--unset` is not listed: as a
+# prefix it resolves to `unset-all`, which reads the same slot. With no listed action --
+# `--replace-all`, or a bare `git config name value value-pattern` -- it is operand 2.
+GIT_CONFIG_VALUE_PATTERN_ACTIONS = {"get", "get-all", "get-regexp", "unset-all"}
+# The forms Git 2.46 dispatches on its first argument; any option before it selects the
+# legacy form instead, where the word is a key name.
+GIT_CONFIG_SUBCOMMANDS = {"get", "set", "unset"}
+GIT_CONFIG_SHORT_VALUE_OPTIONS = {"f", "t"}
+
+
+def _config_long_option(word, candidates):
+    """-> (name, negated, attached value or None) for one long option, or None."""
+    body, separator, value = word[2:].partition("=")
+    if body not in candidates:
+        matches = [name for name in candidates if name.startswith(body)]
+        if not body or len(matches) != 1:
+            return None
+        body = matches[0]
+    negated = body.startswith("no-")
+    return (body[3:] if negated else body), negated, (value if separator else None)
+
+
+def config_regex_operands(argv):
+    """-> (option, pattern token) pairs `git config` compiles as POSIX ERE."""
+    words = [word for word, _quoting in argv]
+    mode = words[0] if words and words[0] in GIT_CONFIG_SUBCOMMANDS else None
+    candidates = set(GIT_CONFIG_OPTIONS) | {"no-" + name for name in GIT_CONFIG_OPTIONS}
+    if mode is None:
+        candidates |= GIT_CONFIG_VALUE_PATTERN_ACTIONS
+    action, fixed, name_pattern, value_pattern = None, False, False, None
+    index = 1 if mode else 0
+    while index < len(argv):
+        word = words[index]
+        if word == "--":
+            index += 1
+            break
+        if word == "-" or not word.startswith("-"):
+            break
+        index += 1
+        if not word.startswith("--"):
+            for position, letter in enumerate(word[1:], 2):
+                if letter in GIT_CONFIG_SHORT_VALUE_OPTIONS:
+                    if position == len(word):
+                        index += 1
+                    break
+            continue
+        option = _config_long_option(word, candidates)
+        if option is None:
+            continue
+        name, negated, attached = option
+        role = GIT_CONFIG_OPTIONS.get(name)
+        if role is None:
+            action = name
+        elif role == "fixed":
+            fixed = not negated
+        elif role == "name-pattern":
+            name_pattern = not negated
+        elif negated:
+            if role == "value-pattern":
+                value_pattern = None
+        else:
+            if attached is not None:
+                token = _token_suffix(argv[index - 1], len(word) - len(attached))
+            elif index < len(argv):
+                token = argv[index]
+                index += 1
+            else:
+                break
+            if role == "value-pattern":
+                value_pattern = token
+    operands = argv[index:]
+    found = []
+    if mode is None:
+        if action == "get-regexp" and operands:
+            found.append(("--get-regexp", operands[0]))
+        slot = 1 if action in GIT_CONFIG_VALUE_PATTERN_ACTIONS else 2
+        if not fixed and len(operands) > slot:
+            found.append(("a git config value-pattern", operands[slot]))
+        return found
+    if mode == "get" and name_pattern and operands:
+        found.append(("git config get --regexp", operands[0]))
+    if value_pattern is not None and not fixed:
+        found.append(("git config --value", value_pattern))
+    return found
+
+
+def always_ere_patterns(invocation):
+    """-> (option, pattern token) pairs Git compiles as POSIX ERE, whatever -E/-P say."""
+    if (invocation is None or invocation.identity_unresolved
+            or invocation.subcommand is None):
+        return ()
+    argv = list(invocation.argv)
+    if invocation.subcommand == "config":
+        return tuple(config_regex_operands(argv))
+    if invocation.subcommand == "stash":
+        if not argv or argv[0][0] not in STASH_DIFF_REGEX_ACTIONS:
+            return ()
+        argv = argv[1:]
+    elif invocation.subcommand not in DIFF_REGEX_SUBCOMMANDS:
+        return ()
+    words = [word for word, _quoting in argv]
+    found = []
+    pickaxe_regex = "--pickaxe-regex" in words[:words.index("--") if "--" in words
+                                                else len(words)]
+    index = 0
+    while index < len(argv):
+        word = words[index]
+        if word == "--":
+            break
+        if word in ("-G", "-I") or (word == "-S" and pickaxe_regex):
+            if index + 1 < len(argv):
+                found.append((word, argv[index + 1]))
+            index += 2
+            continue
+        if (len(word) > 2 and not word.startswith("--")
+                and (word.startswith(("-G", "-I"))
+                     or (word.startswith("-S") and pickaxe_regex))):
+            found.append((word[:2], _token_suffix(argv[index], 2)))
+            index += 1
+            continue
+        for option in ("--ignore-matching-lines", "--word-diff-regex"):
+            if word == option and index + 1 < len(argv):
+                found.append((option, argv[index + 1]))
+                index += 1
+                break
+            if word.startswith(option + "="):
+                found.append((option, _token_suffix(argv[index], len(option) + 1)))
+                break
+        index += 1
+    return tuple(found)
+
+
+def always_ere_findings(patterns):
+    """Grade patterns Git compiles as POSIX ERE regardless of the selected engine."""
+    findings = []
+    for option, (pattern, quoting) in patterns:
+        if (PATTERN_EXPANSION.search(pattern)
+                or _token_has_live_command_parameter((pattern, quoting))
+                or live_brace_expansion((pattern, quoting))):
+            findings.append((
+                "ask", f"Git compiles `{option}` as POSIX ERE and its pattern is "
+                f"shell-expanded ({pattern[:60]!r}), so this guard cannot see the regex "
+                "Git receives"))
+            continue
+        scan = scan_pcre_constructs(pattern)
+        if scan.atoms:
+            findings.append((
+                "deny", f"Git compiles `{option}` as POSIX ERE and no engine flag changes "
+                f"that, so {', '.join(sorted(scan.atoms))} does not have its PCRE meaning; an empty "
+                "or different result is evidence about the engine, not the repository. "
+                "Write portable ERE, such as `(^|[^[:alnum:]_])` and `([^[:alnum:]_]|$)` "
+                "around a word."))
+        elif scan.uncertain:
+            findings.append((
+                "ask", f"Git compiles `{option}` as POSIX ERE, and "
+                f"{', '.join(sorted(scan.uncertain))} may not mean the same there; use "
+                "portable ERE syntax"))
+    return findings
 # Exact spellings only: this family accepts no clustering and no abbreviation, so a
 # prefix or a bundle is a fatal argument to git rather than something to model. Mapped to
 # the grep letters the shared engine parser below already understands. `--basic-regexp`
@@ -6370,6 +6566,11 @@ def _classify_source(command, scan_command, decisions, _shell_depth, _deadline, 
                     "ask", "a shell -c command string is empty, or chooses its "
                     "executable from an expansion, so the Git grep engine cannot be "
                     "inspected before execution"))
+        try:
+            decisions.extend(always_ere_findings(always_ere_patterns(
+                resolve_effective_git_invocation(tokens, resolution, _deadline))))
+        except GitAuthorityError:
+            pass
         try:
             got = git_grep_argv(tokens, resolution, _deadline)
         except GitAuthorityError as exc:
@@ -7442,6 +7643,177 @@ def check_alias_shadowing_against_installed_gits(*, runner=None):
     return failures, scan_set, checks
 
 
+# The engine the log-family probe selects; the selftest swaps it to prove the probe reports.
+_LOG_FAMILY_PROBE_ENGINE = "-E"
+
+
+def _check_log_family_against_git(env):
+    """Each table subcommand that runs must filter `--grep` with the selected engine.
+
+    A two-commit repository with file changes: the first subject carries `a{2}b` as
+    five literal characters, the second what the interval expands to. `-E` must select
+    only the second. A subcommand this Git refuses to run is loud, not a silent wrong
+    result, and is not a failure here.
+    """
+    failures = []
+    literal, interval = "subject a{2}b here", "subject aab here"
+    probes = {
+        "whatchanged": ["git", "whatchanged", "--format=%s"],
+        "show": ["git", "show", "-s", "--format=%s", "HEAD~1", "HEAD"],
+        "reflog": ["git", "reflog", "--format=%s"],
+        "format-patch": ["git", "format-patch", "--stdout", "-2"],
+        "fast-export": ["git", "fast-export", "HEAD"],
+    }
+    with tempfile.TemporaryDirectory(prefix="z-harness-log-family-") as repo:
+        identity = dict(env, GIT_AUTHOR_NAME="probe", GIT_COMMITTER_NAME="probe")
+        def run(argv, **extra):
+            return subprocess.run(argv, cwd=repo, capture_output=True, text=True,
+                                  timeout=10, env=identity, **extra)
+        if run(["git", "init", "--quiet", "-b", "base"]).returncode:
+            return ["cannot initialize the temporary Git log-family fixture"]
+        run(["git", "commit", "--quiet", "--allow-empty", "-m", "base"])
+        run(["git", "checkout", "--quiet", "-b", "side"])
+        # File contents never repeat a subject: `fast-export` writes the parent's files.
+        for name, subject in (("a.txt", literal), ("b.txt", interval)):
+            with open(os.path.join(repo, name), "w", encoding="utf-8") as handle:
+                handle.write(name + "\n")
+            run(["git", "add", name])
+            if run(["git", "commit", "--quiet", "-m", subject]).returncode:
+                return ["cannot commit the temporary Git log-family fixture"]
+        for subcommand, argv in probes.items():
+            result = run([*argv, _LOG_FAMILY_PROBE_ENGINE, "--grep=a{2}b"])
+            if result.returncode:
+                continue
+            if interval not in result.stdout or literal in result.stdout:
+                failures.append(
+                    "installed Git `%s -E --grep` did not select the interval subject "
+                    "alone" % subcommand)
+        # A stash entry's subject carries its base commit's subject, so one entry on each
+        # commit gives `stash list` the same two subjects to choose between.
+        for base in ("side~1", "side"):
+            run(["git", "checkout", "--quiet", base])
+            with open(os.path.join(repo, "a.txt"), "a", encoding="utf-8") as handle:
+                handle.write("stashed\n")
+            if run(["git", "stash", "--quiet"]).returncode:
+                return failures + ["cannot stash in the temporary Git log-family fixture"]
+        result = run(["git", "stash", "list", "--format=%s", _LOG_FAMILY_PROBE_ENGINE,
+                      "--grep=a{2}b"])
+        if not result.returncode and (interval not in result.stdout
+                                      or literal in result.stdout):
+            failures.append(
+                "installed Git `stash list -E --grep` did not select the interval subject "
+                "alone")
+        run(["git", "stash", "clear"])
+        for subcommand in ("cherry-pick", "revert"):
+            run(["git", "checkout", "--quiet", "-B", "probe-" + subcommand,
+                 "base" if subcommand == "cherry-pick" else "side"])
+            result = run(["git", subcommand, "--no-edit", _LOG_FAMILY_PROBE_ENGINE,
+                          "--grep=a{2}b", "base..side"])
+            subject = run(["git", "log", "-1", "--format=%s"]).stdout.strip()
+            run(["git", subcommand, "--abort"])
+            if result.returncode:
+                continue
+            if interval not in subject or literal in subject:
+                failures.append(
+                    "installed Git `%s -E --grep` did not act on the interval subject "
+                    "alone" % subcommand)
+    return failures
+
+
+# The interval the always-ERE probe selects with; the selftest swaps it to prove it reports.
+_ALWAYS_ERE_PROBE_PATTERN = "a{2}b"
+
+
+def _check_always_ere_against_git(env):
+    """Each diff-regex subcommand and `git config` slot must compile its regex as ERE.
+
+    The last commit, a dirty worktree, a stash, and two config files each carry `aab`.
+    The interval `a{2}b` must select it, so the operand is a regex rather than a fixed
+    string or BRE, and the PCRE-only group `(?:aab)` must not, so it is not PCRE. A probe
+    this Git rejects with a diagnostic is loud, not a silent wrong result, and is skipped;
+    an empty result without one is a failure.
+    """
+    failures = []
+    with tempfile.TemporaryDirectory(prefix="z-harness-always-ere-") as repo:
+        identity = dict(env, GIT_AUTHOR_NAME="probe", GIT_COMMITTER_NAME="probe")
+        def run(argv):
+            return subprocess.run(argv, cwd=repo, capture_output=True, text=True,
+                                  timeout=10, env=identity)
+        def write(name, text):
+            with open(os.path.join(repo, name), "w", encoding="utf-8") as handle:
+                handle.write(text)
+        if run(["git", "init", "--quiet", "-b", "base"]).returncode:
+            return ["cannot initialize the temporary Git always-ERE fixture"]
+        write("f.txt", "x\n")
+        run(["git", "add", "f.txt"])
+        run(["git", "commit", "--quiet", "-m", "one"])
+        write("f.txt", "x\naab\n")
+        if run(["git", "commit", "--quiet", "-am", "two"]).returncode:
+            return ["cannot commit the temporary Git always-ERE fixture"]
+        write("f.txt", "x\naab\nwaabw\n")
+        write("values.cfg", "[k]\n\tv = aab\n")
+        write("names.cfg", "[k]\n\taab = 1\n")
+        values = os.path.join(repo, "values.cfg")
+        names = os.path.join(repo, "names.cfg")
+        probes = [
+            ("log -G", lambda p: ["git", "log", "--format=%s", "-G" + p], "two"),
+            ("log -P -G", lambda p: ["git", "log", "-P", "--format=%s", "-G" + p], "two"),
+            ("show -G", lambda p: ["git", "show", "--format=%s", "--name-only", "HEAD",
+                                   "-G" + p], "f.txt"),
+            ("whatchanged -G", lambda p: ["git", "whatchanged", "--format=%s", "-G" + p],
+             "two"),
+            ("diff -G", lambda p: ["git", "diff", "--name-only", "HEAD~1", "HEAD",
+                                   "-G" + p], "f.txt"),
+            ("diff-tree -G", lambda p: ["git", "diff-tree", "-r", "--name-only", "HEAD~1",
+                                        "HEAD", "-G" + p], "f.txt"),
+            ("format-patch -G", lambda p: ["git", "format-patch", "--stdout", "-1", "HEAD",
+                                           "-G" + p], "\n+aab\n"),
+            ("reflog -G", lambda p: ["git", "reflog", "--format=%s", "-G" + p], "two"),
+            ("diff-files -G", lambda p: ["git", "diff-files", "--name-only", "-G" + p],
+             "f.txt"),
+            ("diff-index -G", lambda p: ["git", "diff-index", "--name-only", "HEAD~1",
+                                         "-G" + p], "f.txt"),
+            ("difftool -G", lambda p: ["git", "difftool", "--no-prompt", "-x",
+                                       "echo TOOLRAN", "HEAD~1", "HEAD", "-G" + p],
+             "TOOLRAN"),
+            ("config value-pattern", lambda p: ["git", "config", "-f", values, "--get-all",
+                                                "k.v", p], "aab"),
+            ("config --get-regexp", lambda p: ["git", "config", "-f", names,
+                                               "--get-regexp", "k\\." + p], "k.aab"),
+            ("config get --value", lambda p: ["git", "config", "get", "-f", values,
+                                              "--all", "--value=" + p, "k.v"], "aab"),
+            ("config get --regexp", lambda p: ["git", "config", "get", "-f", names,
+                                               "--regexp", "--show-names", "k\\." + p],
+             "k.aab"),
+        ]
+        stash_probes = [
+            ("stash list -G", lambda p: ["git", "stash", "list", "--format=%s", "-G" + p],
+             "WIP"),
+            ("stash show -G", lambda p: ["git", "stash", "show", "--name-only", "-G" + p],
+             "f.txt"),
+        ]
+        def check(label, argv, marker):
+            selected = run(argv(_ALWAYS_ERE_PROBE_PATTERN))
+            if selected.returncode and selected.stderr.strip():
+                return
+            if marker not in selected.stdout:
+                failures.append(
+                    "installed Git `%s` did not select through the ERE interval %r"
+                    % (label, _ALWAYS_ERE_PROBE_PATTERN))
+            pcre = run(argv("(?:aab)"))
+            if not pcre.returncode and marker in pcre.stdout:
+                failures.append(
+                    "installed Git `%s` accepted a PCRE-only group, so the option is not "
+                    "always ERE" % label)
+        for label, argv, marker in probes:
+            check(label, argv, marker)
+        if run(["git", "stash", "--quiet"]).returncode:
+            return failures + ["cannot stash in the temporary Git always-ERE fixture"]
+        for label, argv, marker in stash_probes:
+            check(label, argv, marker)
+    return failures
+
+
 def check_log_grammar_against_git():
     """Ground the log family's OWN argv grammar, which is not git grep's.
 
@@ -7567,6 +7939,10 @@ def check_log_grammar_against_git():
                     failures.append(
                         "installed Git read log %r over a PCRE-only group as %s, expected "
                         "%s" % (flags, seen, expected))
+            failures.extend(_check_log_family_against_git(env))
+            checks += 1
+            failures.extend(_check_always_ere_against_git(env))
+            checks += 1
             for subcommand in ("shortlog", "rev-list"):
                 checks += 1
                 argv = ["git", subcommand, "-E", "--grep=" + interval, "HEAD"]
@@ -10353,6 +10729,186 @@ FIXTURES += [
 ]
 
 
+FIXTURES += [
+    ('RED  LOG FAMILY: whatchanged filters --grep with the ERE engine',
+     "git whatchanged -E --grep='harness\\b'", 'deny'),
+    ('RED  LOG FAMILY: show filters --grep with the ERE engine',
+     "git show -E --grep='harness\\b' HEAD", 'deny'),
+    ('RED  LOG FAMILY: reflog filters --grep with the ERE engine',
+     "git reflog -E --grep='harness\\b'", 'deny'),
+    ('RED  LOG FAMILY: format-patch filters --grep with the ERE engine',
+     "git format-patch -E --grep='harness\\b' -1", 'deny'),
+    ('RED  LOG FAMILY: fast-export filters --grep with the ERE engine',
+     "git fast-export -E --grep='harness\\b' HEAD", 'deny'),
+    ('RED  LOG FAMILY: cherry-pick acts on an ERE --grep selection',
+     "git cherry-pick -E --grep='harness\\b' main..side", 'deny'),
+    ('RED  LOG FAMILY: revert acts on an ERE --grep selection',
+     "git revert -E --grep='harness\\b' main..side", 'deny'),
+    ('RED  LOG FAMILY: --grep-reflog uses the selected engine',
+     "git log -g -E --grep-reflog='harness\\b'", 'deny'),
+    ('GREEN LOG FAMILY: --grep-reflog under PCRE',
+     "git log -g -P --grep-reflog='harness\\b'", 'allow'),
+    ('GREEN LOG FAMILY: show --grep under PCRE',
+     "git show -P --grep='harness\\b' HEAD", 'allow'),
+    ('RED  ALWAYS ERE: log -G compiles ERE',
+     "git log -G'harness\\b' -- f.txt", 'deny'),
+    ('RED  ALWAYS ERE: show -G compiles ERE',
+     "git show -G'harness\\b' HEAD", 'deny'),
+    ('RED  ALWAYS ERE: whatchanged -G compiles ERE',
+     "git whatchanged -G'harness\\b'", 'deny'),
+    ('RED  ALWAYS ERE: diff -G compiles ERE',
+     "git diff -G'harness\\b' HEAD~1", 'deny'),
+    ('RED  ALWAYS ERE: diff-tree -G compiles ERE',
+     "git diff-tree -r -G'harness\\b' HEAD~1 HEAD", 'deny'),
+    ('RED  ALWAYS ERE: format-patch -G compiles ERE',
+     "git format-patch -G'harness\\b' -1", 'deny'),
+    ('RED  ALWAYS ERE: reflog -G compiles ERE',
+     "git reflog -G'harness\\b'", 'deny'),
+    ('RED  ALWAYS ERE: -P does not change -G',
+     "git log -P -G'harness\\b'", 'deny'),
+    ('RED  ALWAYS ERE: a separated -G value',
+     "git log -G 'harness\\b'", 'deny'),
+    ('RED  ALWAYS ERE: -S with --pickaxe-regex compiles ERE',
+     "git log -S'harness\\b' --pickaxe-regex", 'deny'),
+    ('RED  ALWAYS ERE: diff -I compiles ERE',
+     "git diff -I'harness\\b' HEAD~1", 'deny'),
+    ('RED  ALWAYS ERE: --ignore-matching-lines compiles ERE',
+     "git diff --ignore-matching-lines='harness\\b' HEAD~1", 'deny'),
+    ('RED  ALWAYS ERE: --word-diff-regex compiles ERE',
+     "git diff --word-diff-regex='\\w+' HEAD~1", 'deny'),
+    ('RED  ALWAYS ERE: config --get-regexp compiles ERE',
+     "git config --get-regexp 'harness\\b'", 'deny'),
+    ('GREEN ALWAYS ERE: -S without --pickaxe-regex is a fixed string',
+     "git log -S'harness\\b'", 'allow'),
+    ('GREEN ALWAYS ERE: a portable -G pattern',
+     "git log -G'harness' -- f.txt", 'allow'),
+    ('ASK  ALWAYS ERE: a shell-expanded -G pattern',
+     'git log -G"$PAT"', 'ask'),
+    ('GREEN ALWAYS ERE: grep -G selects BRE, not a diff regex',
+     "git grep -G 'harness\\b' -- README.md", 'allow'),
+    ('RED  CONFIG: --get reads a value-pattern',
+     "git config --get k.v 'harness\\b'", 'deny'),
+    ('RED  CONFIG: --get-all reads a value-pattern',
+     "git config --get-all k.v 'harness\\b'", 'deny'),
+    ('RED  CONFIG: --get-regexp reads a value-pattern after its name regex',
+     "git config --get-regexp 'k\\.v' 'harness\\b'", 'deny'),
+    ('RED  CONFIG: --unset-all reads a value-pattern',
+     "git config --unset-all k.v 'harness\\b'", 'deny'),
+    ('RED  CONFIG: --unset reads a value-pattern',
+     "git config --unset k.v 'harness\\b'", 'deny'),
+    ('RED  CONFIG: --replace-all reads operand 2',
+     "git config --replace-all k.v new 'harness\\b'", 'deny'),
+    ('RED  CONFIG: a bare three-operand set reads operand 2',
+     "git config k.v new 'harness\\b'", 'deny'),
+    ('RED  CONFIG: --fixed-value leaves the name regex a regex',
+     "git config --fixed-value --get-regexp 'harness\\b' x", 'deny'),
+    ('RED  CONFIG: a unique long prefix selects --get-regexp',
+     "git config --get-r 'harness\\b'", 'deny'),
+    ('RED  CONFIG: --no-fixed-value restores the regex',
+     "git config --fixed-value --no-fixed-value --get-all k.v 'harness\\b'", 'deny'),
+    ('RED  CONFIG: --file takes a separate value',
+     "git config --file x --get-all k.v 'harness\\b'", 'deny'),
+    ('RED  CONFIG: --blob takes a separate value',
+     "git config --blob HEAD:x --get-all k.v 'harness\\b'", 'deny'),
+    ('RED  CONFIG: --type takes a separate value',
+     "git config --type bool --get-all k.v 'harness\\b'", 'deny'),
+    ('RED  CONFIG: --default takes a separate value',
+     "git config --default x --get k.v 'harness\\b'", 'deny'),
+    ('RED  CONFIG: --comment takes a separate value',
+     "git config --comment note k.v new 'harness\\b'", 'deny'),
+    ('RED  CONFIG: -f takes a separate value',
+     "git config -f x --get-all k.v 'harness\\b'", 'deny'),
+    ('RED  CONFIG: -f ends a short bundle',
+     "git config -zf x --get-all k.v 'harness\\b'", 'deny'),
+    ('RED  CONFIG: -f takes an attached value',
+     "git config -fx --get-all k.v 'harness\\b'", 'deny'),
+    ('RED  CONFIG: -t takes a separate value',
+     "git config -t bool --get k.v 'harness\\b'", 'deny'),
+    ('RED  CONFIG: --file= carries its value',
+     "git config --file=x --get-all k.v 'harness\\b'", 'deny'),
+    ('RED  CONFIG: get --regexp reads the name as a regex',
+     "git config get --regexp 'harness\\b'", 'deny'),
+    ('RED  CONFIG: get --value= is a value-pattern',
+     "git config get --all --value='harness\\b' k.v", 'deny'),
+    ('RED  CONFIG: get --value takes a separate pattern',
+     "git config get --all --value 'harness\\b' k.v", 'deny'),
+    ('RED  CONFIG: get --url takes a separate value',
+     "git config get --url https://x --all --value='harness\\b' k.v", 'deny'),
+    ('RED  CONFIG: a unique long prefix selects get --regexp',
+     "git config get --re 'harness\\b'", 'deny'),
+    ('RED  CONFIG: set --value is a value-pattern',
+     "git config set --value='harness\\b' k.v new", 'deny'),
+    ('RED  CONFIG: unset --value is a value-pattern',
+     "git config unset --value='harness\\b' k.v", 'deny'),
+    ('RED  CONFIG: a negated value option takes no value',
+     "git config --no-file --get-all k.v 'harness\\b'", 'deny'),
+    ('RED  CONFIG: get is a subcommand only as the first argument',
+     "git config get --value='harness\\b' k.v", 'deny'),
+    ('RED  CONFIG: an option after the first operand is an operand',
+     "git config k.v --get-all 'harness\\b'", 'deny'),
+    ('RED  CONFIG: -- ends the options',
+     "git config --get-regexp -- '-\\bharness'", 'deny'),
+    ('GREEN CONFIG: a value being set is data',
+     'git config alias.g \'!git grep -P "\\bfoo"\'', 'allow'),
+    ('GREEN CONFIG: --fixed-value makes the value-pattern literal',
+     "git config --fixed-value --get-all k.v 'harness\\b'", 'allow'),
+    ('GREEN CONFIG: get --fixed-value makes --value literal',
+     "git config get --fixed-value --value='harness\\b' k.v", 'allow'),
+    ('GREEN CONFIG: --no-value drops the value-pattern',
+     "git config get --value='harness\\b' --no-value k.v", 'allow'),
+    ('GREEN CONFIG: --get-regexp after an operand is the value-pattern',
+     'git config alias.w \'!git log -G"\\bx"\' --get-regexp', 'allow'),
+    ('GREEN CONFIG: an --add value is data',
+     'git config --add alias.g \'!git grep -P "\\bx"\'', 'allow'),
+    ('GREEN CONFIG: a set subcommand value is data',
+     'git config set alias.g \'!git grep -P "\\bfoo"\'', 'allow'),
+    ('ASK  CONFIG: a shell-expanded name regex',
+     'git config --get-regexp "$PAT"', 'ask'),
+    ('RED  LOG FAMILY: stash list filters --grep with the ERE engine',
+     "git stash list -E --grep='harness\\b'", 'deny'),
+    ('GREEN LOG FAMILY: stash list --grep under PCRE',
+     "git stash list -P --grep='harness\\b'", 'allow'),
+    ('RED  ALWAYS ERE: stash list -G compiles ERE',
+     "git stash list -G'harness\\b'", 'deny'),
+    ('RED  ALWAYS ERE: stash show -G compiles ERE',
+     "git stash show -G'harness\\b'", 'deny'),
+    ('GREEN ALWAYS ERE: a stash push message is data',
+     "git stash push -m '-Gharness\\b'", 'allow'),
+    ('RED  ALWAYS ERE: diff-files -G compiles ERE',
+     "git diff-files -G'harness\\b'", 'deny'),
+    ('RED  ALWAYS ERE: diff-index -G compiles ERE',
+     "git diff-index -G'harness\\b' HEAD", 'deny'),
+    ('RED  ALWAYS ERE: difftool -G compiles ERE',
+     "git difftool -G'harness\\b' HEAD~1", 'deny'),
+    ('GREEN ALWAYS ERE: --pickaxe-regex after -- is a path',
+     "git log -S'harness\\b' -- --pickaxe-regex", 'allow'),
+    ('ASK  HAZARD ROUTE: a shell alias running whatchanged',
+     'alias g=\'git whatchanged -E --grep="harness\\b"\'; g', 'ask'),
+    ('ASK  HAZARD ROUTE: config text piped into sh',
+     'echo "git config --get-regexp \'harness\\b\'" | sh', 'ask'),
+    ('ASK  HAZARD ROUTE: a shell alias running reflog',
+     "alias g='git reflog'; g", 'ask'),
+    ('ASK  HAZARD ROUTE: a shell alias running format-patch',
+     "alias g='git format-patch -1'; g", 'ask'),
+    ('ASK  HAZARD ROUTE: a shell alias running fast-export',
+     "alias g='git fast-export HEAD'; g", 'ask'),
+    ('ASK  HAZARD ROUTE: a shell alias running cherry-pick',
+     "alias g='git cherry-pick main..side'; g", 'ask'),
+    ('ASK  HAZARD ROUTE: a shell alias running revert',
+     "alias g='git revert HEAD'; g", 'ask'),
+    ('ASK  HAZARD ROUTE: a shell alias running diff-tree',
+     "alias g='git diff-tree -r HEAD'; g", 'ask'),
+    ('ASK  HAZARD ROUTE: a shell alias running diff-files',
+     "alias g='git diff-files'; g", 'ask'),
+    ('ASK  HAZARD ROUTE: a shell alias running diff-index',
+     "alias g='git diff-index HEAD'; g", 'ask'),
+    ('ASK  HAZARD ROUTE: a shell alias running stash',
+     "alias g='git stash'; g", 'ask'),
+    ('ASK  HAZARD ROUTE: a shell alias running config',
+     "alias g='git config user.name'; g", 'ask'),
+]
+
+
 def fixture_pair_duplicates(fixtures):
     """Return repeated public command/expected pairs; labels do not make cases distinct."""
     seen = set()
@@ -10590,6 +11146,14 @@ def selftest():
                                     if k != "-E"}}),
         ("PCRE constructs", check_pcre_constructs_against_git,
          {"scan_pcre_constructs": lambda _pattern: PatternScan((), ())}),
+        ("log-family subcommand", lambda: (_check_log_family_against_git(dict(
+            os.environ, GIT_AUTHOR_EMAIL="a@b", GIT_COMMITTER_EMAIL="a@b",
+            GIT_CONFIG_NOSYSTEM="1")), 0),
+         {"_LOG_FAMILY_PROBE_ENGINE": "-F"}),
+        ("always-ERE option", lambda: (_check_always_ere_against_git(dict(
+            os.environ, GIT_AUTHOR_EMAIL="a@b", GIT_COMMITTER_EMAIL="a@b",
+            GIT_CONFIG_NOSYSTEM="1")), 0),
+         {"_ALWAYS_ERE_PROBE_PATTERN": "a{3}b"}),
         ("installed-git aliases", check_aliases_against_git,
          {"trusted_git_authority": _submodule_reported_builtin}),
         ("shell boundary", check_shell_boundary_behavior,

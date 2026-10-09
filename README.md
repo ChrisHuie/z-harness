@@ -195,6 +195,16 @@ an interpreter without an explicit first literal script operand, or an expansion
 options are not skipped to guess a program operand. `wc -l < file` with no visible rebinding and
 `python3 script.py < file` read data under this bounded model.
 
+The regex check reads Git's other pattern options too. `--grep`, `--author`, `--committer`,
+and `--grep-reflog` filter with the engine the flags select in `log`, `shortlog`, `rev-list`,
+`whatchanged`, `show`, `reflog`, `format-patch`, `fast-export`, `cherry-pick`, `revert`, and
+`stash list`. `-G`, `-I`/`--ignore-matching-lines`, `--word-diff-regex`, and `-S` with
+`--pickaxe-regex` are POSIX ERE whatever engine flag is given, in `log`, `show`, `whatchanged`,
+`reflog`, `format-patch`, `diff`, `diff-tree`, `diff-files`, `diff-index`, `difftool`, and
+`stash list`/`show`. So are the name regex and value-patterns of `git config`, read through
+its own option grammar so that a value being set stays data. A shell alias or a script piped
+into a shell that runs any of these subcommands is questioned, as it is for `log`.
+
 Claude receives `ask` for uncertainty; the Codex adapter maps it to `deny`. A separately proven
 regex-engine or rev-path hazard retains `deny` precedence. Prefer a direct literal executable and
 an explicit pattern engine when rewriting a questioned command.

@@ -736,7 +736,10 @@ HANDBACK = re.compile(
     r'(stopping here|stopped here|say go|your call|let me know|over to you|'
     r'waiting on|want me to|shall I|should I|do you want|which (would|do) you|'
     r'before I (start|proceed|continue|touch|change)|say the word|'
-    r'happy to .{0,30}if you|unless you|if you\'d rather|continuing to (wait|collect|hold|monitor|poll|watch))', re.I)
+    r'happy to .{0,30}if you|unless you|if you\'d rather|continuing to (wait|collect|hold|monitor|poll|watch)|'
+    r'(after|once|when) you (approve|confirm|decide)\b|'
+    r'(after|once|when) you(\'ve| have) (approved|confirmed|decided)\b|'
+    r'(after|once|pending) your (approval|confirmation|decision)\b)', re.I)
 
 # The boundary is the LAST SENTENCE OR TWO, not a character window. A window
 # was the first design and its own control caught it: on a short message the
@@ -1080,6 +1083,22 @@ def selftest():
         ("handback wins even when an announcement appears earlier",
          {"last_assistant_message": "Starting sounds right. Let me know which you prefer."},
          False),
+        # An action that waits on the user's approval is a handback; a condition that
+        # arrives this turn without the user is not.
+        ("an action that waits on the user's approval hands back",
+         {"last_assistant_message": "Starting the sweep after you approve the plan."}, False),
+        ("an action that waits on the user's confirmation hands back",
+         {"last_assistant_message": "Starting the sweep once you've confirmed the scope."},
+         False),
+        ("an action pending the user's decision hands back",
+         {"last_assistant_message": "Running the audit pending your decision."}, False),
+        ("a condition that arrives without the user is still an announcement",
+         {"last_assistant_message": "Starting the sweep after the build finishes."}, True),
+        ("an approval already given is still an announcement",
+         {"last_assistant_message": "Starting the sweep after you approved it yesterday."},
+         True),
+        ("approval by someone else is still an announcement",
+         {"last_assistant_message": "Starting the sweep after CI approves."}, True),
 
         # Verbatim from other projects' transcripts. Every one of these blocked
         # under the sentence-split design; three of the four were behaviour the

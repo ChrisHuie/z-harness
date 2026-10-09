@@ -134,7 +134,7 @@ DESC_CAP = 400                # house cap (spec ceiling is 1024)
 SELFTEST_SUITES = [
     ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"], 1848),
     ("askq_timeout_guard", ["hooks/askq_timeout_guard.py", "--selftest"], 13),
-    ("announced_work_guard", ["hooks/announced_work_guard.py", "--selftest"], 916),
+    ("announced_work_guard", ["hooks/announced_work_guard.py", "--selftest"], 922),
     ("harness_report", ["hooks/harness_report.py", "--selftest"], 12),
     ("cc-cost", ["tools/cc-cost.py", "--selftest"], 8),
     ("codex-cost", ["tools/codex-cost.py", "--selftest"], 28),
@@ -162,7 +162,7 @@ SELFTEST_SUITES = [
 def expected_selftest_checks(name):
     """Exact execution-derived counts for suites whose former formulas hid probes."""
     fixed = {
-        "announced_work_guard": 916,
+        "announced_work_guard": 922,
         "ci-gate": 369,
         "enumerate-survivors": 28,
         "fuzz-judge-diff": 65,
@@ -2042,13 +2042,13 @@ def selftest():
             announced_timeouts.append(kwargs.get("timeout"))
             return subprocess.CompletedProcess(
                 args[0], 0,
-                b"SELFTEST-SUMMARY suite=announced_work_guard checks=916 failures=0\n",
+                b"SELFTEST-SUMMARY suite=announced_work_guard checks=922 failures=0\n",
                 b"")
         subprocess.run = record_announced_timeout
         try:
             c1_announced_timeout = Run(td, ci=True)
             c1_announced_timeout.c1_selftests(
-                [("announced_work_guard", [stub_suite], 916)],
+                [("announced_work_guard", [stub_suite], 922)],
                 sources=planted_sources("announced_work_guard", stub_suite))
         finally:
             subprocess.run = original_subprocess_run

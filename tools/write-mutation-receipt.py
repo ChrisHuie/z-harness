@@ -103,6 +103,24 @@ CHARSET_COLLECTIONS = {
 # ``timeout`` is an allowed kill only for the edit that restores an unbounded traversal.
 SITE_MUTATIONS = (
     {
+        "label": 'conditional handback base form dropped', "module": STOP,
+        "anchor": "    r'(after|once|when) you (approve|confirm|decide)\\b|'",
+        "replacement": "    r'(?!)|'",
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'conditional handback perfect form dropped', "module": STOP,
+        "anchor": "    r'(after|once|when) you(\\'ve| have) (approved|confirmed|decided)\\b|'",
+        "replacement": "    r'(?!)|'",
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'conditional handback noun form dropped', "module": STOP,
+        "anchor": "    r'(after|once|pending) your (approval|confirmation|decision)\\b)', re.I)",
+        "replacement": "    r'(?!))', re.I)",
+        "allowed_statuses": (),
+    },
+    {
         "label": 'stdin provenance runs before command grading', "module": GREP,
         "anchor": '    for tokens, equals_state, (command_env, lookup_uncertain) in zip(\n            commands, equals_states, environment_states):\n',
         "replacement": '    interpreter_stdin_provenance(\n        command, commands, _shell_depth, _deadline, _shell, _equals_state,\n        _command_env, _lookup_authority_uncertain)\n    for tokens, equals_state, (command_env, lookup_uncertain) in zip(\n            commands, equals_states, environment_states):\n',

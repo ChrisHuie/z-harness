@@ -11,21 +11,24 @@ validators under `contracts/goldens/`; none makes an unregistered GitHub edit ve
 
 ## The rule
 
-A current measurement used as evidence for the outbound head belongs in a generated file,
-and outbound text INCLUDES that file rather than restating it:
+Content generated from the tree belongs in a generated file, and outbound text INCLUDES that file
+rather than restating it:
 
 ```
-<!-- include: contracts/goldens/mutation-summary.md -->
+<!-- include: contracts/goldens/<generated file> -->
 ...byte-identical copy of that file...
 <!-- end include -->
 ```
 
+A measurement of one head is not such a file. Committing it into the head it measures creates the
+same self-reference as a tracked handoff, so mutation evidence is cited by its exact-head
+`mutation-proof` run, whose aggregate holds the measurement against the reviewed
+`contracts/mutation-policy.json` and states the verdict in its step summary.
+
 `tools/ci-gate.py` checks every live include block under this directory against its source and
-enforces the exact relative-path inventory `README.md` and
-`pr-8/frozen-publication.json`. A nested duplicate, symlink, missing file, mutable body draft,
-renamed handoff, or restored roll-up is rejected.
-`tools/write-mutation-receipt.py` writes the receipt and summary from one accepted
-aggregate of exact-plan shard fragments; its normal aggregate mode refuses changed output.
+enforces the registered relative-path inventory: `README.md` and one
+`pr-<number>/frozen-publication.json` per registered pull request. A nested duplicate, symlink,
+missing file, mutable body draft, renamed handoff, or restored roll-up is rejected.
 Historical measurements may remain as context only when the document says they are not
 final-head evidence; the include gate does not validate those free-prose claims.
 

@@ -258,11 +258,16 @@ or an externally administered required workflow must govern that boundary. GitHu
 image contents behind those labels. A `mutation-proof` workflow accepts pull requests, pushes to
 `main`, and manual dispatches, explicitly checks out
 `github.event.pull_request.head.sha || github.sha`, runs the deterministic mutation plan in six
-private-tree shards for every accepted head, and aggregates raw artifacts with `if: always()`. The aggregator
-rejects missing, duplicate, overlapping, foreign, or stale mutation IDs, recomputes each raw outcome,
-schema-compares the canonical tracked receipt, and byte-compares the tracked summary. The offline gate validates that receipt against
-the current plan and sources, derives the canonical summary bytes from the strict receipt, and then
-checks the outbound include copies; it does not rerun the expensive mutation plan locally. A separate
+private-tree shards for every accepted head, and aggregates raw artifacts with `if: always()`. A
+pull-request run is cancelled only when a newer head of the same pull request supersedes it. The
+aggregator rejects missing, duplicate, overlapping, foreign, or stale mutation IDs and shards measured
+under different tool versions, recomputes each raw outcome, and holds that observation against the
+reviewed `contracts/mutation-policy.json`: it exits 0 when the outcomes conform, 1 on a survivor or
+count-only kill the policy does not list or on any site or declared-addition survivor, and 2 when the
+measurement cannot be trusted, such as an `inert` entry being caught. The report goes to the job log
+and step summary and is never committed. The offline gate validates the policy against the current
+plan, holds the plan against an independent closed inventory, and requires every module a registered
+hook runs to be swept or listed as unswept; it does not rerun the expensive mutation plan locally. A separate
 declared Ubuntu job runs `tools/portable-conformance.py`. It resolves locked wheel filenames through
 live PyPI metadata, requires the published digest to equal the lock, hash-verifies every downloaded
 artifact, derives the vendored Agent Plugins schema and license URLs from their pinned repository

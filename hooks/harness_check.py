@@ -154,7 +154,7 @@ SELFTEST_SUITES = [
     ("corpus-delta", ["instruments/corpus_delta.py", "--selftest"], 20),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
     ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 88),
-    ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 1629),
+    ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 1630),
     ("zsh_rev_modifier_guard", ["hooks/guards/zsh_rev_modifier_guard.py", "--selftest"], 522),
 ]
 
@@ -189,9 +189,9 @@ def expected_selftest_checks(name):
         if real not in seen:
             seen.add(real)
             binaries.append(real)
-    # The portable corpus is 1629 checks for one Git. Every additional executable adds
+    # The portable corpus is 1630 checks for one Git. Every additional executable adds
     # one version probe, one fixture setup, and 22 alias-proof-name probes.
-    return 1629 + 24 * (max(1, len(binaries)) - 1)
+    return 1630 + 24 * (max(1, len(binaries)) - 1)
 # The public Bash-guard selftest intentionally runs five independent process-level timing
 # observations for each runtime. Give that aggregate suite enough wall-clock without
 # weakening the five-second deadline each individual hook process must meet.

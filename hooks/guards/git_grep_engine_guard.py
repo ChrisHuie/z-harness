@@ -11267,6 +11267,37 @@ def selftest():
         "PASS" if uniqueness_ok else "FAIL"))
     if duplicates:
         print("        duplicate pairs: %r" % duplicates)
+    # The occurrence locator's scans are counted rather than timed. One scan per command is
+    # the whole-source cost that ran past the hook timeout, and a wall-clock check on a fast
+    # runner let that regression through.
+    real_re = globals()["re"]
+    occurrence_scans = []
+
+    class CountingRe:
+        def __getattr__(self, name):
+            return getattr(real_re, name)
+
+        def finditer(self, *args, **kwargs):
+            occurrence_scans.append(args[0])
+            return real_re.finditer(*args, **kwargs)
+
+    globals()["re"] = CountingRe()
+    try:
+        locator = _CommandOccurrences("eval        ; " * 200 + "source ./x; " * 200)
+        absent = [locator.locate(["eval", f"echo {index}"]) for index in range(200)]
+        absent_scans = len(occurrence_scans)
+        repeated = [locator.locate(["source", "./x"]) for _index in range(200)]
+        repeated_scans = len(occurrence_scans) - absent_scans
+    finally:
+        globals()["re"] = real_re
+    locator_ok = (absent_scans == 0 and builtins.all(position is None for position in absent)
+                  and repeated_scans == 1 and None not in repeated
+                  and len(set(repeated)) == 200)
+    bad += 0 if locator_ok else 1
+    print("  %s the occurrence locator scans once per distinct present command "
+          "(absent words: %d scans; 200 repeats: %d)" % (
+              "PASS" if locator_ok else "FAIL", absent_scans, repeated_scans))
+
     # Work counts are independent of host scheduling. Each fast path avoids only
     # impossible matches, and a positive control proves the counter observes a live call.
     import cProfile

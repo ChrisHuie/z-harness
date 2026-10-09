@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import ast
 import hashlib
 import importlib.util
 import json
@@ -159,14 +160,16 @@ jobs:
         run: python3 tools/portable-conformance.py
 """
 EXPECTED_MUTATION_WORKFLOW = """name: mutation-proof
-# The sweep re-measures every mutation to prove the committed receipt is truthful rather than
-# merely self-consistent, which is the one thing the offline gate cannot do: it recomputes
-# from the receipt's own contents and can never re-measure. It is the only check that tells a
-# real measurement from a fabricated one, so it must reach every head.
+# The sweep measures whether the shipped suites catch every planned guard mutation at this
+# exact head, and holds that measurement against the reviewed policy in
+# contracts/mutation-policy.json. The measurement is this run's evidence and is never
+# committed: the offline gate can validate the policy, but only a sweep can measure.
 #
 # Every accepted head is measured afresh by the same six shards. A path filter, selector, or
-# inherited receipt would leave the result dependent on unverified prior workflow and runner
-# state; absence and self-consistency are not measurement evidence.
+# inherited result would leave the verdict dependent on unverified prior workflow and runner
+# state; absence and self-consistency are not measurement evidence. A pull-request run is
+# cancelled only when a newer head of the same pull request supersedes it, and a run for a
+# push to main is never cancelled.
 on:
   pull_request:
   push:
@@ -175,6 +178,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: mutation-proof-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   mutations:
@@ -225,7 +232,7 @@ jobs:
           name: mutation-fragment-${{ matrix.shard }}
           path: mutation-fragment-${{ matrix.shard }}.json
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 90
 
   aggregate:
     if: always()
@@ -271,7 +278,7 @@ jobs:
           pattern: mutation-fragment-*
           path: mutation-fragments
           merge-multiple: true
-      - name: reject incomplete evidence and compare the tracked receipt
+      - name: reject incomplete evidence and enforce the mutation policy
         run: >-
           python3 tools/write-mutation-receipt.py
           --aggregate mutation-fragments/*.json
@@ -368,7 +375,7 @@ def workflow_error(data: str, mutation_data: Optional[str] = None) -> Optional[s
         return (
             "mutation workflow differs from the closed contract: every accepted head "
             "runs six deterministic shards at the exact head, with read-only permissions, "
-            "immutable actions, artifact aggregation, and tracked-receipt comparison"
+            "immutable actions, artifact aggregation, and enforcement of the reviewed policy"
         )
     return None
 
@@ -417,7 +424,7 @@ def _folded_command(step: str) -> tuple[str, ...]:
     content: folding joins it to the command with a space and the shell then treats the
     whole folded line as a comment. Dropping those lines the way a literal `run: |` block
     allows -- where `#` really is a shell comment -- let one inserted line turn the sweep's
-    receipt comparison into a no-op that exits zero while this oracle read the command it
+    aggregate into a no-op that exits zero while this oracle read the command it
     expected. Every line is returned, so an inserted one changes the tuple and is refused.
     """
     return tuple(
@@ -539,8 +546,15 @@ def mutation_workflow_authority_error(data: str) -> str:
         if line.strip() and not line.lstrip().startswith("#")
         and len(line) - len(line.lstrip(" ")) == 0
     ]
-    if top_fields != ["name: mutation-proof", "on:", "permissions:", "jobs:"]:
+    if top_fields != ["name: mutation-proof", "on:", "permissions:", "concurrency:", "jobs:"]:
         return "mutation workflow top-level fields permit an unreviewed environment"
+    # Cancelling a superseded pull-request head is safe because that head is no longer a
+    # merge candidate. A main push or a dispatch keyed only by event would let one head's
+    # run cancel another's, leaving an accepted head with no measurement.
+    if _yaml_fields(_yaml_mapping_block(data, "concurrency:"), 2) != [
+            "group: mutation-proof-${{ github.event.pull_request.number || github.sha }}",
+            "cancel-in-progress: ${{ github.event_name == 'pull_request' }}"]:
+        return "mutation workflow concurrency is not exactly per-head with pull-request-only cancellation"
     # The key alone leaves the block's CONTENT unread, and neither job overrides it, so a
     # widened workflow-level token reaches every shard and the aggregator silently.
     granted = [
@@ -605,7 +619,7 @@ def mutation_workflow_authority_error(data: str) -> str:
             "- name: install zsh and assert the exact accepted head",
             "- name: refuse a head whose shards did not all succeed",
             f"- uses: {download}",
-            "- name: reject incomplete evidence and compare the tracked receipt"]:
+            "- name: reject incomplete evidence and enforce the mutation policy"]:
         return "mutation aggregate step inventory is not exactly ordered and closed"
 
     for label, job in (("shard", shard), ("aggregate", aggregate)):
@@ -653,7 +667,7 @@ def mutation_workflow_authority_error(data: str) -> str:
             or _yaml_fields(upload_with, 10) != [
                 "name: mutation-fragment-${{ matrix.shard }}",
                 "path: mutation-fragment-${{ matrix.shard }}.json",
-                "if-no-files-found: error", "retention-days: 7"]):
+                "if-no-files-found: error", "retention-days: 90"]):
         return "mutation shard fragment upload is not exactly the reviewed evidence upload"
 
     refusal_step = _yaml_mapping_block(
@@ -673,14 +687,14 @@ def mutation_workflow_authority_error(data: str) -> str:
         return "mutation aggregate fragment download is not exactly the reviewed pattern"
     comparison_step = _yaml_mapping_block(
         aggregate,
-        "      - name: reject incomplete evidence and compare the tracked receipt")
+        "      - name: reject incomplete evidence and enforce the mutation policy")
     if _yaml_fields(comparison_step, 8) != ["run: >-"]:
         return "mutation aggregate comparison step fields are not one folded command"
     comparison_command = _folded_command(comparison_step)
     if comparison_command != (
             "python3 tools/write-mutation-receipt.py",
             "--aggregate mutation-fragments/*.json"):
-        return "mutation aggregate comparison command is not tracked-receipt aggregation"
+        return "mutation aggregate policy command is not the reviewed aggregation"
     return ""
 
 
@@ -1165,9 +1179,9 @@ def mutation_generator_source_error(golden_data=None, source_bytes=None) -> str:
 
     The three guards carry an authored digest here, so editing one reddens this gate until a
     reviewer updates the registry in the same commit. The tool that MEASURES those guards had
-    no such binding: its only digest was ``generator_sha256`` inside the receipt it writes
-    itself, so editing the generator and regenerating in one commit moved both together and
-    the gate stayed green. A self-attesting measurement instrument is not attested.
+    no such binding: its only digest was one it wrote into its own output, so editing the
+    generator and regenerating in one commit moved both together and the gate stayed green.
+    A self-attesting measurement instrument is not attested.
     """
     try:
         if golden_data is None:
@@ -1308,58 +1322,13 @@ def decision_golden_error(golden_data=None, decide=None, snapshot=None,
             f"tools/write-decision-golden.py in the same commit and review that diff")
 
 
-MUTATION_RECEIPT = ROOT / "contracts/goldens/mutation-receipt.json"
-MUTATION_SUMMARY = ROOT / "contracts/goldens/mutation-summary.md"
-# 80 of these are the debt this branch already carried. The other 8 are the removal
-# direction of ENV_SPLIT_ESCAPES, the env -S escape table: removing an entry makes the
-# splitter REFUSE that sequence, which is strictly stricter, so an element sweep that
-# only removes cannot express a kill for them. Two of its ten are caught, by fixtures
-# that depend on the removed escape producing a literal backslash.
-MUTATION_SURVIVOR_DEBT_CEILING = 88
+# The plan may grow; it may not shrink below what the sweep is reviewed to cover.
 MUTATION_PLAN_FLOOR = 600
-# Kills scored only because the recorded check count moved, with no assertion failing. A
-# guard that increments its counter once per element of the collection under mutation moves
-# that count on any removal, so such a kill is decided by loop structure before any probe
-# runs and inflates `caught` without evidence. This was 17 of the 22 CROSS_VERSION_ALIAS_PROOF
-# elements, thirteen of which moved a real merged verdict from deny to ask while every gate
-# stayed green. Fixtures now assert those verdicts, and an arithmetic kill no longer preempts
-# the merged suite that sees them, so the count fell from 17 to zero on the authoring host.
-# The ceiling is one rather than zero because whether an assertion fires can depend on the
-# environment: deleting "W" from MOD_UNMODELLED reddens a probe on a zsh that consumes that
-# letter as a modifier and only moves the check count on a zsh that does not, so the CI
-# runner observes one such kill where this host observes none. The writer owns the ceiling
-# because it evaluates fresh fragments before projecting host-observed fields away; this gate
-# reads that same value while validating the tracked authoring receipt.
 # Declared additions, pinned here independently of the generator. The element sweep only
 # REMOVES members, and removal makes a collection that grants an exemption stricter, so the
 # generated sweep cannot express the direction these fail in. Each entry must be caught; a
 # survivor is a live fail-open rather than coverage debt. Pinned so an entry cannot be
 # dropped without this gate saying so.
-# The committed receipt's kill reasons are dropped from the cross-host comparison, because
-# whether an assertion fires can differ by environment. Dropped from comparison also means
-# unfalsifiable: relabelling every recorded kill as a real assertion and emptying the tally
-# passed both this gate and the CI aggregate, which is exactly the overstatement the reason
-# field exists to prevent. Pinning the committed set by identity puts it back under review --
-# laundering it now requires editing this constant, which a reader sees. This constrains the
-# committed artifact only; it does not claim any host observes the same set.
-# One identity: deleting "W" from MOD_UNMODELLED. The probe that grades it asks the installed
-# zsh what `$v:Wrest` prints, and zsh 5.9 answers with uninitialized memory -- `:W` takes `r`
-# as its delimiter and `e` as the modifier and reads past the word. Which bytes come back
-# depends on the process that launched it: from an interactive shell the literal survives and
-# the probe reads "not consumed"; from a Python child it is garbage and the probe reads
-# "consumed" and the assertion fires. The committed receipt was measured under the sweep,
-# where only the check count moved; run directly on the same host the assertion fires three
-# times out of three, and it fired on the CI runner that measured the previous receipt. The
-# kill is real; which channel reports it is not a fact about the guards. Pinning the identity
-# keeps that observation review-visible; fresh aggregation separately derives and applies the
-# writer-owned ceiling before comparing platform-stable outcomes.
-# The receipt measured at b0cba01 records the "W" deletion by check count alone, as the runs
-# at 3558407, 50baebb, 4df0012 and 1f26536 did; only the run at cc9cdf7 caught it by an
-# assertion. The reviewed set follows the committed measurement, within the writer's ceiling
-# of one.
-EXPECTED_UNASSERTED_KILLS: set[tuple] = {
-    ("hooks/guards/zsh_rev_modifier_guard.py", "MOD_UNMODELLED", "W"),
-}
 EXPECTED_MUTATION_ADDITIONS = {
     (
         "hooks/guards/git_grep_engine_guard.py", "_GIT_TERMINAL_OPTIONS", "set",
@@ -1914,17 +1883,6 @@ EXPECTED_MUTATION_EXCLUSIONS = {
 }
 
 
-def mutation_unasserted_kill_ceiling() -> int:
-    """Read the fresh-observation ceiling from the mutation evidence owner."""
-    spec = importlib.util.spec_from_file_location(
-        "_ci_gate_mutation_ceiling", ROOT / "tools/write-mutation-receipt.py")
-    if spec is None or spec.loader is None:
-        raise ValueError("cannot load write-mutation-receipt.py for its kill ceiling")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.UNASSERTED_KILL_CEILING
-
-
 def mutation_site_policy_digest(descriptors) -> str:
     """Hash every semantic site field under a stable, reviewable framing."""
     records = []
@@ -2050,43 +2008,16 @@ def mutation_policy_error(plan, exclusions, policy) -> str:
     return "; ".join(problems)
 
 
-def mutation_receipt_error(receipt_data=None, plan=None, exclusions=None,
-                           contract=None, current_sources=None, ceiling=None,
-                           policy=None, unasserted_ceiling=None,
-                           unasserted_identities=None) -> str:
-    """Validate exact mutation schema, plan coverage, and every derived field."""
+def mutation_plan_error(plan=None, exclusions=None, policy=None) -> str:
+    """The generated plan matches the closed inventory pinned here, independently of it.
+
+    A generator that silently drops a collection, a site or a declared addition would still
+    measure cleanly, so the plan is held against pins this gate owns and a floor.
+    """
     try:
-        production_contract = plan is None or exclusions is None or contract is None
-        if receipt_data is None:
-            receipt_data = _json_without_duplicate_keys(MUTATION_RECEIPT)
-        if plan is None or exclusions is None or contract is None:
-            spec = importlib.util.spec_from_file_location(
-                "_ci_gate_mutation", ROOT / "tools/write-mutation-receipt.py")
-            if spec is None or spec.loader is None:
-                return "cannot load write-mutation-receipt.py for the mutation receipt"
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            plan, exclusions = module.mutation_plan()
-            contract = {
-                "schema_version": module.SCHEMA_VERSION,
-                # A schema pin, not an attestation: this field is a constant the gate
-                # compares, so it can never record which flags actually ran. It previously
-                # named --accept-receipt-changes unconditionally, which read as provenance
-                # for the one bypass that skips receipt comparison. CI aggregates in verify
-                # mode, so a real mode field cannot live here either -- the freshly computed
-                # value would never equal the committed one.
-                "generated_by": f"{module.GENERATOR} --aggregate",
-                "note": module.NOTE,
-                "keys": tuple(module.RECEIPT_KEYS),
-                "generator_sha256": module.file_sha256(ROOT / module.GENERATOR),
-                "guards": tuple(module.GUARDS),
-                "plan_sha256": module.digest(plan),
-                "kill_reasons": frozenset(module.KILL_REASONS),
-                "unasserted_reason": module.UNASSERTED_KILL_REASON,
-                "unasserted_ceiling": module.UNASSERTED_KILL_CEILING,
-            }
-            current_sources = module.source_digests()
-        if policy is None and production_contract:
+        if plan is None or exclusions is None:
+            plan, exclusions = _mutation_writer("_ci_gate_mutation_plan").mutation_plan()
+        if policy is None:
             policy = {
                 "collections": EXPECTED_MUTATION_COLLECTIONS,
                 "sites": EXPECTED_MUTATION_SITES,
@@ -2096,154 +2027,140 @@ def mutation_receipt_error(receipt_data=None, plan=None, exclusions=None,
                 "additions": EXPECTED_MUTATION_ADDITIONS,
                 "floor": MUTATION_PLAN_FLOOR,
             }
-        if ceiling is None:
-            ceiling = MUTATION_SURVIVOR_DEBT_CEILING
-        if unasserted_ceiling is None:
-            unasserted_ceiling = contract["unasserted_ceiling"]
-        if unasserted_identities is None:
-            unasserted_identities = EXPECTED_UNASSERTED_KILLS
     except Exception as exc:
-        return f"cannot verify the mutation receipt: {exc!r}"
-    if not isinstance(receipt_data, dict):
-        return "mutation receipt root is not an object"
-    problems = []
-    if policy is not None:
-        policy_problem = mutation_policy_error(plan, exclusions, policy)
-        if policy_problem:
-            problems.append("closed mutation policy: " + policy_problem)
-    expected_fields = set(contract["keys"])
-    actual_fields = set(receipt_data)
-    if actual_fields != expected_fields:
-        problems.append(
-            f"top-level fields missing={sorted(expected_fields - actual_fields)} "
-            f"unexpected={sorted(actual_fields - expected_fields)}")
-    for field in ("schema_version", "generated_by", "note", "generator_sha256",
-                  "plan_sha256"):
-        expected = contract[field]
-        if receipt_data.get(field) != expected:
-            problems.append(f"{field} differs from the generator contract")
-    if receipt_data.get("source_digests") != current_sources:
-        problems.append("source digests do not equal all current guard sources")
-    if receipt_data.get("baseline") != {
-            relative: "passed" for relative in contract["guards"]}:
-        problems.append("baseline does not prove every mutation-owned suite passed")
-    if receipt_data.get("sweep_exclusions") != exclusions:
-        problems.append("module-qualified sweep exclusions differ from the exact scan")
-    plan_by_id = {item["id"]: item for item in plan}
-    results = receipt_data.get("results")
-    if not isinstance(results, dict) or not results:
-        problems.append("results are empty or not an object")
-        results = {}
-    missing = sorted(set(plan_by_id) - set(results))
-    foreign = sorted(set(results) - set(plan_by_id))
-    if missing or foreign:
-        problems.append(f"result inventory missing={missing[:4]} foreign={foreign[:4]}")
-    observed_survivors = []
-    addition_survivors = []
-    site_survivors = []
-    observed_unasserted = []
-    unasserted_reason = contract["unasserted_reason"]
-    for mutation_id in sorted(set(plan_by_id) & set(results)):
-        expected = dict(plan_by_id[mutation_id])
-        allowed_statuses = set(expected.pop("allowed_statuses", ()) or ())
-        recorded = results[mutation_id]
-        if not isinstance(recorded, dict):
-            problems.append(f"result {mutation_id} is not an object")
-            continue
-        outcome = recorded.get("outcome")
-        if outcome not in {"caught", "survived"}:
-            problems.append(f"result {mutation_id} has invalid outcome {outcome!r}")
-            continue
-        reason = recorded.get("reason")
-        if reason not in contract["kill_reasons"]:
-            problems.append(f"result {mutation_id} has invalid reason {reason!r}")
-            continue
-        # A survived outcome has exactly one truthful reason, and a kill can never carry it.
-        # Without this the reason is decorative: a caught result could record "survived" and
-        # the unasserted tally below would be whatever the generator chose to report.
-        if (outcome == "survived") != (reason == "survived"):
-            problems.append(
-                f"result {mutation_id} outcome {outcome!r} contradicts reason {reason!r}")
-            continue
-        # Only the predeclared performance timeout is a legitimate non-receipt kill.
-        # An invalid receipt is absent from the reason vocabulary and fails above.
-        if reason == "timeout" and reason not in allowed_statuses:
-            problems.append(
-                f"result {mutation_id} records status {reason!r} its plan does not allow")
-            continue
-        selectors = tuple(expected.get("selectors", ()) or ())
-        reachable_reasons = ({"selector-failure"} if selectors else {
-            "suite-failure", unasserted_reason,
-        }) | allowed_statuses
-        if outcome == "caught" and reason not in reachable_reasons:
-            problems.append(
-                f"result {mutation_id} records reason {reason!r}, which is unreachable "
-                f"for a descriptor with {len(selectors)} selector(s)")
-            continue
-        expected["outcome"] = outcome
-        expected["reason"] = reason
-        if recorded != expected:
-            problems.append(f"result {mutation_id} fields do not match its planned mutation")
-        if outcome == "survived":
-            observed_survivors.append(mutation_id)
-            if expected["kind"] == "site":
-                site_survivors.append(mutation_id)
-            elif expected["kind"] == "set-addition":
-                addition_survivors.append(mutation_id)
-        elif reason == unasserted_reason:
-            observed_unasserted.append(mutation_id)
-    if receipt_data.get("survivors") != observed_survivors:
-        problems.append("survivor IDs are not exactly derived from results")
-    if receipt_data.get("unasserted_kills") != observed_unasserted:
-        problems.append("unasserted-kill IDs are not exactly derived from results")
-    recorded_unasserted = {
-        (results[i].get("module"), results[i].get("name"), results[i].get("element"))
-        for i in observed_unasserted if isinstance(results.get(i), dict)
-    }
-    if recorded_unasserted != set(unasserted_identities):
-        problems.append(
-            f"recorded unasserted kills {sorted(recorded_unasserted)} differ from the "
-            f"reviewed set {sorted(unasserted_identities)}")
-    if len(observed_unasserted) > unasserted_ceiling:
-        problems.append(
-            f"unasserted kills {len(observed_unasserted)} exceed ceiling "
-            f"{unasserted_ceiling}: these mutations are recorded caught while no assertion "
-            f"failed, so the count is not evidence the suites observe them")
-    if receipt_data.get("total") != len(plan_by_id):
-        problems.append("total is not the exact mutation-plan cardinality")
-    if receipt_data.get("caught") != len(plan_by_id) - len(observed_survivors):
-        problems.append("caught is not derived from total minus survivors")
-    if site_survivors:
-        problems.append(f"site mutations survived: {site_survivors[:4]}")
-    if addition_survivors:
-        problems.append(f"declared additions survived: {addition_survivors[:4]}")
-    if len(observed_survivors) > ceiling:
-        problems.append(
-            f"survivor debt {len(observed_survivors)} exceeds ceiling {ceiling}")
-    return ("mutation receipt mismatch: " + "; ".join(problems[:8])) if problems else ""
+        return f"cannot verify the mutation plan: {exc!r}"
+    problem = mutation_policy_error(plan, exclusions, policy)
+    return ("closed mutation plan: " + problem) if problem else ""
 
 
-def mutation_summary_error(receipt_data=None, summary_bytes=None) -> str:
-    """Require the canonical summary bytes to be derived from the strict receipt."""
+MUTATION_POLICY = ROOT / "contracts/mutation-policy.json"
+HOOK_REGISTRATION_FILES = ("settings.json", "hooks/hooks.json")
+HOOK_IMPORT_ROOTS = ("hooks", "hooks/guards", "tools")
+
+
+def _mutation_writer(label: str):
+    spec = importlib.util.spec_from_file_location(
+        label, ROOT / "tools/write-mutation-receipt.py")
+    if spec is None or spec.loader is None:
+        raise ValueError("cannot load write-mutation-receipt.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _unique_json(raw: bytes):
+    def unique_object(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"duplicate JSON object key {key!r}")
+            value[key] = item
+        return value
+
+    return json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object)
+
+
+def mutation_policy_file_error(policy_bytes=None, plan=None, writer=None) -> str:
+    """The reviewed mutation policy names only planned element deletions, canonically.
+
+    The canonical one-entry-per-line form is required because a reviewer reads this file
+    as a diff: a reformatted policy turns one changed survivor into a page of noise.
+    """
     try:
-        if receipt_data is None:
-            receipt_data = _json_without_duplicate_keys(MUTATION_RECEIPT)
-        receipt_problem = mutation_receipt_error(receipt_data=receipt_data)
-        if receipt_problem:
-            return "cannot derive mutation summary from an invalid receipt: " + receipt_problem
-        spec = importlib.util.spec_from_file_location(
-            "_ci_gate_mutation_summary", ROOT / "tools/write-mutation-receipt.py")
-        if spec is None or spec.loader is None:
-            return "cannot load write-mutation-receipt.py for summary derivation"
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        expected = module.summary_text(receipt_data).encode("utf-8")
-        actual = MUTATION_SUMMARY.read_bytes() if summary_bytes is None else summary_bytes
+        writer = _mutation_writer("_ci_gate_mutation_policy") if writer is None else writer
+        raw = MUTATION_POLICY.read_bytes() if policy_bytes is None else policy_bytes
+        policy = _unique_json(raw)
+        if plan is None:
+            plan, _exclusions = writer.mutation_plan()
+        problem = writer.policy_error(policy, plan)
+        if problem:
+            return "mutation policy: " + problem
+        canonical = raw.decode("utf-8") == writer.policy_text(policy)
     except Exception as exc:
-        return f"cannot verify mutation summary derivation: {exc!r}"
-    if actual != expected:
-        return "contracts/goldens/mutation-summary.md is not derived from the strict receipt"
+        return f"cannot verify the mutation policy: {exc!r}"
+    if not canonical:
+        return "contracts/mutation-policy.json is not in the canonical one-entry-per-line form"
     return ""
+
+
+def registered_hook_closure(root: Path | None = None) -> set:
+    """Every repository module a registered hook command executes, by static import.
+
+    Commands are read from both runtimes' registrations, and imports are followed through
+    the directories a hook can import from. A module loaded some other way is outside this
+    closure, so the closure is a lower bound on what runs.
+    """
+    root = ROOT if root is None else root
+    scripts = set()
+
+    def walk(node):
+        if isinstance(node, dict):
+            command = node.get("command")
+            if node.get("type") == "command" and isinstance(command, str):
+                scripts.update(re.findall(r"hooks/[A-Za-z0-9_./-]+\.py", command))
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    for relative in HOOK_REGISTRATION_FILES:
+        walk(_json_without_duplicate_keys(root / relative))
+    closure = set()
+    pending = sorted(scripts)
+    while pending:
+        relative = pending.pop()
+        if relative in closure:
+            continue
+        path = root / relative
+        if not path.is_file():
+            raise ValueError(f"registered hook module {relative} is not a file")
+        closure.add(relative)
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), relative)):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                names = [node.module]
+            else:
+                continue
+            for name in names:
+                for base in HOOK_IMPORT_ROOTS:
+                    candidate = f"{base}/{name.split('.')[0]}.py"
+                    if (root / candidate).is_file():
+                        pending.append(candidate)
+    return closure
+
+
+def mutation_sweep_coverage_error(root=None, guards=None, unswept=None) -> str:
+    """Every module a registered hook runs is either swept or named as unswept, exactly.
+
+    The sweep's scan set is part of its claim. Without this, a new guard reached by a
+    registered hook ships with no mutation evidence and nothing says so; with it, the
+    omission is a reviewed line in the policy.
+    """
+    try:
+        closure = registered_hook_closure(root)
+        if guards is None or unswept is None:
+            writer = _mutation_writer("_ci_gate_mutation_coverage")
+            guards = writer.GUARDS if guards is None else guards
+            if unswept is None:
+                unswept = {item["path"]
+                           for item in writer.load_policy()["unswept_guards"]}
+    except Exception as exc:
+        return f"cannot verify mutation sweep coverage: {exc!r}"
+    if not closure:
+        return "no registered hook module was found, so sweep coverage is unverified"
+    unswept_modules = closure - set(guards)
+    problems = []
+    missing = sorted(unswept_modules - set(unswept))
+    if missing:
+        problems.append(
+            f"registered hook modules are neither swept nor listed as unswept: {missing}")
+    stale = sorted(set(unswept) - unswept_modules)
+    if stale:
+        problems.append(
+            f"unswept_guards names modules no registered hook reaches unswept: {stale}")
+    return "; ".join(problems)
 
 
 REVIEW_ROOT = ROOT / "contracts/review"
@@ -2951,18 +2868,6 @@ def gate(
     print(f"  {'FAIL' if ownership_source_problem else 'PASS'} repository-ownership-source")
     if ownership_source_problem:
         failures.append(ownership_source_problem)
-    # Reported here rather than in the tracked summary: whether an assertion fires can differ
-    # between hosts, so this count belongs in the run that observed it, not in a file two
-    # hosts compare byte for byte.
-    try:
-        _receipt = _json_without_duplicate_keys(MUTATION_RECEIPT)
-        _unasserted = len(_receipt.get("unasserted_kills") or [])
-        _caught = _receipt.get("caught")
-        print(f"  INFO mutation-kills caught={_caught} scored-on-count-alone={_unasserted} "
-              f"ceiling={mutation_unasserted_kill_ceiling()} "
-              f"(recorded in the committed receipt, not measured on this host)")
-    except Exception as exc:
-        print(f"  INFO mutation-kills unavailable: {exc!r}")
     generator_source_problem = mutation_generator_source_error()
     print(f"  {'FAIL' if generator_source_problem else 'PASS'} mutation-generator-source")
     if generator_source_problem:
@@ -2975,14 +2880,29 @@ def gate(
     print(f"  {'FAIL' if decision_problem else 'PASS'} decision-golden")
     if decision_problem:
         failures.append(decision_problem)
-    mutation_problem = mutation_receipt_error()
-    print(f"  {'FAIL' if mutation_problem else 'PASS'} mutation-receipt")
-    if mutation_problem:
-        failures.append(mutation_problem)
-    summary_problem = mutation_summary_error()
-    print(f"  {'FAIL' if summary_problem else 'PASS'} mutation-summary")
-    if summary_problem:
-        failures.append(summary_problem)
+    plan_problem = mutation_plan_error()
+    print(f"  {'FAIL' if plan_problem else 'PASS'} mutation-plan")
+    if plan_problem:
+        failures.append(plan_problem)
+    policy_file_problem = mutation_policy_file_error()
+    print(f"  {'FAIL' if policy_file_problem else 'PASS'} mutation-policy")
+    if policy_file_problem:
+        failures.append(policy_file_problem)
+    coverage_problem = mutation_sweep_coverage_error()
+    print(f"  {'FAIL' if coverage_problem else 'PASS'} mutation-sweep-coverage")
+    if coverage_problem:
+        failures.append(coverage_problem)
+    # Measurements live in the exact-head mutation-proof run, not in the tree; what the
+    # offline gate can state is the reviewed policy it will be held against.
+    try:
+        _policy = _unique_json(MUTATION_POLICY.read_bytes())
+        _classes = [entry.get("class") for entry in _policy.get("allowed_survivors", [])]
+        print(f"  INFO mutation-policy allowed-survivors={len(_classes)} "
+              f"debt={_classes.count('debt')} inert={_classes.count('inert')} "
+              f"count-only={len(_policy.get('count_only_kills', []))} "
+              f"unswept-guards={len(_policy.get('unswept_guards', []))}")
+    except Exception as exc:
+        print(f"  INFO mutation-policy unavailable: {exc!r}")
     retired_claim_problem = retired_dispatch_claim_error()
     print(f"  {'FAIL' if retired_claim_problem else 'PASS'} dispatch-channel-claims "
           f"over {len(RETIRED_DISPATCH_CLAIMS)} retired spelling(s) in "
@@ -3437,8 +3357,8 @@ def selftest() -> int:
                 "|| github.sha }}\n", "", 1),
         ) is not None,
     )
-    # The sweep is the only check that can tell a truthful receipt from a self-consistent
-    # forgery, so every accepted head must execute all six shards. A selector or job-level
+    # The sweep is the only check that measures at all; the offline gate validates only the
+    # policy it is held against, so every accepted head must execute all six shards. A selector or job-level
     # condition would make the result depend on an unproved base run and mutable runner state.
     expect(
         "mutation workflow carries no path filter that would silence a head",
@@ -3535,7 +3455,7 @@ def selftest() -> int:
         ) is not None,
     )
     expect(
-        "aggregate retains tracked-receipt comparison",
+        "aggregate retains policy enforcement",
         workflow_error(
             EXPECTED_WORKFLOW,
             EXPECTED_MUTATION_WORKFLOW.replace(
@@ -3718,25 +3638,35 @@ def selftest() -> int:
          sweep_job_replacement("  aggregate:", "          exit 1\n",
                                "          exit 0\n"),
          "mutation aggregate shard-failure gate does not exit non-zero"),
+        ("a concurrency group shared by every head",
+         sweep_replacement(
+             "  group: mutation-proof-${{ github.event.pull_request.number || github.sha }}\n",
+             "  group: mutation-proof\n"),
+         "mutation workflow concurrency"),
+        ("a sweep that cancels pushes to main",
+         sweep_replacement(
+             "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n",
+             "  cancel-in-progress: true\n"),
+         "mutation workflow concurrency"),
         ("a narrowed fragment download",
          sweep_replacement("          pattern: mutation-fragment-*\n",
                            "          pattern: mutation-fragment-0*\n"),
          "mutation aggregate fragment download"),
-        ("a non-blocking receipt comparison step",
+        ("a non-blocking policy enforcement step",
          sweep_replacement(
-             "      - name: reject incomplete evidence and compare the tracked receipt\n"
+             "      - name: reject incomplete evidence and enforce the mutation policy\n"
              "        run: >-\n",
-             "      - name: reject incomplete evidence and compare the tracked receipt\n"
+             "      - name: reject incomplete evidence and enforce the mutation policy\n"
              "        continue-on-error: true\n        run: >-\n"),
          "mutation aggregate comparison step fields"),
-        ("a receipt comparison over one named fragment",
+        ("a policy enforcement over one named fragment",
          sweep_replacement("          --aggregate mutation-fragments/*.json\n",
                            "          --aggregate mutation-fragments/one.json\n"),
-         "mutation aggregate comparison command"),
+         "mutation aggregate policy command"),
         # YAML recognises no comment inside a block scalar, so a `#` line in a FOLDED
         # command is content: folding joins it and the shell comments out the whole line.
         # Dropping those lines the way a literal `run: |` block allows turned the sweep's
-        # receipt comparison into a no-op that exits zero, with this oracle reading the
+        # aggregate into a no-op that exits zero, with this oracle reading the
         # command it expected.
         ("a comment line folded into the aggregate command",
          sweep_replacement("          python3 tools/write-mutation-receipt.py\n"
@@ -3744,7 +3674,7 @@ def selftest() -> int:
                            "          # measurement disabled\n"
                            "          python3 tools/write-mutation-receipt.py\n"
                            "          --aggregate mutation-fragments/*.json\n"),
-         "mutation aggregate comparison command"),
+         "mutation aggregate policy command"),
         ("a comment line folded into the shard command",
          sweep_replacement(
              "          --expected-head '${{ github.event.pull_request.head.sha "
@@ -4121,70 +4051,17 @@ def selftest() -> int:
         "label": "probe addition", "allowed_statuses": [], "id": "add-id",
     }
     mutation_plan_probe = [set_mutation, site_mutation, addition_mutation]
-    mutation_contract = {
-        "schema_version": 3,
-        "generated_by": "tools/write-mutation-receipt.py --aggregate",
-        "note": "probe-note", "generator_sha256": "c" * 64,
-        "plan_sha256": "d" * 64,
-        "keys": (
-            "schema_version", "generated_by", "note", "generator_sha256",
-            "source_digests", "plan_sha256", "baseline", "sweep_exclusions",
-            "results", "survivors", "unasserted_kills", "caught", "total",
-        ),
-        "guards": ("guard-a.py", "guard-b.py", "guard-c.py"),
-        "kill_reasons": frozenset({
-            "suite-failure", "exact-check-count", "survived", "timeout",
-            "selector-failure",
-        }),
-        "unasserted_reason": "exact-check-count",
-        "unasserted_ceiling": 1,
-    }
-    mutation_sources = {name: str(index) * 64 for index, name in enumerate(
-        mutation_contract["guards"], 1)}
-    set_result = {key: value for key, value in set_mutation.items()
-                  if key != "allowed_statuses"}
-    set_result["outcome"] = "survived"
-    set_result["reason"] = "survived"
-    site_result = {key: value for key, value in site_mutation.items()
-                   if key != "allowed_statuses"}
-    site_result["outcome"] = "caught"
-    site_result["reason"] = "selector-failure"
-    addition_result = {key: value for key, value in addition_mutation.items()
-                       if key != "allowed_statuses"}
-    addition_result["outcome"] = "caught"
-    addition_result["reason"] = "suite-failure"
-    mutation_probe = {
-        "schema_version": 3,
-        "generated_by": mutation_contract["generated_by"],
-        "note": "probe-note",
-        "generator_sha256": "c" * 64,
-        "source_digests": mutation_sources,
-        "plan_sha256": "d" * 64,
-        "baseline": {name: "passed" for name in mutation_contract["guards"]},
-        "sweep_exclusions": {"guard-a.py::FIXTURES": "fixture corpus"},
-        "results": {"set-id": set_result, "site-id": site_result,
-                    "add-id": addition_result},
-        "survivors": ["set-id"], "unasserted_kills": [], "caught": 2, "total": 3,
-    }
-    mutation_args = {
-        "plan": mutation_plan_probe,
-        "exclusions": mutation_probe["sweep_exclusions"],
-        "contract": mutation_contract,
-        "current_sources": mutation_sources,
-        "ceiling": 1,
-        "unasserted_ceiling": 1,
-        "unasserted_identities": set(),
-        "policy": {
-            "collections": {("guard-a.py", "TOKENS"): 1},
-            "sites": {("guard-b.py", "site probe")},
-            "selectors": {("guard-b.py", "site probe"): ("probe selector",)},
-            "site_digest": mutation_site_policy_digest([site_mutation]),
-            "exclusions": mutation_probe["sweep_exclusions"],
-            "additions": {
-                ("guard-a.py", "TOKENS", "set", "z", "probe addition", ()),
-            },
-            "floor": 3,
+    probe_exclusions = {"guard-a.py::FIXTURES": "fixture corpus"}
+    probe_policy = {
+        "collections": {("guard-a.py", "TOKENS"): 1},
+        "sites": {("guard-b.py", "site probe")},
+        "selectors": {("guard-b.py", "site probe"): ("probe selector",)},
+        "site_digest": mutation_site_policy_digest([site_mutation]),
+        "exclusions": probe_exclusions,
+        "additions": {
+            ("guard-a.py", "TOKENS", "set", "z", "probe addition", ()),
         },
+        "floor": 3,
     }
     writer_spec = importlib.util.spec_from_file_location(
         "_ci_gate_mutation_writer_selftest",
@@ -4210,7 +4087,7 @@ def selftest() -> int:
     raw_baseline = {
         relative: {
             "status": "completed", "returncode": 0,
-            "checks": 10, "failures": 0,
+            "checks": 10, "failures": 0, "failed_checks": [],
         }
         for relative in writer.GUARDS
     }
@@ -4354,114 +4231,6 @@ def selftest() -> int:
             "fragment JSON rejects duplicate object keys",
             duplicate_fragment_rejected,
         )
-    # The receipt is compared across hosts, and whether an assertion fires can differ by
-    # environment, so the comparison runs on a projection that drops the observed reason and
-    # its tally. That projection must stay blind to exactly those two fields and to nothing
-    # else, or a real regression rides through the same hole.
-    import copy as _copy
-    stable_probe = {
-        "schema_version": writer.SCHEMA_VERSION, "generated_by": "x", "note": "n",
-        "generator_sha256": "c" * 64, "source_digests": {}, "plan_sha256": "d" * 64,
-        "baseline": {}, "sweep_exclusions": {},
-        "results": {
-            "a": {"outcome": "caught", "reason": "suite-failure", "kind": "set-element",
-                  "module": "guard-a.py", "name": "T", "element": "x"},
-            "b": {"outcome": "survived", "reason": "survived", "kind": "set-element",
-                  "module": "guard-a.py", "name": "T", "element": "y"}},
-        "survivors": ["b"], "unasserted_kills": [], "caught": 1, "total": 2,
-    }
-    stable_plan = [
-        {"id": "a", "kind": "set-element", "module": "guard-a.py",
-         "name": "T", "element": "x", "allowed_statuses": []},
-        {"id": "b", "kind": "set-element", "module": "guard-a.py",
-         "name": "T", "element": "y", "allowed_statuses": []},
-    ]
-    # The receipt and its summary are compared byte for byte against a CI re-measurement, so
-    # neither may depend on a value only one host can observe. These pin the RULE rather than
-    # the two fields that broke it: every declared host-observed field must be invisible to
-    # both comparisons, and nothing else may be.
-    expect(
-        "the host-observed field sets are declared and non-empty",
-        bool(writer.HOST_OBSERVED_RESULT_FIELDS) and bool(writer.HOST_OBSERVED_RECEIPT_KEYS),
-    )
-    observed_invisible = True
-    for _key in writer.HOST_OBSERVED_RECEIPT_KEYS:
-        _probe = _copy.deepcopy(stable_probe)
-        _probe[_key] = ["a"] if _probe.get(_key) == [] else []
-        observed_invisible &= (
-            writer.platform_stable(stable_probe) == writer.platform_stable(_probe)
-            and writer.summary_text(stable_probe) == writer.summary_text(_probe))
-    for _field in writer.HOST_OBSERVED_RESULT_FIELDS:
-        _probe = _copy.deepcopy(stable_probe)
-        _probe["results"]["a"][_field] = "exact-check-count"
-        observed_invisible &= (
-            writer.platform_stable(stable_probe) == writer.platform_stable(_probe)
-            and writer.summary_text(stable_probe) == writer.summary_text(_probe))
-    expect(
-        "every declared host-observed field is invisible to both cross-host comparisons",
-        observed_invisible,
-    )
-    _under_ceiling = _copy.deepcopy(stable_probe)
-    _under_ceiling["results"]["a"]["reason"] = writer.UNASSERTED_KILL_REASON
-    _under_ceiling["unasserted_kills"] = ["a"]
-    _over_ceiling = _copy.deepcopy(_under_ceiling)
-    _over_ceiling["results"]["b"]["outcome"] = "caught"
-    _over_ceiling["results"]["b"]["reason"] = writer.UNASSERTED_KILL_REASON
-    _over_ceiling["survivors"] = []
-    _over_ceiling["unasserted_kills"] = ["a", "b"]
-    _over_ceiling["caught"] = 2
-    expect(
-        "fresh host-observed kills are derived and bounded before projection",
-        writer.fresh_observation_error(_under_ceiling, stable_plan) == ""
-        and writer.fresh_observation_error(_over_ceiling, stable_plan) != "",
-    )
-    _saved_receipt = writer.RECEIPT
-    _saved_summary = writer.SUMMARY
-    _saved_normalized_receipt = writer.normalized_receipt
-    _saved_mutation_plan = writer.mutation_plan
-    with tempfile.TemporaryDirectory(prefix="z-harness-fresh-observation-") as raw:
-        writer.RECEIPT = Path(raw) / "receipt.json"
-        writer.SUMMARY = Path(raw) / "summary.md"
-        writer.RECEIPT.write_text(
-            json.dumps(_over_ceiling, indent=1) + "\n", encoding="utf-8")
-        writer.SUMMARY.write_text(
-            writer.summary_text(_over_ceiling), encoding="utf-8")
-        writer.normalized_receipt = lambda _fragments: _over_ceiling
-        writer.mutation_plan = lambda: (stable_plan, {})
-        try:
-            _fresh_aggregate_rc = writer.aggregate([], False)
-        finally:
-            writer.RECEIPT = _saved_receipt
-            writer.SUMMARY = _saved_summary
-            writer.normalized_receipt = _saved_normalized_receipt
-            writer.mutation_plan = _saved_mutation_plan
-    expect(
-        "fresh aggregation enforces the kill ceiling before a stable projection can pass",
-        _fresh_aggregate_rc == 2,
-    )
-    # The dual: the projection must not quietly stop comparing something real. Any field it
-    # drops beyond the declared set would be a regression nobody could see.
-    _projected = writer.platform_stable(stable_probe)
-    expect(
-        "the projection drops the declared host-observed keys and nothing else",
-        set(stable_probe) - set(_projected) == set(writer.HOST_OBSERVED_RECEIPT_KEYS)
-        and all(set(stable_probe["results"][k]) - set(_projected["results"][k])
-                == set(writer.HOST_OBSERVED_RESULT_FIELDS) for k in _projected["results"]),
-    )
-    _real_changes = []
-    _flip = _copy.deepcopy(stable_probe); _flip["results"]["a"]["outcome"] = "survived"
-    _real_changes.append(("a flipped outcome", _flip))
-    _drop = _copy.deepcopy(stable_probe); _drop["results"].pop("a")
-    _real_changes.append(("a dropped result", _drop))
-    _surv = _copy.deepcopy(stable_probe); _surv["survivors"] = []
-    _real_changes.append(("a shortened survivor list", _surv))
-    _elem = _copy.deepcopy(stable_probe); _elem["results"]["a"]["element"] = "z"
-    _real_changes.append(("a changed mutation element", _elem))
-    for _label, _changed in _real_changes:
-        expect(
-            f"the cross-host comparison still sees {_label}",
-            writer.platform_stable(stable_probe) != writer.platform_stable(_changed),
-        )
     # The helper below controls the CLI-removal checks, so prove both arms first.
     expect(
         "the raise helper reports a call that does not raise",
@@ -4483,109 +4252,10 @@ def selftest() -> int:
         "the removed inheritance mode is rejected by the public CLI",
         _raises(lambda: writer.parse_args(["--verify-inherited", "base"]), SystemExit),
     )
-    expect("recorded mutation evidence matches the guards", mutation_receipt_error() == "")
     expect(
-        "an exact synthetic mutation receipt clears",
-        mutation_receipt_error(mutation_probe, **mutation_args) == "",
-    )
-    # A kill scored only by a moved check count inflates `caught` without any assertion
-    # having failed. The receipt records those separately so the distinction survives into
-    # the artifact; these probe that the tally is derived, bounded, and cannot be forged.
-    unasserted_addition = dict(addition_result, reason="exact-check-count")
-    unasserted_probe = dict(
-        mutation_probe,
-        results={"set-id": set_result, "site-id": site_result,
-                 "add-id": unasserted_addition},
-        unasserted_kills=["add-id"],
-    )
-    expect(
-        "a kill scored only by a moved check count is recorded as unasserted",
-        mutation_receipt_error(
-            unasserted_probe,
-            **dict(mutation_args,
-                   unasserted_identities={("guard-a.py", "TOKENS", "z")})) == "",
-    )
-    expect(
-        "an unasserted kill outside the reviewed set fails",
-        mutation_receipt_error(unasserted_probe, **mutation_args) != "",
-    )
-    expect(
-        "an unasserted kill omitted from the tally fails",
-        mutation_receipt_error(
-            dict(unasserted_probe, unasserted_kills=[]), **mutation_args) != "",
-    )
-    expect(
-        "an unasserted tally naming a mutation that asserted fails",
-        mutation_receipt_error(
-            dict(mutation_probe, unasserted_kills=["site-id"]), **mutation_args) != "",
-    )
-    expect(
-        "unasserted kills above the reviewed ceiling fail",
-        mutation_receipt_error(
-            unasserted_probe, **dict(mutation_args, unasserted_ceiling=0)) != "",
-    )
-    expect(
-        "a result carrying a reason outside the generator vocabulary fails",
-        mutation_receipt_error(
-            dict(mutation_probe,
-                 results={"set-id": set_result, "add-id": addition_result,
-                          "site-id": dict(site_result, reason="looks-fine")}),
-            **mutation_args) != "",
-    )
-    impossible_selector_reason = dict(set_result, outcome="caught",
-                                      reason="selector-failure")
-    impossible_selector_probe = dict(
-        mutation_probe,
-        results={"set-id": impossible_selector_reason,
-                 "add-id": addition_result, "site-id": site_result},
-        survivors=[], caught=3,
-    )
-    expect(
-        "a selectorless mutation cannot claim a selector-failure kill",
-        "unreachable" in mutation_receipt_error(
-            impossible_selector_probe, **mutation_args),
-    )
-    impossible_suite_reason = dict(site_result, reason="suite-failure")
-    expect(
-        "a selected mutation cannot claim a whole-suite kill",
-        "unreachable" in mutation_receipt_error(
-            dict(mutation_probe,
-                 results={"set-id": set_result, "add-id": addition_result,
-                          "site-id": impossible_suite_reason}),
-            **mutation_args),
-    )
-    expect(
-        "a caught result claiming the survived reason fails",
-        mutation_receipt_error(
-            dict(mutation_probe,
-                 results={"set-id": set_result, "add-id": addition_result,
-                          "site-id": dict(site_result, reason="survived")}),
-            **mutation_args) != "",
-    )
-    expect(
-        "a survived result claiming a kill reason fails",
-        mutation_receipt_error(
-            dict(mutation_probe,
-                 results={"set-id": dict(set_result, reason="suite-failure"),
-                          "add-id": addition_result, "site-id": site_result}),
-            **mutation_args) != "",
-    )
-    expect(
-        "a crash status the plan never allowed fails",
-        mutation_receipt_error(
-            dict(mutation_probe,
-                 results={"set-id": set_result, "add-id": addition_result,
-                          "site-id": dict(site_result, reason="timeout")}),
-            **mutation_args) != "",
-    )
-    expect(
-        "a result missing its reason entirely fails",
-        mutation_receipt_error(
-            dict(mutation_probe,
-                 results={"set-id": set_result, "add-id": addition_result,
-                          "site-id": {k: v for k, v in site_result.items()
-                                      if k != "reason"}}),
-            **mutation_args) != "",
+        "the removed receipt-acceptance flag is rejected by the public CLI",
+        _raises(lambda: writer.parse_args(["--aggregate", "x", "--accept-receipt-changes"]),
+                SystemExit),
     )
     # result_kill can return any status the plan tolerates, so a new allowed_statuses entry
     # that nobody added to the vocabulary would make every result carrying it unvalidatable.
@@ -4600,32 +4270,34 @@ def selftest() -> int:
         "the unasserted reason is one the generator can actually emit",
         writer.UNASSERTED_KILL_REASON in writer.KILL_REASONS,
     )
-    shrunk_contract = dict(mutation_contract, plan_sha256="e" * 64)
-    shrunk_probe = dict(
-        mutation_probe,
-        plan_sha256="e" * 64,
-        results={"set-id": set_result},
-        survivors=["set-id"], caught=0, total=1,
+    expect(
+        "the production mutation plan matches its independent closed inventory",
+        mutation_plan_error() == "",
     )
     expect(
-        "a self-consistently regenerated but shrunken plan remains a failure",
-        mutation_receipt_error(
-            shrunk_probe,
-            **dict(mutation_args, plan=[set_mutation], contract=shrunk_contract),
-        ) != "",
+        "a synthetic plan matching its closed inventory clears",
+        mutation_plan_error(plan=mutation_plan_probe, exclusions=probe_exclusions,
+                            policy=probe_policy) == "",
+    )
+    expect(
+        "a plan that shrinks below its floor fails even when every pin is moved with it",
+        "below floor" in mutation_plan_error(
+            plan=[set_mutation], exclusions=probe_exclusions,
+            policy=dict(probe_policy, sites=set(), selectors={},
+                        site_digest=mutation_site_policy_digest([]), additions=set())),
     )
     expect(
         "a foreign site identity fails the independent closed inventory",
         mutation_policy_error(
             [set_mutation, dict(site_mutation, label="foreign")],
-            mutation_probe["sweep_exclusions"], mutation_args["policy"],
+            probe_exclusions, probe_policy,
         ) != "",
     )
     expect(
         "a duplicate site identity fails the independent closed inventory",
         mutation_policy_error(
             [set_mutation, site_mutation, dict(site_mutation, id="duplicate-site")],
-            mutation_probe["sweep_exclusions"], mutation_args["policy"],
+            probe_exclusions, probe_policy,
         ) != "",
     )
     expect(
@@ -4633,7 +4305,7 @@ def selftest() -> int:
         mutation_policy_error(
             [set_mutation, dict(
                 site_mutation, anchor_sha256="c" * 64, id="changed-site")],
-            mutation_probe["sweep_exclusions"], mutation_args["policy"],
+            probe_exclusions, probe_policy,
         ) != "",
     )
     expect(
@@ -4641,7 +4313,7 @@ def selftest() -> int:
         mutation_policy_error(
             [set_mutation, dict(
                 site_mutation, selectors=["different selector"], id="changed-selector")],
-            mutation_probe["sweep_exclusions"], mutation_args["policy"],
+            probe_exclusions, probe_policy,
         ) != "",
     )
     expect(
@@ -4649,7 +4321,7 @@ def selftest() -> int:
         mutation_policy_error(
             [set_mutation, site_mutation,
              dict(addition_mutation, allowed_statuses=["timeout"])],
-            mutation_probe["sweep_exclusions"], mutation_args["policy"],
+            probe_exclusions, probe_policy,
         ) != "",
     )
     expect(
@@ -4657,13 +4329,13 @@ def selftest() -> int:
         mutation_policy_error(
             [dict(set_mutation, allowed_statuses=["invalid-receipt"]),
              site_mutation, addition_mutation],
-            mutation_probe["sweep_exclusions"], mutation_args["policy"],
+            probe_exclusions, probe_policy,
         ) != "",
     )
     duplicate_target = dict(
         site_mutation, label="site twin", id="duplicate-target")
     duplicate_target_policy = dict(
-        mutation_args["policy"],
+        probe_policy,
         sites={("guard-b.py", "site probe"), ("guard-b.py", "site twin")},
         selectors={
             ("guard-b.py", "site probe"): ("probe selector",),
@@ -4677,121 +4349,83 @@ def selftest() -> int:
         "two labels cannot execute the same semantic site mutation",
         mutation_policy_error(
             [set_mutation, site_mutation, duplicate_target],
-            mutation_probe["sweep_exclusions"], duplicate_target_policy,
+            probe_exclusions, duplicate_target_policy,
         ) != "",
     )
-    for field in mutation_contract["keys"]:
+    expect(
+        "the reviewed mutation policy names only planned element deletions, canonically",
+        mutation_policy_file_error() == "",
+    )
+    reviewed_policy = writer.load_policy()
+    production_plan = writer.mutation_plan()[0]
+    unplanned_policy = json.loads(json.dumps(reviewed_policy))
+    unplanned_policy["allowed_survivors"][0]["element"] = "no-such-element"
+    expect(
+        "a policy entry naming no planned element deletion fails",
+        "names no planned element deletion" in mutation_policy_file_error(
+            policy_bytes=writer.policy_text(unplanned_policy).encode("utf-8"),
+            plan=production_plan, writer=writer),
+    )
+    planned_addition = next(
+        item for item in production_plan if item["kind"] == "set-addition")
+    addition_policy = json.loads(json.dumps(reviewed_policy))
+    addition_policy["allowed_survivors"] = sorted(
+        addition_policy["allowed_survivors"] + [{
+            "module": planned_addition["module"],
+            "collection": planned_addition["name"],
+            "element": planned_addition["element"], "class": "debt"}],
+        key=lambda item: (item["module"], item["collection"], item["element"]))
+    expect(
+        "a declared addition listed as an allowed survivor fails",
+        "names no planned element deletion" in mutation_policy_file_error(
+            policy_bytes=writer.policy_text(addition_policy).encode("utf-8"),
+            plan=production_plan, writer=writer),
+    )
+    expect(
+        "a reformatted policy fails the canonical one-entry-per-line form",
+        "canonical" in mutation_policy_file_error(
+            policy_bytes=(json.dumps(reviewed_policy, indent=2) + "\n").encode("utf-8"),
+            plan=production_plan, writer=writer),
+    )
+    expect(
+        "every module a registered hook runs is swept or listed as unswept",
+        mutation_sweep_coverage_error() == "",
+    )
+    with tempfile.TemporaryDirectory(prefix="z-harness-sweep-coverage-") as raw:
+        coverage_root = Path(raw)
+        (coverage_root / "hooks/guards").mkdir(parents=True)
+        (coverage_root / "settings.json").write_text(json.dumps({"hooks": {
+            "PreToolUse": [{"hooks": [
+                {"type": "command", "command": "python3 hooks/entry.py"}]}]}}),
+            encoding="utf-8")
+        (coverage_root / "hooks/hooks.json").write_text(
+            json.dumps({"hooks": {}}), encoding="utf-8")
+        (coverage_root / "hooks/entry.py").write_text("import helper\n", encoding="utf-8")
+        (coverage_root / "hooks/guards/helper.py").write_text("", encoding="utf-8")
         expect(
-            f"mutation receipt rejects a missing {field} field",
-            mutation_receipt_error(
-                {key: value for key, value in mutation_probe.items() if key != field},
-                **mutation_args) != "",
+            "a guard imported by a registered hook and neither swept nor listed fails",
+            "neither swept nor listed" in mutation_sweep_coverage_error(
+                root=coverage_root, guards=("hooks/entry.py",), unswept=set()),
         )
-    expect(
-        "mutation receipt rejects an unexpected top-level field",
-        mutation_receipt_error(dict(mutation_probe, invented=True), **mutation_args) != "",
-    )
-    expect(
-        "mutation receipt rejects a missing planned result",
-        mutation_receipt_error(
-            dict(mutation_probe, results={"site-id": site_result}), **mutation_args) != "",
-    )
-    expect(
-        "mutation receipt rejects a foreign result",
-        mutation_receipt_error(
-            dict(mutation_probe, results=dict(mutation_probe["results"], foreign={})),
-            **mutation_args) != "",
-    )
-    expect(
-        "mutation receipt rejects an extra nested evidence field",
-        mutation_receipt_error(
-            dict(mutation_probe, results=dict(
-                mutation_probe["results"],
-                **{"set-id": dict(set_result, failures=999)})),
-            **mutation_args) != "",
-    )
-    expect(
-        "mutation receipt recomputes survivors instead of trusting the list",
-        mutation_receipt_error(dict(mutation_probe, survivors=[]), **mutation_args) != "",
-    )
-    expect(
-        "mutation receipt recomputes caught and total",
-        mutation_receipt_error(
-            dict(mutation_probe, caught=999, total=999), **mutation_args) != "",
-    )
-    site_survived = dict(site_result, outcome="survived", reason="survived")
-    caught_set = dict(set_result, outcome="caught", reason="suite-failure")
-    expect(
-        "a surviving site mutation is always a failure",
-        mutation_receipt_error(
-            dict(mutation_probe,
-                 results={"set-id": caught_set, "site-id": site_survived,
-                          "add-id": addition_result},
-                 survivors=["site-id"], caught=2),
-            **mutation_args) != "",
-    )
-    compensated_addition = dict(
-        addition_result, outcome="survived", reason="survived")
-    compensated_set = dict(set_result, outcome="caught", reason="suite-failure")
-    expect(
-        "a declared addition survivor fails even when ordinary debt falls by one",
-        mutation_receipt_error(
-            dict(
-                mutation_probe,
-                results={"set-id": compensated_set, "site-id": site_result,
-                         "add-id": compensated_addition},
-                survivors=["add-id"], caught=2,
-            ),
-            **mutation_args,
-        ) != "",
-    )
-    expect(
-        "survivor debt above the closed ceiling is a failure",
-        mutation_receipt_error(mutation_probe, **dict(mutation_args, ceiling=0)) != "",
-    )
-    recorded_receipt = _json_without_duplicate_keys(MUTATION_RECEIPT)
-    expect(
-        "the tracked survivor debt exactly fills the reviewed ceiling",
-        (len(recorded_receipt["survivors"])
-         == MUTATION_SURVIVOR_DEBT_CEILING),
-    )
-    regressed_receipt = json.loads(json.dumps(recorded_receipt))
-    regression_id = next(
-        mutation_id for mutation_id, result in regressed_receipt["results"].items()
-        if result["kind"] == "set-element" and result["outcome"] == "caught")
-    regressed_receipt["results"][regression_id]["outcome"] = "survived"
-    regressed_receipt["survivors"] = sorted(
-        mutation_id for mutation_id, result in regressed_receipt["results"].items()
-        if result["outcome"] == "survived")
-    regressed_receipt["caught"] -= 1
-    expect(
-        "one additional set-element survivor exceeds the production ceiling",
-        mutation_receipt_error(regressed_receipt) != "",
-    )
-    expect(
-        "a receipt missing the Bash baseline is not evidence over all guards",
-        mutation_receipt_error(
-            dict(mutation_probe, baseline={
-                "guard-a.py": "passed", "guard-b.py": "passed"}),
-            **mutation_args) != "",
-    )
-    expect(
-        "a stale guard digest invalidates the mutation receipt",
-        mutation_receipt_error(
-            dict(mutation_probe, source_digests={
-                **mutation_sources, "guard-a.py": "0" * 64}),
-            **mutation_args) != "",
-    )
-    expect(
-        "the canonical mutation summary is derived from the strict receipt",
-        mutation_summary_error() == "",
-    )
-    forged_summary = MUTATION_SUMMARY.read_bytes() + b"\nforged summary bytes\n"
-    expect(
-        "changing the summary and its outbound copies cannot bypass receipt derivation",
-        mutation_summary_error(
-            receipt_data=recorded_receipt, summary_bytes=forged_summary) != "",
-    )
+        expect(
+            "listing the imported guard as unswept clears the coverage rule",
+            mutation_sweep_coverage_error(
+                root=coverage_root, guards=("hooks/entry.py",),
+                unswept={"hooks/guards/helper.py"}) == "",
+        )
+        expect(
+            "an unswept entry no registered hook reaches is stale and fails",
+            "no registered hook reaches" in mutation_sweep_coverage_error(
+                root=coverage_root, guards=("hooks/entry.py",),
+                unswept={"hooks/guards/helper.py", "hooks/stale.py"}),
+        )
+        (coverage_root / "settings.json").write_text(
+            json.dumps({"hooks": {}}), encoding="utf-8")
+        expect(
+            "registrations naming no hook module are unverified, not clean",
+            "unverified" in mutation_sweep_coverage_error(
+                root=coverage_root, guards=(), unswept=set()),
+        )
     handoff_sources = {
         relative: (ROOT / relative).read_text(encoding="utf-8")
         for relative in HANDOFF_DOCTRINE

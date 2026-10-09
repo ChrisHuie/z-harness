@@ -349,6 +349,7 @@ class ZshArgvState(NamedTuple):
     equals_state: str
     command_index: object
     reads_stdin: bool
+    emulation: str = "zsh"
 
 
 def scan_pcre_constructs(pattern):
@@ -833,6 +834,7 @@ def _backtick_substitution(cmd, start):
 def _zsh_argv_state(words, default=ZSH_EQUALS_ON):
     """Parse zsh options once for EQUALS state, ``-c`` body, and stdin use."""
     state = default
+    emulation = "zsh"
     command_mode = False
     explicit_stdin = False
     operands = []
@@ -843,6 +845,17 @@ def _zsh_argv_state(words, default=ZSH_EQUALS_ON):
             operands.extend(range(index + 1, len(words)))
             break
         normalized = re.sub(r"[-_]", "", word.lower())
+        if word == "--emulate":
+            # Measured on zsh 5.9: `--emulate MODE` takes the next word as its value
+            # (`--emulate=MODE` is "no such option"). Read as the first operand, `sh` hid
+            # the `-c` body after it. A non-zsh emulation turns EQUALS off.
+            if index + 1 >= len(words):
+                return ZshArgvState(ZSH_EQUALS_UNKNOWN, None, True)
+            emulation = words[index + 1]
+            if emulation != "zsh":
+                state = ZSH_EQUALS_UNKNOWN
+            index += 2
+            continue
         if word.startswith("--"):
             if normalized == "equals":
                 state = ZSH_EQUALS_ON
@@ -886,7 +899,7 @@ def _zsh_argv_state(words, default=ZSH_EQUALS_ON):
         break
     command_index = operands[0] if command_mode and operands else None
     reads_stdin = explicit_stdin or (not command_mode and not operands)
-    return ZshArgvState(state, command_index, reads_stdin)
+    return ZshArgvState(state, command_index, reads_stdin, emulation)
 
 
 def _shell_reads_stdin(words):
@@ -4263,8 +4276,10 @@ def nested_shell_invocation(resolution, current_shell="sh", deadline=None):
         if state.command_index is None:
             return None
         command_arg = resolution.items[state.command_index]
+        # Measured on zsh 5.9: under `--emulate sh` an unbraced `$v:t` is left as text,
+        # so the body is read as the shell it emulates. csh keeps history modifiers.
         return ShellInvocation(
-            shell, command_arg[0],
+            "sh" if state.emulation in {"sh", "ksh"} else shell, command_arg[0],
             source_has_live_unresolved(command_arg[0], deadline),
             dict(resolution.command_env),
             _descendant_lookup_authority(resolution))
@@ -9604,6 +9619,14 @@ FIXTURES += [
      "git grep -E $'harness\\0' -- README.md", 'ask'),
     ('RED  ANSI-C: every simple escape decodes, so the atom before them stays live',
      'git grep -E $\'harness\\\\b\\a\\b\\e\\E\\f\\n\\r\\t\\v\\\\\\\'\\"\\?\' -- README.md', 'deny'),
+]
+
+
+FIXTURES += [
+    ("RED  EMULATE: an emulation mode is the option's value, not the script operand",
+     'zsh --emulate sh -c "git grep -E \'harness\\b\' -- README.md"', 'deny'),
+    ('RED  EMULATE: a zsh emulation mode still reaches the -c body',
+     'zsh --emulate zsh -c "git grep -E \'harness\\b\' -- README.md"', 'deny'),
 ]
 
 

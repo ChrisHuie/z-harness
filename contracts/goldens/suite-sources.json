@@ -5,15 +5,15 @@
     "askq_timeout_guard": "85c136dc24f3b4f41a60987b8abecb97779e209e49c4e29e74a5d46174d695ef",
     "bash_command_guard": "db16bbe5e3fa9ccdc7e5f4d941b332e3a33f68dee9127fe963dfa560d591d81b",
     "cc-cost": "972b0122b5f84de10f41915a133132f555b943c46061d91b07e3f7b534a4d003",
-    "ci-gate": "43e2efb28d05a425b3a16142b73e902503db4a88ecca030657c7355d9f35c43a",
+    "ci-gate": "420946f00807bef7bbddf0bc0e0092488c06ff909471004e3d5253a69c6dd506",
     "claim-provenance": "4552d3a8ec1da9b90e47a2dcd36abb0c3b1ad49a873731f50effb9268635e67f",
     "codex-cost": "fc46c95da8babd276e705c9578c5857a6563588b588da540ea4222c2c6ca793c",
     "codex_session_start": "b9dbedba94d623304ef97ca1b13a14b2f7b000cc98f35e016448ed4c85030567",
     "corpus-delta": "78e63417fbf80262e497380fea30c7f34db9386a1592cf9f0326e2924e98c299",
     "enumerate-survivors": "77993a5bf38e672a47723abe4bf28d12ff87e215de1d2687787aeb58d5d58f03",
     "fuzz-judge-diff": "69c1877f874e7172810cacb691034fe3e452d392132895bc05b0f259976aa671",
-    "git_grep_engine_guard": "f29bebffe594d7a81b5b6c013d99ce194de490766240c5fd1c06931f30b505e5",
-    "harness_check": "17424590b9d935b0a26589b72cf60bd3ade039536bb4ef2c134cc93d220d084f",
+    "git_grep_engine_guard": "474ef54b6ba385348abea1d672a90c985c59203405d0eeaee48edad147f3a752",
+    "harness_check": "cdb151dd194cefb39545c2640e1903a8c343fc2a19f3e0bc98b4656530875e43",
     "harness_report": "eec022de9c2f7dec81c612e751dac472f2f8b695029d627784e7e5d840312cbc",
     "portable-conformance": "8eb48510971d0e4f7371cd7a4d16c41850e8e1324a739b70b71d3b85c5823606",
     "pr-delivery-state": "4fa74be86a09a0047c3d960fda37a87930d7a6b8dfd39361a8850e3d0f4ef9b5",
@@ -22,7 +22,7 @@
     "run-skill-evals": "38115603816e7698926a290d401179c3db2f4f5ffa12b49e2bfe04b3f294a508",
     "spawn_preflight_guard": "9e9f7c1aa5eb64d756613315210ddfacdf999ffe8e7182edb18fbcdf3cda7980",
     "verify-review-publication": "fb7a4b95248de1f664180ad0598a54778591f321963b2265e734b37ff7bcd455",
-    "write-mutation-receipt": "3f8083b900bd0f0600f375d4ad2748edfe44b95ec0ce3e2d4021ffa9dadb9367",
-    "zsh_rev_modifier_guard": "4a30fd78280639361945890bfcb78e896ebdbb643f1af5e5e1fe02ece1ca7570"
+    "write-mutation-receipt": "520cc8923fda7a638e75d2ccee1b72d135effebb8eac4010d69b783ac5746bf1",
+    "zsh_rev_modifier_guard": "e7a4e8747fcfc0571f0503220b89d0c161d2348abe59d02191c4c29179033b45"
   }
 }

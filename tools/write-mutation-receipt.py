@@ -103,6 +103,18 @@ CHARSET_COLLECTIONS = {
 # ``timeout`` is an allowed kill only for the edit that restores an unbounded traversal.
 SITE_MUTATIONS = (
     {
+        "label": "zsh --emulate value read as an operand", "module": GREP,
+        "anchor": '        if word == "--emulate":',
+        "replacement": "        if False:",
+        "allowed_statuses": (),
+    },
+    {
+        "label": "nested zsh emulation ignored", "module": GREP,
+        "anchor": '            "sh" if state.emulation in {"sh", "ksh"} else shell, command_arg[0],',
+        "replacement": "            shell, command_arg[0],",
+        "allowed_statuses": (),
+    },
+    {
         "label": 'ANSI-C escaped quote closes the string', "module": GREP,
         "anchor": '        if char == "\\\\":\n            index += 2\n',
         "replacement": '        if char == "\\\\":\n            index += 1\n',

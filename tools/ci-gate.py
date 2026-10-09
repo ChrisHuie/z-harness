@@ -56,9 +56,9 @@ EVAL_SKILL_FLOOR = 7
 SUITE_FLOORS = {
     "harness_check": 230,
     "render-packages": 192,
-    "bash_command_guard": 1631,
-    "git_grep_engine_guard": 1409,
-    "zsh_rev_modifier_guard": 506,
+    "bash_command_guard": 1636,
+    "git_grep_engine_guard": 1411,
+    "zsh_rev_modifier_guard": 509,
 }
 EXPECTED_WORKFLOW = """name: harness-check
 on:
@@ -1050,7 +1050,7 @@ RETAINED_DECISION_COMMANDS = ROOT / "contracts/goldens/retained-guard-commands.j
 SUITE_SOURCE_GOLDEN = ROOT / "contracts/goldens/suite-sources.json"
 HARNESS_SOURCE = ROOT / "hooks/harness_check.py"
 REPOSITORY_OWNERSHIP_SOURCE = ROOT / "tools/repository_ownership.py"
-DECISION_CORPUS_FLOOR = 1236
+DECISION_CORPUS_FLOOR = 1241
 DECISION_WRITER_SHA256 = "8c4180468fc05a88c69fafba3a79f2387f5df2d1aa728def1670f5497a442e9d"
 RETAINED_DECISION_SCHEMA_VERSION = 1
 RETAINED_DECISION_NOTE = (
@@ -1313,7 +1313,7 @@ MUTATION_SUMMARY = ROOT / "contracts/goldens/mutation-summary.md"
 # only removes cannot express a kill for them. Two of its ten are caught, by fixtures
 # that depend on the removed escape producing a literal backslash.
 MUTATION_SURVIVOR_DEBT_CEILING = 88
-MUTATION_PLAN_FLOOR = 444
+MUTATION_PLAN_FLOOR = 446
 # Kills scored only because the recorded check count moved, with no assertion failing. A
 # guard that increments its counter once per element of the collection under mutation moves
 # that count on any removal, so such a kill is decided by loop structure before any probe
@@ -1411,6 +1411,8 @@ EXPECTED_MUTATION_COLLECTIONS = {
     ("hooks/guards/git_grep_engine_guard.py", "_ANSI_C_SIMPLE_ESCAPES"): 13,
 }
 EXPECTED_MUTATION_SITES = {
+    ("hooks/guards/git_grep_engine_guard.py", "zsh --emulate value read as an operand"),
+    ("hooks/guards/git_grep_engine_guard.py", "nested zsh emulation ignored"),
     ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C escaped quote closes the string'),
     ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C cross-shell escape accepted'),
     ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C hex NUL accepted'),
@@ -1768,7 +1770,7 @@ EXPECTED_MUTATION_SELECTORS = {
         ("a repeated core.worktree binds the effective candidate Git recognises",),
 }
 EXPECTED_MUTATION_SITE_DIGEST = (
-    "aa5b0dc8b109c59ab10b51dba4f7974304a7e2fe8d82db625082b592038588c8"
+    "e251b60e935d3245e38b1b796328ca3640555f24821193ecbb7ae689d1c63489"
 )
 EXPECTED_MUTATION_EXCLUSIONS = {
     "hooks/guards/git_grep_engine_guard.py::ALIAS_GUARDED":

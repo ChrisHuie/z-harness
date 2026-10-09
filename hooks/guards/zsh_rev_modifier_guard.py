@@ -1138,6 +1138,16 @@ FIXTURES += [
 ]
 
 
+FIXTURES += [
+    ('GREEN EMULATE: sh emulation leaves an unbraced modifier as text',
+     "zsh --emulate sh -c 'git show $SHA:src/f.py'", 'allow'),
+    ('RED  EMULATE: zsh emulation applies the modifier',
+     "zsh --emulate zsh -c 'git show $SHA:src/f.py'", 'deny'),
+    ('RED  EMULATE: csh emulation applies the modifier',
+     "zsh --emulate csh -c 'git show $SHA:src/f.py'", 'deny'),
+]
+
+
 def selftest():
     if not FIXTURES:
         print("SCAN SET EMPTY - zero fixtures is an error", file=sys.stderr)

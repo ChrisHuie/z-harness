@@ -12,7 +12,7 @@
     "corpus-delta": "78e63417fbf80262e497380fea30c7f34db9386a1592cf9f0326e2924e98c299",
     "enumerate-survivors": "77993a5bf38e672a47723abe4bf28d12ff87e215de1d2687787aeb58d5d58f03",
     "fuzz-judge-diff": "69c1877f874e7172810cacb691034fe3e452d392132895bc05b0f259976aa671",
-    "git_grep_engine_guard": "36fa8cdad455effcecbf10deac729e9c8eeefdda63f44d0dd3f0f153c3411869",
+    "git_grep_engine_guard": "3bcc5f004d7db4b02fb73e7d1b00139429cf77bc172451af74067850e9c816da",
     "harness_check": "286cefc5401a1aa0c0239362b3425e5ac8a2606969961e6b45833bc8e4cebcb5",
     "harness_report": "eec022de9c2f7dec81c612e751dac472f2f8b695029d627784e7e5d840312cbc",
     "portable-conformance": "8eb48510971d0e4f7371cd7a4d16c41850e8e1324a739b70b71d3b85c5823606",

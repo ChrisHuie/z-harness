@@ -11130,6 +11130,18 @@ def selftest():
         sum(1 for f in FIXTURES if f[2] == "ask"),
         sum(1 for f in FIXTURES if f[2] == "allow")))
     bad = _SelftestTally()
+    production_decide = globals()["decide"]
+
+    def decide(*args, **kwargs):
+        """Turn a production exception into a failed case without losing the receipt.
+
+        A defect that raises -- unbounded recursion, say -- must reach the summary line as a
+        failure; escaping the suite left no receipt, which grades as no measurement at all.
+        """
+        try:
+            return production_decide(*args, **kwargs)
+        except Exception as exc:
+            return "<error>", f"{type(exc).__name__}: {exc}"
 
     builtin_all = builtins.all
     def all(iterable):

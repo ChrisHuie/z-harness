@@ -103,6 +103,48 @@ CHARSET_COLLECTIONS = {
 # ``timeout`` is an allowed kill only for the edit that restores an unbounded traversal.
 SITE_MUTATIONS = (
     {
+        "label": 'path command word read as possible eval', "module": GREP,
+        "anchor": '    if _command_word_is_path(words[0]):\n        return False',
+        "replacement": '    if False:\n        return False',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'path command word counted as a rebinding', "module": GREP,
+        "anchor": '        if (words and not _command_word_is_path(words[0])\n                and (',
+        "replacement": '        if (words\n                and (',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'computed script file exemption dropped', "module": GREP,
+        "anchor": '            if script_reason == "a computed script operand" and _computed_script_names_file(\n                    script):',
+        "replacement": '            if False and _computed_script_names_file(\n                    script):',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'stdin-shaped script tail read as a file', "module": GREP,
+        "anchor": ' and not re.fullmatch(r"/(?:stdin|[0-9]+)", tail)',
+        "replacement": '',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'computed script name read as a file', "module": GREP,
+        "anchor": '    if any(char in "$`" and mode in "UD" for char, mode in zip(tail, modes)):\n        return False',
+        "replacement": '    if False:\n        return False',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'globbed script name read as a file', "module": GREP,
+        "anchor": '    if any(char in "*?[{}~" and mode == "U" for char, mode in zip(tail, modes)):\n        return False',
+        "replacement": '    if False:\n        return False',
+        "allowed_statuses": (),
+    },
+    {
+        "label": 'split script path read as one word', "module": GREP,
+        "anchor": '    if not slashes or not _dynamic_executable_is_single_word(token):',
+        "replacement": '    if not slashes:',
+        "allowed_statuses": (),
+    },
+    {
         "label": 'conditional handback base form dropped', "module": STOP,
         "anchor": "    r'(after|once|when) you (approve|confirm|decide)\\b|'",
         "replacement": "    r'(?!)|'",

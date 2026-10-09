@@ -178,7 +178,10 @@ start), visibly builds the name as an array, or names a lowercase parameter, whi
 zsh's special arrays; zsh splits unquoted substitution output, and a POSIX child shell splits
 both. Positional/array splicing, flagged parameter forms, Git-shaped argv, and shell-script
 operands remain uncertain. A dynamic command word may itself be `source` or `eval`, so it makes
-a later bare `echo`/`printf` or stdin consumer as uncertain as a visible setter does.
+a later bare `echo`/`printf` or stdin consumer as uncertain as a visible setter does. One that
+keeps a literal `/` -- `$VENV/bin/python`, `"$S/tool"` -- is run as a path and is never `source`,
+`.` or `eval`; it reaches a function or alias only through one of that slash name declared in
+the same command, which the rebinding check already sees.
 
 Commands a known launcher runs are read as well: the argv of `xargs`, `find -exec`/`-execdir`/
 `-ok`/`-okdir`, `flock`, and `git bisect run`; the string `flock -c`, `git rebase --exec`, and a
@@ -192,7 +195,9 @@ harmless.
 A shell whose script operand is `/dev/stdin`, `/dev/fd/0`, or `/proc/self/fd/0` reads standard
 input exactly as one with no operand does, so its here-string or redirect is the source it runs.
 A process-substitution or computed script operand -- `bash <(...)`, `sh "$SCRIPT"` -- is
-unresolved, as it is for `source`; a literal script file is outside inspection.
+unresolved, as it is for `source`; a literal script file is outside inspection, and so is a
+computed directory before a literal file name, `bash "$S/run.sh"`, unless that name could finish
+a stdin or descriptor path.
 A literal `< file` is questioned when its consumer is a shell, a potentially rebound bare name,
 an interpreter without an explicit first literal script operand, or an expansion. Interpreter
 options are not skipped to guess a program operand. `wc -l < file` with no visible rebinding and

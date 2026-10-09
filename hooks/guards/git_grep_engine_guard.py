@@ -284,8 +284,9 @@ def _has_dynamic_command_word(source, deadline=None):
             words = words[1:]
             while words and words[0][0].startswith("-"):
                 words = words[1:]
-        if words and (_token_has_live_unresolved(words[0])
-                      or _token_has_live_command_parameter(words[0])):
+        if (words and not _command_word_is_path(words[0])
+                and (_token_has_live_unresolved(words[0])
+                     or _token_has_live_command_parameter(words[0]))):
             return True
     return False
 
@@ -3945,6 +3946,63 @@ def _dynamic_executable_is_single_word(token):
     return True
 
 
+def _literal_slash_positions(token):
+    """Offsets of each `/` in a word that no expansion supplies or removes.
+
+    The tokenizer leaves substitutions as placeholders, so only a `${...}` body can hold
+    a `/` that does not survive into the word.
+    """
+    text, _quoting = token
+    modes = _source_operand_modes(token)
+    positions = []
+    depth = 0
+    index = 0
+    while index < len(text):
+        live = modes[index] in "UD"
+        if live and text.startswith("${", index):
+            depth += 1
+            index += 2
+            continue
+        if depth and live and text[index] == "}":
+            depth -= 1
+        elif not depth and text[index] == "/":
+            positions.append(index)
+        index += 1
+    return positions
+
+
+def _command_word_is_path(token):
+    """Whether a command word keeps a literal `/` whatever its expansions yield.
+
+    zsh runs such a word as a path, never as a builtin: measured on zsh 5.9, `"$v/source"`
+    with an empty `v` fails as `no such file or directory: /source`. It reaches a function
+    or an alias only through one of that slash name declared in the same source, which the
+    rebinding check already sees.
+    """
+    return bool(_literal_slash_positions(token))
+
+
+def _computed_script_names_file(token):
+    """Whether a computed script path ends in a literal file name no expansion reaches.
+
+    `$S/fresh-clone.sh` is `<value>/fresh-clone.sh`: a script file, outside inspection as
+    a literal one is. It cannot be `/dev/stdin` or a descriptor path, and it cannot begin
+    an option. A tail that could finish one of those -- `$D/stdin`, `$P/fd/0` -- does not
+    name a file.
+    """
+    text, _quoting = token
+    slashes = _literal_slash_positions(token)
+    if not slashes or not _dynamic_executable_is_single_word(token):
+        return False
+    tail = text[slashes[-1]:]
+    modes = _source_operand_modes(token)[slashes[-1]:]
+    if any(char in "$`" and mode in "UD" for char, mode in zip(tail, modes)):
+        return False
+    if any(char in "*?[{}~" and mode == "U" for char, mode in zip(tail, modes)):
+        return False
+    return bool(re.fullmatch(r"/[^/]+", tail)) and not re.fullmatch(r"/(?:stdin|[0-9]+)", tail)
+
+
 def _dynamic_command_is_relevant(words):
     """Whether a command whose executable is an expansion can reach executable source.
 
@@ -3953,13 +4011,16 @@ def _dynamic_command_is_relevant(words):
     argv may supply the entire Git invocation before those operands, so the written tail
     alone cannot prove it harmless. Visible rebinding also leaves a quoted name uncertain.
     """
-    if len(words) == 1:
-        return True
     if not _dynamic_executable_is_single_word(words[0]):
         return True
     if _IDENTITY_MUTATION_VISIBLE.get() is not False:
         return True
     if command_has_git_hazard_hint(words):
+        return True
+    # A path is not `source`, `.` or `eval`, so its operands are not reparsed as source.
+    if _command_word_is_path(words[0]):
+        return False
+    if len(words) == 1:
         return True
     for token in words[1:]:
         text, _quoting = token
@@ -6626,6 +6687,9 @@ def _classify_source(command, scan_command, decisions, _shell_depth, _deadline, 
             # A shell's script operand is the same boundary as `source`'s: a literal file
             # is outside inspection, a computed one is source this guard never sees.
             script_reason = _dynamic_source_operand_reason(script, False, _shell, equals_state)
+            if script_reason == "a computed script operand" and _computed_script_names_file(
+                    script):
+                script_reason = None
             if script_reason is not None:
                 decisions.append((
                     "ask", f"{script_reason} {script[0]!r} is the script a shell runs; the "
@@ -11078,6 +11142,41 @@ FIXTURES += [
      'f() { eval \'g() { git grep -E "harness\\b" -- README.md; }\'; }; f; g', 'ask'),
     ('ASK  CALLED FUNCTION: a called function in a pipeline',
      'f() { g() { git grep -E "harness\\b" -- README.md; }; }; f | cat; g', 'ask'),
+]
+
+FIXTURES += [
+    ('GREEN PATH WORD: a path command word is not eval, so quoted operands are data',
+     '"$V/bin/python" -c "print(\'x\')"', 'allow'),
+    ('GREEN PATH WORD: an unquoted path command word with expanded operands',
+     '$S/.venv/bin/pytest "$S/test_x.py" -q', 'allow'),
+    ('GREEN PATH WORD: a path command word does not make a later heredoc consumer uncertain',
+     '"$S/tool" --version; cat > out.txt <<\'EOF\'\nx\nEOF', 'allow'),
+    ('GREEN PATH WORD: a path command word is not a rebinding before echo',
+     '"$S/tool" --version; echo grep -E \'harness\\b\' -- README.md', 'allow'),
+    ('ASK  PATH WORD: a bare expansion may be eval',
+     '"$RG" -c "print(\'x\')"', 'ask'),
+    ('ASK  PATH WORD: a slash inside ${...} is not in the word',
+     '"${CMD%/}" -c "print(\'x\')"', 'ask'),
+    ('ASK  PATH WORD: a declared slash-named function is still a rebinding',
+     'function /tmp/f { eval "$1"; }; "$D/f" \'git grep -E "harness\\b" -- README.md\'', 'ask'),
+    ('ASK  PATH WORD: a Git-shaped tail after a path command word',
+     '"$G/bin/git" grep -E \'harness\\b\' -- README.md', 'ask'),
+    ('GREEN SCRIPT OPERAND: a computed directory before a literal script name',
+     'bash $S/fresh-clone.sh', 'allow'),
+    ('GREEN SCRIPT OPERAND: a quoted computed directory before a literal script name',
+     'sh "$SP/gate.sh" --fast', 'allow'),
+    ('ASK  SCRIPT OPERAND: a fully computed script path',
+     'bash "$GATE"', 'ask'),
+    ('ASK  SCRIPT OPERAND: a computed path that can finish /dev/stdin',
+     'bash $D/stdin <<< "git grep -E \\"harness\\\\b\\" -- README.md"', 'ask'),
+    ('ASK  SCRIPT OPERAND: a computed path that can finish a descriptor',
+     'zsh "$P/0" <<< "x"', 'ask'),
+    ('ASK  SCRIPT OPERAND: a glob in the script name',
+     'sh $S/*.sh', 'ask'),
+    ('ASK  SCRIPT OPERAND: a computed name after the last slash',
+     'bash $S/$NAME', 'ask'),
+    ('ASK  SCRIPT OPERAND: a split directory can supply more words',
+     'setopt shwordsplit; bash $S/fresh-clone.sh', 'ask'),
 ]
 
 

@@ -56,8 +56,8 @@ EVAL_SKILL_FLOOR = 7
 SUITE_FLOORS = {
     "harness_check": 230,
     "render-packages": 192,
-    "bash_command_guard": 1848,
-    "git_grep_engine_guard": 1613,
+    "bash_command_guard": 1864,
+    "git_grep_engine_guard": 1629,
     "zsh_rev_modifier_guard": 522,
 }
 EXPECTED_WORKFLOW = """name: harness-check
@@ -1050,7 +1050,7 @@ RETAINED_DECISION_COMMANDS = ROOT / "contracts/goldens/retained-guard-commands.j
 SUITE_SOURCE_GOLDEN = ROOT / "contracts/goldens/suite-sources.json"
 HARNESS_SOURCE = ROOT / "hooks/harness_check.py"
 REPOSITORY_OWNERSHIP_SOURCE = ROOT / "tools/repository_ownership.py"
-DECISION_CORPUS_FLOOR = 1450
+DECISION_CORPUS_FLOOR = 1466
 DECISION_WRITER_SHA256 = "8c4180468fc05a88c69fafba3a79f2387f5df2d1aa728def1670f5497a442e9d"
 RETAINED_DECISION_SCHEMA_VERSION = 1
 RETAINED_DECISION_NOTE = (
@@ -1313,7 +1313,7 @@ MUTATION_SUMMARY = ROOT / "contracts/goldens/mutation-summary.md"
 # only removes cannot express a kill for them. Two of its ten are caught, by fixtures
 # that depend on the removed escape producing a literal backslash.
 MUTATION_SURVIVOR_DEBT_CEILING = 88
-MUTATION_PLAN_FLOOR = 593
+MUTATION_PLAN_FLOOR = 600
 # Kills scored only because the recorded check count moved, with no assertion failing. A
 # guard that increments its counter once per element of the collection under mutation moves
 # that count on any removal, so such a kill is decided by loop structure before any probe
@@ -1418,6 +1418,13 @@ EXPECTED_MUTATION_COLLECTIONS = {
     ("hooks/guards/git_grep_engine_guard.py", "GIT_CONFIG_SHORT_VALUE_OPTIONS"): 2,
 }
 EXPECTED_MUTATION_SITES = {
+    ("hooks/guards/git_grep_engine_guard.py", 'path command word read as possible eval'),
+    ("hooks/guards/git_grep_engine_guard.py", 'path command word counted as a rebinding'),
+    ("hooks/guards/git_grep_engine_guard.py", 'computed script file exemption dropped'),
+    ("hooks/guards/git_grep_engine_guard.py", 'stdin-shaped script tail read as a file'),
+    ("hooks/guards/git_grep_engine_guard.py", 'computed script name read as a file'),
+    ("hooks/guards/git_grep_engine_guard.py", 'globbed script name read as a file'),
+    ("hooks/guards/git_grep_engine_guard.py", 'split script path read as one word'),
     ("hooks/announced_work_guard.py", 'conditional handback base form dropped'),
     ("hooks/announced_work_guard.py", 'conditional handback perfect form dropped'),
     ("hooks/announced_work_guard.py", 'conditional handback noun form dropped'),
@@ -1872,7 +1879,7 @@ EXPECTED_MUTATION_SELECTORS = {
         ("a repeated core.worktree binds the effective candidate Git recognises",),
 }
 EXPECTED_MUTATION_SITE_DIGEST = (
-    "c353df4762b68877c243c56efdcb6af990f76a6cabefe804cf53a0b85116ee84"
+    "c0a0f7cac6134749dc4469ef813406b9c2457a94ce9b68f5aaa2b0183299b76e"
 )
 EXPECTED_MUTATION_EXCLUSIONS = {
     "hooks/guards/git_grep_engine_guard.py::ALIAS_GUARDED":

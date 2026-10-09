@@ -19,6 +19,13 @@ Guards, each with its own fixtures and red-proof in guards/:
 Precedence: deny > ask > allow. Reasons from every guard that fired are concatenated,
 so a command tripping both is told about both.
 
+One caller-scoped predicate runs beside them, in evaluate_payload rather than GUARDS,
+because its verdict depends on who is calling and only the payload says that:
+  credential_reach_guard  — a credential or another model's CLI. A subagent (the payload
+                            carries agent_id) is denied; the Claude main thread is asked
+                            before another model's CLI or a stored-secret read; the Codex
+                            main thread is not judged. Its own suite pins the spellings.
+
 Both runtimes use the same PreToolUse fields and deny shape. The Claude envelope was
 verified in-binary at 2.1.220. Codex's installed hook contract accepts `deny` with a
 non-empty reason, or no output; `allow` requires `updatedInput`, and `ask` is rejected.
@@ -35,12 +42,13 @@ import sys
 import pathlib
 import time
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 RUNTIMES = {"claude", "codex"}
 sys.path.insert(0, str(pathlib.Path(__file__).parent / "guards"))
 
 import zsh_rev_modifier_guard as zsh_guard      # noqa: E402
 import git_grep_engine_guard as grep_guard      # noqa: E402
+import credential_reach_guard as cred_guard     # noqa: E402
 
 GUARDS = [
     ("zsh_rev_modifier", zsh_guard),
@@ -1437,6 +1445,41 @@ def selftest():
     total += 1
     failures += (not ok)
     print(f"  {'PASS' if ok else 'FAIL'} tokenizer-linear   256 KiB in {elapsed:.3f}s (cap 1.5s)")
+    def _verdict(command, runtime="claude", **extra):
+        payload = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                   "tool_input": {"command": command}, **extra}
+        output = evaluate_payload(payload, runtime=runtime)
+        spec = (output or {}).get("hookSpecificOutput", {})
+        return spec.get("permissionDecision"), spec.get("permissionDecisionReason", "")
+    for label, args, kwargs, want in (
+        ("subagent gh is denied", ("gh pr list",), {"agent_id": "agent-x1"}, "deny"),
+        ("main-thread gh is allowed", ("gh pr list",), {}, None),
+        ("empty agent_id is the main thread", ("gh pr list",), {"agent_id": ""}, None),
+        ("claude main thread asks before codex", ("codex exec 'x'",), {}, "ask"),
+        ("codex main thread is not judged", ("codex exec 'x'", "codex"), {}, None),
+    ):
+        got, _reason = _verdict(*args, **kwargs)
+        ok = got == want
+        total += 1
+        failures += (not ok)
+        print(f"  {'PASS' if ok else 'FAIL'} credential-caller  want={want!s:<5} got={got!s:<5} {label}")
+    got, reason = _verdict("git show $sha:src/x.py && gh api user", agent_id="agent-x2")
+    ok = got == "deny" and "credential_reach" in reason and reason.count("\n\n") >= 1
+    total += 1
+    failures += (not ok)
+    print(f"  {'PASS' if ok else 'FAIL'} credential-merge   both the git and credential reasons are returned")
+    original_cred_decide = cred_guard.decide
+    def _planted_cred_fault(*_args, **_kwargs):
+        raise RuntimeError("planted credential predicate fault")
+    cred_guard.decide = _planted_cred_fault
+    try:
+        got, reason = _verdict("echo safe")
+    finally:
+        cred_guard.decide = original_cred_decide
+    ok = got == "deny" and "credential_reach: predicate failed" in reason
+    total += 1
+    failures += (not ok)
+    print(f"  {'PASS' if ok else 'FAIL'} credential-fault   a broken credential predicate cannot become allow")
     print(f"\n  {total} checks, {failures} failures")
     if total == 0:
         print("  ZERO CHECKS RAN — treating as failure")
@@ -1513,6 +1556,26 @@ def main():
     return hook_mode(raw, runtime=runtime)
 
 
+def _with_credential_reach(command, payload, runtime, decision, reason):
+    """Merge the caller-scoped credential verdict; a predicate fault is a deny."""
+    agent_id = payload.get("agent_id")
+    subagent = isinstance(agent_id, str) and bool(agent_id)
+    try:
+        cred_decision, cred_reason = cred_guard.decide(
+            command, subagent=subagent, runtime=runtime)
+        if cred_decision not in RANK or not isinstance(cred_reason, str):
+            raise ValueError(f"credential_reach returned {cred_decision!r}")
+    except BaseException as exc:                   # predicate failure is not an allow
+        cred_decision = "deny"
+        cred_reason = (f"credential_reach: predicate failed ({exc!r}); z-harness cannot prove "
+                       "this Bash command is not a credential or model call, so it is denied.")
+    if RANK[cred_decision] > RANK[decision]:
+        decision = cred_decision
+    if cred_decision != "allow" and cred_reason:
+        reason = "\n\n".join(r for r in (reason, cred_reason) if r)
+    return decision, reason
+
+
 def evaluate_payload(payload, runtime="claude"):
     """Return a hook output object for a blocked Bash call, otherwise None."""
     if not isinstance(payload, dict):
@@ -1529,6 +1592,7 @@ def evaluate_payload(payload, runtime="claude"):
     if not isinstance(command, str) or not command:
         raise EnvelopeError("matched Bash payload has no non-empty string command")
     decision, reason = decide(command)
+    decision, reason = _with_credential_reach(command, payload, runtime, decision, reason)
     if decision == "allow":
         return None
     if runtime == "codex" and decision == "ask":

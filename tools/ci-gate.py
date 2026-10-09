@@ -56,7 +56,8 @@ EVAL_SKILL_FLOOR = 7
 SUITE_FLOORS = {
     "harness_check": 230,
     "render-packages": 192,
-    "bash_command_guard": 1864,
+    "bash_command_guard": 1871,
+    "credential_reach_guard": 73,
     "git_grep_engine_guard": 1630,
     "zsh_rev_modifier_guard": 522,
 }
@@ -949,6 +950,8 @@ def command_specs(render_root: Path) -> List[Tuple[List[str], ReceiptSpec]]:
          selftest_receipt("git_grep_engine_guard", SUITE_FLOORS["git_grep_engine_guard"])),
         ([python, "hooks/guards/zsh_rev_modifier_guard.py", "--selftest"],
          selftest_receipt("zsh_rev_modifier_guard", SUITE_FLOORS["zsh_rev_modifier_guard"])),
+        ([python, "hooks/guards/credential_reach_guard.py", "--selftest"],
+         selftest_receipt("credential_reach_guard", SUITE_FLOORS["credential_reach_guard"])),
         (
             [python, "tools/run-skill-evals.py", "--validate"],
             ReceiptSpec(
@@ -5439,6 +5442,8 @@ def selftest() -> int:
             return Result(0, f"SELFTEST-SUMMARY suite=git_grep_engine_guard checks={expected_selftest_checks('git_grep_engine_guard')} failures=0\n")
         if "zsh_rev_modifier_guard.py" in joined:
             return Result(0, f"SELFTEST-SUMMARY suite=zsh_rev_modifier_guard checks={expected_selftest_checks('zsh_rev_modifier_guard')} failures=0\n")
+        if "credential_reach_guard.py" in joined:
+            return Result(0, f"SELFTEST-SUMMARY suite=credential_reach_guard checks={SUITE_FLOORS['credential_reach_guard']} failures=0\n")
         if "run-skill-evals.py" in joined:
             return Result(0, f"EVAL-VALIDATE-SUMMARY scenarios={EVAL_SCENARIO_FLOOR} "
                           f"skills={EVAL_SKILL_FLOOR} failures=0 scope=shape-only exit=0\n")
@@ -5450,7 +5455,7 @@ def selftest() -> int:
         "fake runner covers the production command registry",
         gate(fake_runner, emit_child_output=False) == 0,
     )
-    expect("production registry is non-empty", len(fake_calls) == 9)
+    expect("production registry is non-empty", len(fake_calls) == 10)
 
     def timeout_subprocess(argv, **_kwargs):
         if tuple(argv) == tuple(harness_argv):

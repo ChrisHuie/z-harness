@@ -4550,6 +4550,242 @@ def nested_shell_invocation(resolution, current_shell="sh", deadline=None):
     return None
 
 
+class LaunchedCommand(NamedTuple):
+    """A command a known launcher runs: an argv it executes or a string it hands to sh."""
+    launcher: str
+    kind: str
+    tokens: tuple
+    operands_after_terminator: bool
+
+
+def _first_launched_word(items, start):
+    """Index of the first Git or shell word at or after ``start``."""
+    for index in range(start, len(items)):
+        word = os.path.basename(items[index][0])
+        if word == "git" or word in SHELLS:
+            return index
+    return None
+
+
+def _operands_after_terminator(argv, placeholder):
+    """Whether every operand the launcher supplies lands after a literal `--`.
+
+    Appended operands land at the end; replaced ones land wherever the placeholder is
+    written. Anywhere before `--` an operand can be an option such as `-P`.
+    """
+    words = [text for text, _quoting in argv]
+    if "--" not in words:
+        return False
+    terminator = words.index("--")
+    if placeholder is None:
+        return True
+    return all(index > terminator for index, word in enumerate(words)
+               if placeholder in word)
+
+
+def _token_suffix(token, start):
+    text, quoting = token
+    if quoting.startswith("mixed:"):
+        return text[start:], "mixed:" + quoting.split(":", 1)[1][start:]
+    return text[start:], quoting
+
+
+def launched_commands(items):
+    """Commands a known launcher runs, read from its argv without executing anything.
+
+    The launched command starts at the first Git or shell word after the launcher's
+    own options, so an option table is not needed to find it; only the replacement
+    options are read, because they decide where launcher-supplied operands land.
+    """
+    if not items:
+        return ()
+    name = os.path.basename(items[0][0])
+    words = [text for text, _quoting in items]
+    if name == "find":
+        launches = []
+        index = 1
+        while index < len(items):
+            if words[index] in ("-exec", "-execdir", "-ok", "-okdir"):
+                end = index + 1
+                while end < len(items) and words[end] not in (";", "+"):
+                    end += 1
+                if end >= len(items):
+                    break
+                argv = tuple(items[index + 1:end])
+                if argv:
+                    launches.append(LaunchedCommand(
+                        "find", "argv", argv, _operands_after_terminator(argv, "{}")))
+                index = end + 1
+                continue
+            index += 1
+        return tuple(launches)
+    if name == "xargs":
+        start = _first_launched_word(items, 1)
+        if start is None:
+            return ()
+        placeholder = None
+        prefix = words[1:start]
+        for position, word in enumerate(prefix):
+            if word in ("-I", "-J") and position + 1 < len(prefix):
+                placeholder = prefix[position + 1]
+            elif word.startswith(("-I", "-J")) and len(word) > 2:
+                placeholder = word[2:]
+            elif word.startswith("-i"):
+                placeholder = word[2:] or "{}"
+            elif word.startswith("--replace"):
+                placeholder = word.partition("=")[2] or "{}"
+        argv = tuple(items[start:])
+        return (LaunchedCommand(
+            "xargs", "argv", argv, _operands_after_terminator(argv, placeholder)),)
+    if name == "flock":
+        for index in range(1, len(items) - 1):
+            if words[index] in ("-c", "--command"):
+                return (LaunchedCommand("flock", "shell", (items[index + 1],), True),)
+        start = _first_launched_word(items, 2)
+        if start is None:
+            return ()
+        return (LaunchedCommand("flock", "argv", tuple(items[start:]), True),)
+    if name != "git":
+        return ()
+    index = 1
+    while index < len(words) and words[index].startswith("-"):
+        if words[index] in _GIT_TERMINAL_OPTIONS:
+            return ()
+        index += 2 if words[index] in _GIT_GLOBAL_OPTIONS_WITH_VALUES else 1
+    if index >= len(words):
+        return ()
+    subcommand, rest = words[index], list(items[index + 1:])
+    if subcommand == "bisect" and len(rest) > 1 and rest[0][0] == "run":
+        return (LaunchedCommand("git bisect run", "argv", tuple(rest[1:]), True),)
+    if subcommand == "submodule":
+        while rest and rest[0][0] in ("--quiet", "-q"):
+            rest.pop(0)
+        if not rest or rest[0][0] != "foreach":
+            return ()
+        rest.pop(0)
+        while rest and rest[0][0] in ("--recursive", "--quiet", "-q"):
+            rest.pop(0)
+        if rest and rest[0][0] == "--":
+            rest.pop(0)
+        # Measured on git 2.46.1: one operand runs through the shell, several are argv.
+        if len(rest) == 1:
+            return (LaunchedCommand("git submodule foreach", "shell", (rest[0],), True),)
+        if rest:
+            return (LaunchedCommand("git submodule foreach", "argv", tuple(rest), True),)
+        return ()
+    if subcommand == "rebase":
+        launches = []
+        for position, token in enumerate(rest):
+            word = token[0]
+            if word in ("-x", "--exec") and position + 1 < len(rest):
+                body = rest[position + 1]
+            elif word.startswith("--exec="):
+                body = _token_suffix(token, len("--exec="))
+            elif word.startswith("-x") and len(word) > 2:
+                body = _token_suffix(token, 2)
+            else:
+                continue
+            launches.append(LaunchedCommand("git rebase --exec", "shell", (body,), True))
+        return tuple(launches)
+    return ()
+
+
+def _literal_argv_source(tokens):
+    """Rebuild an argv a launcher executes, or None while a word is still an expansion."""
+    if any(_token_has_live_unresolved(token) or _token_has_live_command_parameter(token)
+           for token in tokens):
+        return None
+    return " ".join(shlex.quote(text) for text, _quoting in tokens)
+
+
+def launched_command_decisions(resolution, depth, deadline, shell, equals_state,
+                               command_env, lookup_authority_uncertain):
+    """Decide what known launchers run: argv, `sh -c` bodies, and strings Git runs.
+
+    The launcher arm that asks on a Git-shaped tail stays; this adds the verdict of the
+    command the launcher runs, so a proven hazard behind `xargs`, `find -exec`, `flock`,
+    or `git bisect run` is denied, and a shell body there is read rather than skipped.
+    """
+    findings = []
+    items = list(resolution.items)
+    launches = launched_commands(items)
+    for launch in launches:
+        if launch.kind == "shell":
+            body = launch.tokens[0]
+            if _token_has_live_unresolved(body) or _token_has_live_command_parameter(body):
+                findings.append((
+                    "ask", f"{launch.launcher} hands the shell a string chosen by an "
+                    "expansion, so the Git it runs cannot be inspected"))
+                continue
+            decision, reason = decide(body[0], depth + 1, deadline, "sh",
+                                      ZSH_EQUALS_OFF, command_env,
+                                      lookup_authority_uncertain)
+            if decision != "allow":
+                findings.append((decision, f"{launch.launcher} runs this shell string: "
+                                 + reason))
+            continue
+        launched = unwrap_command_prefix(
+            list(launch.tokens), shell, equals_state, command_env,
+            lookup_authority_uncertain)
+        invocation = nested_shell_invocation(launched, shell, deadline)
+        if invocation is not None:
+            if invocation.command:
+                with nested_word_split_scope(launched, invocation):
+                    decision, reason = decide(
+                        invocation.command, depth + 1, deadline, invocation.shell,
+                        nested_shell_equals_state(launched, invocation, equals_state),
+                        invocation.command_env, invocation.lookup_authority_uncertain)
+                if decision != "allow":
+                    findings.append((decision, f"{launch.launcher} runs a shell body: "
+                                     + reason))
+            if (not invocation.command
+                    or nested_body_has_dynamic_command_word(
+                        launched, invocation, deadline)):
+                findings.append((
+                    "ask", f"{launch.launcher} runs a shell whose body is empty or "
+                    "chooses its executable from an expansion"))
+            continue
+        source = _literal_argv_source(launch.tokens)
+        if source is None:
+            continue
+        decision, reason = decide(source, depth + 1, deadline, shell, equals_state,
+                                  command_env, lookup_authority_uncertain)
+        if decision == "deny" and not launch.operands_after_terminator:
+            findings.append((
+                "ask", f"{launch.launcher} runs a proven hazard but may supply operands "
+                "before `--`, where one can select another engine: " + reason))
+        elif decision != "allow":
+            findings.append((decision, f"{launch.launcher} runs: " + reason))
+    if launches or not items:
+        return findings
+    executable = os.path.basename(items[0][0])
+    if (executable == "git" or executable in SHELLS
+            or items[0][0] in TRUSTED_EXTERNAL_NON_FORWARDING_COMMANDS
+            or executable in SHELL_NON_FORWARDING_COMMANDS):
+        return findings
+    # Outside the launchers modelled above, a `sh -c` body usually runs somewhere this
+    # guard cannot follow -- over ssh, in a container -- so it is a question, never a
+    # verdict, and only when the body is not itself allowed.
+    for index in range(1, len(items)):
+        if os.path.basename(items[index][0]) not in SHELLS:
+            continue
+        launched = unwrap_command_prefix(
+            items[index:], shell, equals_state, command_env, lookup_authority_uncertain)
+        invocation = nested_shell_invocation(launched, shell, deadline)
+        if invocation is None or not invocation.command:
+            continue
+        with nested_word_split_scope(launched, invocation):
+            decision, _reason = decide(
+                invocation.command, depth + 1, deadline, invocation.shell,
+                ZSH_EQUALS_UNKNOWN, invocation.command_env, True)
+        if decision != "allow":
+            findings.append((
+                "ask", f"{items[0][0]!r} hands a shell body to a launcher this guard "
+                "does not model, and the body is not proven harmless"))
+        break
+    return findings
+
+
 def nested_shell_equals_state(resolution, invocation, inherited=ZSH_EQUALS_ON):
     """Return EQUALS state for an eval body or a newly launched shell."""
     if invocation.shell != "zsh":
@@ -6057,6 +6293,9 @@ def _classify_source(command, scan_command, decisions, _shell_depth, _deadline, 
             commands, equals_states, environment_states):
         resolution = unwrap_command_prefix(
             tokens, _shell, equals_state, command_env, lookup_uncertain)
+        decisions.extend(launched_command_decisions(
+            resolution, _shell_depth, _deadline, _shell, equals_state, command_env,
+            lookup_uncertain))
         if resolution.errors and resolution.hazard_hint:
             decisions.append((
                 "ask", "a possible Git invocation crosses an unresolved command "
@@ -6580,8 +6819,8 @@ FIXTURES = [
      "command -pv git grep -nE 'harness\\b' -- README.md", "allow"),
     ("GREEN WRAPPER: builtin refuses to execute an external git",
      "builtin git grep -nE 'harness\\b' -- README.md", "allow"),
-    ("ASK WRAPPER: xargs is unmodelled and conceals git",
-     """xargs git grep -nE 'harness\\b' -- README.md""", "ask"),
+    ("RED  WRAPPER: xargs appending after -- cannot change the proven engine",
+     """xargs git grep -nE 'harness\\b' -- README.md""", "deny"),
     ("ASK WRAPPER: unknown arch prefix with a guarded Git tail fails closed",
      """arch git grep -nE 'harness\\b' -- README.md""", "ask"),
     ("ASK WRAPPER: unknown xcrun prefix with a guarded Git tail fails closed",
@@ -9977,6 +10216,70 @@ FIXTURES += [
      "trap '$PY script.py' EXIT", 'allow'),
     ('ASK  SCALAR WORD: the facts a function walk asks for again do not recurse',
      'set -e; f() { :; }; $PY script.py; f', 'ask'),
+]
+
+
+FIXTURES += [
+    ('RED  LAUNCHER: xargs runs a shell body carrying the hazard',
+     'echo README.md | xargs sh -c "git grep -E \'harness\\b\' -- README.md"', 'deny'),
+    ("RED  LAUNCHER: an xargs shell body's operands are positional parameters",
+     'xargs -n1 sh -c \'git grep -E "harness\\b" -- "$0"\' < list.txt', 'deny'),
+    ('RED  LAUNCHER: find -exec runs a shell body carrying the hazard',
+     'find . -name README.md -exec sh -c "git grep -E \'harness\\b\' -- README.md" \\;', 'deny'),
+    ('RED  LAUNCHER: a find shell body reads its path as a positional parameter',
+     'find . -name README.md -exec sh -c \'git grep -E "harness\\b" -- "$1"\' _ {} \\;', 'deny'),
+    ('RED  LAUNCHER: git bisect run runs a shell body',
+     'git bisect run sh -c "git grep -E \\"harness\\\\b\\" -- README.md"', 'deny'),
+    ('RED  LAUNCHER: git bisect run runs an argv',
+     "git bisect run git grep -E 'harness\\b' -- README.md", 'deny'),
+    ('RED  LAUNCHER: one submodule foreach operand is a shell string',
+     'git submodule foreach "git grep -E \\"harness\\\\b\\" -- README.md"', 'deny'),
+    ('RED  LAUNCHER: several submodule foreach operands are an argv',
+     "git submodule foreach git grep -E 'harness\\b' -- README.md", 'deny'),
+    ('RED  LAUNCHER: rebase --exec runs a shell string',
+     'git rebase --exec "git grep -E \\"harness\\\\b\\" -- README.md" HEAD~1', 'deny'),
+    ('RED  LAUNCHER: rebase --exec= runs a shell string',
+     'git rebase --exec="git grep -E \\"harness\\\\b\\" -- README.md" HEAD~1', 'deny'),
+    ('RED  LAUNCHER: rebase -x runs a shell string',
+     'git rebase -x "git grep -E \\"harness\\\\b\\" -- README.md" HEAD~1', 'deny'),
+    ('RED  LAUNCHER: flock -c runs a shell string',
+     'flock /tmp/l -c "git grep -E \'harness\\b\' -- README.md"', 'deny'),
+    ('RED  LAUNCHER: xargs replacement after -- supplies only a path',
+     "xargs -I{} git grep -E 'harness\\b' -- {} < list.txt", 'deny'),
+    ('RED  LAUNCHER: xargs appends only after an explicit --',
+     "echo README.md | xargs git grep -E 'harness\\b' --", 'deny'),
+    ('RED  LAUNCHER: find -exec + appends only after an explicit --',
+     "find . -name README.md -exec git grep -E 'harness\\b' -- {} +", 'deny'),
+    ('RED  LAUNCHER: find -execdir runs an argv',
+     "find . -name README.md -execdir git grep -E 'harness\\b' -- {} \\;", 'deny'),
+    ('RED  LAUNCHER: find -ok runs an argv',
+     "find . -name README.md -ok git grep -E 'harness\\b' -- {} \\;", 'deny'),
+    ('RED  LAUNCHER: find -okdir runs an argv',
+     "find . -name README.md -okdir git grep -E 'harness\\b' -- {} \\;", 'deny'),
+    ('ASK  LAUNCHER: xargs may append an engine option without --',
+     "echo README.md | xargs git grep -E 'harness\\b'", 'ask'),
+    ('ASK  LAUNCHER: find may substitute an option without --',
+     "find . -exec git grep -E 'harness\\b' {} \\;", 'ask'),
+    ('ASK  LAUNCHER: a replacement before -- may be an option',
+     'xargs -I{} git grep -E {} -- README.md < pats.txt', 'ask'),
+    ('ASK  LAUNCHER: a separated replacement before -- may supply an engine option',
+     "xargs -I {} git grep -E 'harness\\b' {} -- README.md < list.txt", 'ask'),
+    ("ASK  LAUNCHER: an unmodelled launcher's shell body is a question",
+     'ssh host sh -c "git grep -E \'harness\\b\' -- README.md"', 'ask'),
+    ('ASK  LAUNCHER: a dynamic shell string Git runs is a question',
+     'git submodule foreach "$CMD"', 'ask'),
+    ('GREEN LAUNCHER: rebase -x running a build is data to this guard',
+     "git rebase -x 'make test' HEAD~3", 'allow'),
+    ('GREEN LAUNCHER: find -exec of a counter',
+     "find . -name '*.py' -exec wc -l {} +", 'allow'),
+    ('GREEN LAUNCHER: a find shell body that only prints',
+     'find . -type f -exec sh -c \'echo "$1"\' _ {} \\;', 'allow'),
+    ('GREEN LAUNCHER: echo prints a shell body as text',
+     'echo sh -c "git grep -E \'harness\\b\' -- README.md"', 'allow'),
+    ('GREEN LAUNCHER: a submodule foreach status string',
+     "git submodule foreach 'git status'", 'allow'),
+    ('GREEN LAUNCHER: xargs removing files',
+     'xargs -0 rm -f < list.txt', 'allow'),
 ]
 
 

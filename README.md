@@ -176,6 +176,15 @@ zsh's special arrays; zsh splits unquoted substitution output, and a POSIX child
 both. Positional/array splicing, flagged parameter forms, Git-shaped argv, and shell-script
 operands remain uncertain. A dynamic command word may itself be `source` or `eval`, so it makes
 a later bare `echo`/`printf` or stdin consumer as uncertain as a visible setter does.
+
+Commands a known launcher runs are read as well: the argv of `xargs`, `find -exec`/`-execdir`/
+`-ok`/`-okdir`, `flock`, and `git bisect run`; the string `flock -c`, `git rebase --exec`, and a
+single `git submodule foreach` operand hand to `sh`; and a `sh -c` body inside any of them. A
+proven hazard there denies when every operand the launcher supplies lands after a literal `--`,
+and otherwise asks, because an appended `-P` can change the engine. A modifier the calling zsh
+expands in the launcher's argv reaches a launched rev:path whatever the launcher does. A `sh -c`
+body handed to any other command -- `ssh`, a container runtime -- asks unless it is proven
+harmless.
 A literal `< file` is questioned when its consumer is a shell, a potentially rebound bare name,
 an interpreter without an explicit first literal script operand, or an expansion. Interpreter
 options are not skipped to guess a program operand. `wc -l < file` with no visible rebinding and

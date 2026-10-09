@@ -81,7 +81,7 @@ from git_grep_engine_guard import (  # noqa: E402
     REV_PATH_SUBCOMMANDS,
     split_commands, command_without_heredoc_payloads,
     UNREADABLE_SOURCE_REASON, identity_mutation_scope, scalar_word_scope,
-    nested_word_split_scope, nested_body_has_dynamic_command_word,
+    nested_word_split_scope, nested_body_has_dynamic_command_word, launched_commands,
     unwrap_command_prefix, zsh_equals_states,
     command_environment_states, _strongest_decision,
     _equals_expanded,
@@ -263,6 +263,41 @@ def decide(command, _depth=0, _shell="zsh", _equals_state=ZSH_EQUALS_ON,
     return _strongest_decision(decisions) if decisions else ("allow", "")
 
 
+def _launched_rev_path_decisions(resolution, depth, shell, equals_state, deadline):
+    """rev:path findings for what a known launcher runs.
+
+    The calling zsh expands an unbraced `$SHA:t` in the launcher's argv before the
+    launcher starts, so a modifier there reaches a launched Git rev:path whatever the
+    launcher does with it. A launched zsh body applies its own modifiers.
+    """
+    findings = []
+    for launch in launched_commands(list(resolution.items)):
+        hits = _zsh_expansion_hits(launch.tokens) if shell == "zsh" else []
+        if launch.kind == "shell":
+            if hits and source_has_git_hazard_hint(launch.tokens[0][0], deadline):
+                findings.append(_deny_hits(hits))
+            continue
+        launched = unwrap_command_prefix(list(launch.tokens), shell, equals_state)
+        invocation = nested_shell_invocation(launched, shell, deadline)
+        if invocation is None:
+            state, _reason = rev_path_git_state(list(launch.tokens), launched, deadline)
+            if hits and state == REV_PATH_GIT:
+                findings.append(_deny_hits(hits))
+            continue
+        if hits and source_has_git_hazard_hint(invocation.command, deadline):
+            findings.append(_deny_hits(hits))
+        if invocation.command and depth < NEST_DEPTH_LIMIT:
+            with nested_word_split_scope(launched, invocation):
+                decision, reason = decide(
+                    invocation.command, depth + 1, invocation.shell,
+                    nested_shell_equals_state(launched, invocation, equals_state),
+                    deadline, invocation.command_env,
+                    invocation.lookup_authority_uncertain)
+            if decision != "allow":
+                findings.append((decision, reason))
+    return findings
+
+
 def _classify(command, decisions, _depth, _shell, _equals_state, _deadline,
               _command_env, _lookup_authority_uncertain):
     """Append every non-allow rev:path finding for one command source."""
@@ -379,6 +414,8 @@ def _classify_source(command, scan_command, decisions, _depth, _shell, _equals_s
                     "ask", "zsh `:W` parameter-modifier grammar is delimiter-dependent, "
                     "so this guard cannot prove whether the rev:path reaches Git "
                     "unchanged; brace the parameter name before the colon"))
+        decisions.extend(_launched_rev_path_decisions(
+            resolution, _depth, _shell, equals_state, _deadline))
         if resolution.errors and resolution.hazard_hint:
             decisions.append((
                 "ask",
@@ -554,8 +591,8 @@ FIXTURES = [
      ("command " * (MAX_PREFIX_DEPTH + 1)) + "git show $SHA:src/f.py", "ask"),
     ("ASK WRAPPER: an unclosed Git command is not a clean parse",
      "git show '$SHA:src/f.py", "ask"),
-    ("ASK WRAPPER: xargs is unmodelled and conceals git",
-     "SHA=x; xargs git show $SHA:src/f.py", "ask"),
+    ("RED  WRAPPER: the calling zsh rewrites the rev:path before xargs runs",
+     "SHA=x; xargs git show $SHA:src/f.py", "deny"),
     ("ASK WRAPPER: ssh is unmodelled and conceals git",
      "SHA=x; ssh host git show $SHA:src/f.py", "ask"),
     ("ASK WRAPPER: unknown arch prefix with a guarded Git tail fails closed",
@@ -1148,6 +1185,28 @@ FIXTURES += [
      "zsh --emulate zsh -c 'git show $SHA:src/f.py'", 'deny'),
     ('RED  EMULATE: csh emulation applies the modifier',
      "zsh --emulate csh -c 'git show $SHA:src/f.py'", 'deny'),
+]
+
+
+FIXTURES += [
+    ('RED  LAUNCHER: the calling zsh rewrites a find -exec rev:path',
+     'find . -exec git show $SHA:src/f.py \\;', 'deny'),
+    ('RED  LAUNCHER: the calling zsh rewrites an xargs rev:path',
+     'xargs git show $SHA:src/f.py < list.txt', 'deny'),
+    ('RED  LAUNCHER: a launched zsh body applies its own modifier',
+     "xargs zsh -c 'git show $SHA:src/f.py' < list.txt", 'deny'),
+    ('RED  LAUNCHER: a double-quoted body is expanded by the calling zsh',
+     'xargs sh -c "git show $SHA:src/f.py" < list.txt', 'deny'),
+    ('GREEN LAUNCHER: a single-quoted sh body applies no modifier',
+     "xargs sh -c 'git show $SHA:src/f.py' < list.txt", 'allow'),
+    ('RED  LAUNCHER: git bisect run argv is rewritten by the calling zsh',
+     'git bisect run git show $SHA:src/f.py', 'deny'),
+    ('RED  LAUNCHER: a double-quoted foreach string is rewritten by the calling zsh',
+     'git submodule foreach "git show $SHA:src/f.py"', 'deny'),
+    ('GREEN LAUNCHER: a single-quoted foreach string runs under sh',
+     "git submodule foreach 'git show $SHA:src/f.py'", 'allow'),
+    ('GREEN LAUNCHER: a launched non-rev-path Git subcommand',
+     'xargs git status $X:t < list.txt', 'allow'),
 ]
 
 

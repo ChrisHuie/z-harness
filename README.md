@@ -257,7 +257,7 @@ and coordinated edits to both workflows can fabricate both in-repo job classes. 
 or an externally administered required workflow must govern that boundary. GitHub still manages the
 image contents behind those labels. A `mutation-proof` workflow accepts pull requests, pushes to
 `main`, and manual dispatches, explicitly checks out
-`github.event.pull_request.head.sha || github.sha`, runs the deterministic mutation plan in six
+`github.event.pull_request.head.sha || github.sha`, runs the deterministic mutation plan in fifteen
 private-tree shards for every accepted head, and aggregates raw artifacts with `if: always()`. A
 pull-request run is cancelled only when a newer run of the same pull request supersedes it, and
 no other run can cancel or replace a push or dispatch run. The
@@ -276,7 +276,7 @@ revision and paths, and verifies a signed, hash-pinned Claude Code release befor
 Network failure is red, never skipped. The repository workflow does not itself prove that either job
 is a branch-protection required check. `tools/pr-delivery-state.py` proves generic exact-head check
 and workflow presence; final mutation evidence additionally requires the named mutation workflow,
-six nonempty shard artifacts, and its successful aggregate job to be inspected explicitly.
+fifteen nonempty shard artifacts, and its successful aggregate job to be inspected explicitly.
 
 Local `harness_check.py` mode adds machine-specific Claude anchors, compares the complete payload
 of repository-owned skills under `~/.claude/skills`, and scans tracked plus authored-untracked

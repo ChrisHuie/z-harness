@@ -117,7 +117,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 230
+SELFTEST_FLOOR = 231
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -211,7 +211,10 @@ def expected_selftest_checks(name):
 # hand-timing on one host and drifts silently until the day it reddens. announced_work_guard
 # was raised from 30 s the day that happened, on a run that changed none of its checks;
 # ci-gate from 60 s the day its nested run took 36.5 s against a 36 s margin on the Ubuntu
-# runner, after the plan grew to 389 sites and the golden to 1,132 with no check changed. The
+# runner, after the plan grew to 389 sites and the golden to 1,132 with no check changed, and
+# from 90 s the day its nested run took 56.5 s on Ubuntu and 56.2 s on macOS against a 54 s
+# margin while the same suite run alone took 31.6 s on the authoring host. fuzz-judge-diff was
+# registered at 25 s the day its nested macOS run took 9.1 s against the default's 9 s margin. The
 # ratios these figures imply are not quoted here: the loaded and unloaded numbers give
 # different answers, and the earlier attempt to state one contradicted the ci-gate figure
 # three lines above it.
@@ -219,7 +222,8 @@ SELFTEST_TIMEOUTS = {
     "bash_command_guard": 90,
     "git_grep_engine_guard": 60,
     "announced_work_guard": 60,
-    "ci-gate": 90,
+    "ci-gate": 120,
+    "fuzz-judge-diff": 25,
 }
 DEFAULT_SELFTEST_TIMEOUT = 15
 # A suite may use this much of its registered timeout before C1 says so. Without it the
@@ -2038,7 +2042,11 @@ def selftest():
         )
         expect_red(
             "the registered CI-gate timeout retains measured headroom",
-            lambda: SELFTEST_TIMEOUTS["ci-gate"] == 90,
+            lambda: SELFTEST_TIMEOUTS["ci-gate"] == 120,
+        )
+        expect_red(
+            "the registered fuzz-judge-diff timeout retains measured headroom",
+            lambda: SELFTEST_TIMEOUTS["fuzz-judge-diff"] == 25,
         )
 
         announced_timeouts = []

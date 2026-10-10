@@ -4,7 +4,7 @@ name: mutation-proof
 # contracts/mutation-policy.json. The measurement is this run's evidence and is never
 # committed: the offline gate can validate the policy, but only a sweep can measure.
 #
-# Every accepted head is measured afresh by the same six shards. A path filter, selector, or
+# Every accepted head is measured afresh by the same fifteen shards. A path filter, selector or
 # inherited result would leave the verdict dependent on unverified prior workflow and runner
 # state; absence and self-consistency are not measurement evidence. A pull-request run is
 # cancelled only when a newer run of the same pull request supersedes it. Each push and
@@ -28,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -64,7 +64,7 @@ jobs:
         run: >-
           python3 tools/write-mutation-receipt.py
           --shard-index ${{ matrix.shard }}
-          --shard-count 6
+          --shard-count 15
           --fragment mutation-fragment-${{ matrix.shard }}.json
           --expected-head '${{ github.event.pull_request.head.sha || github.sha }}'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

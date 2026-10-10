@@ -28,6 +28,7 @@ import os
 import re
 import sys
 import pathlib
+import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import git_grep_engine_guard as tokenizer   # noqa: E402  (split_commands only)
@@ -86,10 +87,14 @@ MODEL_WORD = re.compile(r"(?<![\w./-])(?:codex|hermes|claude|gemini|aider|openco
                         r"(?![\w-])")
 
 
-def _split(text):
-    """Tokenize, or None when the shared tokenizer cannot read the text."""
+def _split(text, deadline=None):
+    """Tokenize, or None when the shared tokenizer cannot read the text.
+
+    An exhausted decision deadline makes the tokenizer raise, so it lands here as unreadable
+    source and takes the same fallback.
+    """
     try:
-        return tokenizer.split_commands(text)
+        return tokenizer.split_commands(text, _deadline=deadline)
     except Exception:                              # CommandParseError and kin
         return None
 
@@ -148,7 +153,7 @@ def _runner_target(name, rest):
     return None
 
 
-def _findings_for(words, depth):
+def _findings_for(words, depth, deadline=None):
     """Findings for one simple command as (kind, detail). kind: model|secret|cred."""
     out = []
     assigns, rest = _command_word(words)
@@ -164,11 +169,11 @@ def _findings_for(words, depth):
     if name in SHELLS:
         for j, word in enumerate(args):
             if re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", word) and j + 1 < len(args):
-                out.extend(_scan(args[j + 1], depth + 1))
+                out.extend(_scan(args[j + 1], depth + 1, deadline))
                 break
         return out
     if name == "eval" and args:
-        return out + _scan(" ".join(args), depth + 1)
+        return out + _scan(" ".join(args), depth + 1, deadline)
     if name in MODEL_CLIS:
         if not (args and all(a in INFO_ONLY for a in args)):
             out.append(("model", f"{name} (another model's CLI)"))
@@ -219,7 +224,7 @@ def _findings_for(words, depth):
     return out
 
 
-def _scan(text, depth=0):
+def _scan(text, depth=0, deadline=None):
     """All findings in a command text, judged recursively up to MAX_DEPTH."""
     if depth > MAX_DEPTH:
         return [("cred", "nesting deeper than the guard follows")]
@@ -229,27 +234,27 @@ def _scan(text, depth=0):
     for m in ARGV_LITERAL.finditer(text):
         findings.append(("cred", f"argv literal naming {m.group(0).strip('[(, ')}"))
     for m in HEREDOC.finditer(text):
-        lead = _split(m.group("lead") or ":")
+        lead = _split(m.group("lead") or ":", deadline)
         if lead is None:
             findings.append(("unparsed", "a heredoc whose consumer the tokenizer cannot read"))
             continue
         _assigns, rest = _command_word([w for w, _q in sum(lead, [])])
         if rest and _base(rest[0]) in SHELLS:
-            findings.extend(_scan(m.group("body"), depth + 1))
-    simples = _split(text)
+            findings.extend(_scan(m.group("body"), depth + 1, deadline))
+    simples = _split(text, deadline)
     if simples is None:
         findings.append(("unparsed", "command source the shared tokenizer cannot read"))
         if MODEL_WORD.search(text):
             findings.append(("model", "a model CLI name in unreadable command source"))
         return findings
     for simple in simples:
-        findings.extend(_findings_for([w for w, _q in simple], depth))
+        findings.extend(_findings_for([w for w, _q in simple], depth, deadline))
     return findings
 
 
-def decide(command, *, subagent, runtime="claude"):
-    """-> (decision, reason) for this caller."""
-    findings = _scan(command)
+def decide(command, *, subagent, runtime="claude", deadline=None):
+    """-> (decision, reason) for this caller, within the caller's decision deadline."""
+    findings = _scan(command, deadline=deadline)
     if not findings:
         return "allow", ""
     seen, details = set(), []
@@ -395,6 +400,32 @@ def selftest():
     failures += (not ok)
     print(f"  {'PASS' if ok else 'FAIL'} caller    the same command is denied for a subagent "
           "and allowed on the main thread")
+    # A deadline the hook has already spent stops the tokenizer at its first budget check.
+    # That reads as unreadable source: a subagent is denied, and the main thread keeps the
+    # raw-text secret and model-name fallbacks.
+    spent = time.monotonic() - 1
+    for label, cmd, sub, want in (
+            ("a subagent's ordinary command is denied as unreadable", "git status", True,
+             "deny"),
+            ("a model CLI still asks on the main thread", "codex exec hi", False, "ask"),
+            ("a credential file still asks on the main thread", "cat ~/.codex/auth.json",
+             False, "ask"),
+            ("an ordinary command keeps the unreadable-source fallback", "git status",
+             False, "allow")):
+        got, _reason = decide(cmd, subagent=sub, runtime="claude", deadline=spent)
+        ok = got == want
+        total += 1
+        failures += (not ok)
+        print(f"  {'PASS' if ok else 'FAIL'} deadline  spent budget: {label} (got {got})")
+    live = time.monotonic() + 600
+    unchanged = [(label, want, decide(cmd, subagent=caller == "sub", runtime=runtime,
+                                      deadline=live)[0])
+                 for label, cmd, caller, runtime, want in FIXTURES]
+    ok = unchanged == baseline
+    total += 1
+    failures += (not ok)
+    print(f"  {'PASS' if ok else 'FAIL'} deadline  a live deadline leaves every fixture verdict "
+          "unchanged")
     print(f"\n  {total} checks, {failures} failures")
     print(f"SELFTEST-SUMMARY suite=credential_reach_guard checks={total} failures={failures}")
     return 1 if failures else 0

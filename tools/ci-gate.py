@@ -59,7 +59,7 @@ EVAL_SKILL_FLOOR = 7
 # 165 here and 178 in harness_check -- and a fake that hardcodes its own number tests the
 # literal rather than the contract.
 SUITE_FLOORS = {
-    "harness_check": 230,
+    "harness_check": 231,
     "render-packages": 192,
     "bash_command_guard": 1871,
     "credential_reach_guard": 73,
@@ -169,7 +169,7 @@ EXPECTED_MUTATION_WORKFLOW = """name: mutation-proof
 # contracts/mutation-policy.json. The measurement is this run's evidence and is never
 # committed: the offline gate can validate the policy, but only a sweep can measure.
 #
-# Every accepted head is measured afresh by the same six shards. A path filter, selector, or
+# Every accepted head is measured afresh by the same fifteen shards. A path filter, selector or
 # inherited result would leave the verdict dependent on unverified prior workflow and runner
 # state; absence and self-consistency are not measurement evidence. A pull-request run is
 # cancelled only when a newer run of the same pull request supersedes it. Each push and
@@ -193,7 +193,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -229,7 +229,7 @@ jobs:
         run: >-
           python3 tools/write-mutation-receipt.py
           --shard-index ${{ matrix.shard }}
-          --shard-count 6
+          --shard-count 15
           --fragment mutation-fragment-${{ matrix.shard }}.json
           --expected-head '${{ github.event.pull_request.head.sha || github.sha }}'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -379,7 +379,7 @@ def workflow_error(data: str, mutation_data: Optional[str] = None) -> Optional[s
     if mutation_data != EXPECTED_MUTATION_WORKFLOW:
         return (
             "mutation workflow differs from the closed contract: every accepted head "
-            "runs six deterministic shards at the exact head, with read-only permissions, "
+            "runs fifteen deterministic shards at the exact head, with read-only permissions, "
             "immutable actions, artifact aggregation, and enforcement of the reviewed policy"
         )
     return None
@@ -611,8 +611,9 @@ def mutation_workflow_authority_error(data: str) -> str:
     if _yaml_fields(strategy, 6) != ["fail-fast: false", "matrix:"]:
         return "mutation shard strategy is not exactly fail-fast with one matrix"
     matrix = _yaml_mapping_block(strategy, "      matrix:")
-    if _yaml_fields(matrix, 8) != ["shard: [0, 1, 2, 3, 4, 5]"]:
-        return "mutation shard matrix is not exactly the six reviewed shards"
+    if _yaml_fields(matrix, 8) != [
+            "shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]"]:
+        return "mutation shard matrix is not exactly the fifteen reviewed shards"
     if _yaml_step_headers(shard) != [
             f"- uses: {checkout}", f"- uses: {setup}",
             "- name: install zsh and assert the exact accepted head",
@@ -665,10 +666,10 @@ def mutation_workflow_authority_error(data: str) -> str:
     if receipt_command != (
             "python3 tools/write-mutation-receipt.py",
             "--shard-index ${{ matrix.shard }}",
-            "--shard-count 6",
+            "--shard-count 15",
             "--fragment mutation-fragment-${{ matrix.shard }}.json",
             f"--expected-head '{head}'"):
-        return "mutation shard receipt command is not exactly the six-way sharded writer"
+        return "mutation shard receipt command is not exactly the fifteen-way sharded writer"
     upload_step = _yaml_mapping_block(shard, f"      - uses: {upload}")
     upload_with = _yaml_mapping_block(upload_step, "        with:")
     if (_yaml_fields(upload_step, 8) != ["with:"]
@@ -2214,6 +2215,7 @@ REGISTERED_REVIEW_PATHS = frozenset({
     "pr-8/frozen-publication.json",
     "pr-25/frozen-publication.json",
     "pr-26/frozen-publication.json",
+    "pr-27/frozen-publication.json",
 })
 HANDOFF_DOCTRINE = {
     "AGENTS.md": (
@@ -3391,7 +3393,7 @@ def selftest() -> int:
         ) is not None,
     )
     # The sweep is the only check that measures at all; the offline gate validates only the
-    # policy it is held against, so every accepted head must execute all six shards. A
+    # policy it is held against, so every accepted head must execute all fifteen shards. A
     # selector or job-level condition would make the result depend on an unproved base run
     # and mutable runner state.
     expect(
@@ -3419,19 +3421,19 @@ def selftest() -> int:
         ) is not None,
     )
     expect(
-        "mutation workflow retains all six shards",
+        "mutation workflow retains all fifteen shards",
         workflow_error(
             EXPECTED_WORKFLOW,
             EXPECTED_MUTATION_WORKFLOW.replace(
-                "        shard: [0, 1, 2, 3, 4, 5]\n",
-                "        shard: [0, 1, 2, 3, 4]\n", 1),
+                "        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]\n",
+                "        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]\n", 1),
         ) is not None,
     )
     expect(
-        "shard commands retain the six-way assignment",
+        "shard commands retain the fifteen-way assignment",
         workflow_error(
             EXPECTED_WORKFLOW,
-            EXPECTED_MUTATION_WORKFLOW.replace("--shard-count 6", "--shard-count 5", 1),
+            EXPECTED_MUTATION_WORKFLOW.replace("--shard-count 15", "--shard-count 14", 1),
         ) is not None,
     )
     expect(
@@ -3611,8 +3613,8 @@ def selftest() -> int:
         ("a shard strategy that stops at the first failure",
          sweep_replacement("      fail-fast: false\n", ""), "mutation shard strategy"),
         ("a dropped shard",
-         sweep_replacement("        shard: [0, 1, 2, 3, 4, 5]\n",
-                           "        shard: [0, 1, 2, 3, 4]\n"),
+         sweep_replacement("        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]\n",
+                           "        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]\n"),
          "mutation shard matrix"),
         ("a step inserted into the shard job",
          sweep_job_replacement("  mutations:", "      - name: run mutation shard\n",
@@ -3660,7 +3662,7 @@ def selftest() -> int:
                            "        continue-on-error: true\n        run: >-\n"),
          "mutation shard receipt step fields"),
         ("a changed shard count",
-         sweep_replacement("          --shard-count 6\n", "          --shard-count 5\n"),
+         sweep_replacement("          --shard-count 15\n", "          --shard-count 14\n"),
          "mutation shard receipt command"),
         ("a shard that uploads no evidence",
          sweep_replacement("          if-no-files-found: error\n", ""),

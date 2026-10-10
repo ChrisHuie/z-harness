@@ -1516,9 +1516,9 @@ def perf_selftest():
     """Run the checks whose verdict is a wall-clock claim, once per head.
 
     Each spawns or times real hook work against the 4.5 s cap that sits inside the runtimes'
-    5 s PreToolUse timeout, which lets the command run when it expires. `--selftest` keeps
-    every verdict that does not depend on the host's speed, and the mutation sweep runs it
-    once per mutation; these run once per head, where a timing verdict belongs.
+    5 s PreToolUse timeout, which lets the command run when it expires. These run once per
+    head and `--selftest` once per mutation. `--selftest` still decides each command under
+    the production deadlines, so a slow enough host can fail a check there as well.
     """
     total = failures = 0
     for name, mod in GUARDS:

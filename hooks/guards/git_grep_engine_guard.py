@@ -44,9 +44,11 @@ Python or awk semantics is a different guard, not a widening of this one.
 Exit codes:  0 = decision emitted on stdout (allow/deny/ask)
              2 = usage error / unknown flag / zero inputs in --selftest or --perf
 
-`--selftest` gives the same verdict on a host of any speed; the mutation sweep runs it once
-per mutation. `--perf` holds the controls whose verdict is a timing claim and runs once per
-head.
+`--perf` holds the controls whose verdict is a timing claim and runs once per head; the
+mutation sweep runs `--selftest` once per mutation. `--selftest` still decides inside
+GUARD_BUDGET_SECONDS, so a slow enough host can fail one of its checks as well:
+"function-declaration limit mutation loses bounded-parse ask" parses a source one declaration
+past the default limit inside that budget.
 """
 import builtins
 import contextlib
@@ -9338,8 +9340,8 @@ FIXTURES += [
 # into an `ask`. With the guard's clock run eight times fast the first four, and no other
 # fixture, change verdict; the token-count one changes past that, and a per-word scan made
 # quadratic stalls on it for minutes instead of failing a check. `--perf` runs them once per
-# head; `--selftest`, which the mutation sweep runs for every mutation, holds only verdicts
-# that do not depend on the host's speed.
+# head. `--selftest`, which the mutation sweep runs for every mutation, still decides inside
+# the same budget, so a host slower still can turn one of its verdicts as well.
 PERF_FIXTURES = [
     ("GREEN LIMIT: a legal source at the byte cap is classified inside the budget",
      _BYTE_LIMIT_SOURCE, "allow"),

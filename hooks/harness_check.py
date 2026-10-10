@@ -2066,7 +2066,7 @@ def selftest():
             lambda: SELFTEST_TIMEOUTS["bash_command_guard-perf"] == 90,
         )
         expect_red(
-            "the Bash guard's clock-independent suite keeps its measured 30 s budget",
+            "the Bash guard's selftest suite keeps its measured 30 s budget",
             lambda: SELFTEST_TIMEOUTS["bash_command_guard"] == 30,
         )
         expect_red(

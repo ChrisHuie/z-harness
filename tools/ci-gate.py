@@ -59,11 +59,11 @@ EVAL_SKILL_FLOOR = 7
 # 165 here and 178 in harness_check -- and a fake that hardcodes its own number tests the
 # literal rather than the contract.
 SUITE_FLOORS = {
-    "harness_check": 231,
+    "harness_check": 233,
     "render-packages": 192,
-    "bash_command_guard": 1871,
+    "bash_command_guard": 1858,
     "credential_reach_guard": 73,
-    "git_grep_engine_guard": 1630,
+    "git_grep_engine_guard": 1625,
     "zsh_rev_modifier_guard": 522,
 }
 EXPECTED_WORKFLOW = """name: harness-check
@@ -1077,7 +1077,7 @@ SUITE_SOURCE_GOLDEN = ROOT / "contracts/goldens/suite-sources.json"
 HARNESS_SOURCE = ROOT / "hooks/harness_check.py"
 REPOSITORY_OWNERSHIP_SOURCE = ROOT / "tools/repository_ownership.py"
 DECISION_CORPUS_FLOOR = 1466
-DECISION_WRITER_SHA256 = "8c4180468fc05a88c69fafba3a79f2387f5df2d1aa728def1670f5497a442e9d"
+DECISION_WRITER_SHA256 = "2d3209ae53b50f897039a100952768b8556c0f8de2fd85888ef0c8651f9b0a9b"
 RETAINED_DECISION_SCHEMA_VERSION = 1
 RETAINED_DECISION_NOTE = (
     "reviewed decision commands retained after their originating fixtures left the "
@@ -1868,7 +1868,7 @@ EXPECTED_MUTATION_SELECTORS = {
         ("a repeated core.worktree binds the effective candidate Git recognises",),
 }
 EXPECTED_MUTATION_SITE_DIGEST = (
-    "c0a0f7cac6134749dc4469ef813406b9c2457a94ce9b68f5aaa2b0183299b76e"
+    "e5133b40f7951a45d08e90d1f71c9778bfe748022b4400a8ae0b8b4dff85f2d7"
 )
 EXPECTED_MUTATION_EXCLUSIONS = {
     "hooks/guards/git_grep_engine_guard.py::ALIAS_GUARDED":

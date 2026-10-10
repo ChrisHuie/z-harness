@@ -42,7 +42,11 @@ heredocs, here-strings, process substitution, interpreter stdin -- ARE classifie
 Python or awk semantics is a different guard, not a widening of this one.
 
 Exit codes:  0 = decision emitted on stdout (allow/deny/ask)
-             2 = usage error / unknown flag / zero inputs in --selftest
+             2 = usage error / unknown flag / zero inputs in --selftest or --perf
+
+`--selftest` gives the same verdict on a host of any speed; the mutation sweep runs it once
+per mutation. `--perf` holds the controls whose verdict is a timing claim and runs once per
+head.
 """
 import builtins
 import contextlib
@@ -9293,18 +9297,10 @@ _SHELL_DEPTH_OVERFLOW_SOURCE = _nested_shell_source(6, _GUARDED_GREP)
 _FUNCTION_OPERATOR_BUDGET_SOURCE = (
     "f(){ /bin/echo safe; }; f;" + "( : );" * 16000)
 FIXTURES += [
-    ("GREEN LIMIT: a legal source at the byte cap is classified inside the budget",
-     _BYTE_LIMIT_SOURCE, "allow"),
-    ("GREEN LIMIT: a token count at the cap is still classified",
-     _TOKEN_LIMIT_SOURCE, "allow"),
     ("ASK LIMIT: a token count past the cap says so instead of guessing",
      _TOKEN_OVERFLOW_SOURCE, "ask"),
-    ("GREEN BUDGET: a long env -S token is classified inside the guard's budget",
-     _ENV_SPLIT_BUDGET_SOURCE, "allow"),
     ("ASK LIMIT: an env -S argument count past the cap says so instead of guessing",
      _ENV_SPLIT_TOKEN_OVERFLOW_SOURCE, "ask"),
-    ("GREEN LIMIT: a subcommand count at the cap is still classified",
-     _SUBCOMMAND_LIMIT_SOURCE, "allow"),
     ("ASK LIMIT: a subcommand count past the cap says so instead of guessing",
      _SUBCOMMAND_OVERFLOW_SOURCE, "ask"),
     ("GREEN LIMIT: wrapper nesting at the cap is still unwrapped",
@@ -9325,8 +9321,25 @@ FIXTURES += [
      _SHELL_DEPTH_OVERFLOW_SOURCE, "ask"),
     ("ASK LIMIT: too many function declarations cannot consume the hook timeout",
      _FUNCTION_PARSE_LIMIT_SOURCE, "ask"),
+]
+# At-limit controls whose `allow` is also a timing claim: each source is sized so its parse
+# takes a real share of GUARD_BUDGET_SECONDS, so a host slow enough turns the same command
+# into an `ask`. With the guard's clock run eight times fast the first four, and no other
+# fixture, change verdict; the token-count one changes past that, and a per-word scan made
+# quadratic stalls on it for minutes instead of failing a check. `--perf` runs them once per
+# head; `--selftest`, which the mutation sweep runs for every mutation, holds only verdicts
+# that do not depend on the host's speed.
+PERF_FIXTURES = [
+    ("GREEN LIMIT: a legal source at the byte cap is classified inside the budget",
+     _BYTE_LIMIT_SOURCE, "allow"),
+    ("GREEN BUDGET: a long env -S token is classified inside the guard's budget",
+     _ENV_SPLIT_BUDGET_SOURCE, "allow"),
+    ("GREEN LIMIT: a subcommand count at the cap is still classified",
+     _SUBCOMMAND_LIMIT_SOURCE, "allow"),
     ("GREEN LIMIT: operator-heavy source remains inside the public hook budget",
      _FUNCTION_OPERATOR_BUDGET_SOURCE, "allow"),
+    ("GREEN LIMIT: a token count at the cap is still classified",
+     _TOKEN_LIMIT_SOURCE, "allow"),
 ]
 
 # Authority and decision composition across command/alias boundaries. These cases bind
@@ -13059,6 +13072,26 @@ def selftest():
     return 0 if failures == 0 else 1
 
 
+def perf_selftest():
+    """Decide each at-limit control inside the guard's own budget, once per head."""
+    if not PERF_FIXTURES:
+        print("NO PERF FIXTURES - a suite that cannot go red proves nothing", file=sys.stderr)
+        return 2
+    checks = failures = 0
+    for label, cmd, want in PERF_FIXTURES:
+        try:
+            got, _reason = decide(cmd)
+        except Exception as exc:              # a raising decision is a failed case
+            got = "<error: %s>" % type(exc).__name__
+        ok = got == want
+        checks += 1
+        failures += not ok
+        print("  %-4s want=%-5s got=%-5s  %s" % ("PASS" if ok else "FAIL", want, got, label))
+    print("SELFTEST-SUMMARY suite=git_grep_engine_guard-perf checks=%d failures=%d" % (
+        checks, failures))
+    return 1 if failures else 0
+
+
 def main():
     args = sys.argv[1:]
     if args:
@@ -13067,6 +13100,8 @@ def main():
             return 0
         if args[0] == "--selftest":
             return selftest()
+        if args[0] == "--perf":
+            return perf_selftest()
         if args[0] == "--check":
             if len(args) < 2:
                 print("--check needs a command string", file=sys.stderr)

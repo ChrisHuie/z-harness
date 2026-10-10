@@ -117,7 +117,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 231
+SELFTEST_FLOOR = 233
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -132,7 +132,8 @@ DESC_CAP = 400                # house cap (spec ceiling is 1024)
 # checks=111, so a suite can be gutted with nothing failing. Raise a floor in the same
 # commit that adds the checks; lowering one is a deliberate, reviewable edit.
 SELFTEST_SUITES = [
-    ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"], 1871),
+    ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"], 1858),
+    ("bash_command_guard-perf", ["hooks/bash_command_guard.py", "--perf"], 14),
     ("credential_reach_guard",
      ["hooks/guards/credential_reach_guard.py", "--selftest"], 73),
     ("askq_timeout_guard", ["hooks/askq_timeout_guard.py", "--selftest"], 13),
@@ -156,7 +157,8 @@ SELFTEST_SUITES = [
     ("corpus-delta", ["instruments/corpus_delta.py", "--selftest"], 20),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
     ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 88),
-    ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 1630),
+    ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 1625),
+    ("git_grep_engine_guard-perf", ["hooks/guards/git_grep_engine_guard.py", "--perf"], 5),
     ("zsh_rev_modifier_guard", ["hooks/guards/zsh_rev_modifier_guard.py", "--selftest"], 522),
 ]
 
@@ -165,6 +167,8 @@ def expected_selftest_checks(name):
     """Exact execution-derived counts for suites whose former formulas hid probes."""
     fixed = {
         "announced_work_guard": 922,
+        "bash_command_guard-perf": 14,
+        "git_grep_engine_guard-perf": 5,
         "ci-gate": 345,
         "enumerate-survivors": 28,
         "fuzz-judge-diff": 65,
@@ -175,7 +179,7 @@ def expected_selftest_checks(name):
     if name in fixed:
         return fixed[name]
     if name == "bash_command_guard":
-        return 1871
+        return 1858
     if name == "credential_reach_guard":
         return 73
     if name == "zsh_rev_modifier_guard":
@@ -193,12 +197,17 @@ def expected_selftest_checks(name):
         if real not in seen:
             seen.add(real)
             binaries.append(real)
-    # The portable corpus is 1630 checks for one Git. Every additional executable adds
+    # The portable corpus is 1625 checks for one Git. Every additional executable adds
     # one version probe, one fixture setup, and 22 alias-proof-name probes.
-    return 1630 + 24 * (max(1, len(binaries)) - 1)
-# The public Bash-guard selftest intentionally runs five independent process-level timing
+    return 1625 + 24 * (max(1, len(binaries)) - 1)
+# The Bash guard's perf suite intentionally runs five independent process-level timing
 # observations for each runtime. Give that aggregate suite enough wall-clock without
-# weakening the five-second deadline each individual hook process must meet.
+# weakening the five-second deadline each individual hook process must meet. Those checks
+# and the grep guard's at-limit timing controls left the two guards' `--selftest` for
+# `--perf`, because the mutation sweep runs `--selftest` once per mutation; measured on the
+# authoring host after the move, bash_command_guard-perf took 31.6-33.7 s and
+# bash_command_guard 3.3-3.5 s, git_grep_engine_guard-perf 6.2-6.3 s and
+# git_grep_engine_guard 10.6-11.3 s.
 # Registered where the 15 s default leaves no headroom for a slower runner. Measured
 # on the authoring host: bash_command_guard 27 s, git_grep_engine_guard 7.3 s (its
 # byte-cap, token and subcommand fixtures parse real megabyte-scale sources, and it
@@ -219,8 +228,10 @@ def expected_selftest_checks(name):
 # different answers, and the earlier attempt to state one contradicted the ci-gate figure
 # three lines above it.
 SELFTEST_TIMEOUTS = {
-    "bash_command_guard": 90,
+    "bash_command_guard": 30,
+    "bash_command_guard-perf": 90,
     "git_grep_engine_guard": 60,
+    "git_grep_engine_guard-perf": 30,
     "announced_work_guard": 60,
     "ci-gate": 120,
     "fuzz-judge-diff": 25,
@@ -2012,8 +2023,8 @@ def selftest():
         # These fixtures test timeout dispatch and margins, not receipt counts. Keep
         # their synthetic success receipt valid when the registered corpus grows.
         passing_bash_receipt = (
-            "SELFTEST-SUMMARY suite=bash_command_guard "
-            f"checks={expected_selftest_checks('bash_command_guard')} failures=0\n"
+            "SELFTEST-SUMMARY suite=bash_command_guard-perf "
+            f"checks={expected_selftest_checks('bash_command_guard-perf')} failures=0\n"
         ).encode("utf-8")
         def record_c1_timeout(*args, **kwargs):
             observed_timeouts.append(kwargs.get("timeout"))
@@ -2025,8 +2036,8 @@ def selftest():
         try:
             c1_timeout = Run(td, ci=True)
             c1_timeout.c1_selftests(
-                [("bash_command_guard", [stub_suite], 1)],
-                sources=planted_sources("bash_command_guard", stub_suite))
+                [("bash_command_guard-perf", [stub_suite], 1)],
+                sources=planted_sources("bash_command_guard-perf", stub_suite))
         finally:
             subprocess.run = original_subprocess_run
         # 90 is a literal here on purpose. Reading it back out of SELFTEST_TIMEOUTS
@@ -2038,7 +2049,15 @@ def selftest():
         )
         expect_red(
             "the registered Bash timeout is still the one this check asserts",
-            lambda: SELFTEST_TIMEOUTS["bash_command_guard"] == 90,
+            lambda: SELFTEST_TIMEOUTS["bash_command_guard-perf"] == 90,
+        )
+        expect_red(
+            "the Bash guard's clock-independent suite keeps its measured 30 s budget",
+            lambda: SELFTEST_TIMEOUTS["bash_command_guard"] == 30,
+        )
+        expect_red(
+            "the grep guard's perf suite keeps its measured 30 s budget",
+            lambda: SELFTEST_TIMEOUTS["git_grep_engine_guard-perf"] == 30,
         )
         expect_red(
             "the registered CI-gate timeout retains measured headroom",
@@ -2082,24 +2101,24 @@ def selftest():
         try:
             c1_margin = Run(td, ci=True)
             c1_margin.c1_selftests(
-                [("bash_command_guard", [stub_suite], 1)],
-                sources=planted_sources("bash_command_guard", stub_suite),
+                [("bash_command_guard-perf", [stub_suite], 1)],
+                sources=planted_sources("bash_command_guard-perf", stub_suite),
                 )
         finally:
             subprocess.run = original_subprocess_run
         margin_clean = not c1_margin.failures
         original_margin = globals()["SELFTEST_TIMEOUT_MARGIN"]
-        original_registered = SELFTEST_TIMEOUTS["bash_command_guard"]
+        original_registered = SELFTEST_TIMEOUTS["bash_command_guard-perf"]
         subprocess.run = slow_run
-        SELFTEST_TIMEOUTS["bash_command_guard"] = 0.05
+        SELFTEST_TIMEOUTS["bash_command_guard-perf"] = 0.05
         try:
             c1_tight = Run(td, ci=True)
             c1_tight.c1_selftests(
-                [("bash_command_guard", [stub_suite], 1)],
-                sources=planted_sources("bash_command_guard", stub_suite))
+                [("bash_command_guard-perf", [stub_suite], 1)],
+                sources=planted_sources("bash_command_guard-perf", stub_suite))
         finally:
             subprocess.run = original_subprocess_run
-            SELFTEST_TIMEOUTS["bash_command_guard"] = original_registered
+            SELFTEST_TIMEOUTS["bash_command_guard-perf"] = original_registered
             globals()["SELFTEST_TIMEOUT_MARGIN"] = original_margin
         expect_red(
             "C1 reddens when a suite grows into its registered timeout",

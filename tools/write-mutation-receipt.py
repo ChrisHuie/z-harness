@@ -1799,7 +1799,7 @@ SITE_MUTATIONS = (
             "    return [any(os.path.basename(w) in GIT_HAZARD_SUBCOMMANDS\n"
             "                for w in words[index + 1:])\n"
             "            for index in range(-1, len(words))]"),
-        "allowed_statuses": ("timeout",),
+        "allowed_statuses": (),
     },
     {
         "label": "candidate authority forced trusted", "module": GREP,

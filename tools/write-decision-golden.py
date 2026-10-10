@@ -144,6 +144,7 @@ def imported_fixture_commands() -> tuple[set[str], dict[str, dict], dict[str, se
     expected: dict[str, set[str]] = {}
     registries = (
         git_grep_engine_guard.FIXTURES,
+        git_grep_engine_guard.PERF_FIXTURES,
         zsh_rev_modifier_guard.FIXTURES,
         bash_command_guard.DECISION_FIXTURES,
     )

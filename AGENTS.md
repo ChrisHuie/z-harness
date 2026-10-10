@@ -64,10 +64,8 @@ Named a tool? Run exactly that and stop, never wrapped in a self-directed swarm.
 exists for equivalent-or-better substitutions flagged up front; the cardinal failure is a hidden
 downgrade.
 
-Before dispatch, check the data volume; check `docker info` when a worker needs a database. Cap a
-batch at 3–4 concurrent agents and wait for the batch. Infrastructure failure is neither pass nor
-fail. Decide the reclaim order before the volume is full; otherwise point `TMPDIR` at a volume
-with room.
+Before dispatch, check `docker info` when a worker needs a database. Cap a batch at 3–4 concurrent
+agents and wait for the batch. Infrastructure failure is neither pass nor fail.
 
 Let workers inherit the current model unless the task explicitly requires a different one.
 

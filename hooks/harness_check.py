@@ -157,7 +157,7 @@ SELFTEST_SUITES = [
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
     ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 88),
     ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 1630),
-    ("zsh_rev_modifier_guard", ["hooks/guards/zsh_rev_modifier_guard.py", "--selftest"], 520),
+    ("zsh_rev_modifier_guard", ["hooks/guards/zsh_rev_modifier_guard.py", "--selftest"], 522),
 ]
 
 
@@ -179,7 +179,7 @@ def expected_selftest_checks(name):
     if name == "credential_reach_guard":
         return 73
     if name == "zsh_rev_modifier_guard":
-        return 520
+        return 522
     if name != "git_grep_engine_guard":
         return None
     binaries, seen = [], set()

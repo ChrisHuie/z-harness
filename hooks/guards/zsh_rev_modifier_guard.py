@@ -1080,6 +1080,62 @@ def check_modifier_sets_against_zsh():
     return failures, planned, 0
 
 
+def _modelled_probe_stdout(suffix):
+    """What the modifier probe's selftest double prints for `$v:<suffix>`.
+
+    It models zsh from MODS, MOD_PREFIXES and OVERREAD_MODIFIERS: a delimited letter
+    consumes only in its closed spelling, and a prefix carries a base or delimited letter.
+    `xrest` prints invalid UTF-8 as a letter zsh consumes that no table declares.
+    """
+    consumed = (
+        (suffix[0] in OVERREAD_MODIFIERS and suffix[1:] == "@/@h")
+        or suffix[0] in MODS
+        or (suffix[0] in MOD_PREFIXES
+            and len(suffix) > 1
+            and suffix[1] in (MODS + OVERREAD_MODIFIERS))
+    )
+    if suffix == "xrest":
+        return b"/a/b/c.py:\xf8rest\n"
+    if consumed:
+        return b"consumed\n"
+    return f"/a/b/c.py:{suffix}\n".encode("ascii")
+
+
+def _module_without_unmodelled(letter):
+    """This module executed afresh from its source with `letter` removed from MOD_UNMODELLED.
+
+    Built from source rather than by assigning the table after import, so a constant that
+    copied the table while the module loaded sees the removal too.
+    """
+    import ast
+    import types
+    path = os.path.abspath(__file__)
+    with open(path, encoding="utf-8") as handle:
+        source = handle.read()
+    declarations = [
+        node for node in ast.parse(source).body
+        if isinstance(node, ast.Assign)
+        and [getattr(target, "id", None) for target in node.targets] == ["MOD_UNMODELLED"]]
+    if (len(declarations) != 1 or not isinstance(declarations[0].value, ast.Constant)
+            or not isinstance(declarations[0].value.value, str)):
+        raise ValueError("MOD_UNMODELLED is not one literal string declaration")
+    value = declarations[0].value
+    lines = source.splitlines(keepends=True)
+    line = lines[value.lineno - 1]
+    if value.lineno != value.end_lineno or not line.isascii():
+        raise ValueError("MOD_UNMODELLED is not declared on one ASCII line")
+    lines[value.lineno - 1] = (line[:value.col_offset] + repr(value.value.replace(letter, ""))
+                               + line[value.end_col_offset:])
+    module = types.ModuleType(f"{__name__}_without_{letter}")
+    module.__file__ = path
+    saved_path = list(sys.path)
+    try:
+        exec(compile("".join(lines), path, "exec"), module.__dict__)
+    finally:
+        sys.path[:] = saved_path
+    return module
+
+
 FIXTURES += [
     ("RED TOKEN: double-quoted substitution preserves zsh rev hazard",
      '/bin/echo "$(git show $SHA:src/f.py)"', "deny"),
@@ -1316,20 +1372,8 @@ def selftest():
     def byte_probe(args, **kwargs):
         byte_probe_calls.append((args, kwargs))
         suffix = args[2].split('$v:', 1)[1].rsplit('"', 1)[0]
-        consumed = (
-            (suffix[0] in OVERREAD_MODIFIERS and suffix[1:] == "@/@h")
-            or suffix[0] in MODS
-            or (suffix[0] in MOD_PREFIXES
-                and len(suffix) > 1
-                and suffix[1] in (MODS + OVERREAD_MODIFIERS))
-        )
-        if suffix == "xrest":
-            stdout = b"/a/b/c.py:\xf8rest\n"
-        elif consumed:
-            stdout = b"consumed\n"
-        else:
-            stdout = f"/a/b/c.py:{suffix}\n".encode("ascii")
-        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr=b"")
+        return subprocess.CompletedProcess(
+            args, 0, stdout=_modelled_probe_stdout(suffix), stderr=b"")
     shutil.which = lambda name: "/fake/zsh" if name == "zsh" else original_which(name)
     subprocess.run = byte_probe
     try:
@@ -1351,6 +1395,54 @@ def selftest():
     bad += 0 if byte_probe_ok else 1
     print("  %-4s modifier probe handles non-UTF-8 bytes through its production call site"
           % ("PASS" if byte_probe_ok else "FAIL"))
+
+    # Deleting W from MOD_UNMODELLED must leave the probe's inputs alone: the same spellings,
+    # the closed W forms and never `Wrest` or `Wa-x`, and under the double's model no failure
+    # beyond the planted one. A copy of this module built from source with W removed is
+    # probed beside the running one, so a probe or model that reads MOD_UNMODELLED again,
+    # directly or through a constant copied at import, changes one of the two lists.
+    def probed(module):
+        suffixes = []
+
+        def record(args, **kwargs):
+            suffix = args[2].split('$v:', 1)[1].rsplit('"', 1)[0]
+            suffixes.append(suffix)
+            return subprocess.CompletedProcess(
+                args, 0, stdout=module._modelled_probe_stdout(suffix), stderr=b"")
+
+        saved_run, saved_which = subprocess.run, shutil.which
+        subprocess.run = record
+        shutil.which = lambda name: "/fake/zsh" if name == "zsh" else saved_which(name)
+        try:
+            found = module.check_modifier_sets_against_zsh()[0]
+        finally:
+            subprocess.run, shutil.which = saved_run, saved_which
+        return suffixes, found
+
+    open_w = {"Wrest", "Wa-x"}
+    closed_w = {"W@/@h", "W@/@"} | {prefix + "W@/@h" for prefix in MOD_PREFIXES}
+    try:
+        live_suffixes, live_found = probed(sys.modules[__name__])
+        cold_suffixes, cold_found = probed(_module_without_unmodelled("W"))
+        selection_ok = (cold_suffixes == live_suffixes
+                        and len(cold_suffixes) == modifier_checks
+                        and closed_w <= set(cold_suffixes) and not open_w & set(cold_suffixes))
+        model_ok = (len(live_found) == len(cold_found) == 1
+                    and "starts with 'x'" in cold_found[0])
+        selection_note = (f"{len(cold_suffixes)} spellings, open W "
+                          f"{sorted(open_w & set(cold_suffixes))}, closed W missing "
+                          f"{sorted(closed_w - set(cold_suffixes))}")
+        model_note = f"{len(live_found)} and {len(cold_found)} probe failures"
+    except BaseException as exc:          # a mutated module that cannot load fails both
+        selection_ok = model_ok = False
+        selection_note = model_note = f"raised {type(exc).__name__}: {exc}"
+    for ok, label, note in (
+            (selection_ok, "deleting W from MOD_UNMODELLED leaves the probe spellings "
+             "unchanged", selection_note),
+            (model_ok, "deleting W from MOD_UNMODELLED adds no failure under the probe "
+             "double's model", model_note)):
+        bad += 0 if ok else 1
+        print("  %-4s %s (%s)" % ("PASS" if ok else "FAIL", label, note))
 
     original_equals_states = zsh_equals_states
     globals()["zsh_equals_states"] = (

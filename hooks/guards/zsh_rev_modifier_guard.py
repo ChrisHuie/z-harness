@@ -988,6 +988,15 @@ FIXTURES += [
 ]
 
 
+# zsh 5.9 reads past the end of the word when the delimiter after `:W` is left open:
+# get_strarg returns the word's end with the length of the last character it scanned, and
+# the `:W` parser steps over that length, so `$v:Wrest` prints whatever follows in memory.
+# `:F` and `:s` test for the end before stepping. This records zsh, not the guard: the
+# modifier probe picks its spellings from here, so an edit to MOD_UNMODELLED cannot make
+# it run one whose output is undefined.
+OVERREAD_MODIFIERS = "W"
+
+
 def check_modifier_sets_against_zsh():
     """Bind MODS and MOD_PREFIXES to what the installed zsh actually consumes.
 
@@ -1001,15 +1010,14 @@ def check_modifier_sets_against_zsh():
     absent -- the claim is about zsh, so on a host without it the claim is inapplicable
     rather than unproven.
     """
-    # Every ASCII letter outside MOD_UNMODELLED is probed alone and before a known modifier.
-    # `:W` takes the next character as its delimiter, so a spelling such as `Wrest` leaves
-    # the delimiter unterminated and zsh 5.9 prints bytes that differ between runs. An
-    # unmodelled letter is therefore probed only through grounded spellings: one that
-    # consumes and one that stays literal.
-    planned = (len(string.ascii_letters) - len(MOD_UNMODELLED)
-               + len(string.ascii_letters) - len(MOD_UNMODELLED)
-               + 2 * len(MOD_UNMODELLED)
-               + len(MOD_PREFIXES) * len(MOD_UNMODELLED))
+    # Every ASCII letter outside OVERREAD_MODIFIERS is probed alone and before a known
+    # modifier. Those letters, and every letter MOD_UNMODELLED declares, are probed through
+    # spellings that close the delimiter: one that consumes and one that stays literal. A
+    # declaration zsh does not support fails those, and no edit to the table can select a
+    # spelling that leaves a delimiter open.
+    delimited = sorted(set(OVERREAD_MODIFIERS) | set(MOD_UNMODELLED))
+    planned = (2 * (len(string.ascii_letters) - len(OVERREAD_MODIFIERS))
+               + (2 + len(MOD_PREFIXES)) * len(delimited))
     if shutil.which("zsh") is None:
         return [], 0, planned
 
@@ -1026,7 +1034,7 @@ def check_modifier_sets_against_zsh():
     failures = []
     modelled = set(MODS) | set(MOD_PREFIXES) | set(MOD_UNMODELLED)
     for char in string.ascii_letters:
-        if char in MOD_UNMODELLED:
+        if char in OVERREAD_MODIFIERS:
             continue
         # A base modifier consumes on its own; a prefix letter only ahead of one.
         alone = consumed(char + "rest")
@@ -1039,11 +1047,7 @@ def check_modifier_sets_against_zsh():
                 f"MODS claims `:{char}` is a modifier but this zsh leaves it literal, so "
                 f"a correct rev:path starting with {char!r} is denied")
     for prefix in string.ascii_letters:
-        if prefix in MOD_UNMODELLED:
-            if prefix in MODS or prefix in MOD_PREFIXES:
-                failures.append(
-                    f"unmodelled modifier {prefix!r} is also declared as a stable "
-                    "modifier or prefix")
+        if prefix in OVERREAD_MODIFIERS:
             continue
         paired = consumed(prefix + MODS[0] + "-x")
         expected = prefix in (set(MODS) | set(MOD_PREFIXES))
@@ -1052,6 +1056,11 @@ def check_modifier_sets_against_zsh():
                 f"zsh prefix behavior for `:{prefix}{MODS[0]}-x` is {paired}, but the "
                 f"declared modifier/prefix tables predict {expected}")
     for prefix in MOD_UNMODELLED:
+        if prefix in MODS or prefix in MOD_PREFIXES:
+            failures.append(
+                f"unmodelled modifier {prefix!r} is also declared as a stable "
+                "modifier or prefix")
+    for prefix in delimited:
         consuming = prefix + "@/@h"
         literal = prefix + "@/@"
         if not consumed(consuming):
@@ -1308,11 +1317,11 @@ def selftest():
         byte_probe_calls.append((args, kwargs))
         suffix = args[2].split('$v:', 1)[1].rsplit('"', 1)[0]
         consumed = (
-            suffix == "W@/@h"
+            (suffix[0] in OVERREAD_MODIFIERS and suffix[1:] == "@/@h")
             or suffix[0] in MODS
             or (suffix[0] in MOD_PREFIXES
                 and len(suffix) > 1
-                and suffix[1] in (MODS + MOD_UNMODELLED))
+                and suffix[1] in (MODS + OVERREAD_MODIFIERS))
         )
         if suffix == "xrest":
             stdout = b"/a/b/c.py:\xf8rest\n"

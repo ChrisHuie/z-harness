@@ -47,6 +47,8 @@ instruments/*.fuzz.json
 !hooks/**
 !agents/
 !agents/**
+!agent-methods/
+!agent-methods/**
 !commands/
 !commands/**
 

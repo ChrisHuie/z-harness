@@ -5,12 +5,10 @@
 The shared policy lives in `AGENTS.md`. Keep this file limited to Claude Code mechanics so Claude
 and Codex cannot silently develop different copies of the same rule.
 
-Before substantive action, use the `Skill` tool for every matching skill. A compaction summary that
-says a skill was loaded is not the body; call `Skill` again. Do not load `claude-api` unless the task
-is writing or debugging code that calls the Anthropic API.
+Do not load `claude-api` unless the task is writing or debugging code that calls the Anthropic API.
 
-This repository's live Claude installation is `~/.claude`. Skills, `settings.json`, hooks, status
-line, and tracked project memories are active in place. A mirror clone is only a synchronization
+This repository's live Claude installation is `~/.claude`. Skills, `settings.json`, hooks, and
+status line are active in place. A mirror clone is only a synchronization
 source. Edits to the user-level `CLAUDE.md` reach the next session or compaction, not the running
 context; edits to an existing installed skill hot-reload, while a new skill directory needs a new
 session.
@@ -23,8 +21,8 @@ first denies every `Agent` and `Task` spawn on the machine until the sources cat
 names the guard's version and this ordering. The reverse order degrades safely: an older
 registration simply omits a flag the newer hook accepts.
 
-Claude's spawn tools are `Agent` and `Task`. Background agents must send their report with
-`SendMessage`; never read an agent's `.output` symlink because it is the full JSONL transcript.
+Claude's spawn tools are `Agent` and `Task`. Never read an agent's `.output` symlink because it is
+the full JSONL transcript.
 Worktree isolation may branch from `main`, so pass the target SHA and make the worker verify it.
 
 Claude Code gives a session one scratchpad directory and every subagent inherits that exact path, so
@@ -41,13 +39,9 @@ The AskUserQuestion AFK control is Claude-specific. After every Claude Code upgr
 python3 ~/.claude/hooks/askq_timeout_guard.py --verify-harness
 ```
 
-The registered Claude `Stop` hook runs `announced_work_guard.py`. It blocks a final message whose
-tail announces imminent work without evidence that the work began. Codex has no equivalent
-registration in this package, so this is a Claude-only enforcement claim.
-
 Use `python3 ~/.claude/hooks/harness_report.py --since 7d` for Claude skill-delivery evidence and
 `python3 ~/.claude/tools/cc-cost.py --since 7d` for Claude token accounting. Claude project memory
-lives under `~/.claude/projects/<project>/memory/`; the index is injected into that project.
+lives under `~/.claude/projects/<project>/memory/`.
 
 ## Authoring machine
 

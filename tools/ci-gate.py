@@ -2218,6 +2218,7 @@ REGISTERED_REVIEW_PATHS = frozenset({
     "pr-27/frozen-publication.json",
     "pr-28/frozen-publication.json",
     "pr-29/frozen-publication.json",
+    "pr-32/frozen-publication.json",
 })
 HANDOFF_DOCTRINE = {
     "AGENTS.md": (

@@ -2,7 +2,6 @@
 
 Skill routing is mandatory. Before substantive action, inspect the available skill list.
 When a skill covers any part of the task, load and read its complete `SKILL.md` before acting.
-After compaction, a summary that says a skill was loaded is not its body; reload it when needed.
 
 | Load it first | When |
 |---|---|
@@ -19,9 +18,8 @@ After compaction, a summary that says a skill was loaded is not its body; reload
 ## Chris (@chrishuie)
 
 Chris is the solo maintainer; implementation runs through agents. Replace named roles, on-call
-rosters, handoffs, and sign-offs with agent equivalents. Use standalone skills and standard git,
-not beads, `bd`, or formula tooling. Use `@chrishuie` for CODEOWNERS, reviewers, and mentions;
-the local git author name is not proof of the GitHub account.
+rosters, handoffs, and sign-offs with agent equivalents. Use `@chrishuie` for CODEOWNERS, reviewers,
+and mentions; the local git author name is not proof of the GitHub account.
 
 Use a dense register for strategy, market, and protocol work. Use plain language for
 infrastructure, with a concrete example before an acronym. Make the call when a trade-off depends
@@ -66,10 +64,8 @@ Named a tool? Run exactly that and stop, never wrapped in a self-directed swarm.
 exists for equivalent-or-better substitutions flagged up front; the cardinal failure is a hidden
 downgrade.
 
-Before dispatch, check the data volume; check `docker info` when a worker needs a database. Cap a
-batch at 3–4 concurrent agents and wait for the batch. Infrastructure failure is neither pass nor
-fail. Decide the reclaim order before the volume is full; otherwise point `TMPDIR` at a volume
-with room.
+Before dispatch, check `docker info` when a worker needs a database. Cap a batch at 3–4 concurrent
+agents and wait for the batch. Infrastructure failure is neither pass nor fail.
 
 Let workers inherit the current model unless the task explicitly requires a different one.
 
@@ -141,9 +137,7 @@ the workflow did not run. Assert a non-empty run list for the exact head.
 Measure before reconstructing. Record the query that regenerates a number, not a drifting literal.
 An A/B changing two variables proves only that the pair matters.
 
-Use the runtime-specific accounting command supplied by its adapter: `CLAUDE.md` names Claude's
-installed command, while Codex SessionStart injects the resolved plugin-cache command. Do not
-naively sum repeated usage records.
+Do not naively sum repeated usage records.
 
 ## Destructive operations and scope
 

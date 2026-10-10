@@ -2145,10 +2145,11 @@ SITE_MUTATIONS = (
     {
         "label": "zsh unmodelled modifier prefix grammar dropped", "module": ZSH,
         "anchor": (
-            "    r\"|(?:[A-Za-z_][A-Za-z0-9_]*(?:\\[[^\\]]*\\])?|[0-9]+|[#?*@!$-]))\"\n"
-            "    r\":[\" + MOD_PREFIXES + r\"]*W\")"),
+            "    r\":[\" + MOD_PREFIXES + r\"]*\"\n"
+            "    + (\"[\" + MOD_UNMODELLED + \"]\" if MOD_UNMODELLED else \"(?!)\"))"),
         "replacement": (
-            "    r\"|(?:[A-Za-z_][A-Za-z0-9_]*(?:\\[[^\\]]*\\])?|[0-9]+|[#?*@!$-])):W\")"),
+            "    r\":\"\n"
+            "    + (\"[\" + MOD_UNMODELLED + \"]\" if MOD_UNMODELLED else \"(?!)\"))"),
         "allowed_statuses": (),
     },
     {

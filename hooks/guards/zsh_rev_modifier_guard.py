@@ -124,13 +124,16 @@ EXPANSION_BRACED = re.compile(
 EXPANSION_BRACED_INVALID = re.compile(
     r"\$\{(?:[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]+\])?|[0-9]+|[#?*@!$-])"
     r":[" + MOD_PREFIXES + r"]*([" + MODS + r"])[A-Za-z]")
-# ``W`` has delimiter-dependent grammar (``W:sep:``). Keep this third state separate
-# from the deny regexes and ask on a resolved rev:path consumer.
+# MOD_UNMODELLED letters have delimiter-dependent grammar (``W:sep:``). Keep this third
+# state separate from the deny regexes and ask on a resolved rev:path consumer. The class is
+# built from the table, so the table and the decision cannot disagree; with the table empty
+# the pattern matches nothing.
 EXPANSION_UNMODELLED = re.compile(
     r"\$(?:\{(?:\([^}]*\))?"
     r"(?:[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]+\])?|[0-9]+|[#?*@!$-])"
     r"|(?:[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?|[0-9]+|[#?*@!$-]))"
-    r":[" + MOD_PREFIXES + r"]*W")
+    r":[" + MOD_PREFIXES + r"]*"
+    + ("[" + MOD_UNMODELLED + "]" if MOD_UNMODELLED else "(?!)"))
 
 # git subcommands that take a `rev:path` / `rev:./path` argument
 # How many `<shell> -c` layers this guard will unwrap. Reaching it returns `ask`, never
@@ -998,11 +1001,12 @@ def check_modifier_sets_against_zsh():
     absent -- the claim is about zsh, so on a host without it the claim is inapplicable
     rather than unproven.
     """
-    # Every ASCII letter is probed alone. Stable base/prefix letters are also probed
-    # before a known modifier. `:W` has delimiter-dependent grammar, so it gets one
-    # observed-consuming and one observed-literal spelling instead of being forced into
-    # the stable-prefix boolean model.
-    planned = (len(string.ascii_letters)
+    # Every ASCII letter outside MOD_UNMODELLED is probed alone and before a known modifier.
+    # `:W` takes the next character as its delimiter, so a spelling such as `Wrest` leaves
+    # the delimiter unterminated and zsh 5.9 prints bytes that differ between runs. An
+    # unmodelled letter is therefore probed only through grounded spellings: one that
+    # consumes and one that stays literal.
+    planned = (len(string.ascii_letters) - len(MOD_UNMODELLED)
                + len(string.ascii_letters) - len(MOD_UNMODELLED)
                + 2 * len(MOD_UNMODELLED)
                + len(MOD_PREFIXES) * len(MOD_UNMODELLED))
@@ -1022,6 +1026,8 @@ def check_modifier_sets_against_zsh():
     failures = []
     modelled = set(MODS) | set(MOD_PREFIXES) | set(MOD_UNMODELLED)
     for char in string.ascii_letters:
+        if char in MOD_UNMODELLED:
+            continue
         # A base modifier consumes on its own; a prefix letter only ahead of one.
         alone = consumed(char + "rest")
         if alone and char not in modelled:

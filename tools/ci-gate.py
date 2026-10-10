@@ -64,7 +64,7 @@ SUITE_FLOORS = {
     "bash_command_guard": 1871,
     "credential_reach_guard": 73,
     "git_grep_engine_guard": 1630,
-    "zsh_rev_modifier_guard": 522,
+    "zsh_rev_modifier_guard": 520,
 }
 EXPECTED_WORKFLOW = """name: harness-check
 on:
@@ -1867,7 +1867,7 @@ EXPECTED_MUTATION_SELECTORS = {
         ("a repeated core.worktree binds the effective candidate Git recognises",),
 }
 EXPECTED_MUTATION_SITE_DIGEST = (
-    "c0a0f7cac6134749dc4469ef813406b9c2457a94ce9b68f5aaa2b0183299b76e"
+    "864aafc40339ce3f2afcfa1b42d0c53b1ba13d01047fb96a6519690e73051a70"
 )
 EXPECTED_MUTATION_EXCLUSIONS = {
     "hooks/guards/git_grep_engine_guard.py::ALIAS_GUARDED":

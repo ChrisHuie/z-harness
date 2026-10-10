@@ -91,9 +91,7 @@
   {"module": "hooks/guards/zsh_rev_modifier_guard.py", "collection": "MOD_MEANING", "element": "t", "class": "debt"},
   {"module": "hooks/guards/zsh_rev_modifier_guard.py", "collection": "MOD_MEANING", "element": "u", "class": "debt"}
  ],
- "count_only_kills": [
-  {"module": "hooks/guards/zsh_rev_modifier_guard.py", "collection": "MOD_UNMODELLED", "element": "W"}
- ],
+ "count_only_kills": [],
  "unswept_guards": [
   {"path": "hooks/askq_timeout_guard.py", "reason": "Claude AskUserQuestion timeout hook registered in settings.json; no mutation in the sweep targets it"},
   {"path": "hooks/codex_session_start.py", "reason": "Codex SessionStart and SubagentStart hook registered in hooks/hooks.json; no mutation in the sweep targets it"},

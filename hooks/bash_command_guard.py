@@ -205,7 +205,9 @@ def _budget_faults(observations, expected, cap):
     faults = []
     for rc, stdout, stderr, elapsed in observations:
         decision, reason = _emitted_decision(stdout)
-        if rc != 0:
+        if rc is None:
+            faults.append("hit the 5s hook timeout")
+        elif rc != 0:
             faults.append(f"exited {rc}")
         elif stderr:
             faults.append(f"wrote stderr {_clipped(stderr, 90)!r}")
@@ -232,16 +234,18 @@ def _budget_note(faults, runs):
     return "; " + "; ".join(shown)
 
 
+def _graded_decide(command, target=None):
+    """Turn a production exception into a failed case without losing the receipt."""
+    try:
+        return (decide if target is None else target)(command)
+    except BaseException as exc:
+        return "<error>", f"{type(exc).__name__}: {exc}"
+
+
 def selftest():
     """Run every sub-guard's own suite. Fails if any fails, or if a suite is empty."""
     total = failures = 0
-
-    def graded_decide(command, target=decide):
-        """Turn a production exception into a failed case without losing the receipt."""
-        try:
-            return target(command)
-        except BaseException as exc:
-            return "<error>", f"{type(exc).__name__}: {exc}"
+    graded_decide = _graded_decide
 
     def graded_payload(payload, runtime="claude"):
         """Keep envelope assertions running when their production path raises."""
@@ -261,6 +265,14 @@ def selftest():
     failures += (not ok)
     print(f"  {'PASS' if ok else 'FAIL'} receipt-integrity  "
           "a fixture exception becomes a failed case, not a missing receipt")
+    # The perf suite's hook loops record a process killed at the 5 s timeout as an
+    # observation with no exit status; it must read as a named fault, never as a pass.
+    ok = (_budget_faults([(None, "", "", 5.0)], None, 4.5) == ["hit the 5s hook timeout"]
+          and _budget_faults([(0, "", "", 1.0)], None, 4.5) == [])
+    total += 1
+    failures += (not ok)
+    print(f"  {'PASS' if ok else 'FAIL'} budget-faults      "
+          "a hook killed at the timeout is a named fault, a clean run is none")
     for name, mod in GUARDS:
         fixtures = getattr(mod, "FIXTURES", None)
         if not fixtures:
@@ -1221,104 +1233,6 @@ def selftest():
         failures += (not ok)
         print(f"  {'PASS' if ok else 'FAIL'} codex-json        {label:<18} "
               f"want=allow got={'allow' if not stdout else 'decision':<8}")
-    registered_started = time.monotonic()
-    registered_decisions = []
-    for _attempt in range(5):
-        grep_guard._GIT_AUTHORITY_CACHE.clear()
-        raw = json.dumps({"tool_name": "Bash", "tool_input": {"command": "git status --short"}})
-        rc, stdout, stderr = run_raw(raw)
-        registered_decisions.append((rc, stdout, stderr))
-    registered_elapsed = time.monotonic() - registered_started
-    faults = _budget_faults(
-        [(rc, stdout, stderr, 0.0) for rc, stdout, stderr in registered_decisions],
-        None, 4.5)
-    note = _budget_note(faults, len(registered_decisions))
-    over_cap = registered_elapsed >= 4.5
-    if over_cap:
-        note += "; the five envelopes together exceeded the 4.5s cap"
-    ok = not faults and not over_cap
-    total += 1
-    failures += (not ok)
-    print(f"  {'PASS' if ok else 'FAIL'} hook-budget        5 public envelopes in "
-          f"{registered_elapsed:.3f}s (cap 4.5s){note}")
-
-    slow_raw = json.dumps({
-        "tool_name": "Bash",
-        "tool_input": {"command": grep_guard._FUNCTION_PARSE_LIMIT_SOURCE},
-    })
-    for runtime, expected in (("claude", "ask"), ("codex", "deny")):
-        observations = []
-        for _attempt in range(5):
-            started = time.monotonic()
-            argv = [sys.executable, __file__]
-            if runtime == "codex":
-                argv.extend(("--runtime", "codex"))
-            result = subprocess.run(
-                argv, input=slow_raw, capture_output=True, text=True, timeout=5)
-            elapsed = time.monotonic() - started
-            observations.append(
-                (result.returncode, result.stdout, result.stderr, elapsed))
-        faults = _budget_faults(observations, expected, 4.5)
-        ok = not faults
-        total += 1
-        failures += (not ok)
-        print(f"  {'PASS' if ok else 'FAIL'} slow-hook-budget   {runtime:<6} "
-              f"5 explicit {expected} decisions; max="
-              f"{max(item[3] for item in observations):.3f}s (cap 4.5s)"
-              f"{_budget_note(faults, len(observations))}")
-
-    operator_raw = json.dumps({
-        "tool_name": "Bash",
-        "tool_input": {"command": grep_guard._FUNCTION_OPERATOR_BUDGET_SOURCE},
-    })
-    for runtime in ("claude", "codex"):
-        observations = []
-        for _attempt in range(5):
-            started = time.monotonic()
-            argv = [sys.executable, __file__]
-            if runtime == "codex":
-                argv.extend(("--runtime", "codex"))
-            result = subprocess.run(
-                argv, input=operator_raw, capture_output=True, text=True, timeout=5)
-            observations.append((
-                result.returncode, result.stdout, result.stderr,
-                time.monotonic() - started))
-        faults = _budget_faults(observations, None, 4.5)
-        ok = not faults
-        total += 1
-        failures += (not ok)
-        print(f"  {'PASS' if ok else 'FAIL'} operator-budget    {runtime:<6} "
-              f"5 explicit allow decisions; max="
-              f"{max(item[3] for item in observations):.3f}s (cap 4.5s)"
-              f"{_budget_note(faults, len(observations))}")
-
-    # Each command that may move option or PATH state -- a dynamic command word, a
-    # `PATH=` assignment, `source` -- once cost a scan of the whole source. A few thousand
-    # of them ran past the five-second hook timeout, which lets the command through, or
-    # spent the decision budget and asked where main denied in half a second.
-    flood_hazard = "git grep -E 'harness\\b' -- README.md"
-    for label, command in (
-            ("dynamic-word", "$X a; " * 6000 + flood_hazard),
-            ("path-assignment", "PATH=/x:$PATH; " * 4000 + flood_hazard),
-            ("quoted-source",
-             "".join(f"source 'x{index}'; " for index in range(3000)) + flood_hazard)):
-        raw = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
-        started = time.monotonic()
-        try:
-            result = subprocess.run(
-                [sys.executable, __file__], input=raw, capture_output=True, text=True,
-                timeout=5)
-            faults = _budget_faults([(result.returncode, result.stdout, result.stderr,
-                                      time.monotonic() - started)], "deny", 4.5)
-        except subprocess.TimeoutExpired:
-            faults = ["was killed at the 5s hook timeout"]
-        ok = not faults
-        total += 1
-        failures += (not ok)
-        print(f"  {'PASS' if ok else 'FAIL'} action-flood       {label:<16} "
-              f"want=deny {time.monotonic() - started:.3f}s (cap 4.5s)"
-              f"{_budget_note(faults, 1)}")
-
     cache_probe_source = "f(){ /bin/echo safe; }; f;" + "( : );" * 64
     annotation_calls = []
     original_annotate = grep_guard.annotate_function_declarations
@@ -1436,15 +1350,6 @@ def selftest():
     total += 1
     failures += (not ok)
     print(f"  {'PASS' if ok else 'FAIL'} stdin-closed       decode failure has a reason")
-    large_command = "echo " + ("x" * (256 * 1024))
-    started = time.perf_counter()
-    tokenized = grep_guard.split_commands(large_command)
-    elapsed = time.perf_counter() - started
-    ok = (elapsed < 1.5 and len(tokenized) == 1
-          and tokenized[0][1][0] == "x" * (256 * 1024))
-    total += 1
-    failures += (not ok)
-    print(f"  {'PASS' if ok else 'FAIL'} tokenizer-linear   256 KiB in {elapsed:.3f}s (cap 1.5s)")
     def _verdict(command, runtime="claude", **extra):
         """Grade one payload; a production exception is a failed case, never an allow."""
         payload = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
@@ -1489,6 +1394,142 @@ def selftest():
         print("  ZERO CHECKS RAN — treating as failure")
         return 2
     print(f"SELFTEST-SUMMARY suite=bash_command_guard checks={total} failures={failures}")
+    return 1 if failures else 0
+
+
+def perf_selftest():
+    """Run the checks whose verdict is a wall-clock claim, once per head.
+
+    Each spawns or times real hook work against the 4.5 s cap that sits inside the runtimes'
+    5 s PreToolUse timeout, which lets the command run when it expires. `--selftest` keeps
+    every verdict that does not depend on the host's speed, and the mutation sweep runs it
+    once per mutation; these run once per head, where a timing verdict belongs.
+    """
+    total = failures = 0
+    for name, mod in GUARDS:
+        for label, cmd, want in getattr(mod, "PERF_FIXTURES", ()):
+            got, _ = _graded_decide(cmd, mod.decide)
+            ok = got == want
+            total += 1
+            failures += (not ok)
+            print(f"  {'PASS' if ok else 'FAIL'} {name:<18} want={want:<5} got={got:<5} {label}")
+    registered_started = time.monotonic()
+    registered_decisions = []
+    for _attempt in range(5):
+        grep_guard._GIT_AUTHORITY_CACHE.clear()
+        raw = json.dumps({"tool_name": "Bash", "tool_input": {"command": "git status --short"}})
+        rc, stdout, stderr = run_raw(raw)
+        registered_decisions.append((rc, stdout, stderr))
+    registered_elapsed = time.monotonic() - registered_started
+    faults = _budget_faults(
+        [(rc, stdout, stderr, 0.0) for rc, stdout, stderr in registered_decisions],
+        None, 4.5)
+    note = _budget_note(faults, len(registered_decisions))
+    over_cap = registered_elapsed >= 4.5
+    if over_cap:
+        note += "; the five envelopes together exceeded the 4.5s cap"
+    ok = not faults and not over_cap
+    total += 1
+    failures += (not ok)
+    print(f"  {'PASS' if ok else 'FAIL'} hook-budget        5 public envelopes in "
+          f"{registered_elapsed:.3f}s (cap 4.5s){note}")
+
+    slow_raw = json.dumps({
+        "tool_name": "Bash",
+        "tool_input": {"command": grep_guard._FUNCTION_PARSE_LIMIT_SOURCE},
+    })
+    for runtime, expected in (("claude", "ask"), ("codex", "deny")):
+        observations = []
+        for _attempt in range(5):
+            started = time.monotonic()
+            argv = [sys.executable, __file__]
+            if runtime == "codex":
+                argv.extend(("--runtime", "codex"))
+            try:
+                result = subprocess.run(
+                    argv, input=slow_raw, capture_output=True, text=True, timeout=5)
+            except subprocess.TimeoutExpired:
+                observations.append((None, "", "", time.monotonic() - started))
+                continue
+            elapsed = time.monotonic() - started
+            observations.append(
+                (result.returncode, result.stdout, result.stderr, elapsed))
+        faults = _budget_faults(observations, expected, 4.5)
+        ok = not faults
+        total += 1
+        failures += (not ok)
+        print(f"  {'PASS' if ok else 'FAIL'} slow-hook-budget   {runtime:<6} "
+              f"5 explicit {expected} decisions; max="
+              f"{max(item[3] for item in observations):.3f}s (cap 4.5s)"
+              f"{_budget_note(faults, len(observations))}")
+
+    operator_raw = json.dumps({
+        "tool_name": "Bash",
+        "tool_input": {"command": grep_guard._FUNCTION_OPERATOR_BUDGET_SOURCE},
+    })
+    for runtime in ("claude", "codex"):
+        observations = []
+        for _attempt in range(5):
+            started = time.monotonic()
+            argv = [sys.executable, __file__]
+            if runtime == "codex":
+                argv.extend(("--runtime", "codex"))
+            try:
+                result = subprocess.run(
+                    argv, input=operator_raw, capture_output=True, text=True, timeout=5)
+            except subprocess.TimeoutExpired:
+                observations.append((None, "", "", time.monotonic() - started))
+                continue
+            observations.append((
+                result.returncode, result.stdout, result.stderr,
+                time.monotonic() - started))
+        faults = _budget_faults(observations, None, 4.5)
+        ok = not faults
+        total += 1
+        failures += (not ok)
+        print(f"  {'PASS' if ok else 'FAIL'} operator-budget    {runtime:<6} "
+              f"5 explicit allow decisions; max="
+              f"{max(item[3] for item in observations):.3f}s (cap 4.5s)"
+              f"{_budget_note(faults, len(observations))}")
+
+    # Each command that may move option or PATH state -- a dynamic command word, a
+    # `PATH=` assignment, `source` -- once cost a scan of the whole source. A few thousand
+    # of them ran past the five-second hook timeout, which lets the command through, or
+    # spent the decision budget and asked where main denied in half a second.
+    flood_hazard = "git grep -E 'harness\\b' -- README.md"
+    for label, command in (
+            ("dynamic-word", "$X a; " * 6000 + flood_hazard),
+            ("path-assignment", "PATH=/x:$PATH; " * 4000 + flood_hazard),
+            ("quoted-source",
+             "".join(f"source 'x{index}'; " for index in range(3000)) + flood_hazard)):
+        raw = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+        started = time.monotonic()
+        try:
+            result = subprocess.run(
+                [sys.executable, __file__], input=raw, capture_output=True, text=True,
+                timeout=5)
+            faults = _budget_faults([(result.returncode, result.stdout, result.stderr,
+                                      time.monotonic() - started)], "deny", 4.5)
+        except subprocess.TimeoutExpired:
+            faults = ["was killed at the 5s hook timeout"]
+        ok = not faults
+        total += 1
+        failures += (not ok)
+        print(f"  {'PASS' if ok else 'FAIL'} action-flood       {label:<16} "
+              f"want=deny {time.monotonic() - started:.3f}s (cap 4.5s)"
+              f"{_budget_note(faults, 1)}")
+
+    large_command = "echo " + ("x" * (256 * 1024))
+    started = time.perf_counter()
+    tokenized = grep_guard.split_commands(large_command)
+    elapsed = time.perf_counter() - started
+    ok = (elapsed < 1.5 and len(tokenized) == 1
+          and tokenized[0][1][0] == "x" * (256 * 1024))
+    total += 1
+    failures += (not ok)
+    print(f"  {'PASS' if ok else 'FAIL'} tokenizer-linear   256 KiB in {elapsed:.3f}s (cap 1.5s)")
+    print(f"\n  {total} checks, {failures} failures")
+    print(f"SELFTEST-SUMMARY suite=bash_command_guard-perf checks={total} failures={failures}")
     return 1 if failures else 0
 
 
@@ -1550,6 +1591,8 @@ def main():
             return 0
         if args[0] == "--selftest":
             return selftest()
+        if args[0] == "--perf":
+            return perf_selftest()
         print(f"unknown flag: {args[0]}", file=sys.stderr)
         return 2
 

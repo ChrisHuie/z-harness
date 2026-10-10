@@ -223,6 +223,8 @@ an explicit pattern engine when rewriting a questioned command.
 python3 hooks/harness_check.py
 python3 hooks/harness_check.py --selftest
 python3 hooks/bash_command_guard.py --selftest
+python3 hooks/bash_command_guard.py --perf
+python3 hooks/guards/git_grep_engine_guard.py --perf
 python3 hooks/spawn_preflight_guard.py --selftest
 python3 hooks/codex_session_start.py --selftest
 python3 hooks/askq_timeout_guard.py --selftest
@@ -243,6 +245,11 @@ python3 instruments/fuzz_judge_diff.py --selftest
 python3 tools/ci-gate.py --selftest
 python3 tools/ci-gate.py
 ```
+
+A guard's `--selftest` holds only verdicts that do not depend on the host's speed, and the mutation
+sweep runs it once per mutation. The Bash and grep guards keep their wall-clock checks -- hook
+processes timed against the 4.5 s cap and the at-limit sources decided inside the decision budget
+-- in `--perf`, which `hooks/harness_check.py` runs once per head.
 
 `python3 tools/ci-gate.py` is the offline CI-equivalent entry point. It runs the ordinary gate, its
 meta-selftest, the renderer and guard selftests, eval validation, and a fresh render/verify pair. It

@@ -117,7 +117,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 233
+SELFTEST_FLOOR = 236
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -1017,11 +1017,18 @@ class Run:
             self.result("C1", passed, detail)
 
     def c1_selftest_inventory(self, suites=None, exemptions=None):
-        """Every script exposing --selftest is aggregated or explicitly classified."""
+        """Every script exposing --selftest is aggregated or explicitly classified.
+
+        A script defining `perf_selftest` must also be registered with `--perf`: its own
+        `--selftest` entry already aggregates the path, so deleting the perf entry alone
+        would stop its wall-clock checks from running anywhere with this check still green.
+        """
         suites = SELFTEST_SUITES if suites is None else suites
         exemptions = SELFTEST_EXEMPTIONS if exemptions is None else exemptions
         aggregated = {cmd[0] for _name, cmd, _floor in suites}
+        perf_registered = {cmd[0] for _name, cmd, _floor in suites if cmd[1:] == ["--perf"]}
         actual = set()
+        perf_actual = set()
         for rel_root in ("hooks", "tools", "instruments"):
             base = os.path.join(self.root, rel_root)
             if not os.path.isdir(base):
@@ -1035,15 +1042,22 @@ class Run:
                     if (re.search(r"^def selftest\(", text, re.M)
                             or re.search(r"['\"]--selftest['\"]", text)):
                         actual.add(os.path.relpath(path, self.root))
+                    if re.search(r"^def perf_selftest\(", text, re.M):
+                        perf_actual.add(os.path.relpath(path, self.root))
         declared = aggregated | set(exemptions)
         unknown = sorted(actual - declared)
         stale = sorted(declared - actual)
+        perf_unregistered = sorted(perf_actual - perf_registered)
+        perf_stale = sorted(perf_registered - perf_actual)
         self.result(
-            "C1", bool(actual) and not unknown and not stale,
+            "C1", (bool(actual) and not unknown and not stale
+                   and not perf_unregistered and not perf_stale),
             f"selftest inventory: discovered={len(actual)} aggregated={len(aggregated)} "
-            f"exemptions={len(exemptions)}"
+            f"exemptions={len(exemptions)} perf={len(perf_registered)}"
             + (f" unclassified={unknown}" if unknown else "")
-            + (f" stale={stale}" if stale else ""),
+            + (f" stale={stale}" if stale else "")
+            + (f" perf-unregistered={perf_unregistered}" if perf_unregistered else "")
+            + (f" perf-stale={perf_stale}" if perf_stale else ""),
         )
 
     # ---- C2 ----------------------------------------------------------------
@@ -2135,6 +2149,32 @@ def selftest():
         expect_red("C1 rejects an unclassified selftest-capable script",
                    lambda: any(c == "C1" and "unclassified" in d
                                for c, d in c1_inventory.failures))
+        open(os.path.join(td, "tools", "timed.py"), "w").write(
+            "def selftest():\n    return 0\n\n\ndef perf_selftest():\n    return 0\n"
+        )
+        open(os.path.join(td, "tools", "untimed.py"), "w").write(
+            "def selftest():\n    return 0\n"
+        )
+        default_entries = [("unregistered", ["tools/unregistered.py", "--selftest"], 1),
+                           ("timed", ["tools/timed.py", "--selftest"], 1),
+                           ("untimed", ["tools/untimed.py", "--selftest"], 1)]
+        perf_runs = {}
+        for label, extra in (
+                ("missing", []),
+                ("registered", [("timed-perf", ["tools/timed.py", "--perf"], 1)]),
+                ("stale", [("timed-perf", ["tools/timed.py", "--perf"], 1),
+                           ("untimed-perf", ["tools/untimed.py", "--perf"], 1)])):
+            perf_runs[label] = Run(td, ci=True)
+            perf_runs[label].c1_selftest_inventory(suites=default_entries + extra,
+                                                   exemptions={})
+        perf_details = {label: " ".join(d for _c, d in run.failures)
+                        for label, run in perf_runs.items()}
+        expect_red("C1 rejects a perf-capable script registered only for --selftest",
+                   lambda: "perf-unregistered=['tools/timed.py']" in perf_details["missing"])
+        expect_red("C1 accepts a perf-capable script registered for both entry points",
+                   lambda: not perf_runs["registered"].failures)
+        expect_red("C1 rejects a --perf registration for a script without perf_selftest",
+                   lambda: "perf-stale=['tools/untimed.py']" in perf_details["stale"])
 
         vocab_root = os.path.join(td, "vocab")
         skill_root = os.path.join(vocab_root, "skills", "gamma")

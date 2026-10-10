@@ -42,6 +42,9 @@ import sys
 import pathlib
 import time
 
+# The runtime's hook timeout runs from process start, so the decision deadline is anchored
+# here, before the guard modules below are imported, rather than when a decision begins.
+PROCESS_STARTED = time.monotonic()
 VERSION = "1.6.0"
 RUNTIMES = {"claude", "codex"}
 sys.path.insert(0, str(pathlib.Path(__file__).parent / "guards"))
@@ -56,6 +59,7 @@ GUARDS = [
 ]
 RANK = {"allow": 0, "ask": 1, "deny": 2}
 PROCESS_GREP_COMMAND = "git grep -E 'harness\\b' -- README.md"
+HOOK_OPERATOR_SOURCE = "f(){ /bin/echo safe; }; f;" + "( : );" * 8000
 PROCESS_SOURCE_EXPLOIT_COMMAND = (
     "source <(/usr/bin/printf '%s\\n' \"git grep -E "
     "'harness\\\\b' -- README.md; /bin/echo EXECUTED\")"
@@ -1267,9 +1271,14 @@ def selftest():
               f"{max(item[3] for item in observations):.3f}s (cap 4.5s)"
               f"{_budget_note(faults, len(observations))}")
 
+    # The Git-grep suite's operator control is sized for one predicate inside its own
+    # budget. A hook process spends the same 3.5 s on start-up, both predicates and the
+    # credential scan, and at that size took 2.28 s on the authoring host: x1.5, which
+    # hosted runners did not meet once the credential scan shared the deadline. Half the
+    # groups took 1.17 s there, x3.0.
     operator_raw = json.dumps({
         "tool_name": "Bash",
-        "tool_input": {"command": grep_guard._FUNCTION_OPERATOR_BUDGET_SOURCE},
+        "tool_input": {"command": HOOK_OPERATOR_SOURCE},
     })
     for runtime in ("claude", "codex"):
         observations = []
@@ -1319,6 +1328,40 @@ def selftest():
               f"want=deny {time.monotonic() - started:.3f}s (cap 4.5s)"
               f"{_budget_note(faults, 1)}")
 
+    # The credential check runs after both predicates, so its own work must fit the same
+    # deadline. Twelve thousand heredoc headers inside one quoted argument once held the
+    # hook past its timeout after a deny was already decided, and a megabyte the credential
+    # tokenizer could not finish once let a keychain read through on the main thread.
+    credential_cases = (
+        ("heredoc-headers", "claude", None,
+         "printf %s '" + "x <<TAG\n" * 12_000 + "'; " + flood_hazard, "deny"),
+        ("heredoc-headers", "codex", None,
+         "printf %s '" + "x <<TAG\n" * 12_000 + "'; " + flood_hazard, "deny"),
+        ("spent-on-keychain", "claude", None,
+         "/bin/echo " + "x" * 1_000_000 + "; security find-generic-password -s svc -w",
+         "ask"))
+    for label, runtime, agent, command, want in credential_cases:
+        payload = {"tool_name": "Bash", "tool_input": {"command": command}}
+        if agent:
+            payload["agent_id"] = agent
+        argv = [sys.executable, __file__]
+        if runtime == "codex":
+            argv.extend(("--runtime", "codex"))
+        started = time.monotonic()
+        try:
+            result = subprocess.run(argv, input=json.dumps(payload), capture_output=True,
+                                    text=True, timeout=5)
+            faults = _budget_faults([(result.returncode, result.stdout, result.stderr,
+                                      time.monotonic() - started)], want, 4.5)
+        except subprocess.TimeoutExpired:
+            faults = ["was killed at the 5s hook timeout"]
+        ok = not faults
+        total += 1
+        failures += (not ok)
+        print(f"  {'PASS' if ok else 'FAIL'} credential-budget  {label:<17} {runtime:<6} "
+              f"want={want} {time.monotonic() - started:.3f}s (cap 4.5s)"
+              f"{_budget_note(faults, 1)}")
+
     cache_probe_source = "f(){ /bin/echo safe; }; f;" + "( : );" * 64
     annotation_calls = []
     original_annotate = grep_guard.annotate_function_declarations
@@ -1358,6 +1401,117 @@ def selftest():
     failures += (not shared_deadline_ok)
     print(f"  {'PASS' if shared_deadline_ok else 'FAIL'} shared-deadline    "
           "both predicates receive one outer monotonic deadline")
+
+    # The credential check runs after the predicates. Without the same deadline it could
+    # finish after the runtime's timeout, and a timed-out hook lets the command run.
+    handed = []
+    class HandedGuard:
+        @staticmethod
+        def decide(_command, _deadline=None):
+            handed.append(("predicate", _deadline))
+            return "allow", ""
+    original_cred_decide = cred_guard.decide
+    def handed_cred(_command, *, subagent, runtime="claude", deadline=None):
+        handed.append(("credential", deadline))
+        return "allow", ""
+    probe_payload = {"tool_name": "Bash", "tool_input": {"command": "/bin/echo safe"}}
+    explicit = time.monotonic() + 600
+    original_guards = list(GUARDS)
+    GUARDS[:] = [("only", HandedGuard)]
+    cred_guard.decide = handed_cred
+    handed_error = None
+    try:
+        evaluate_payload(probe_payload, deadline=explicit)
+        evaluate_payload(probe_payload)
+    except BaseException as exc:              # a mutated production path fails this case
+        handed_error = exc
+    finally:
+        GUARDS[:] = original_guards
+        cred_guard.decide = original_cred_decide
+    credential_deadline_ok = (
+        handed_error is None
+        and handed[:2] == [("predicate", explicit), ("credential", explicit)]
+        and len(handed) == 4 and handed[2][1] is not None and handed[2][1] == handed[3][1])
+    total += 1
+    failures += (not credential_deadline_ok)
+    print(f"  {'PASS' if credential_deadline_ok else 'FAIL'} credential-deadline "
+          "the credential check shares the predicates' deadline")
+
+    # The predicates can finish inside the deadline and allow, leaving the credential check
+    # to run out of it. Its scan then stopped early, so the hook must not allow on the
+    # strength of predicates that never looked for a credential. The clock here is live
+    # while the predicates run and spent from the moment the credential check starts.
+    class SpentClock:
+        def __init__(self, at):
+            self.at = at
+
+        def monotonic(self):
+            return self.at
+
+        def __getattr__(self, name):
+            return getattr(time, name)
+
+    def spent_after_predicates(at):
+        def checked(command, *, subagent, runtime="claude", deadline=None):
+            saved = (cred_guard.time, grep_guard.time)
+            cred_guard.time = grep_guard.time = SpentClock(at)
+            try:
+                return original_cred_decide(
+                    command, subagent=subagent, runtime=runtime, deadline=deadline)
+            finally:
+                cred_guard.time, grep_guard.time = saved
+        return checked
+
+    keychain = "security find-generic-password -s svc -w"
+    for label, command, agent, runtime, before, want in (
+            ("keychain read, main thread", keychain, None, "claude", "allow", "ask"),
+            ("quoted model CLI, main thread", 'co""dex exec hi', None, "claude", "allow",
+             "ask"),
+            ("ordinary command, subagent", "git status", "sub-1", "claude", "allow", "deny"),
+            ("keychain read, Codex main thread", keychain, None, "codex", "allow", None),
+            ("prior deny kept", "git grep -E 'harness\\b' -- README.md; " + keychain,
+             None, "claude", "deny", "deny")):
+        payload = {"tool_name": "Bash", "tool_input": {"command": command}}
+        if agent:
+            payload["agent_id"] = agent
+        live = time.monotonic() + 600
+        try:
+            predicates, _reason = decide(command, _deadline=live)
+            cred_guard.decide = spent_after_predicates(live + 1)
+            output = evaluate_payload(payload, runtime=runtime, deadline=live)
+            got = (output or {}).get("hookSpecificOutput", {}).get("permissionDecision")
+        except BaseException as exc:          # a mutated production path fails this case
+            predicates, got = "raised", f"raised {type(exc).__name__}"
+        finally:
+            cred_guard.decide = original_cred_decide
+        ok = predicates == before and got == want
+        total += 1
+        failures += (not ok)
+        print(f"  {'PASS' if ok else 'FAIL'} credential-spent   {label:<32} predicates="
+              f"{predicates:<5} want={want!s:<5} got={got!s:<5}")
+
+    # The hook entry point anchors that deadline at process start, before the guard
+    # imports, not when a decision begins.
+    import io
+    anchored = []
+    original_hook_mode = globals()["hook_mode"]
+    original_argv, original_stdin = sys.argv, sys.stdin
+    globals()["hook_mode"] = (
+        lambda _raw, runtime="claude", deadline=None: anchored.append(deadline) or 0)
+    sys.argv = ["bash_command_guard.py"]
+    sys.stdin = io.StringIO(json.dumps(probe_payload))
+    try:
+        main()
+    except BaseException:                     # a mutated production path fails this case
+        anchored.append("<error>")
+    finally:
+        globals()["hook_mode"] = original_hook_mode
+        sys.argv, sys.stdin = original_argv, original_stdin
+    anchored_ok = anchored == [PROCESS_STARTED + grep_guard.HOOK_PROCESS_BUDGET_SECONDS]
+    total += 1
+    failures += (not anchored_ok)
+    print(f"  {'PASS' if anchored_ok else 'FAIL'} process-deadline   "
+          "the hook entry point anchors its deadline at process start")
 
     oversized = "echo " + ("x" * grep_guard.MAX_COMMAND_CHARS)
     got, reason = graded_decide(oversized)
@@ -1505,13 +1659,13 @@ def run_raw(raw, runtime="claude"):
     return rc, out.getvalue(), err.getvalue()
 
 
-def hook_mode(raw, runtime="claude"):
+def hook_mode(raw, runtime="claude", deadline=None):
     if not raw.strip():
         print("bash_command_guard: empty stdin — no input to judge", file=sys.stderr)
         return 2
     try:
         payload = json.loads(raw)
-        output = evaluate_payload(payload, runtime=runtime)
+        output = evaluate_payload(payload, runtime=runtime, deadline=deadline)
     except EnvelopeError as exc:
         print(f"bash_command_guard: {exc}; refusing to run blind", file=sys.stderr)
         return 2
@@ -1557,16 +1711,17 @@ def main():
     if raw is None:
         print(error, file=sys.stderr)
         return 2
-    return hook_mode(raw, runtime=runtime)
+    return hook_mode(raw, runtime=runtime,
+                     deadline=PROCESS_STARTED + grep_guard.HOOK_PROCESS_BUDGET_SECONDS)
 
 
-def _with_credential_reach(command, payload, runtime, decision, reason):
+def _with_credential_reach(command, payload, runtime, decision, reason, deadline=None):
     """Merge the caller-scoped credential verdict; a predicate fault is a deny."""
     agent_id = payload.get("agent_id")
     subagent = isinstance(agent_id, str) and bool(agent_id)
     try:
         cred_decision, cred_reason = cred_guard.decide(
-            command, subagent=subagent, runtime=runtime)
+            command, subagent=subagent, runtime=runtime, deadline=deadline)
         if cred_decision not in RANK or not isinstance(cred_reason, str):
             raise ValueError(f"credential_reach returned {cred_decision!r}")
     except BaseException as exc:                   # predicate failure is not an allow
@@ -1580,8 +1735,12 @@ def _with_credential_reach(command, payload, runtime, decision, reason):
     return decision, reason
 
 
-def evaluate_payload(payload, runtime="claude"):
-    """Return a hook output object for a blocked Bash call, otherwise None."""
+def evaluate_payload(payload, runtime="claude", deadline=None):
+    """Return a hook output object for a blocked Bash call, otherwise None.
+
+    The command predicates and the credential check share one deadline. A hook process
+    passes the one anchored at its start; an in-process caller gets one from now.
+    """
     if not isinstance(payload, dict):
         raise EnvelopeError("PreToolUse payload is not an object")
     tool_name = payload.get("tool_name")
@@ -1595,8 +1754,11 @@ def evaluate_payload(payload, runtime="claude"):
     command = tool_input.get("command")
     if not isinstance(command, str) or not command:
         raise EnvelopeError("matched Bash payload has no non-empty string command")
-    decision, reason = decide(command)
-    decision, reason = _with_credential_reach(command, payload, runtime, decision, reason)
+    if deadline is None:
+        deadline = time.monotonic() + grep_guard.GUARD_BUDGET_SECONDS
+    decision, reason = decide(command, _deadline=deadline)
+    decision, reason = _with_credential_reach(
+        command, payload, runtime, decision, reason, deadline)
     if decision == "allow":
         return None
     if runtime == "codex" and decision == "ask":

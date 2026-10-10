@@ -259,7 +259,8 @@ image contents behind those labels. A `mutation-proof` workflow accepts pull req
 `main`, and manual dispatches, explicitly checks out
 `github.event.pull_request.head.sha || github.sha`, runs the deterministic mutation plan in six
 private-tree shards for every accepted head, and aggregates raw artifacts with `if: always()`. A
-pull-request run is cancelled only when a newer head of the same pull request supersedes it. The
+pull-request run is cancelled only when a newer run of the same pull request supersedes it, and
+no other run can cancel or replace a push or dispatch run. The
 aggregator rejects missing, duplicate, overlapping, foreign, or stale mutation IDs and shards measured
 under different tool versions, recomputes each raw outcome, and holds that observation against the
 reviewed `contracts/mutation-policy.json`: it exits 0 when the outcomes conform, 1 on a survivor or

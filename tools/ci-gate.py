@@ -170,7 +170,7 @@ EXPECTED_MUTATION_WORKFLOW = """name: mutation-proof
 # state; absence and self-consistency are not measurement evidence. A pull-request run is
 # cancelled only when a newer run of the same pull request supersedes it. Each push and
 # dispatch run is its own concurrency group, because GitHub replaces a pending run in a shared
-# group whatever cancel-in-progress says; none of those runs is ever cancelled or replaced.
+# group whatever cancel-in-progress says, and no other run can cancel or replace one of them.
 on:
   pull_request:
   push:
@@ -549,10 +549,11 @@ def mutation_workflow_authority_error(data: str) -> str:
     ]
     if top_fields != ["name: mutation-proof", "on:", "permissions:", "concurrency:", "jobs:"]:
         return "mutation workflow top-level fields permit an unreviewed environment"
-    # Cancelling a superseded pull-request head is safe because that head is no longer a
-    # merge candidate. Push and dispatch runs are keyed by run, not by head: GitHub replaces a
-    # pending run in a shared group even without cancel-in-progress, so any key two of those
-    # runs could share would let one leave an accepted head with no measurement.
+    # Cancelling a superseded pull-request run is safe because the run superseding it
+    # measures that pull request's current head. Push and dispatch runs are keyed by run, not
+    # by head: GitHub replaces a pending run in a shared group even without
+    # cancel-in-progress, so any key two of those runs could share would let one leave an
+    # accepted head with no measurement.
     if _yaml_fields(_yaml_mapping_block(data, "concurrency:"), 2) != [
             "group: mutation-proof-${{ github.event.pull_request.number || github.run_id }}",
             "cancel-in-progress: ${{ github.event_name == 'pull_request' }}"]:

@@ -59,6 +59,7 @@ GUARDS = [
 ]
 RANK = {"allow": 0, "ask": 1, "deny": 2}
 PROCESS_GREP_COMMAND = "git grep -E 'harness\\b' -- README.md"
+HOOK_OPERATOR_SOURCE = "f(){ /bin/echo safe; }; f;" + "( : );" * 8000
 PROCESS_SOURCE_EXPLOIT_COMMAND = (
     "source <(/usr/bin/printf '%s\\n' \"git grep -E "
     "'harness\\\\b' -- README.md; /bin/echo EXECUTED\")"
@@ -1270,9 +1271,14 @@ def selftest():
               f"{max(item[3] for item in observations):.3f}s (cap 4.5s)"
               f"{_budget_note(faults, len(observations))}")
 
+    # The Git-grep suite's operator control is sized for one predicate inside its own
+    # budget. A hook process spends the same 3.5 s on start-up, both predicates and the
+    # credential scan, and at that size took 2.28 s on the authoring host: x1.5, which
+    # hosted runners did not meet once the credential scan shared the deadline. Half the
+    # groups took 1.17 s there, x3.0.
     operator_raw = json.dumps({
         "tool_name": "Bash",
-        "tool_input": {"command": grep_guard._FUNCTION_OPERATOR_BUDGET_SOURCE},
+        "tool_input": {"command": HOOK_OPERATOR_SOURCE},
     })
     for runtime in ("claude", "codex"):
         observations = []

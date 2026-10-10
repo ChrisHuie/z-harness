@@ -1379,14 +1379,18 @@ def selftest():
     original_guards = list(GUARDS)
     GUARDS[:] = [("only", HandedGuard)]
     cred_guard.decide = handed_cred
+    handed_error = None
     try:
         evaluate_payload(probe_payload, deadline=explicit)
         evaluate_payload(probe_payload)
+    except BaseException as exc:              # a mutated production path fails this case
+        handed_error = exc
     finally:
         GUARDS[:] = original_guards
         cred_guard.decide = original_cred_decide
     credential_deadline_ok = (
-        handed[:2] == [("predicate", explicit), ("credential", explicit)]
+        handed_error is None
+        and handed[:2] == [("predicate", explicit), ("credential", explicit)]
         and len(handed) == 4 and handed[2][1] is not None and handed[2][1] == handed[3][1])
     total += 1
     failures += (not credential_deadline_ok)
@@ -1405,6 +1409,8 @@ def selftest():
     sys.stdin = io.StringIO(json.dumps(probe_payload))
     try:
         main()
+    except BaseException:                     # a mutated production path fails this case
+        anchored.append("<error>")
     finally:
         globals()["hook_mode"] = original_hook_mode
         sys.argv, sys.stdin = original_argv, original_stdin

@@ -1351,6 +1351,8 @@ def selftest():
     git_guard._check_decision_budget = counting_budget_check
     try:
         walked = decide("/bin/echo a; /bin/echo b; /bin/echo c")[0]
+    except BaseException:                     # a mutated production path fails this case
+        walked = "<error>"
     finally:
         git_guard._check_decision_budget = original_budget_check
     walk_budget_ok = walked == "allow" and len(walk_checks) == 3

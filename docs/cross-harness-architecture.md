@@ -221,7 +221,7 @@ workflow must govern that boundary. GitHub manages the image contents behind tho
 repository cannot prove that the jobs are required by branch protection.
 
 The `mutation-proof` workflow accepts pull requests, pushes to `main`, and manual dispatches,
-checks out the exact accepted head, and runs the deterministic guard-mutation plan in six
+checks out the exact accepted head, and runs the deterministic guard-mutation plan in fifteen
 private-tree shards every time. Its `if: always()` aggregate job
 rejects missing, duplicated, overlapping, foreign, or stale fragment IDs and shards measured under
 different tool versions, recomputes the raw suite outcomes, and holds that head's observation against

@@ -97,6 +97,12 @@ MAX_FUNCTION_DECLARATIONS = 512
 MAX_FUNCTION_RECORD_CACHE_ENTRIES = 32
 REGISTERED_HOOK_TIMEOUT_SECONDS = 5
 GUARD_BUDGET_SECONDS = 4.0
+# What a Bash hook process may spend, counted from its own start. The runtime's timeout also
+# covers work outside any decision: in a 0.35-CPU amd64 container the interpreter took up to
+# 0.28 s before the hook's first statement, and work after an exhausted deadline added up to
+# 0.5 s. Each runtime lets the command run when the hook times out, so this budget, not the
+# per-decision one, is what keeps that from happening.
+HOOK_PROCESS_BUDGET_SECONDS = 3.5
 GIT_PROBE_TIMEOUT_SECONDS = 0.75
 ZSH_EQUALS_ON = "on"
 ZSH_EQUALS_OFF = "off"
@@ -407,7 +413,8 @@ def function_record_cache_scope():
             _FUNCTION_RECORD_CACHE.reset(cache_token)
 
 
-def hook_timeout_contract(settings_data=None, codex_data=None, *, root=None, budget=None):
+def hook_timeout_contract(settings_data=None, codex_data=None, *, root=None, budget=None,
+                          process_budget=None):
     """Return an error when the two registered Bash hooks do not bound this guard."""
     root = (os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             if root is None else root)
@@ -438,6 +445,10 @@ def hook_timeout_contract(settings_data=None, codex_data=None, *, root=None, bud
     internal = GUARD_BUDGET_SECONDS if budget is None else budget
     if internal > REGISTERED_HOOK_TIMEOUT_SECONDS - 1.0:
         return (f"internal budget {internal} does not leave the required one-second "
+                f"margin inside timeout {REGISTERED_HOOK_TIMEOUT_SECONDS}")
+    process = HOOK_PROCESS_BUDGET_SECONDS if process_budget is None else process_budget
+    if process > REGISTERED_HOOK_TIMEOUT_SECONDS - 1.5:
+        return (f"hook process budget {process} does not leave the measured 1.5-second "
                 f"margin inside timeout {REGISTERED_HOOK_TIMEOUT_SECONDS}")
     return ""
 
@@ -12034,10 +12045,13 @@ def selftest():
     planted_settings["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"] = 4
     timeout_contract_red = bool(hook_timeout_contract(settings_data=planted_settings))
     budget_contract_red = bool(hook_timeout_contract(budget=4.01))
+    process_budget_contract_red = bool(hook_timeout_contract(process_budget=3.51))
     for label, ok in (
         ("registered Claude/Codex timeout contract matches", timeout_contract_ok),
         ("registered timeout mutation turns the contract red", timeout_contract_red),
         ("internal budget margin mutation turns the contract red", budget_contract_red),
+        ("hook process budget margin mutation turns the contract red",
+         process_budget_contract_red),
     ):
         bad += 0 if ok else 1
         print("  %s %s" % ("PASS" if ok else "FAIL", label))

@@ -373,6 +373,9 @@ def _classify_source(command, scan_command, decisions, _depth, _shell, _equals_s
         _deadline)
     for tokens, equals_state, (command_env, lookup_uncertain) in zip(
             commands, equals_states, environment_states):
+        # Each command's resolution runs without a budget check of its own, so an exhausted
+        # deadline must stop the walk here rather than after every remaining command.
+        git_guard._check_decision_budget(_deadline)
         resolution = unwrap_command_prefix(
             tokens, _shell, equals_state, command_env, lookup_uncertain)
         rev_path_resolution = resolution
@@ -1336,6 +1339,26 @@ def selftest():
     bad += 0 if byte_probe_ok else 1
     print("  %-4s modifier probe handles non-UTF-8 bytes through its production call site"
           % ("PASS" if byte_probe_ok else "FAIL"))
+
+    # Each command's resolution runs without a budget check of its own, so the walk must
+    # check the decision budget once per command. Count the checks made from the walk.
+    original_budget_check = git_guard._check_decision_budget
+    walk_checks = []
+    def counting_budget_check(deadline):
+        if sys._getframe(1).f_code.co_name == "_classify_source":
+            walk_checks.append(deadline)
+        return original_budget_check(deadline)
+    git_guard._check_decision_budget = counting_budget_check
+    try:
+        walked = decide("/bin/echo a; /bin/echo b; /bin/echo c")[0]
+    except BaseException:                     # a mutated production path fails this case
+        walked = "<error>"
+    finally:
+        git_guard._check_decision_budget = original_budget_check
+    walk_budget_ok = walked == "allow" and len(walk_checks) == 3
+    bad += 0 if walk_budget_ok else 1
+    print("  %-4s the command walk checks the decision budget once per command (%d)"
+          % ("PASS" if walk_budget_ok else "FAIL", len(walk_checks)))
 
     original_equals_states = zsh_equals_states
     globals()["zsh_equals_states"] = (

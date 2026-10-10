@@ -12,6 +12,8 @@ command-only GUARDS list:
   main thread, claude runtime           another model's CLI, a secret store -> ask
                                         other credential use (gh for PR work) -> allow
   main thread, codex runtime            allow (Codex cannot ask; outside this rule)
+A scan the caller's decision deadline stops early is judged as if it had found something:
+deny for a subagent, ask on the claude main thread.
 
 Spellings modelled, per simple command after env assignments and the wrappers in WRAPPERS:
 a listed CLI at command position; a listed CLI run through npx/bunx/pnpx/uvx/pipx run/
@@ -24,10 +26,13 @@ Not modelled (a stated limit, not a clean verdict): a script file or program tha
 credentialed command without naming it in this text; aliases or functions defined earlier;
 a CLI copied or linked under another name.
 """
+import bisect
 import os
+import random
 import re
 import sys
 import pathlib
+import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import git_grep_engine_guard as tokenizer   # noqa: E402  (split_commands only)
@@ -78,20 +83,112 @@ CURL_AUTH_FLAGS = {"-u", "--user", "--oauth2-bearer", "--aws-sigv4", "-n", "--ne
                    "--netrc-file", "--netrc-optional", "-b", "--cookie", "-E", "--cert"}
 WGET_AUTH_FLAGS = {"--http-user", "--http-password", "--user", "--password",
                    "--load-cookies", "--ask-password"}
+# The heredoc grammar the scan reads, as one expression. `_heredocs` yields exactly its
+# matches; the expression itself is only the selftest's oracle, because every header whose
+# delimiter never closes makes it scan to the end of the text, which no deadline can stop.
 HEREDOC = re.compile(r"(?m)^(?P<lead>[^\n]*?)<<-?\s*'?\"?(?P<tag>[A-Za-z_][A-Za-z0-9_]*)'?\"?"
                      r"[^\n]*\n(?P<body>.*?)\n(?P=tag)\b", re.S)
+HEREDOC_TAG = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+SPACE_RUN = re.compile(r"\s*")
+WORD_RUN = re.compile(r"\w*")
 MAX_DEPTH = 4
 # Main-thread fallback when the tokenizer cannot read the command: a model CLI name as a word.
 MODEL_WORD = re.compile(r"(?<![\w./-])(?:codex|hermes|claude|gemini|aider|opencode|cursor-agent)"
                         r"(?![\w-])")
 
 
-def _split(text):
-    """Tokenize, or None when the shared tokenizer cannot read the text."""
+class BudgetExhausted(Exception):
+    """The caller's decision deadline passed before the scan finished."""
+
+
+def _check_budget(deadline):
+    if deadline is not None and time.monotonic() >= deadline:
+        raise BudgetExhausted()
+
+
+def _split(text, deadline=None):
+    """Tokenize, or None when the shared tokenizer cannot read the text.
+
+    The tokenizer raises the same error for a spent deadline as for unreadable source. Only
+    unreadable source takes the main-thread fallback, which relies on the command guards
+    having graded that source; a spent deadline means the scan stopped early, so it raises
+    BudgetExhausted instead.
+    """
     try:
-        return tokenizer.split_commands(text)
+        return tokenizer.split_commands(text, _deadline=deadline)
     except Exception:                              # CommandParseError and kin
+        _check_budget(deadline)
         return None
+
+
+def _leading_word(line):
+    """The word characters a line starts with; HEREDOC's closing word boundary ends them."""
+    return WORD_RUN.match(line).group()
+
+
+def _heredocs(text, deadline=None):
+    """Yield (lead, body) for each HEREDOC match in `text`, in order, checking the deadline.
+
+    For each line it tries the `<<` occurrences left to right, as HEREDOC's lazy lead does,
+    and closes the delimiter with its longest prefix that some later line begins with as a
+    whole word, at the first such line. That line lies at least two lines past the delimiter
+    because the body is a line of its own. An index of line-leading words replaces HEREDOC's
+    scan to the end of the text for each header.
+    """
+    if "<<" not in text:
+        return
+    lines = text.split("\n")
+    starts, offset, closers = [], 0, {}
+    for number, line in enumerate(lines):
+        if number % 4096 == 0:
+            _check_budget(deadline)
+        starts.append(offset)
+        offset += len(line) + 1
+        word = _leading_word(line)
+        if word and HEREDOC_TAG.fullmatch(word):
+            closers.setdefault(word, []).append(number)
+    lengths = sorted({len(word) for word in closers}, reverse=True)
+    number = 0
+    while number < len(lines):
+        line = lines[number]
+        column, closed = line.find("<<"), None
+        while column != -1:
+            _check_budget(deadline)
+            closed = _closing(text, starts, number, column, closers, lengths, deadline)
+            if closed is not None:
+                break
+            column = line.find("<<", column + 1)
+        if closed is None:
+            number += 1
+            continue
+        tag_line, closer = closed
+        yield line[:column], text[starts[tag_line + 1]:starts[closer] - 1]
+        number = closer + 1
+
+
+def _closing(text, starts, number, column, closers, lengths, deadline):
+    """-> (delimiter line, closing line) for the `<<` at this column, or None."""
+    position = starts[number] + column + 2
+    if text.startswith("-", position):
+        position += 1
+    position = SPACE_RUN.match(text, position).end()
+    if text.startswith("'", position):
+        position += 1
+    if text.startswith('"', position):
+        position += 1
+    tag = HEREDOC_TAG.match(text, position)
+    if tag is None:
+        return None
+    tag_line = bisect.bisect_right(starts, position) - 1
+    for length in lengths:
+        if length > len(tag.group()):
+            continue
+        _check_budget(deadline)
+        found = closers.get(tag.group()[:length], ())
+        at = bisect.bisect_left(found, tag_line + 2)
+        if at < len(found):
+            return tag_line, found[at]
+    return None
 
 
 def _base(word):
@@ -148,7 +245,7 @@ def _runner_target(name, rest):
     return None
 
 
-def _findings_for(words, depth):
+def _findings_for(words, depth, deadline=None):
     """Findings for one simple command as (kind, detail). kind: model|secret|cred."""
     out = []
     assigns, rest = _command_word(words)
@@ -164,11 +261,11 @@ def _findings_for(words, depth):
     if name in SHELLS:
         for j, word in enumerate(args):
             if re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", word) and j + 1 < len(args):
-                out.extend(_scan(args[j + 1], depth + 1))
+                out.extend(_scan(args[j + 1], depth + 1, deadline))
                 break
         return out
     if name == "eval" and args:
-        return out + _scan(" ".join(args), depth + 1)
+        return out + _scan(" ".join(args), depth + 1, deadline)
     if name in MODEL_CLIS:
         if not (args and all(a in INFO_ONLY for a in args)):
             out.append(("model", f"{name} (another model's CLI)"))
@@ -219,37 +316,48 @@ def _findings_for(words, depth):
     return out
 
 
-def _scan(text, depth=0):
-    """All findings in a command text, judged recursively up to MAX_DEPTH."""
+def _scan(text, depth=0, deadline=None):
+    """All findings in a command text, judged recursively up to MAX_DEPTH.
+
+    A spent deadline ends the scan with an `exhausted` finding after whatever it had found.
+    """
     if depth > MAX_DEPTH:
         return [("cred", "nesting deeper than the guard follows")]
     findings = []
+    try:
+        _scan_into(findings, text, depth, deadline)
+    except BudgetExhausted:
+        findings.append(("exhausted", "the decision deadline passed before the credential "
+                                      "check finished"))
+    return findings
+
+
+def _scan_into(findings, text, depth, deadline):
     for m in CREDENTIAL_PATH.finditer(text):
         findings.append(("secret", f"credential file {m.group(0)}"))
     for m in ARGV_LITERAL.finditer(text):
         findings.append(("cred", f"argv literal naming {m.group(0).strip('[(, ')}"))
-    for m in HEREDOC.finditer(text):
-        lead = _split(m.group("lead") or ":")
+    for lead_text, body in _heredocs(text, deadline):
+        lead = _split(lead_text or ":", deadline)
         if lead is None:
             findings.append(("unparsed", "a heredoc whose consumer the tokenizer cannot read"))
             continue
         _assigns, rest = _command_word([w for w, _q in sum(lead, [])])
         if rest and _base(rest[0]) in SHELLS:
-            findings.extend(_scan(m.group("body"), depth + 1))
-    simples = _split(text)
+            findings.extend(_scan(body, depth + 1, deadline))
+    simples = _split(text, deadline)
     if simples is None:
         findings.append(("unparsed", "command source the shared tokenizer cannot read"))
         if MODEL_WORD.search(text):
             findings.append(("model", "a model CLI name in unreadable command source"))
-        return findings
+        return
     for simple in simples:
-        findings.extend(_findings_for([w for w, _q in simple], depth))
-    return findings
+        findings.extend(_findings_for([w for w, _q in simple], depth, deadline))
 
 
-def decide(command, *, subagent, runtime="claude"):
-    """-> (decision, reason) for this caller."""
-    findings = _scan(command)
+def decide(command, *, subagent, runtime="claude", deadline=None):
+    """-> (decision, reason) for this caller, within the caller's decision deadline."""
+    findings = _scan(command, deadline=deadline)
     if not findings:
         return "allow", ""
     seen, details = set(), []
@@ -264,10 +372,18 @@ def decide(command, *, subagent, runtime="claude"):
                         + ". Report what you need to the main thread instead.")
     # "unparsed" alone does not ask on the main thread: the command guards already grade
     # unreadable source, and the MODEL_WORD fallback above covers a model CLI inside it.
+    # "exhausted" does ask: the command guards finished and may have allowed, so nothing
+    # else graded the part of the command this scan never reached.
     asks = [d for k, d in details if k in {"model", "secret"}]
+    exhausted = any(k == "exhausted" for k, _d in details)
     if runtime == "claude" and asks:
         return "ask", ("credential_reach: this calls another model or reads a stored secret ("
-                       + "; ".join(asks) + "). Only the maintainer approves that.")
+                       + "; ".join(asks) + "). Only the maintainer approves that."
+                       + (" The check also stopped at its decision deadline."
+                          if exhausted else ""))
+    if runtime == "claude" and exhausted:
+        return "ask", ("credential_reach: the decision deadline passed before this command was "
+                       "checked for credential or model use, so the maintainer decides.")
     return "allow", ""
 
 
@@ -395,6 +511,134 @@ def selftest():
     failures += (not ok)
     print(f"  {'PASS' if ok else 'FAIL'} caller    the same command is denied for a subagent "
           "and allowed on the main thread")
+    # A deadline the hook has already spent stops the scan at its first budget check. The
+    # command guards may have finished and allowed, so a stopped scan is not unreadable
+    # source: the main thread asks, a subagent is denied, and Codex's main thread, which
+    # this rule never blocks, stays allowed.
+    spent = time.monotonic() - 1
+    for label, cmd, sub, runtime, want in (
+            ("a subagent's ordinary command is denied", "git status", True, "claude",
+             "deny"),
+            ("a model CLI asks on the main thread", "codex exec hi", False, "claude", "ask"),
+            ("a credential file asks on the main thread", "cat ~/.codex/auth.json",
+             False, "claude", "ask"),
+            ("a keychain read, found only by tokenizing, asks",
+             "security find-generic-password -s svc -w", False, "claude", "ask"),
+            ("a quoted model CLI, found only by tokenizing, asks", 'co""dex exec hi',
+             False, "claude", "ask"),
+            ("an ordinary command asks on the main thread", "git status", False, "claude",
+             "ask"),
+            ("Codex's main thread stays allowed", "security find-generic-password -s svc",
+             False, "codex", "allow")):
+        got, _reason = decide(cmd, subagent=sub, runtime=runtime, deadline=spent)
+        ok = got == want
+        total += 1
+        failures += (not ok)
+        print(f"  {'PASS' if ok else 'FAIL'} deadline  spent budget: {label} (got {got})")
+
+    # The heredoc scan must find what HEREDOC finds. Inputs: every fixture, each heredoc
+    # consumer with each delimiter spelling, and seeded random text built from the grammar's
+    # edge cases (`<<<`, `<<-`, quoted and prefix delimiters, newlines inside `\s*`, Unicode).
+    corpus = [cmd for _label, cmd, _caller, _runtime, _want in FIXTURES]
+    for consumer in sorted(SHELLS) + ["cat", "python3 -"]:
+        for payload in ("codex exec x", 'co""dex exec x', "security find-generic-password -w"):
+            for opener, closer in (("<<EOF", "EOF"), ("<<'EOF'", "EOF"), ('<<"EOF"', "EOF"),
+                                   ("<<-EOF", "EOF"), ("<< EOF", "EOF"), ("<<EOF", "EOF)")):
+                corpus.append(f"{consumer} {opener}\n{payload}\n{closer}\necho after")
+    pieces = ["<<", "<<-", "<<<", "-", " ", "\t", "\n", "\n", "'", '"', "EOF", "EO", "EOFX",
+              "E", "x", "_a", "1", ")", ";", "\u00e9", "\x0b", "\u2003", "bash ", "fish ",
+              "EOF\n", "\nEOF", "<<EOF\n"]
+    rng = random.Random(20261010)
+    corpus += ["".join(rng.choice(pieces) for _ in range(rng.randint(1, 40)))
+               for _ in range(3000)]
+    differing = [text for text in corpus
+                 if list(_heredocs(text)) != [(m.group("lead"), m.group("body"))
+                                              for m in HEREDOC.finditer(text)]]
+    matched = sum(1 for text in corpus if HEREDOC.search(text))
+    ok = not differing and matched > 0
+    total += 1
+    failures += (not ok)
+    print(f"  {'PASS' if ok else 'FAIL'} heredoc   the scan reproduces HEREDOC on {len(corpus)} "
+          f"inputs, {matched} with a heredoc ({len(differing)} differ)")
+
+    # HEREDOC rescans to the end of the text for every header that never closes. The scan
+    # reads each line's leading word once and never runs HEREDOC.
+    flood = "printf %s '" + "x <<TAG\n" * 2000 + "'; git status"
+    reads = []
+    original_leading = globals()["_leading_word"]
+    original_heredoc = globals()["HEREDOC"]
+
+    def counting_leading(line):
+        reads.append(line)
+        return original_leading(line)
+
+    class Forbidden:
+        def __getattr__(self, name):
+            raise AssertionError("the scan used HEREDOC")
+
+    globals()["_leading_word"] = counting_leading
+    globals()["HEREDOC"] = Forbidden()
+    try:
+        flooded = list(_heredocs(flood))
+        closed = list(_heredocs(flood + "\nTAG"))
+        scanned = _scan("bash <<'EOF'\ngh api user\nEOF", deadline=time.monotonic() + 600)
+        linear_error = ""
+    except AssertionError as exc:
+        flooded, closed, scanned, linear_error = None, None, None, str(exc)
+    finally:
+        globals()["_leading_word"] = original_leading
+        globals()["HEREDOC"] = original_heredoc
+    lines = flood.count("\n") + 1
+    ok = (not linear_error and flooded == [] and len(closed) == 1
+          and any(kind == "cred" for kind, _detail in scanned)
+          and len(reads) == lines + lines + 1 + 3)
+    total += 1
+    failures += (not ok)
+    print(f"  {'PASS' if ok else 'FAIL'} heredoc   2000 unclosed headers: each line's leading "
+          f"word read once, and the scan finds a heredoc without HEREDOC ({len(reads)} reads "
+          f"for {lines} + {lines + 1} + 3 lines){'; ' + linear_error if linear_error else ''}")
+
+    # A deadline that passes inside the heredoc scan ends it with the exhausted finding.
+    # These headers follow a space, so no line has a leading word and only the per-header
+    # deadline check can stop the scan.
+    unclosed = "printf %s '" + " <<TAG\n" * 2000 + "'; git status"
+    ticks = iter(range(10 ** 6))
+    original_time = globals()["time"]
+
+    class SteppedClock:
+        @staticmethod
+        def monotonic():
+            return next(ticks)
+
+    split_calls = []
+    original_split = globals()["_split"]
+
+    def recording_split(text, deadline=None):
+        split_calls.append(text)
+        return original_split(text, deadline)
+
+    globals()["time"] = SteppedClock
+    globals()["_split"] = recording_split
+    try:
+        stopped = _scan(unclosed, deadline=3)
+    finally:
+        globals()["time"] = original_time
+        globals()["_split"] = original_split
+    ok = [kind for kind, _detail in stopped] == ["exhausted"] and not split_calls
+    total += 1
+    failures += (not ok)
+    print(f"  {'PASS' if ok else 'FAIL'} heredoc   a deadline passing inside the heredoc scan "
+          f"ends it as exhausted before tokenizing ({[k for k, _d in stopped]}, "
+          f"{len(split_calls)} tokenizer calls)")
+    live = time.monotonic() + 600
+    unchanged = [(label, want, decide(cmd, subagent=caller == "sub", runtime=runtime,
+                                      deadline=live)[0])
+                 for label, cmd, caller, runtime, want in FIXTURES]
+    ok = unchanged == baseline
+    total += 1
+    failures += (not ok)
+    print(f"  {'PASS' if ok else 'FAIL'} deadline  a live deadline leaves every fixture verdict "
+          "unchanged")
     print(f"\n  {total} checks, {failures} failures")
     print(f"SELFTEST-SUMMARY suite=credential_reach_guard checks={total} failures={failures}")
     return 1 if failures else 0

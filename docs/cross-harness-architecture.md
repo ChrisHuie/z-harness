@@ -223,10 +223,12 @@ repository cannot prove that the jobs are required by branch protection.
 The `mutation-proof` workflow accepts pull requests, pushes to `main`, and manual dispatches,
 checks out the exact accepted head, and runs the deterministic guard-mutation plan in six
 private-tree shards every time. Its `if: always()` aggregate job
-rejects missing, duplicated, overlapping, foreign, or stale fragment IDs, recomputes the raw suite
-outcomes, schema-compares the canonical tracked receipt, and byte-compares the tracked summary. The offline gate
-validates that receipt against the current source and plan, derives the canonical summary from that
-strict receipt, and then checks the outbound include copies; it does not rerun the full mutation plan.
+rejects missing, duplicated, overlapping, foreign, or stale fragment IDs and shards measured under
+different tool versions, recomputes the raw suite outcomes, and holds that head's observation against
+the reviewed `contracts/mutation-policy.json`. The observation is reported and never committed, which
+keeps host evidence apart from the canonical source as the rest of this architecture does. The
+offline gate validates the policy against the current plan and requires every module a registered
+hook runs to be swept or listed as unswept; it does not rerun the full mutation plan.
 
 The workflow also declares an Ubuntu `portable-conformance` job. It is networked and fail-closed,
 and its lock pins the Agent Skills source archive, `skills-ref` sources and dependency-wheel closure,

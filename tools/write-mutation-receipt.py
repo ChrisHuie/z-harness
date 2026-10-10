@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Run deterministic guard mutations and build the tracked coverage receipt.
+"""Run deterministic guard mutations and enforce the reviewed mutation policy.
 
 Each mutation runs the real suite from a private on-disk tree. Shards write raw
-fragments; aggregation reconstructs the exact plan, rejects missing or overlapping IDs,
-and reduces platform-specific counts to the stable fact the receipt claims: whether the
-shipped gate catches that mutation. Receipt changes require an explicit acceptance flag.
+fragments; aggregation reconstructs the exact plan, rejects missing, overlapping or
+mixed-environment evidence, recomputes every outcome, and holds that observation of one
+head against contracts/mutation-policy.json. The observation is reported, never committed:
+only the policy is a reviewed artifact.
 """
 from __future__ import annotations
 
@@ -20,13 +21,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import traceback
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
-RECEIPT = ROOT / "contracts/goldens/mutation-receipt.json"
-SUMMARY = ROOT / "contracts/goldens/mutation-summary.md"
-GREP = "hooks/guards/git_grep_engine_guard.py"
+GREP ="hooks/guards/git_grep_engine_guard.py"
 ZSH = "hooks/guards/zsh_rev_modifier_guard.py"
 BASH = "hooks/bash_command_guard.py"
 STOP = "hooks/announced_work_guard.py"
@@ -36,9 +36,8 @@ OWNERSHIP = "tools/repository_ownership.py"
 # ownership use focused site mutations so the sweep does not grade their fixture vocabularies.
 GUARDS = (GREP, ZSH, BASH, STOP, OWNERSHIP)
 COLLECTION_GUARDS = (GREP, ZSH, BASH)
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 GENERATOR = "tools/write-mutation-receipt.py"
-NOTE = ("which guard mutations the shipped suites catch; each result's reason is an observation from the host that generated it, not a cross-platform fact")
 OUTCOMES = {"caught", "survived"}
 # The reason a kill was scored, recorded per result because the outcome alone cannot be
 # graded. ``result_kill`` scores a kill when the recorded check count moves, and a guard
@@ -48,31 +47,25 @@ OUTCOMES = {"caught", "survived"}
 # zero assertions failing, while the deletion moved real verdicts from deny to ask. Dropping
 # the reason made a predetermined kill and a detection read identically in the artifact.
 UNASSERTED_KILL_REASON = "exact-check-count"
-UNASSERTED_KILL_CEILING = 1
 KILL_REASONS = frozenset({
     "suite-failure", "selector-failure", UNASSERTED_KILL_REASON, "survived",
     "timeout",
 })
-# Fields whose value is an observation of the host that produced it rather than a fact about
-# the guards. Whether an assertion fires can differ between environments -- deleting "W" from
-# MOD_UNMODELLED reddens a probe on a zsh that consumes that letter as a modifier and only
-# moves the recorded check count on a zsh that does not -- so anything derived from them is
-# host-specific. The receipt and its summary are compared byte for byte between the host that
-# writes them and the CI runner that re-measures, so NOTHING either artifact is compared on
-# may be derived from these. They are recorded as evidence and projected out before any
-# comparison; `platform_stable` is the single place that removes them, and `summary_text`
-# consumes only its output so a new summary field cannot reintroduce one.
-HOST_OBSERVED_RESULT_FIELDS = frozenset({"reason"})
-HOST_OBSERVED_RECEIPT_KEYS = frozenset({"unasserted_kills"})
-RECEIPT_KEYS = (
-    "schema_version", "generated_by", "note", "generator_sha256",
-    "source_digests", "plan_sha256", "baseline", "sweep_exclusions",
-    "results", "survivors", "unasserted_kills", "caught", "total",
-)
 FRAGMENT_KEYS = (
     "schema_version", "kind", "head_sha", "generator_sha256", "source_digests",
-    "plan_sha256", "shard", "baseline", "results",
+    "plan_sha256", "environment", "shard", "baseline", "results",
 )
+# The tools whose behaviour the suites probe directly. Shards measured under different
+# versions of any of these did not measure the same thing, so their union is not one
+# observation. The runner image is recorded for attribution only: two images can carry the
+# same tools, and the tools are what the suites see.
+ENVIRONMENT_KEYS = ("python", "zsh", "git", "platform", "image")
+COMPARED_ENVIRONMENT_KEYS = ("python", "zsh", "git", "platform")
+# A failing suite's names are kept so a kill can be attributed from the artifact alone. A
+# kill recorded only as a count of failures could not say which check fired, and a check
+# that fires for a reason unrelated to the mutation reads as coverage.
+FAILED_CHECK_LIMIT = 20
+FAILED_CHECK_CHARS = 200
 
 
 def qname(module: str, name: str) -> str:
@@ -2541,6 +2534,13 @@ def run_suite(tree: Path, relative: str, timeout: int = 240,
             "receipt_count": len(matches),
             "stderr_tail": "process exit and receipt failures disagree",
         }
+    failed_checks = failed_check_names(done.stdout)
+    if len(failed_checks) != min(failures, FAILED_CHECK_LIMIT):
+        return {
+            "status": "invalid-receipt", "returncode": done.returncode,
+            "receipt_count": len(matches),
+            "stderr_tail": "failing-check lines and receipt failures disagree",
+        }
     selected = {}
     for selector in selectors:
         pattern = re.compile(
@@ -2558,10 +2558,94 @@ def run_suite(tree: Path, relative: str, timeout: int = 240,
         "status": "completed", "returncode": done.returncode,
         "checks": checks,
         "failures": failures,
+        "failed_checks": failed_checks,
     }
     if selectors:
         result["selectors"] = selected
     return result
+
+
+def failed_check_names(stdout: str) -> list[str]:
+    """The suite's own FAIL lines, bounded, so a kill names the check that fired."""
+    names = []
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("FAIL"):
+            names.append(stripped[:FAILED_CHECK_CHARS])
+            if len(names) == FAILED_CHECK_LIMIT:
+                break
+    return names
+
+
+def environment_fingerprint(runner=None, environ=None) -> dict:
+    """The tool versions a shard measured under, plus the image for attribution."""
+    runner = subprocess.run if runner is None else runner
+    environ = os.environ if environ is None else environ
+
+    def first_line(argv) -> str:
+        try:
+            done = runner(argv, capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return f"unavailable: {type(exc).__name__}"
+        text = (done.stdout or done.stderr or "").strip()
+        return text.splitlines()[0] if text else f"exit {done.returncode}"
+
+    gits, seen = [], set()
+    for directory in (environ.get("PATH") or "").split(os.pathsep):
+        if not directory:
+            continue
+        resolved = shutil.which("git", path=directory)
+        if not resolved:
+            continue
+        real = os.path.realpath(resolved)
+        if real not in seen:
+            seen.add(real)
+            gits.append({"path": real, "version": first_line([real, "--version"])})
+    zsh = shutil.which("zsh", path=environ.get("PATH"))
+    return {
+        "python": sys.version.split()[0],
+        "zsh": first_line([zsh, "--version"]) if zsh else "absent",
+        "git": gits,
+        "platform": f"{sys.platform}-{os.uname().machine}",
+        "image": {"os": environ.get("ImageOS", ""), "version": environ.get("ImageVersion", "")},
+    }
+
+
+def environment_error(environment: object) -> str:
+    if not isinstance(environment, dict) or tuple(environment) != ENVIRONMENT_KEYS:
+        return f"environment fields are not exactly {list(ENVIRONMENT_KEYS)}"
+    if any(not isinstance(environment[key], str) or not environment[key]
+           for key in ("python", "zsh", "platform")):
+        return "environment python, zsh and platform are not non-empty strings"
+    gits = environment["git"]
+    if (not isinstance(gits, list) or not gits
+            or any(not isinstance(item, dict) or tuple(item) != ("path", "version")
+                   or any(not isinstance(item[key], str) or not item[key]
+                          for key in ("path", "version"))
+                   for item in gits)):
+        return "environment git is not a non-empty list of path and version"
+    image = environment["image"]
+    if (not isinstance(image, dict) or tuple(image) != ("os", "version")
+            or any(not isinstance(image[key], str) for key in ("os", "version"))):
+        return "environment image is not exactly os and version strings"
+    return ""
+
+
+def compared_environment(environment: dict) -> dict:
+    return {key: environment[key] for key in COMPARED_ENVIRONMENT_KEYS}
+
+
+def environment_uniformity_error(fragments: list[dict], environment: dict) -> str:
+    """Shards, and the host aggregating them, must have measured under the same tools."""
+    measured = {
+        json.dumps(compared_environment(fragment["environment"]), sort_keys=True)
+        for fragment in fragments
+    }
+    if len(measured) != 1:
+        return "fragments were measured under different tool versions"
+    if compared_environment(environment) != compared_environment(fragments[0]["environment"]):
+        return "the aggregating host's tool versions differ from the shards'"
+    return ""
 
 
 def baseline_results(tree: Path, plan=None) -> dict[str, dict]:
@@ -2710,6 +2794,7 @@ def fragment_payload(index: int, count: int, expected_head: str | None) -> dict:
     plan_hash = digest(plan)
     generator_hash = file_sha256(ROOT / GENERATOR)
     guard_hashes = source_digests()
+    environment = environment_fingerprint()
     with tempfile.TemporaryDirectory(prefix="z-harness-mutations-") as raw:
         tree = Path(raw) / "tree"
         # ``.claude`` holds locally-created worktrees whose basename is ``worktrees``, so the
@@ -2734,6 +2819,8 @@ def fragment_payload(index: int, count: int, expected_head: str | None) -> dict:
     if (file_sha256(ROOT / GENERATOR) != generator_hash
             or source_digests() != guard_hashes):
         raise ValueError("mutation sources changed while the shard was running")
+    if compared_environment(environment_fingerprint()) != compared_environment(environment):
+        raise ValueError("the measured tools changed while the shard was running")
     return {
         "schema_version": SCHEMA_VERSION,
         "kind": "mutation-fragment",
@@ -2741,6 +2828,7 @@ def fragment_payload(index: int, count: int, expected_head: str | None) -> dict:
         "generator_sha256": generator_hash,
         "source_digests": guard_hashes,
         "plan_sha256": plan_hash,
+        "environment": environment,
         "shard": {"index": index, "count": count},
         "baseline": baseline,
         "results": results,
@@ -2754,6 +2842,9 @@ def validate_fragment(fragment: dict) -> str:
         return "fragment schema version differs"
     if fragment.get("kind") != "mutation-fragment":
         return "fragment kind differs"
+    environment_problem = environment_error(fragment.get("environment"))
+    if environment_problem:
+        return f"fragment {environment_problem}"
     if not isinstance(fragment.get("results"), dict):
         return "fragment results are not an object"
     shard = fragment.get("shard")
@@ -2779,7 +2870,7 @@ def suite_result_error(result: object, *, baseline: bool = False) -> str:
         return "suite result is not a typed object"
     status = result["status"]
     expected = {
-        "completed": {"status", "returncode", "checks", "failures"},
+        "completed": {"status", "returncode", "checks", "failures", "failed_checks"},
         "timeout": {"status", "timeout_seconds"},
         "invalid-receipt": {
             "status", "returncode", "receipt_count", "stderr_tail"},
@@ -2797,6 +2888,15 @@ def suite_result_error(result: object, *, baseline: bool = False) -> str:
             return "completed suite result counters are outside their domain"
         if not exit_receipt_agree(result["returncode"], result["failures"]):
             return "completed suite exit and receipt failures disagree"
+        names = result["failed_checks"]
+        if (not isinstance(names, list) or len(names) > FAILED_CHECK_LIMIT
+                or any(not isinstance(name, str) or not name.startswith("FAIL")
+                       or len(name) > FAILED_CHECK_CHARS for name in names)):
+            return "completed suite failed-check names are malformed"
+        # Every swept suite prints one PASS or FAIL line per counted assertion, so the names
+        # a record carries and the failures its receipt counts are two reports of one fact.
+        if len(names) != min(result["failures"], FAILED_CHECK_LIMIT):
+            return "completed suite failed-check names disagree with its receipt failures"
         if baseline and (result["returncode"] != 0 or result["failures"] != 0):
             return "baseline suite result is not green"
         if "selectors" in result:
@@ -2877,7 +2977,12 @@ def shard_assignment_error(fragment: dict, plan: list[dict], shard_count: int) -
         f"missing={sorted(expected - actual)[:4]}")
 
 
-def normalized_receipt(fragments: list[dict]) -> dict:
+def observation_from_fragments(fragments: list[dict], environment: dict | None = None) -> dict:
+    """Recompute one head's complete measurement from its shards.
+
+    The result is an observation of this head on these tools, held in memory and reported.
+    It is never committed: a committed copy of a measurement can only be measured again.
+    """
     plan, exclusions = mutation_plan()
     plan_by_id = {item["id"]: item for item in plan}
     expected_ids = set(plan_by_id)
@@ -2893,6 +2998,10 @@ def normalized_receipt(fragments: list[dict]) -> dict:
         values = {json.dumps(fragment[field], sort_keys=True) for fragment in fragments}
         if len(values) != 1:
             raise ValueError(f"fragments disagree on {field}")
+    environment = environment_fingerprint() if environment is None else environment
+    uniformity_problem = environment_uniformity_error(fragments, environment)
+    if uniformity_problem:
+        raise ValueError(uniformity_problem)
     if fragments[0]["generator_sha256"] != file_sha256(ROOT / GENERATOR):
         raise ValueError("fragment generator digest is stale")
     if fragments[0]["source_digests"] != source_digests():
@@ -2936,19 +3045,20 @@ def normalized_receipt(fragments: list[dict]) -> dict:
         descriptor.pop("allowed_statuses", None)
         descriptor["outcome"] = outcome
         descriptor["reason"] = reason
+        descriptor["failed_checks"] = [
+            name for suite in (raw["owner"], raw["merged"]) if isinstance(suite, dict)
+            for name in suite.get("failed_checks", ())]
         reduced[mutation_id] = descriptor
         if outcome == "survived":
             survivors.append(mutation_id)
         elif reason == UNASSERTED_KILL_REASON:
             unasserted.append(mutation_id)
     return {
-        "schema_version": SCHEMA_VERSION,
-        "generated_by": f"{GENERATOR} --aggregate",
-        "note": NOTE,
+        "head_sha": fragments[0]["head_sha"],
+        "environment": fragments[0]["environment"],
         "generator_sha256": fragments[0]["generator_sha256"],
         "source_digests": fragments[0]["source_digests"],
         "plan_sha256": fragments[0]["plan_sha256"],
-        "baseline": {relative: "passed" for relative in GUARDS},
         "sweep_exclusions": exclusions,
         "results": reduced,
         "survivors": survivors,
@@ -2991,7 +3101,7 @@ def collection_scope_sentence(payload: dict) -> str:
                          if name not in enumerated and kinds.get(name)
                          and kinds.get(name) != {"site"})
     unmutated = sorted(name for name in swept if not kinds.get(name))
-    # A result whose module is not a swept source contradicts the receipt's own digest map.
+    # A result whose module is not a swept source contradicts the observation's digest map.
     # Say so rather than dropping it, which would hide exactly the disagreement this
     # sentence exists to prevent.
     stray = sorted(set(kinds) - swept)
@@ -3043,19 +3153,13 @@ def collection_scope_sentence(payload: dict) -> str:
 
 
 def summary_text(payload: dict) -> str:
-    # Consume only the projection. The summary is compared byte for byte against a CI
-    # re-measurement, so a field derived from a host observation would make it unequal on a
-    # host that observed differently. Reading through the projection turns that into an
-    # immediate KeyError here rather than a red aggregate job on another machine.
-    payload = platform_stable(payload)
+    """The per-collection table of one observation, with the scan set beside it."""
     # The scan set belongs with the verdict. Without it the per-symbol exclusion list at the
     # end reads as the complete inventory, when it enumerates only symbols INSIDE these
-    # sources; every other file in the repository is outside the sweep entirely, including
-    # hooks this package registers. Read from the receipt's own digest map rather than a
-    # literal, so the declaration cannot disagree with what was measured. The map is
-    # platform-stable, so the cross-host byte comparison still holds.
+    # sources; every other file in the repository is outside the sweep entirely. Read from
+    # the observation's own digest map rather than a literal, so the declaration cannot
+    # disagree with what was measured.
     lines = [
-        "<!-- generated by tools/write-mutation-receipt.py -- do not edit -->", "",
         "Swept sources: "
         + ", ".join(f"`{name}`" for name in sorted(payload["source_digests"]))
         + ". No other repository file is mutated by this sweep, so the exclusions listed "
@@ -3100,12 +3204,7 @@ def summary_text(payload: dict) -> str:
     lines += [
         "",
         f"{payload['caught']} of {payload['total']} planned mutations are caught; "
-        f"{len(payload['survivors'])} exact mutation IDs remain recorded coverage debt.",
-        "",
-        "A kill scored only because the recorded check count moved is not evidence that the "
-        "suites observe the change. That count is recorded per result and reported by the "
-        "gate rather than shown here, because whether an assertion fires can differ between "
-        "hosts and this file is compared across them.",
+        f"{len(payload['survivors'])} survive.",
         "",
     ]
     if payload["sweep_exclusions"]:
@@ -3129,21 +3228,114 @@ def load_json(path: Path) -> dict:
         path.read_text(encoding="utf-8"), object_pairs_hook=unique_object)
 
 
-def platform_stable(payload):
-    """Drop the environment-observed fields so two hosts can be compared."""
-    if not isinstance(payload, dict):
-        return payload
-    reduced = {k: v for k, v in payload.items()
-               if k not in HOST_OBSERVED_RECEIPT_KEYS}
-    results = reduced.get("results")
-    if isinstance(results, dict):
-        reduced["results"] = {
-            key: {k: v for k, v in value.items()
-                  if k not in HOST_OBSERVED_RESULT_FIELDS}
-            if isinstance(value, dict) else value
-            for key, value in results.items()
-        }
-    return reduced
+# The authored policy is the reviewed statement of which measured outcomes are acceptable.
+# It is kept apart from any measurement: a measurement is an observation of one head on one
+# host, while the policy is what a reviewer agreed to, and only the policy is committed.
+POLICY = ROOT / "contracts/mutation-policy.json"
+POLICY_KIND = "mutation-policy"
+POLICY_SCHEMA_VERSION = 1
+POLICY_KEYS = ("schema_version", "kind", "allowed_survivors", "count_only_kills",
+               "unswept_guards")
+# `debt` may survive and becomes a ratchet candidate when caught. `inert` must survive: its
+# removal cannot change any behaviour, so a kill of one is evidence the measurement itself is
+# unsound, not that coverage improved.
+POLICY_CLASSES = ("debt", "inert")
+POLICY_SURVIVOR_KEYS = ("module", "collection", "element", "class")
+POLICY_COUNT_ONLY_KEYS = ("module", "collection", "element")
+POLICY_UNSWEPT_KEYS = ("path", "reason")
+
+
+def load_policy(path: Path | None = None) -> dict:
+    return load_json(POLICY if path is None else path)
+
+
+def policy_text(policy: dict) -> str:
+    """Render the policy one entry per line, so a reviewed change reads as one line each."""
+    def entries(items) -> str:
+        if not items:
+            return "[]"
+        return ("[\n" + ",\n".join("  " + json.dumps(item, ensure_ascii=False)
+                                   for item in items) + "\n ]")
+
+    return (
+        "{\n"
+        f' "schema_version": {json.dumps(policy["schema_version"])},\n'
+        f' "kind": {json.dumps(policy["kind"])},\n'
+        f' "allowed_survivors": {entries(policy["allowed_survivors"])},\n'
+        f' "count_only_kills": {entries(policy["count_only_kills"])},\n'
+        f' "unswept_guards": {entries(policy["unswept_guards"])}\n'
+        "}\n")
+
+
+def policy_error(policy: object, plan: list[dict], root: Path | None = None) -> str:
+    """Validate the authored policy against the plan it governs.
+
+    Every survivor or count-only entry must name exactly one planned element deletion. A
+    site or a declared addition cannot be listed at all: those are written to be caught, so
+    their survival is never acceptable debt. An unswept entry is refused only for a module
+    the plan mutates. GUARDS also lists modules for their digests and baselines, and
+    membership there mutates nothing.
+    """
+    root = ROOT if root is None else root
+    targeted = {item["module"] for item in plan}
+    if not isinstance(policy, dict) or tuple(policy) != POLICY_KEYS:
+        return f"policy fields are not exactly {list(POLICY_KEYS)} in that order"
+    if policy["schema_version"] != POLICY_SCHEMA_VERSION:
+        return f"policy schema_version is not {POLICY_SCHEMA_VERSION}"
+    if policy["kind"] != POLICY_KIND:
+        return f"policy kind is not {POLICY_KIND!r}"
+    elements = {
+        (item["module"], item["name"], item["element"])
+        for item in plan if item.get("kind") == "set-element"
+    }
+    listed = {}
+    for section, keys in (("allowed_survivors", POLICY_SURVIVOR_KEYS),
+                          ("count_only_kills", POLICY_COUNT_ONLY_KEYS)):
+        items = policy[section]
+        if not isinstance(items, list):
+            return f"{section} is not a list"
+        identities = []
+        for item in items:
+            if (not isinstance(item, dict) or tuple(item) != keys
+                    or any(not isinstance(item[key], str) or not item[key] for key in keys)):
+                return (f"{section} entry {item!r} does not carry exactly {list(keys)} "
+                        "as non-empty strings")
+            identity = (item["module"], item["collection"], item["element"])
+            if identity not in elements:
+                return f"{section} entry {identity} names no planned element deletion"
+            if section == "allowed_survivors" and item["class"] not in POLICY_CLASSES:
+                return f"{section} entry {identity} has unknown class {item['class']!r}"
+            identities.append(identity)
+        if identities != sorted(identities):
+            return f"{section} is not sorted by module, collection and element"
+        if len(identities) != len(set(identities)):
+            return f"{section} lists an element more than once"
+        listed[section] = set(identities)
+    # Each element carries one reviewed expectation. Listed in both sections, it may survive
+    # or be killed by arithmetic alone, and neither outcome would be reported.
+    both = sorted(listed["allowed_survivors"] & listed["count_only_kills"])
+    if both:
+        return f"{both[0]} is listed both as an allowed survivor and as a count-only kill"
+    unswept = policy["unswept_guards"]
+    if not isinstance(unswept, list):
+        return "unswept_guards is not a list"
+    paths = []
+    for item in unswept:
+        if (not isinstance(item, dict) or tuple(item) != POLICY_UNSWEPT_KEYS
+                or any(not isinstance(item[key], str) or not item[key].strip()
+                       for key in POLICY_UNSWEPT_KEYS)):
+            return (f"unswept_guards entry {item!r} does not carry exactly "
+                    f"{list(POLICY_UNSWEPT_KEYS)} as non-empty strings")
+        if item["path"] in targeted:
+            return f"unswept_guards names {item['path']}, which the mutation plan targets"
+        if not (root / item["path"]).is_file():
+            return f"unswept_guards names {item['path']}, which is not a file"
+        paths.append(item["path"])
+    if paths != sorted(paths):
+        return "unswept_guards is not sorted by path"
+    if len(paths) != len(set(paths)):
+        return "unswept_guards lists a path more than once"
+    return ""
 
 
 def result_reason_error(result: object, descriptor: dict) -> str:
@@ -3168,87 +3360,176 @@ def result_reason_error(result: object, descriptor: dict) -> str:
     return ""
 
 
-def fresh_observation_error(payload: dict, plan=None) -> str:
-    """Validate host-observed kill evidence before projecting it away."""
-    if not isinstance(payload, dict):
-        return "fresh mutation receipt root is not an object"
-    results = payload.get("results")
-    if not isinstance(results, dict):
-        return "fresh mutation results are not an object"
-    if plan is None:
-        try:
-            plan, _exclusions = mutation_plan()
-        except (OSError, ValueError) as exc:
-            return f"cannot bind fresh reasons to the mutation plan: {exc}"
+def observation_error(observation: dict, plan: list[dict]) -> str:
+    """Every recomputed outcome uses a kill mechanism its descriptor can produce."""
+    if not isinstance(observation, dict) or not isinstance(observation.get("results"), dict):
+        return "mutation observation results are not an object"
+    results = observation["results"]
     plan_by_id = {item["id"]: item for item in plan}
     if set(results) != set(plan_by_id):
-        return "fresh reason inventory differs from the mutation plan"
+        return "observed result inventory differs from the mutation plan"
     for mutation_id in sorted(results):
         problem = result_reason_error(results[mutation_id], plan_by_id[mutation_id])
         if problem:
-            return f"fresh result {mutation_id}: {problem}"
+            return f"observed result {mutation_id}: {problem}"
     observed = sorted(
         mutation_id for mutation_id, result in results.items()
-        if isinstance(result, dict)
-        and result.get("outcome") == "caught"
-        and result.get("reason") == UNASSERTED_KILL_REASON
-    )
-    if payload.get("unasserted_kills") != observed:
-        return "fresh unasserted-kill IDs are not exactly derived from results"
-    if len(observed) > UNASSERTED_KILL_CEILING:
-        return (
-            f"fresh unasserted kills {len(observed)} exceed ceiling "
-            f"{UNASSERTED_KILL_CEILING}")
+        if result.get("outcome") == "caught"
+        and result.get("reason") == UNASSERTED_KILL_REASON)
+    if observation.get("unasserted_kills") != observed:
+        return "count-only kill IDs are not exactly derived from results"
     return ""
 
 
-def aggregate(paths: list[Path], accept: bool) -> int:
-    payload = normalized_receipt([load_json(path) for path in paths])
+EXIT_CONFORMS, EXIT_VIOLATION, EXIT_INSTRUMENT = 0, 1, 2
+VERDICT_WORDS = {
+    EXIT_CONFORMS: "conforms",
+    EXIT_VIOLATION: "violation",
+    EXIT_INSTRUMENT: "instrument-fault",
+}
+
+
+def mutation_label(result: dict) -> str:
+    module = Path(result["module"]).name
+    if result["kind"] == "site":
+        return f"{module} site '{result['label']}'"
+    verb = "adding" if result["kind"] == "set-addition" else "removing"
+    return f"{module} {result['name']}: {verb} {result['element']!r}"
+
+
+def policy_verdict(observation: dict, policy: dict) -> dict:
+    """Hold one observation against the reviewed policy.
+
+    A violation is a coverage change the policy does not allow. An instrument fault means
+    the measurement itself cannot be trusted, so it outranks every violation it reports:
+    an inert entry has no behaviour to lose, and only an unsound oracle can kill it.
+    """
+    results = observation["results"]
+    by_symbol = {
+        (result["module"], result["name"], result["element"]): result
+        for result in results.values() if result["kind"] == "set-element"
+    }
+    allowed = {
+        (entry["module"], entry["collection"], entry["element"]): entry["class"]
+        for entry in policy["allowed_survivors"]
+    }
+    count_only = {
+        (entry["module"], entry["collection"], entry["element"])
+        for entry in policy["count_only_kills"]
+    }
+    violations, faults, ratchet = [], [], []
+    for mutation_id in observation["survivors"]:
+        result = results[mutation_id]
+        if result["kind"] != "set-element":
+            violations.append(f"{result['kind']} survived: {mutation_label(result)}")
+        elif (result["module"], result["name"], result["element"]) not in allowed:
+            violations.append(f"survivor not in the policy: {mutation_label(result)}")
+    for symbol, policy_class in sorted(allowed.items()):
+        result = by_symbol[symbol]
+        if result["outcome"] != "caught":
+            continue
+        # A kill scored by check count alone asserted nothing, so it retires no debt; the
+        # count-only rule below reports it instead.
+        if policy_class == "debt" and result["reason"] == UNASSERTED_KILL_REASON:
+            continue
+        fired = "; ".join(result["failed_checks"][:3]) or "no failing check recorded"
+        line = f"{mutation_label(result)} caught by {result['reason']} ({fired})"
+        (faults if policy_class == "inert" else ratchet).append(line)
+    observed_count_only = set()
+    for mutation_id in observation["unasserted_kills"]:
+        result = results[mutation_id]
+        symbol = (result["module"], result.get("name"), result.get("element"))
+        observed_count_only.add(symbol)
+        if result["kind"] != "set-element" or symbol not in count_only:
+            violations.append(
+                f"kill scored by check count alone, not in the policy: "
+                f"{mutation_label(result)}")
+    unobserved = [
+        mutation_label(by_symbol[symbol])
+        for symbol in sorted(count_only - observed_count_only)
+    ]
+    code = (EXIT_INSTRUMENT if faults
+            else EXIT_VIOLATION if violations else EXIT_CONFORMS)
+    return {"code": code, "violations": violations, "faults": faults,
+            "ratchet_candidates": ratchet, "unobserved_count_only": unobserved}
+
+
+def report_text(observation: dict, policy: dict, verdict: dict) -> str:
+    """The run's human-readable record: the verdict first, then what it rests on."""
+    results = list(observation["results"].values())
+    enumerated = [result for result in results if result["kind"] == "set-element"]
+    declared = [result for result in results if result["kind"] != "set-element"]
+
+    def caught(items) -> int:
+        return sum(1 for result in items if result["outcome"] == "caught")
+
+    debt = sum(1 for entry in policy["allowed_survivors"] if entry["class"] == "debt")
+    inert = len(policy["allowed_survivors"]) - debt
+    environment = observation["environment"]
+    tools = [f"python {environment['python']}", environment["zsh"]]
+    tools += [f"{item['version']} at {item['path']}" for item in environment["git"]]
+    tools.append(environment["platform"])
+    if environment["image"]["version"]:
+        tools.append(f"image {environment['image']['os']} {environment['image']['version']}")
+    headline = {
+        EXIT_CONFORMS: "conforms to the reviewed policy",
+        EXIT_VIOLATION: "VIOLATES the reviewed policy",
+        EXIT_INSTRUMENT: "INSTRUMENT FAULT: this measurement cannot be trusted",
+    }[verdict["code"]]
+    lines = [
+        f"## Mutation proof at {observation['head_sha'][:12]}", "",
+        f"**Verdict:** {headline}", "",
+        f"- Enumerated element deletions, not chosen by an author: {len(enumerated)} "
+        f"planned, {caught(enumerated)} caught, {len(enumerated) - caught(enumerated)} "
+        "survive",
+        f"- Declared sites and additions, written to be caught: {len(declared)} planned, "
+        f"{caught(declared)} caught",
+        f"- Policy: {len(policy['allowed_survivors'])} allowed survivors ({debt} debt, "
+        f"{inert} inert); {len(policy['count_only_kills'])} count-only kill(s) allowed; "
+        f"{len(policy['unswept_guards'])} unswept guard(s)",
+        "- Tools: " + "; ".join(tools),
+    ]
+    for title, key in (
+            ("Violations", "violations"),
+            ("Instrument faults", "faults"),
+            ("Ratchet candidates: debt entries now caught, removable from the policy",
+             "ratchet_candidates"),
+            ("Count-only allowances not observed in this run", "unobserved_count_only")):
+        if verdict[key]:
+            lines += ["", f"### {title}", ""] + [f"- {item}" for item in verdict[key]]
+    if policy["unswept_guards"]:
+        lines += ["", "### Unswept guards", ""] + [
+            f"- `{entry['path']}`: {entry['reason']}" for entry in policy["unswept_guards"]]
+    lines += ["", summary_text(observation)]
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def aggregate(paths: list[Path]) -> int:
+    observation = observation_from_fragments([load_json(path) for path in paths])
     plan, _exclusions = mutation_plan()
-    observation_problem = fresh_observation_error(payload, plan)
-    if observation_problem:
-        print(f"refusing mutation receipt: {observation_problem}", file=sys.stderr)
-        return 2
-    summary = summary_text(payload)
-    existing = load_json(RECEIPT) if RECEIPT.is_file() else None
-    existing_summary = SUMMARY.read_text(encoding="utf-8") if SUMMARY.is_file() else None
-    if existing is not None and not accept:
-        existing_problem = fresh_observation_error(existing, plan)
-        if existing_problem:
-            print(
-                f"refusing tracked mutation receipt: {existing_problem}",
-                file=sys.stderr,
-            )
-            return 2
-    # `reason` answers whether an assertion fired, which legitimately differs by platform:
-    # deleting "W" from MOD_UNMODELLED reddens a probe on a zsh that consumes that letter as
-    # a modifier and only moves the check count on a zsh that does not. The outcome is the
-    # cross-platform fact this receipt claims, so the comparison is made on the projection
-    # that excludes reason and its derived tally; both remain recorded as an observation from
-    # the host that generated them, and ci-gate still validates their vocabulary and their
-    # consistency with the outcome.
-    if not accept and (
-            platform_stable(existing) != platform_stable(payload)
-            or existing_summary != summary):
-        before = len(existing.get("results", {})) if isinstance(existing, dict) else 0
-        print(
-            f"refusing mutation receipt change ({before} -> {payload['total']} results; "
-            f"{len(payload['survivors'])} survivors); review fragments and rerun with "
-            "--accept-receipt-changes",
-            file=sys.stderr)
-        return 2
-    if accept:
-        RECEIPT.write_text(json.dumps(payload, indent=1) + "\n", encoding="utf-8")
-        SUMMARY.write_text(summary, encoding="utf-8")
-        print(
-            f"wrote {RECEIPT.relative_to(ROOT)} and {SUMMARY.relative_to(ROOT)}: "
-            f"{payload['caught']}/{payload['total']} caught, "
-            f"{len(payload['survivors'])} survivors")
-    else:
-        print(
-            f"verified {payload['caught']}/{payload['total']} caught mutation outcomes "
-            "against the tracked receipt")
-    return 0
+    problem = observation_error(observation, plan)
+    if problem:
+        print(f"mutation proof instrument fault: {problem}", file=sys.stderr)
+        return EXIT_INSTRUMENT
+    policy = load_policy()
+    policy_problem = policy_error(policy, plan)
+    if policy_problem:
+        print(f"mutation policy cannot be applied: {policy_problem}", file=sys.stderr)
+        return EXIT_INSTRUMENT
+    verdict = policy_verdict(observation, policy)
+    report = report_text(observation, policy, verdict)
+    print(report)
+    step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if step_summary:
+        with open(step_summary, "a", encoding="utf-8") as handle:
+            handle.write(report)
+    print(
+        f"MUTATION-PROOF-SUMMARY verdict={VERDICT_WORDS[verdict['code']]} "
+        f"caught={observation['caught']} total={observation['total']} "
+        f"survivors={len(observation['survivors'])} "
+        f"violations={len(verdict['violations'])} faults={len(verdict['faults'])} "
+        f"ratchet={len(verdict['ratchet_candidates'])}")
+    return verdict["code"]
 
 
 def selftest() -> int:
@@ -3256,12 +3537,14 @@ def selftest() -> int:
 
     A generator that UNDER-generates is already caught: fewer descriptors change
     ``plan_sha256``, which the gate recomputes from source and compares. A generator that
-    mis-scores a kill is caught by nothing -- every shard would agree, the receipt would be
-    internally consistent, and the CI re-measurement recomputes from the receipt's own
-    contents, so it reproduces the same wrong verdict. These checks are that missing
-    control, so they run no suite, spawn no process and open no socket: suite results are
-    hand-built typed dictionaries and ``mutation_plan`` runs against a fixture guard in a
-    temporary directory with the module's collection tables swapped out.
+    mis-scores a kill is caught by nothing -- every shard would agree, the observation
+    would be internally consistent, and the policy would be applied to the same wrong
+    verdict. These checks are that missing
+    control, so they run no swept suite and open no socket: suite results are hand-built
+    typed dictionaries and ``mutation_plan`` runs against a fixture guard in a temporary
+    directory with the module's collection tables swapped out. The only processes spawned
+    are three fixture scripts that drive ``run_suite``, the boundary where a suite's output
+    becomes a recorded result.
     """
     checks = failures = 0
 
@@ -3289,23 +3572,28 @@ def selftest() -> int:
                f"returned {returned!r} instead of {exception.__name__}({message!r})")
 
     # ---- result_kill: the decision the sweep cannot grade for itself ------------------
-    baseline = {"status": "completed", "returncode": 0, "checks": 40, "failures": 0}
+    baseline = {"status": "completed", "returncode": 0, "checks": 40, "failures": 0,
+                "failed_checks": []}
 
     def completed(returncode=0, checks=40, failures=0) -> dict:
         return {"status": "completed", "returncode": returncode,
-                "checks": checks, "failures": failures}
+                "checks": checks, "failures": failures,
+                "failed_checks": [f"FAIL planted {index}"
+                                  for index in range(min(failures, FAILED_CHECK_LIMIT))]}
 
     equal("a green run at the baseline check count survives",
           result_kill(completed(), baseline), (False, "survived"))
     raises("exit one with zero receipt failures is not a measurement",
            ValueError,
            "mutation produced an invalid measurement: "
-           "{'status': 'completed', 'returncode': 1, 'checks': 40, 'failures': 0}",
+           "{'status': 'completed', 'returncode': 1, 'checks': 40, 'failures': 0, "
+           "'failed_checks': []}",
            lambda: result_kill(completed(returncode=1), baseline))
     raises("receipt failures with a zero exit are not a measurement",
            ValueError,
            "mutation produced an invalid measurement: "
-           "{'status': 'completed', 'returncode': 0, 'checks': 40, 'failures': 3}",
+           "{'status': 'completed', 'returncode': 0, 'checks': 40, 'failures': 3, "
+           "'failed_checks': ['FAIL planted 0', 'FAIL planted 1', 'FAIL planted 2']}",
            lambda: result_kill(completed(failures=3), baseline))
     equal("consistent red exit and receipt channels are a suite failure",
           result_kill(completed(returncode=1, failures=3), baseline),
@@ -3329,7 +3617,7 @@ def selftest() -> int:
           result_kill(completed(checks=41), baseline), (True, "exact-check-count"))
     equal("a check count that fell with nothing failing is an unasserted kill",
           result_kill(completed(checks=39), baseline), (True, "exact-check-count"))
-    # The distinction the receipt exists to make: a detection must not be filed as
+    # The distinction the reason field exists to make: a detection must not be filed as
     # arithmetic when the count also moved, or a real kill reads as a predetermined one.
     equal("a failed assertion outranks a moved check count",
           result_kill(completed(returncode=1, failures=1, checks=39), baseline),
@@ -3453,38 +3741,399 @@ def selftest() -> int:
     }
     forged_reason_payload = json.loads(json.dumps(truthful_reason_payload))
     forged_reason_payload["results"]["selectorless"]["reason"] = "selector-failure"
-    equal("fresh observation validation accepts reachable kill mechanisms",
-          fresh_observation_error(truthful_reason_payload, reason_plan), "")
-    record("fresh observation validation rejects a structurally impossible kill mechanism",
-           "unreachable" in fresh_observation_error(forged_reason_payload, reason_plan))
+    equal("observation validation accepts reachable kill mechanisms",
+          observation_error(truthful_reason_payload, reason_plan), "")
+    record("observation validation rejects a structurally impossible kill mechanism",
+           "unreachable" in observation_error(forged_reason_payload, reason_plan))
+    equal("observation validation rejects a count-only tally that is not derived",
+          observation_error(dict(truthful_reason_payload, unasserted_kills=["selected"]),
+                            reason_plan),
+          "count-only kill IDs are not exactly derived from results")
 
-    with tempfile.TemporaryDirectory(prefix="z-harness-reason-selftest-") as raw:
-        reason_root = Path(raw)
-        tracked_receipt = reason_root / "receipt.json"
-        tracked_summary = reason_root / "summary.md"
-        fragment = reason_root / "fragment.json"
-        tracked_receipt.write_text(
-            json.dumps(forged_reason_payload), encoding="utf-8")
-        tracked_summary.write_text("stable\n", encoding="utf-8")
-        fragment.write_text("{}", encoding="utf-8")
+    # ---- policy_verdict: one observation held against the reviewed policy -------------
+    def observed(kind, outcome, reason, *, name="T", element="", label="", checks=()):
+        return {"kind": kind, "module": "m.py", "name": name, "element": element,
+                "label": label, "outcome": outcome, "reason": reason,
+                "failed_checks": list(checks)}
+
+    def observation_with(**changes):
+        results = {
+            "debt": observed("set-element", "survived", "survived", element="a"),
+            "covered": observed("set-element", "caught", "suite-failure", element="b",
+                                checks=("FAIL covered",)),
+            "inert": observed("set-element", "survived", "survived", element="c"),
+            "site": observed("site", "caught", "selector-failure", label="site one"),
+            "pin": observed("set-addition", "caught", "suite-failure", element="z"),
+        }
+        results.update(changes)
+        survivors = sorted(key for key, value in results.items()
+                           if value["outcome"] == "survived")
+        unasserted = sorted(key for key, value in results.items()
+                            if value["reason"] == UNASSERTED_KILL_REASON)
+        return {"head_sha": "f" * 40, "results": results, "survivors": survivors,
+                "unasserted_kills": unasserted, "caught": len(results) - len(survivors),
+                "total": len(results)}
+
+    def symbol(element, policy_class=None):
+        entry = {"module": "m.py", "collection": "T", "element": element}
+        if policy_class:
+            entry["class"] = policy_class
+        return entry
+
+    verdict_policy = {"schema_version": POLICY_SCHEMA_VERSION, "kind": POLICY_KIND,
+                      "allowed_survivors": [symbol("a", "debt"), symbol("c", "inert")],
+                      "count_only_kills": [], "unswept_guards": []}
+    conforming = policy_verdict(observation_with(), verdict_policy)
+    record("an observation inside the policy conforms with nothing to report",
+           conforming["code"] == EXIT_CONFORMS and not any(
+               conforming[key] for key in ("violations", "faults", "ratchet_candidates",
+                                           "unobserved_count_only")), str(conforming))
+    unlisted = policy_verdict(observation_with(
+        covered=observed("set-element", "survived", "survived", element="b")),
+        verdict_policy)
+    record("a survivor the policy does not list is a violation",
+           unlisted["code"] == EXIT_VIOLATION
+           and unlisted["violations"] == ["survivor not in the policy: m.py T: removing 'b'"],
+           str(unlisted))
+    site_survivor = policy_verdict(observation_with(
+        site=observed("site", "survived", "survived", label="site one")), verdict_policy)
+    record("a surviving site is a violation no policy entry can excuse",
+           site_survivor["code"] == EXIT_VIOLATION
+           and site_survivor["violations"] == ["site survived: m.py site 'site one'"],
+           str(site_survivor))
+    pin_survivor = policy_verdict(observation_with(
+        pin=observed("set-addition", "survived", "survived", element="z")), verdict_policy)
+    record("a surviving declared addition is a violation",
+           pin_survivor["code"] == EXIT_VIOLATION
+           and pin_survivor["violations"] == ["set-addition survived: m.py T: adding 'z'"],
+           str(pin_survivor))
+    ratchet = policy_verdict(observation_with(
+        debt=observed("set-element", "caught", "suite-failure", element="a",
+                      checks=("FAIL now covered",))), verdict_policy)
+    record("a debt entry now caught is a ratchet candidate, not a failure",
+           ratchet["code"] == EXIT_CONFORMS and ratchet["ratchet_candidates"] == [
+               "m.py T: removing 'a' caught by suite-failure (FAIL now covered)"],
+           str(ratchet))
+    fault = policy_verdict(observation_with(
+        inert=observed("set-element", "caught", "suite-failure", element="c",
+                       checks=("FAIL timing",))), verdict_policy)
+    record("an inert entry caught is an instrument fault naming the check that fired",
+           fault["code"] == EXIT_INSTRUMENT and fault["faults"] == [
+               "m.py T: removing 'c' caught by suite-failure (FAIL timing)"], str(fault))
+    fault_and_violation = policy_verdict(observation_with(
+        inert=observed("set-element", "caught", "suite-failure", element="c"),
+        covered=observed("set-element", "survived", "survived", element="b")),
+        verdict_policy)
+    record("an instrument fault outranks a violation measured by the same run",
+           fault_and_violation["code"] == EXIT_INSTRUMENT
+           and fault_and_violation["violations"], str(fault_and_violation))
+    count_only = observation_with(
+        covered=observed("set-element", "caught", UNASSERTED_KILL_REASON, element="b"))
+    record("a count-only kill the policy does not allow is a violation",
+           policy_verdict(count_only, verdict_policy)["violations"] == [
+               "kill scored by check count alone, not in the policy: m.py T: removing 'b'"])
+    count_only_debt = policy_verdict(observation_with(
+        debt=observed("set-element", "caught", UNASSERTED_KILL_REASON, element="a")),
+        verdict_policy)
+    record("a debt entry killed by check count alone is a violation, not a ratchet candidate",
+           count_only_debt["code"] == EXIT_VIOLATION
+           and count_only_debt["ratchet_candidates"] == []
+           and count_only_debt["violations"] == [
+               "kill scored by check count alone, not in the policy: m.py T: removing 'a'"],
+           str(count_only_debt))
+    allowing = dict(verdict_policy, count_only_kills=[symbol("b")])
+    equal("a count-only kill the policy names conforms",
+          policy_verdict(count_only, allowing)["code"], EXIT_CONFORMS)
+    equal("a named count-only kill that asserted this run is reported, not failed",
+          policy_verdict(observation_with(), allowing)["unobserved_count_only"],
+          ["m.py T: removing 'b'"])
+
+    # ---- aggregate: the job's exit code is the verdict --------------------------------
+    verdict_plan = [
+        {"id": key, "kind": value["kind"], "module": "m.py", "name": value["name"],
+         "element": value["element"], "label": value["label"],
+         "selectors": ["sel"] if value["kind"] == "site" else [],
+         "allowed_statuses": []}
+        for key, value in observation_with()["results"].items()]
+    verdict_environment = {"python": "3.13.14", "zsh": "zsh 5.9", "git": [
+        {"path": "/usr/bin/git", "version": "git version 2.55.0"}],
+        "platform": "linux-x86_64", "image": {"os": "ubuntu24", "version": "1"}}
+
+    def aggregate_with(observation, policy, plan=verdict_plan):
         patched = {
-            "RECEIPT": tracked_receipt,
-            "SUMMARY": tracked_summary,
-            "mutation_plan": lambda: (reason_plan, {}),
-            "normalized_receipt": lambda _fragments: truthful_reason_payload,
-            "summary_text": lambda _payload: "stable\n",
+            "observation_from_fragments": lambda _fragments: dict(
+                observation, environment=verdict_environment, source_digests={},
+                sweep_exclusions={}),
+            "mutation_plan": lambda: (plan, {}),
+            "load_policy": lambda: policy,
+        }
+        restored = {name: globals()[name] for name in patched}
+        globals().update(patched)
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = aggregate([])
+        finally:
+            globals().update(restored)
+        return code, out.getvalue(), err.getvalue()
+
+    code, out, _err = aggregate_with(observation_with(), verdict_policy)
+    record("a conforming observation exits zero and states its verdict first",
+           code == EXIT_CONFORMS and "**Verdict:** conforms to the reviewed policy" in out
+           and "MUTATION-PROOF-SUMMARY verdict=conforms" in out, out[-400:])
+    code, out, _err = aggregate_with(observation_with(
+        covered=observed("set-element", "survived", "survived", element="b")),
+        verdict_policy)
+    record("a violation exits one and lists what the policy does not allow",
+           code == EXIT_VIOLATION and "survivor not in the policy" in out)
+    code, out, _err = aggregate_with(observation_with(
+        inert=observed("set-element", "caught", "suite-failure", element="c")),
+        verdict_policy)
+    record("an instrument fault exits two",
+           code == EXIT_INSTRUMENT and "INSTRUMENT FAULT" in out)
+    impossible = observation_with(
+        covered=observed("set-element", "caught", "selector-failure", element="b"))
+    code, _out, err = aggregate_with(impossible, verdict_policy)
+    record("an impossible kill mechanism is an instrument fault before any verdict",
+           code == EXIT_INSTRUMENT and "unreachable" in err, err)
+    code, _out, err = aggregate_with(
+        observation_with(), dict(verdict_policy, allowed_survivors=[symbol("q", "debt")]))
+    record("a policy that names no planned deletion cannot be applied",
+           code == EXIT_INSTRUMENT and "names no planned element deletion" in err, err)
+    with tempfile.TemporaryDirectory(prefix="z-harness-step-summary-") as raw:
+        step_summary = Path(raw) / "summary.md"
+        saved_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+        os.environ["GITHUB_STEP_SUMMARY"] = str(step_summary)
+        try:
+            aggregate_with(observation_with(), verdict_policy)
+        finally:
+            if saved_summary is None:
+                os.environ.pop("GITHUB_STEP_SUMMARY", None)
+            else:
+                os.environ["GITHUB_STEP_SUMMARY"] = saved_summary
+        record("the report is appended to the job summary when one is provided",
+               step_summary.is_file()
+               and "**Verdict:** conforms" in step_summary.read_text(encoding="utf-8"))
+    saved_aggregate = globals()["aggregate"]
+    globals()["aggregate"] = lambda _paths: {}["unanticipated"]
+    unanticipated = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(unanticipated):
+            code = main(["--aggregate", "fragment.json"])
+    except Exception as exc:
+        code = repr(exc)
+    finally:
+        globals()["aggregate"] = saved_aggregate
+    record("an unanticipated aggregation error exits two, never the violation code",
+           code == EXIT_INSTRUMENT
+           and "KeyError: 'unanticipated'" in unanticipated.getvalue(),
+           unanticipated.getvalue()[-300:])
+
+    # ---- observation_from_fragments: each refusal that makes the aggregate exit two ----
+    # Exit two is the only signal that a fragment set is not one complete measurement of
+    # this head, so every refusal is driven here. The live inputs -- plan, digests, checkout
+    # head and the aggregator's own baseline -- are fixtures, so no suite or process runs.
+    fragment_plan = [
+        {"id": f"m{index}", "kind": "set-element", "module": BASH, "name": "T",
+         "collection_kind": "set", "element": element}
+        for index, element in enumerate("abcd")]
+    fragment_baseline = {relative: dict(baseline) for relative in GUARDS}
+
+    def shard_result(killed):
+        return {"owner": completed(returncode=1, failures=1) if killed else completed(),
+                "merged": None, "outcome": "caught" if killed else "survived",
+                "reason": "suite-failure" if killed else "survived"}
+
+    def fragment(index, count=2, **changes):
+        value = {
+            "schema_version": SCHEMA_VERSION, "kind": "mutation-fragment",
+            "head_sha": "a" * 40, "generator_sha256": "b" * 64,
+            "source_digests": {BASH: "c" * 64}, "plan_sha256": digest(fragment_plan),
+            "environment": verdict_environment, "shard": {"index": index, "count": count},
+            "baseline": fragment_baseline,
+            "results": {item["id"]: shard_result(position % 2 == 0)
+                        for position, item in enumerate(fragment_plan)
+                        if position % count == index}}
+        value.update(changes)
+        return value
+
+    def observe(fragments, generator="b" * 64, sources=None, head="a" * 40,
+                aggregator_baseline=None):
+        patched = {
+            "mutation_plan": lambda: (fragment_plan, {}),
+            "file_sha256": lambda _path: generator,
+            "source_digests": lambda: {BASH: "c" * 64} if sources is None else sources,
+            "baseline_results": lambda _tree, _plan: (
+                fragment_baseline if aggregator_baseline is None else aggregator_baseline),
+            "git_head": lambda: head,
         }
         restored = {name: globals()[name] for name in patched}
         globals().update(patched)
         try:
-            aggregate_stderr = io.StringIO()
-            with contextlib.redirect_stderr(aggregate_stderr):
-                aggregate_exit = aggregate([fragment], accept=False)
+            return observation_from_fragments(fragments, verdict_environment)
         finally:
             globals().update(restored)
-        record("verification aggregation rejects an impossibly relabelled tracked reason",
-               aggregate_exit == 2
-               and "refusing tracked mutation receipt" in aggregate_stderr.getvalue())
+
+    whole = observe([fragment(1), fragment(0)])
+    equal("a complete fragment set in any order is one observation",
+          (whole["caught"], whole["total"], whole["survivors"]), (2, 4, ["m1", "m3"]))
+    for name, message, fragments, live in (
+            ("no fragment at all is not a measurement",
+             "no mutation fragments supplied", [], {}),
+            ("a fragment from another schema is refused",
+             "fragment schema version differs",
+             [fragment(0, schema_version=SCHEMA_VERSION - 1), fragment(1)], {}),
+            ("a fragment missing its environment is refused",
+             "fragment fields are not exact",
+             [{key: value for key, value in fragment(0).items() if key != "environment"},
+              fragment(1)], {}),
+            ("a fragment without the Bash baseline is not evidence over all guards",
+             "fragment baseline inventory differs",
+             [fragment(0, baseline={relative: result for relative, result
+                                    in fragment_baseline.items() if relative != BASH}),
+              fragment(1)], {}),
+            ("shards from two heads are not one observation",
+             "fragments disagree on head_sha",
+             [fragment(0), fragment(1, head_sha="d" * 40)], {}),
+            ("shards on different tools are refused where the aggregate reads them",
+             "fragments were measured under different tool versions",
+             [fragment(0),
+              fragment(1, environment=dict(verdict_environment, python="3.12.0"))], {}),
+            ("a fragment from an edited generator is stale",
+             "fragment generator digest is stale",
+             [fragment(0), fragment(1)], {"generator": "e" * 64}),
+            ("a fragment from edited guards is stale",
+             "fragment guard digests are stale",
+             [fragment(0), fragment(1)], {"sources": {BASH: "e" * 64}}),
+            ("a fragment from another plan is stale",
+             "fragment plan digest is stale",
+             [fragment(0, plan_sha256="e" * 64), fragment(1, plan_sha256="e" * 64)], {}),
+            ("a fragment of a head other than the checkout is refused",
+             "fragment head is not the aggregate checkout head",
+             [fragment(0), fragment(1)], {"head": "e" * 40}),
+            ("a fragment baseline the aggregator does not reproduce is refused",
+             "fragment baseline differs from the aggregate checkout baseline",
+             [fragment(0), fragment(1)],
+             {"aggregator_baseline": {relative: dict(baseline, checks=41)
+                                      for relative in GUARDS}}),
+            ("shards that disagree on the shard count are refused",
+             "fragments disagree on shard count",
+             [fragment(0), fragment(1, count=3)], {}),
+            ("a missing shard is refused",
+             "fragment shard inventory is incomplete or duplicated: [0]",
+             [fragment(0)], {}),
+            ("a duplicated shard is refused",
+             "fragment shard inventory is incomplete or duplicated: [0, 0]",
+             [fragment(0), fragment(0)], {}),
+            ("a shard carrying another shard's mutation is refused",
+             "fragment shard 0 assignment differs: foreign=['m1'] missing=['m0']",
+             [fragment(0, results={"m1": shard_result(False), "m2": shard_result(True)}),
+              fragment(1)], {}),
+            ("a raw outcome that disagrees with its own suite results is refused",
+             "raw classification disagrees with recomputation for m0",
+             [fragment(0, results={
+                 "m0": dict(shard_result(True), outcome="survived", reason="survived"),
+                 "m2": shard_result(True)}), fragment(1)], {}),
+    ):
+        raises(name, ValueError, message,
+               lambda value=fragments, changes=live: observe(value, **changes))
+
+    # ---- evidence the observation carries: failing names and the measured tools -------
+    equal("only the suite's FAIL lines are kept as failing names",
+          failed_check_names("  PASS one\n  FAIL two\nFAIL three\n  4 checks\n"),
+          ["FAIL two", "FAIL three"])
+    many = "\n".join(f"  FAIL {index} " + "x" * 300 for index in range(30))
+    record("failing names are bounded in count and length",
+           len(failed_check_names(many)) == FAILED_CHECK_LIMIT
+           and all(len(name) == FAILED_CHECK_CHARS for name in failed_check_names(many)))
+    equal("a completed result must carry its failing names",
+          suite_result_error({key: value for key, value in completed().items()
+                              if key != "failed_checks"}),
+          "suite result fields differ for status 'completed'")
+    equal("a failing name that is not a FAIL line is malformed evidence",
+          suite_result_error(dict(completed(returncode=1, failures=1),
+                                  failed_checks=["PASS forged"])),
+          "completed suite failed-check names are malformed")
+    disagreeing = "completed suite failed-check names disagree with its receipt failures"
+    equal("a red result carrying no failing name disagrees with its receipt",
+          suite_result_error(dict(completed(returncode=1, failures=1), failed_checks=[])),
+          disagreeing)
+    equal("a red result carrying fewer names than its failures disagrees with its receipt",
+          suite_result_error(dict(completed(returncode=1, failures=3),
+                                  failed_checks=["FAIL planted 0"])), disagreeing)
+    equal("a green result carrying a failing name disagrees with its receipt",
+          suite_result_error(dict(completed(), failed_checks=["FAIL forged"])), disagreeing)
+    equal("names stop at the bound however many failures the receipt counts",
+          suite_result_error(completed(returncode=1, failures=FAILED_CHECK_LIMIT + 5)), "")
+    with tempfile.TemporaryDirectory(prefix="z-harness-suite-reader-") as raw:
+        reader_tree = Path(raw)
+        for stem, lines, failing in (
+                ("green", ["  PASS one"], 0),
+                ("red", ["  FAIL one -> detail", "  PASS two", "    FAIL three"], 2),
+                ("unnamed", ["  PASS one", "  PASS two"], 1)):
+            body = "".join(f"print({line!r})\n" for line in lines)
+            (reader_tree / f"{stem}.py").write_text(
+                "import sys\n" + body
+                + f"print('SELFTEST-SUMMARY suite={stem} checks={len(lines)} "
+                  f"failures={failing}')\n"
+                + f"sys.exit({1 if failing else 0})\n", encoding="utf-8")
+        equal("the suite reader records a green run with no failing names",
+              run_suite(reader_tree, "green.py"),
+              {"status": "completed", "returncode": 0, "checks": 1, "failures": 0,
+               "failed_checks": []})
+        equal("the suite reader records each failing line of a red run",
+              run_suite(reader_tree, "red.py"),
+              {"status": "completed", "returncode": 1, "checks": 3, "failures": 2,
+               "failed_checks": ["FAIL one -> detail", "FAIL three"]})
+        equal("the suite reader refuses failures its output never names",
+              run_suite(reader_tree, "unnamed.py"),
+              {"status": "invalid-receipt", "returncode": 1, "receipt_count": 1,
+               "stderr_tail": "failing-check lines and receipt failures disagree"})
+    equal("a well-formed environment validates", environment_error(verdict_environment), "")
+    equal("an environment with no Git is refused",
+          environment_error(dict(verdict_environment, git=[])),
+          "environment git is not a non-empty list of path and version")
+    equal("reordered environment fields are refused",
+          environment_error({key: verdict_environment[key]
+                             for key in reversed(ENVIRONMENT_KEYS)}),
+          f"environment fields are not exactly {list(ENVIRONMENT_KEYS)}")
+    shard = {"environment": verdict_environment}
+    other_git = dict(verdict_environment, git=[
+        {"path": "/usr/bin/git", "version": "git version 2.56.0"}])
+    equal("shards and aggregator measured under one set of tools",
+          environment_uniformity_error([shard, shard], verdict_environment), "")
+    equal("shards measured under different Git versions are not one observation",
+          environment_uniformity_error([shard, {"environment": other_git}],
+                                       verdict_environment),
+          "fragments were measured under different tool versions")
+    equal("an image change alone does not split the observation",
+          environment_uniformity_error(
+              [shard, {"environment": dict(verdict_environment,
+                                           image={"os": "ubuntu24", "version": "2"})}],
+              verdict_environment), "")
+    equal("an aggregator on different tools cannot vouch for the shards",
+          environment_uniformity_error([shard], other_git),
+          "the aggregating host's tool versions differ from the shards'")
+    with tempfile.TemporaryDirectory(prefix="z-harness-env-selftest-") as raw:
+        first, second = Path(raw) / "a", Path(raw) / "b"
+        first.mkdir()
+        second.mkdir()
+        (first / "git").write_text("", encoding="utf-8")
+        (first / "git").chmod(0o755)
+        (second / "git").symlink_to(first / "git")
+        (second / "zsh").write_text("", encoding="utf-8")
+        (second / "zsh").chmod(0o755)
+        fingerprint = environment_fingerprint(
+            runner=lambda argv, **_kwargs: subprocess.CompletedProcess(
+                argv, 0, f"{Path(argv[0]).name} version 9.9\n", ""),
+            environ={"PATH": os.pathsep.join([str(first), str(second)]),
+                     "ImageOS": "ubuntu24", "ImageVersion": "7"})
+        record("one Git reached twice through PATH is recorded once, with the image",
+               len(fingerprint["git"]) == 1
+               and fingerprint["git"][0]["version"] == "git version 9.9"
+               and fingerprint["zsh"] == "zsh version 9.9"
+               and fingerprint["image"] == {"os": "ubuntu24", "version": "7"},
+               str(fingerprint))
 
     # ---- needs_merged_run: where an arithmetic kill must not stop the measurement -----
     equal("the merged suite is not rerun against itself when it survives",
@@ -3753,10 +4402,94 @@ def selftest() -> int:
            planning(source='"""fixture guard with no guarded collections"""\n',
                     sites=(), additions=(), exclusions={}))
 
+    # ---- policy_error: the reviewed allowlist may name only planned element deletions ---
+    def policy_entry(element, policy_class="debt"):
+        return {"module": guard_relative, "collection": "OPTS", "element": element,
+                "class": policy_class}
+
+    def policy_with(**sections):
+        base = {"schema_version": POLICY_SCHEMA_VERSION, "kind": POLICY_KIND,
+                "allowed_survivors": [policy_entry("--one")],
+                "count_only_kills": [], "unswept_guards": []}
+        base.update(sections)
+        return base
+
+    with tempfile.TemporaryDirectory(prefix="z-harness-policy-selftest-") as raw:
+        policy_root = Path(raw)
+        (policy_root / "hooks").mkdir()
+        (policy_root / "hooks/unswept.py").write_text("", encoding="utf-8")
+
+        def checked(policy):
+            return policy_error(policy, plan, root=policy_root)
+
+        equal("a policy naming one planned element deletion clears",
+              checked(policy_with()), "")
+        equal("an unswept guard that exists and is not swept clears",
+              checked(policy_with(unswept_guards=[
+                  {"path": "hooks/unswept.py", "reason": "not yet swept"}])), "")
+        baselined = policy_root / GUARDS[0]
+        baselined.parent.mkdir(parents=True, exist_ok=True)
+        baselined.write_text("", encoding="utf-8")
+        equal("a module GUARDS baselines but the plan never mutates may stay unswept",
+              checked(policy_with(unswept_guards=[
+                  {"path": GUARDS[0], "reason": "baselined, not mutated"}])), "")
+        equal("an entry naming no planned element is refused",
+              checked(policy_with(allowed_survivors=[policy_entry("--nine")])),
+              f"allowed_survivors entry ('{guard_relative}', 'OPTS', '--nine') names no "
+              "planned element deletion")
+        equal("a declared addition can never be listed as an allowed survivor",
+              checked(policy_with(allowed_survivors=[policy_entry("--three")])),
+              f"allowed_survivors entry ('{guard_relative}', 'OPTS', '--three') names no "
+              "planned element deletion")
+        equal("an unknown survivor class is refused",
+              checked(policy_with(allowed_survivors=[policy_entry("--one", "fine")])),
+              f"allowed_survivors entry ('{guard_relative}', 'OPTS', '--one') has unknown "
+              "class 'fine'")
+        equal("an unsorted allowlist is refused",
+              checked(policy_with(allowed_survivors=[
+                  policy_entry("--two"), policy_entry("--one")])),
+              "allowed_survivors is not sorted by module, collection and element")
+        equal("a duplicated allowlist entry is refused",
+              checked(policy_with(allowed_survivors=[
+                  policy_entry("--one"), policy_entry("--one")])),
+              "allowed_survivors lists an element more than once")
+        equal("an element listed both as a survivor and as a count-only kill is refused",
+              checked(policy_with(count_only_kills=[
+                  {"module": guard_relative, "collection": "OPTS", "element": "--one"}])),
+              f"('{guard_relative}', 'OPTS', '--one') is listed both as an allowed survivor "
+              "and as a count-only kill")
+        record("an entry carrying an extra field is refused",
+               "does not carry exactly" in checked(policy_with(allowed_survivors=[
+                   dict(policy_entry("--one"), note="x")])))
+        equal("a count-only allowance must name a planned element deletion",
+              checked(policy_with(count_only_kills=[
+                  {"module": guard_relative, "collection": "OPTS", "element": "--nine"}])),
+              f"count_only_kills entry ('{guard_relative}', 'OPTS', '--nine') names no "
+              "planned element deletion")
+        equal("an unswept entry for a swept guard is refused",
+              checked(policy_with(unswept_guards=[{"path": guard_relative, "reason": "x"}])),
+              f"unswept_guards names {guard_relative}, which the mutation plan targets")
+        equal("an unswept entry for a missing file is refused",
+              checked(policy_with(unswept_guards=[
+                  {"path": "hooks/absent.py", "reason": "x"}])),
+              "unswept_guards names hooks/absent.py, which is not a file")
+        record("an unswept entry with a blank reason is refused",
+               "does not carry exactly" in checked(policy_with(unswept_guards=[
+                   {"path": "hooks/unswept.py", "reason": " "}])))
+        record("reordered top-level policy fields are refused",
+               "policy fields are not exactly" in checked(
+                   {key: policy_with()[key] for key in reversed(POLICY_KEYS)}))
+    rendered_policy = policy_text(policy_with(allowed_survivors=[
+        policy_entry("--one"), policy_entry("--two")]))
+    record("the canonical policy rendering parses back exactly, one entry per line",
+           json.loads(rendered_policy) == policy_with(allowed_survivors=[
+               policy_entry("--one"), policy_entry("--two")])
+           and rendered_policy.count('\n  {"module": ') == 2, rendered_policy)
+
     # collection_scope_sentence is the summary's only statement about which swept sources
-    # had their collections walked. Its only gate is a byte comparison against a CI
-    # re-measurement, and a deterministic falsehood passes that forever, so each arm's truth
-    # is asserted here on message content rather than on the call not raising.
+    # had their collections walked. It reaches only the run's report, which nothing later
+    # compares, so a deterministic falsehood would stand forever; each arm's truth is
+    # asserted here on message content rather than on the call not raising.
     def scope(sources, results, exclusions=None) -> str:
         return collection_scope_sentence({
             "source_digests": {name: "0" * 64 for name in sources},
@@ -3796,7 +4529,7 @@ def selftest() -> int:
     # The completeness clause is the sentence's only unconditional claim, so it needs
     # assertions in the WITHHELD direction too. Asserted positively alone, an operand can be
     # dropped from its guard and the summary then claims completeness over an incomplete
-    # sweep -- a falsehood the byte-comparison gate passes forever because it is stable.
+    # sweep -- a falsehood nothing downstream compares, so it would stand forever.
     complete_phrase = "complete for every swept source"
     record("completeness is withheld when a swept source carried no mutation",
            complete_phrase not in scope(
@@ -3872,7 +4605,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--fragment", type=Path)
     parser.add_argument("--expected-head")
     parser.add_argument("--aggregate", nargs="+", type=Path)
-    parser.add_argument("--accept-receipt-changes", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -3891,7 +4623,7 @@ def main(argv: list[str] | None = None) -> int:
             }, indent=1))
             return 0
         if args.aggregate:
-            return aggregate(args.aggregate, args.accept_receipt_changes)
+            return aggregate(args.aggregate)
         if (args.shard_index is None or args.shard_count is None
                 or args.fragment is None):
             print(
@@ -3908,6 +4640,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         print(f"mutation proof failed: {exc}", file=sys.stderr)
+        return 2
+    except Exception:
+        # Uncaught, this would exit 1, which the aggregate reserves for a policy violation.
+        traceback.print_exc()
         return 2
 
 

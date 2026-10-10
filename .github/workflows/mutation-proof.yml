@@ -1,12 +1,15 @@
 name: mutation-proof
-# The sweep re-measures every mutation to prove the committed receipt is truthful rather than
-# merely self-consistent, which is the one thing the offline gate cannot do: it recomputes
-# from the receipt's own contents and can never re-measure. It is the only check that tells a
-# real measurement from a fabricated one, so it must reach every head.
+# The sweep measures whether the shipped suites catch every planned guard mutation at this
+# exact head, and holds that measurement against the reviewed policy in
+# contracts/mutation-policy.json. The measurement is this run's evidence and is never
+# committed: the offline gate can validate the policy, but only a sweep can measure.
 #
 # Every accepted head is measured afresh by the same six shards. A path filter, selector, or
-# inherited receipt would leave the result dependent on unverified prior workflow and runner
-# state; absence and self-consistency are not measurement evidence.
+# inherited result would leave the verdict dependent on unverified prior workflow and runner
+# state; absence and self-consistency are not measurement evidence. A pull-request run is
+# cancelled only when a newer run of the same pull request supersedes it. Each push and
+# dispatch run is its own concurrency group, because GitHub replaces a pending run in a shared
+# group whatever cancel-in-progress says, and no other run can cancel or replace one of them.
 on:
   pull_request:
   push:
@@ -15,6 +18,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: mutation-proof-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   mutations:
@@ -65,7 +72,7 @@ jobs:
           name: mutation-fragment-${{ matrix.shard }}
           path: mutation-fragment-${{ matrix.shard }}.json
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 90
 
   aggregate:
     if: always()
@@ -111,7 +118,7 @@ jobs:
           pattern: mutation-fragment-*
           path: mutation-fragments
           merge-multiple: true
-      - name: reject incomplete evidence and compare the tracked receipt
+      - name: reject incomplete evidence and enforce the mutation policy
         run: >-
           python3 tools/write-mutation-receipt.py
           --aggregate mutation-fragments/*.json

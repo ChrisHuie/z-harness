@@ -293,10 +293,11 @@ document/transcript or spend API budget.
 A separate `mutation-proof` workflow accepts pull requests, pushes to `main`, and manual dispatches,
 checks out the exact accepted head, and runs six deterministic mutation shards in private trees
 every time. Its `if: always()` aggregate job rejects
-missing, duplicated, overlapping, foreign, or stale fragment IDs, independently recomputes each raw
-suite classification, and compares the aggregate with the tracked mutation receipt and summary. The
-offline gate validates those tracked artifacts and the workflow bytes but does not execute the full
-mutation plan.
+missing, duplicated, overlapping, foreign, or stale fragment IDs and shards measured under different
+tool versions, independently recomputes each raw suite classification, and holds the result against
+the reviewed `contracts/mutation-policy.json`: exit 0 conforms, 1 is a coverage change the policy does
+not allow, and 2 is a measurement that cannot be trusted. The offline gate validates the policy and
+the workflow bytes but does not execute the full mutation plan.
 
 For an active PR, run the live publication gate after the push:
 
@@ -311,7 +312,8 @@ exits 2. `pr_commit_count` is the GraphQL `commits.totalCount` observed with tha
 a head change during collection is an evidence error rather than a mixed snapshot. This generic
 command does not require a workflow by name or enumerate mutation shard jobs
 and artifacts. Before publication, separately require the final-head `mutation-proof` run, all six
-successful shard jobs, exactly six nonempty shard artifacts, and its successful aggregate job.
+successful shard jobs, exactly six nonempty shard artifacts, and its successful aggregate job, whose
+step summary states the verdict and any ratchet candidates.
 
 Validate the package manifest with the bundled Codex plugin validator when available:
 

@@ -1868,7 +1868,7 @@ EXPECTED_MUTATION_SELECTORS = {
         ("a repeated core.worktree binds the effective candidate Git recognises",),
 }
 EXPECTED_MUTATION_SITE_DIGEST = (
-    "e5133b40f7951a45d08e90d1f71c9778bfe748022b4400a8ae0b8b4dff85f2d7"
+    "59551628e5a707524da7989541e281637b5c45a5f539cabce460ddaa66052825"
 )
 EXPECTED_MUTATION_EXCLUSIONS = {
     "hooks/guards/git_grep_engine_guard.py::ALIAS_GUARDED":
@@ -2216,6 +2216,7 @@ REGISTERED_REVIEW_PATHS = frozenset({
     "pr-25/frozen-publication.json",
     "pr-26/frozen-publication.json",
     "pr-27/frozen-publication.json",
+    "pr-28/frozen-publication.json",
     "pr-29/frozen-publication.json",
     "pr-30/frozen-publication.json",
 })

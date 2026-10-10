@@ -118,6 +118,7 @@ same shared policy at both user and project scope.
 | `hooks/spawn_preflight_guard.py` | shared adapter | disk-capacity gate plus required fresh scratch reservation; maps unsupported Codex `ask` decisions to fail-closed `deny` |
 | `hooks/askq_timeout_guard.py` | Claude | AskUserQuestion AFK guard; no claimed Codex equivalent |
 | `hooks/announced_work_guard.py` | Claude | Stop hook that blocks a final message which announces work that has not begun; no claimed Codex equivalent |
+| `hooks/claim_evidence_guard.py` | Claude | Stop hook that blocks a final message stating a factual claim no tool output in the transcript establishes, judged by a separate headless verifier; fails closed; no claimed Codex equivalent |
 | `hooks/codex_session_start.py` | Codex | injects mandatory shared policy, resolved adapter commands, and optional host-local context |
 | `$CODEX_HOME/z-harness/AGENTS.local.md` | local Codex host | optional non-packaged machine instructions appended by the session adapter |
 | `hooks/harness_check.py` | shared | mechanical gate over skills, hooks, context files, and plugin packaging |
@@ -228,6 +229,7 @@ python3 hooks/codex_session_start.py --selftest
 python3 hooks/askq_timeout_guard.py --selftest
 python3 hooks/askq_timeout_guard.py --verify-harness
 python3 hooks/announced_work_guard.py --selftest
+python3 hooks/claim_evidence_guard.py --selftest
 python3 hooks/harness_report.py --selftest
 python3 tools/cc-cost.py --selftest
 python3 tools/codex-cost.py --selftest

@@ -45,6 +45,13 @@ The registered Claude `Stop` hook runs `announced_work_guard.py`. It blocks a fi
 tail announces imminent work without evidence that the work began. Codex has no equivalent
 registration in this package, so this is a Claude-only enforcement claim.
 
+The second registered `Stop` hook runs `claim_evidence_guard.py`. It hands the final message and
+the transcript to a separate headless `claude -p --restricted` verifier, and blocks the stop when
+any factual claim has no supporting tool output and is not labelled unverified. A verifier failure
+also blocks; only the line `UNVERIFIED: the claim verifier did not run on this reply.` lets such a
+reply through. Claude Code ends a turn anyway after `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` consecutive
+blocks and shows its own warning. This is also a Claude-only enforcement claim.
+
 Use `python3 ~/.claude/hooks/harness_report.py --since 7d` for Claude skill-delivery evidence and
 `python3 ~/.claude/tools/cc-cost.py --since 7d` for Claude token accounting. Claude project memory
 lives under `~/.claude/projects/<project>/memory/`; the index is injected into that project.

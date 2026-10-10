@@ -1475,13 +1475,13 @@ def selftest():
         if agent:
             payload["agent_id"] = agent
         live = time.monotonic() + 600
-        predicates, _reason = decide(command, _deadline=live)
-        cred_guard.decide = spent_after_predicates(live + 1)
         try:
+            predicates, _reason = decide(command, _deadline=live)
+            cred_guard.decide = spent_after_predicates(live + 1)
             output = evaluate_payload(payload, runtime=runtime, deadline=live)
             got = (output or {}).get("hookSpecificOutput", {}).get("permissionDecision")
         except BaseException as exc:          # a mutated production path fails this case
-            got = f"raised {type(exc).__name__}"
+            predicates, got = "raised", f"raised {type(exc).__name__}"
         finally:
             cred_guard.decide = original_cred_decide
         ok = predicates == before and got == want

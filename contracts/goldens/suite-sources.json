@@ -3,7 +3,7 @@
   "suites": {
     "announced_work_guard": "9d9b44bdb73d5b62226b419e231330eb2ba67be400668fed83072985f2924b5f",
     "askq_timeout_guard": "85c136dc24f3b4f41a60987b8abecb97779e209e49c4e29e74a5d46174d695ef",
-    "bash_command_guard": "747ae81f633374f23bdc6cca9af23bf8288c60ecd911a235b7ba8dbbf9d3c995",
+    "bash_command_guard": "a275cb163e0f0e182e66abb48aa716deab2774203d4dae218925e79c45e30889",
     "cc-cost": "972b0122b5f84de10f41915a133132f555b943c46061d91b07e3f7b534a4d003",
     "ci-gate": "74427e487fafc91f60a8c372567fc5c99e9a56b76a0a1edaf568ab0a955e99c2",
     "claim-provenance": "4552d3a8ec1da9b90e47a2dcd36abb0c3b1ad49a873731f50effb9268635e67f",

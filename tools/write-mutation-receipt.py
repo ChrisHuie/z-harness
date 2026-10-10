@@ -2534,6 +2534,13 @@ def run_suite(tree: Path, relative: str, timeout: int = 240,
             "receipt_count": len(matches),
             "stderr_tail": "process exit and receipt failures disagree",
         }
+    failed_checks = failed_check_names(done.stdout)
+    if len(failed_checks) != min(failures, FAILED_CHECK_LIMIT):
+        return {
+            "status": "invalid-receipt", "returncode": done.returncode,
+            "receipt_count": len(matches),
+            "stderr_tail": "failing-check lines and receipt failures disagree",
+        }
     selected = {}
     for selector in selectors:
         pattern = re.compile(
@@ -2551,7 +2558,7 @@ def run_suite(tree: Path, relative: str, timeout: int = 240,
         "status": "completed", "returncode": done.returncode,
         "checks": checks,
         "failures": failures,
-        "failed_checks": failed_check_names(done.stdout),
+        "failed_checks": failed_checks,
     }
     if selectors:
         result["selectors"] = selected
@@ -2886,6 +2893,10 @@ def suite_result_error(result: object, *, baseline: bool = False) -> str:
                 or any(not isinstance(name, str) or not name.startswith("FAIL")
                        or len(name) > FAILED_CHECK_CHARS for name in names)):
             return "completed suite failed-check names are malformed"
+        # Every swept suite prints one PASS or FAIL line per counted assertion, so the names
+        # a record carries and the failures its receipt counts are two reports of one fact.
+        if len(names) != min(result["failures"], FAILED_CHECK_LIMIT):
+            return "completed suite failed-check names disagree with its receipt failures"
         if baseline and (result["returncode"] != 0 or result["failures"] != 0):
             return "baseline suite result is not green"
         if "selectors" in result:
@@ -3256,15 +3267,17 @@ def policy_text(policy: dict) -> str:
         "}\n")
 
 
-def policy_error(policy: object, plan: list[dict], guards=None, root: Path | None = None) -> str:
+def policy_error(policy: object, plan: list[dict], root: Path | None = None) -> str:
     """Validate the authored policy against the plan it governs.
 
     Every survivor or count-only entry must name exactly one planned element deletion. A
     site or a declared addition cannot be listed at all: those are written to be caught, so
-    their survival is never acceptable debt.
+    their survival is never acceptable debt. An unswept entry is refused only for a module
+    the plan mutates. GUARDS also lists modules for their digests and baselines, and
+    membership there mutates nothing.
     """
-    guards = GUARDS if guards is None else guards
     root = ROOT if root is None else root
+    targeted = {item["module"] for item in plan}
     if not isinstance(policy, dict) or tuple(policy) != POLICY_KEYS:
         return f"policy fields are not exactly {list(POLICY_KEYS)} in that order"
     if policy["schema_version"] != POLICY_SCHEMA_VERSION:
@@ -3313,8 +3326,8 @@ def policy_error(policy: object, plan: list[dict], guards=None, root: Path | Non
                        for key in POLICY_UNSWEPT_KEYS)):
             return (f"unswept_guards entry {item!r} does not carry exactly "
                     f"{list(POLICY_UNSWEPT_KEYS)} as non-empty strings")
-        if item["path"] in guards:
-            return f"unswept_guards names {item['path']}, which the sweep covers"
+        if item["path"] in targeted:
+            return f"unswept_guards names {item['path']}, which the mutation plan targets"
         if not (root / item["path"]).is_file():
             return f"unswept_guards names {item['path']}, which is not a file"
         paths.append(item["path"])
@@ -3527,9 +3540,11 @@ def selftest() -> int:
     mis-scores a kill is caught by nothing -- every shard would agree, the observation
     would be internally consistent, and the policy would be applied to the same wrong
     verdict. These checks are that missing
-    control, so they run no suite, spawn no process and open no socket: suite results are
-    hand-built typed dictionaries and ``mutation_plan`` runs against a fixture guard in a
-    temporary directory with the module's collection tables swapped out.
+    control, so they run no swept suite and open no socket: suite results are hand-built
+    typed dictionaries and ``mutation_plan`` runs against a fixture guard in a temporary
+    directory with the module's collection tables swapped out. The only processes spawned
+    are three fixture scripts that drive ``run_suite``, the boundary where a suite's output
+    becomes a recorded result.
     """
     checks = failures = 0
 
@@ -3563,7 +3578,8 @@ def selftest() -> int:
     def completed(returncode=0, checks=40, failures=0) -> dict:
         return {"status": "completed", "returncode": returncode,
                 "checks": checks, "failures": failures,
-                "failed_checks": ["FAIL planted"] if failures else []}
+                "failed_checks": [f"FAIL planted {index}"
+                                  for index in range(min(failures, FAILED_CHECK_LIMIT))]}
 
     equal("a green run at the baseline check count survives",
           result_kill(completed(), baseline), (False, "survived"))
@@ -3577,7 +3593,7 @@ def selftest() -> int:
            ValueError,
            "mutation produced an invalid measurement: "
            "{'status': 'completed', 'returncode': 0, 'checks': 40, 'failures': 3, "
-           "'failed_checks': ['FAIL planted']}",
+           "'failed_checks': ['FAIL planted 0', 'FAIL planted 1', 'FAIL planted 2']}",
            lambda: result_kill(completed(failures=3), baseline))
     equal("consistent red exit and receipt channels are a suite failure",
           result_kill(completed(returncode=1, failures=3), baseline),
@@ -4038,6 +4054,41 @@ def selftest() -> int:
           suite_result_error(dict(completed(returncode=1, failures=1),
                                   failed_checks=["PASS forged"])),
           "completed suite failed-check names are malformed")
+    disagreeing = "completed suite failed-check names disagree with its receipt failures"
+    equal("a red result carrying no failing name disagrees with its receipt",
+          suite_result_error(dict(completed(returncode=1, failures=1), failed_checks=[])),
+          disagreeing)
+    equal("a red result carrying fewer names than its failures disagrees with its receipt",
+          suite_result_error(dict(completed(returncode=1, failures=3),
+                                  failed_checks=["FAIL planted 0"])), disagreeing)
+    equal("a green result carrying a failing name disagrees with its receipt",
+          suite_result_error(dict(completed(), failed_checks=["FAIL forged"])), disagreeing)
+    equal("names stop at the bound however many failures the receipt counts",
+          suite_result_error(completed(returncode=1, failures=FAILED_CHECK_LIMIT + 5)), "")
+    with tempfile.TemporaryDirectory(prefix="z-harness-suite-reader-") as raw:
+        reader_tree = Path(raw)
+        for stem, lines, failing in (
+                ("green", ["  PASS one"], 0),
+                ("red", ["  FAIL one -> detail", "  PASS two", "    FAIL three"], 2),
+                ("unnamed", ["  PASS one", "  PASS two"], 1)):
+            body = "".join(f"print({line!r})\n" for line in lines)
+            (reader_tree / f"{stem}.py").write_text(
+                "import sys\n" + body
+                + f"print('SELFTEST-SUMMARY suite={stem} checks={len(lines)} "
+                  f"failures={failing}')\n"
+                + f"sys.exit({1 if failing else 0})\n", encoding="utf-8")
+        equal("the suite reader records a green run with no failing names",
+              run_suite(reader_tree, "green.py"),
+              {"status": "completed", "returncode": 0, "checks": 1, "failures": 0,
+               "failed_checks": []})
+        equal("the suite reader records each failing line of a red run",
+              run_suite(reader_tree, "red.py"),
+              {"status": "completed", "returncode": 1, "checks": 3, "failures": 2,
+               "failed_checks": ["FAIL one -> detail", "FAIL three"]})
+        equal("the suite reader refuses failures its output never names",
+              run_suite(reader_tree, "unnamed.py"),
+              {"status": "invalid-receipt", "returncode": 1, "receipt_count": 1,
+               "stderr_tail": "failing-check lines and receipt failures disagree"})
     equal("a well-formed environment validates", environment_error(verdict_environment), "")
     equal("an environment with no Git is refused",
           environment_error(dict(verdict_environment, git=[])),
@@ -4369,13 +4420,19 @@ def selftest() -> int:
         (policy_root / "hooks/unswept.py").write_text("", encoding="utf-8")
 
         def checked(policy):
-            return policy_error(policy, plan, guards=(guard_relative,), root=policy_root)
+            return policy_error(policy, plan, root=policy_root)
 
         equal("a policy naming one planned element deletion clears",
               checked(policy_with()), "")
         equal("an unswept guard that exists and is not swept clears",
               checked(policy_with(unswept_guards=[
                   {"path": "hooks/unswept.py", "reason": "not yet swept"}])), "")
+        baselined = policy_root / GUARDS[0]
+        baselined.parent.mkdir(parents=True, exist_ok=True)
+        baselined.write_text("", encoding="utf-8")
+        equal("a module GUARDS baselines but the plan never mutates may stay unswept",
+              checked(policy_with(unswept_guards=[
+                  {"path": GUARDS[0], "reason": "baselined, not mutated"}])), "")
         equal("an entry naming no planned element is refused",
               checked(policy_with(allowed_survivors=[policy_entry("--nine")])),
               f"allowed_survivors entry ('{guard_relative}', 'OPTS', '--nine') names no "
@@ -4411,7 +4468,7 @@ def selftest() -> int:
               "planned element deletion")
         equal("an unswept entry for a swept guard is refused",
               checked(policy_with(unswept_guards=[{"path": guard_relative, "reason": "x"}])),
-              f"unswept_guards names {guard_relative}, which the sweep covers")
+              f"unswept_guards names {guard_relative}, which the mutation plan targets")
         equal("an unswept entry for a missing file is refused",
               checked(policy_with(unswept_guards=[
                   {"path": "hooks/absent.py", "reason": "x"}])),

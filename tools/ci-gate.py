@@ -5,16 +5,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-import ast
+import contextlib
 import hashlib
 import importlib.util
+import io
 import json
+import modulefinder
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import types
 from typing import Callable, List, Optional, Sequence, Tuple
 
 from repository_ownership import git_toplevel_error, run_git
@@ -2079,31 +2083,41 @@ def mutation_policy_file_error(policy_bytes=None, plan=None, writer=None) -> str
     return ""
 
 
+HOOK_INTERPRETER = re.compile(r"python3?(?:\.\d+)?")
+
+
 def registered_hook_closure(root: Path | None = None) -> set:
     """Every repository module a registered hook command executes, by static import.
 
-    Commands are read from both runtimes' registrations, and imports are followed through
-    the directories a hook can import from. A module loaded some other way is outside this
-    closure, so the closure is a lower bound on what runs. A registered command that runs a
-    Python file outside those directories is refused rather than skipped: skipping it would
-    let a new registration escape the scan set with every check green.
+    Commands come from the ``hooks`` table of both runtimes' registrations. Each must run
+    ``python3 <script>`` with the script under a directory hooks import from. Any other form
+    -- ``-m``, ``-c``, an interpreter option, a command that is not Python -- is refused
+    rather than skipped, because skipping would let a registration escape the scan set with
+    every check green. The standard library's ``modulefinder`` resolves imports over those
+    directories, so package, dotted, relative and function-local imports are followed as
+    Python follows them; a namespace package makes it raise, which is reported, not passed.
+    A module loaded through ``importlib`` or similar is outside the closure, so the closure
+    is a lower bound on what runs.
     """
     root = ROOT if root is None else root
+    tops = sorted({base.split("/")[0] for base in HOOK_IMPORT_ROOTS})
+    repository_script = re.compile(
+        rf"(?:^|/)((?:{'|'.join(tops)})/[A-Za-z0-9_./-]+\.py)$")
     scripts = set()
-    tops = "|".join(sorted({base.split("/")[0] for base in HOOK_IMPORT_ROOTS}))
-    repository_module = re.compile(rf"(?:^|/)((?:{tops})/[A-Za-z0-9_./-]+\.py)$")
 
     def walk(node):
         if isinstance(node, dict):
             command = node.get("command")
             if node.get("type") == "command" and isinstance(command, str):
-                for token in re.findall(r"[^\s'\"]+\.py\b", command):
-                    found = repository_module.search(token)
-                    if found is None:
-                        raise ValueError(
-                            f"registered command {command!r} runs {token}, which is outside "
-                            "the directories this closure reads")
-                    scripts.add(found.group(1))
+                argv = shlex.split(command)
+                found = None
+                if len(argv) > 1 and HOOK_INTERPRETER.fullmatch(Path(argv[0]).name):
+                    found = repository_script.search(argv[1])
+                if found is None:
+                    raise ValueError(
+                        f"registered hook command {command!r} does not run a script under "
+                        f"{' or '.join(top + '/' for top in tops)} with python3")
+                scripts.add(found.group(1))
             for value in node.values():
                 walk(value)
         elif isinstance(node, list):
@@ -2111,44 +2125,43 @@ def registered_hook_closure(root: Path | None = None) -> set:
                 walk(value)
 
     for relative in HOOK_REGISTRATION_FILES:
-        walk(_json_without_duplicate_keys(root / relative))
+        registration = _json_without_duplicate_keys(root / relative)
+        if not isinstance(registration, dict) or "hooks" not in registration:
+            raise ValueError(f"{relative} has no hooks table")
+        walk(registration["hooks"])
+    real_root = root.resolve()
+    # One finder scans each shared module once. Every script loads as ``__main__``, so the
+    # files are collected after each run, before the next script replaces that entry.
+    finder = modulefinder.ModuleFinder(path=[str(root / base) for base in HOOK_IMPORT_ROOTS])
     closure = set()
-    pending = sorted(scripts)
-    while pending:
-        relative = pending.pop()
-        if relative in closure:
-            continue
+    for relative in sorted(scripts):
         path = root / relative
         if not path.is_file():
             raise ValueError(f"registered hook module {relative} is not a file")
-        closure.add(relative)
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), relative)):
-            if isinstance(node, ast.Import):
-                names = [alias.name for alias in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-                names = [node.module]
-            else:
-                continue
-            for name in names:
-                for base in HOOK_IMPORT_ROOTS:
-                    candidate = f"{base}/{name.split('.')[0]}.py"
-                    if (root / candidate).is_file():
-                        pending.append(candidate)
+        finder.run_script(str(path))
+        for module in finder.modules.values():
+            filename = getattr(module, "__file__", None)
+            if filename and Path(filename).resolve().is_relative_to(real_root):
+                closure.add(Path(filename).resolve().relative_to(real_root).as_posix())
     return closure
 
 
-def mutation_sweep_coverage_error(root=None, guards=None, unswept=None) -> str:
-    """Every module a registered hook runs is either swept or named as unswept, exactly.
+def mutation_sweep_coverage_error(root=None, swept=None, unswept=None) -> str:
+    """Every module a registered hook runs is either mutated by the plan or named as unswept.
 
     The sweep's scan set is part of its claim. Without this, a new guard reached by a
     registered hook ships with no mutation evidence and nothing says so; with it, the
-    omission is a reviewed line in the policy.
+    omission is a reviewed line in the policy. Swept means targeted by a planned mutation:
+    the writer's GUARDS also lists modules for their digests and baselines, and membership
+    there mutates nothing.
     """
     try:
         closure = registered_hook_closure(root)
-        if guards is None or unswept is None:
+        if swept is None or unswept is None:
             writer = _mutation_writer("_ci_gate_mutation_coverage")
-            guards = writer.GUARDS if guards is None else guards
+            if swept is None:
+                plan, _exclusions = writer.mutation_plan()
+                swept = {item["module"] for item in plan}
             if unswept is None:
                 unswept = {item["path"]
                            for item in writer.load_policy()["unswept_guards"]}
@@ -2156,7 +2169,7 @@ def mutation_sweep_coverage_error(root=None, guards=None, unswept=None) -> str:
         return f"cannot verify mutation sweep coverage: {exc!r}"
     if not closure:
         return "no registered hook module was found, so sweep coverage is unverified"
-    unswept_modules = closure - set(guards)
+    unswept_modules = closure - set(swept)
     problems = []
     missing = sorted(unswept_modules - set(unswept))
     if missing:
@@ -2167,6 +2180,27 @@ def mutation_sweep_coverage_error(root=None, guards=None, unswept=None) -> str:
         problems.append(
             f"unswept_guards names modules no registered hook reaches unswept: {stale}")
     return "; ".join(problems)
+
+
+def mutation_evidence_problems() -> list:
+    """The offline mutation checks in gate order, as (check name, problem) pairs.
+
+    The writer is loaded and its plan generated once, and all three checks read that one
+    plan, so they judge the same inventory.
+    """
+    names = ("mutation-plan", "mutation-policy", "mutation-sweep-coverage")
+    try:
+        writer = _mutation_writer("_ci_gate_mutation_evidence")
+        plan, exclusions = writer.mutation_plan()
+        unswept = {item["path"] for item in writer.load_policy()["unswept_guards"]}
+    except Exception as exc:
+        return [(name, f"cannot generate the mutation plan: {exc!r}") for name in names]
+    return [
+        ("mutation-plan", mutation_plan_error(plan=plan, exclusions=exclusions)),
+        ("mutation-policy", mutation_policy_file_error(plan=plan, writer=writer)),
+        ("mutation-sweep-coverage", mutation_sweep_coverage_error(
+            swept={item["module"] for item in plan}, unswept=unswept)),
+    ]
 
 
 REVIEW_ROOT = ROOT / "contracts/review"
@@ -2887,18 +2921,10 @@ def gate(
     print(f"  {'FAIL' if decision_problem else 'PASS'} decision-golden")
     if decision_problem:
         failures.append(decision_problem)
-    plan_problem = mutation_plan_error()
-    print(f"  {'FAIL' if plan_problem else 'PASS'} mutation-plan")
-    if plan_problem:
-        failures.append(plan_problem)
-    policy_file_problem = mutation_policy_file_error()
-    print(f"  {'FAIL' if policy_file_problem else 'PASS'} mutation-policy")
-    if policy_file_problem:
-        failures.append(policy_file_problem)
-    coverage_problem = mutation_sweep_coverage_error()
-    print(f"  {'FAIL' if coverage_problem else 'PASS'} mutation-sweep-coverage")
-    if coverage_problem:
-        failures.append(coverage_problem)
+    for check_name, mutation_problem in mutation_evidence_problems():
+        print(f"  {'FAIL' if mutation_problem else 'PASS'} {check_name}")
+        if mutation_problem:
+            failures.append(mutation_problem)
     # Measurements live in the exact-head mutation-proof run, not in the tree; what the
     # offline gate can state is the reviewed policy it will be held against.
     try:
@@ -4402,61 +4428,164 @@ def selftest() -> int:
     with tempfile.TemporaryDirectory(prefix="z-harness-sweep-coverage-") as raw:
         coverage_root = Path(raw)
         (coverage_root / "hooks/guards").mkdir(parents=True)
-        (coverage_root / "settings.json").write_text(json.dumps({"hooks": {
-            "PreToolUse": [{"hooks": [
-                {"type": "command", "command": "python3 hooks/entry.py"}]}]}}),
-            encoding="utf-8")
+        (coverage_root / "tools").mkdir()
         (coverage_root / "hooks/hooks.json").write_text(
             json.dumps({"hooks": {}}), encoding="utf-8")
         (coverage_root / "hooks/entry.py").write_text("import helper\n", encoding="utf-8")
         (coverage_root / "hooks/guards/helper.py").write_text("", encoding="utf-8")
+        (coverage_root / "tools/stop_tool.py").write_text("", encoding="utf-8")
+
+        def register(*commands):
+            (coverage_root / "settings.json").write_text(json.dumps({"hooks": {
+                "PreToolUse": [{"hooks": [{"type": "command", "command": command}
+                                          for command in commands]}]}}),
+                encoding="utf-8")
+
+        def closure_or_error():
+            try:
+                return registered_hook_closure(coverage_root)
+            except Exception as exc:
+                return repr(exc)
+
+        register("python3 hooks/entry.py")
         expect(
             "a guard imported by a registered hook and neither swept nor listed fails",
             "neither swept nor listed" in mutation_sweep_coverage_error(
-                root=coverage_root, guards=("hooks/entry.py",), unswept=set()),
+                root=coverage_root, swept={"hooks/entry.py"}, unswept=set()),
         )
         expect(
             "listing the imported guard as unswept clears the coverage rule",
             mutation_sweep_coverage_error(
-                root=coverage_root, guards=("hooks/entry.py",),
+                root=coverage_root, swept={"hooks/entry.py"},
                 unswept={"hooks/guards/helper.py"}) == "",
         )
         expect(
             "an unswept entry no registered hook reaches is stale and fails",
             "no registered hook reaches" in mutation_sweep_coverage_error(
-                root=coverage_root, guards=("hooks/entry.py",),
+                root=coverage_root, swept={"hooks/entry.py"},
                 unswept={"hooks/guards/helper.py", "hooks/stale.py"}),
         )
-        (coverage_root / "settings.json").write_text(
-            json.dumps({"hooks": {}}), encoding="utf-8")
+        # GUARDS lists modules for their digests and baselines; only the plan mutates.
+        # A writer whose GUARDS names the helper while its plan never touches it must
+        # still be made to list the helper as unswept.
+        baseline_only_writer = types.SimpleNamespace(
+            GUARDS=("hooks/entry.py", "hooks/guards/helper.py"),
+            mutation_plan=lambda: ([{"module": "hooks/entry.py"}], {}),
+            load_policy=lambda: {"unswept_guards": []})
+        original_mutation_writer = _mutation_writer
+        globals()["_mutation_writer"] = lambda _label: baseline_only_writer
+        try:
+            baseline_only = mutation_sweep_coverage_error(root=coverage_root)
+        finally:
+            globals()["_mutation_writer"] = original_mutation_writer
+        expect(
+            "a module baselined but never mutated is not counted as swept",
+            "neither swept nor listed as unswept: ['hooks/guards/helper.py']"
+            in baseline_only,
+        )
+        (coverage_root / "hooks/guards/__init__.py").write_text(
+            "from . import relative\n", encoding="utf-8")
+        for name in ("relative", "submodule", "dotted"):
+            (coverage_root / f"hooks/guards/{name}.py").write_text("", encoding="utf-8")
+        (coverage_root / "hooks/late.py").write_text("", encoding="utf-8")
+        (coverage_root / "hooks/entry.py").write_text(
+            "from guards import submodule\nimport guards.dotted\n"
+            "def later():\n    import late\n", encoding="utf-8")
+        expect(
+            "package, dotted, relative and function-local imports all enter the closure",
+            closure_or_error() == {
+                "hooks/entry.py", "hooks/guards/__init__.py", "hooks/guards/relative.py",
+                "hooks/guards/submodule.py", "hooks/guards/dotted.py", "hooks/late.py"},
+        )
+        (coverage_root / "hooks/guards/__init__.py").unlink()
+        (coverage_root / "hooks/entry.py").write_text(
+            "from guards import submodule\n", encoding="utf-8")
+        expect(
+            "a namespace-package import is reported as unverifiable, not passed",
+            "cannot verify" in mutation_sweep_coverage_error(
+                root=coverage_root, swept={"hooks/entry.py"}, unswept=set()),
+        )
+        register()
         expect(
             "registrations naming no hook module are unverified, not clean",
             "unverified" in mutation_sweep_coverage_error(
-                root=coverage_root, guards=(), unswept=set()),
+                root=coverage_root, swept=set(), unswept=set()),
         )
-        (coverage_root / "tools").mkdir()
-        (coverage_root / "tools/stop_tool.py").write_text("", encoding="utf-8")
-
-        def register(command):
-            (coverage_root / "settings.json").write_text(json.dumps({"hooks": {
-                "Stop": [{"hooks": [{"type": "command", "command": command}]}]}}),
-                encoding="utf-8")
-
-        register("python3 ~/.claude/tools/stop_tool.py")
-        try:
-            tools_closure = registered_hook_closure(coverage_root)
-        except ValueError as exc:
-            tools_closure = repr(exc)
+        register("python3 ~/.claude/tools/stop_tool.py --flag")
         expect(
             "a registered module under tools/ enters the closure",
-            tools_closure == {"tools/stop_tool.py"},
+            closure_or_error() == {"tools/stop_tool.py"},
         )
-        register("python3 ~/.claude/scripts/stop_tool.py")
-        expect(
-            "a registered Python file outside the read directories is refused, not skipped",
-            "outside the directories this closure reads" in mutation_sweep_coverage_error(
-                root=coverage_root, guards=(), unswept=set()),
-        )
+        for label, command in (
+                ("a Python file outside the read directories", "python3 scripts/stop.py"),
+                ("a module entry point", "python3 -m hooks.entry"),
+                ("an interpreter option before the script", "python3 -B hooks/entry.py"),
+                ("a Python file under a command that is not Python", "sh hooks/entry.py"),
+        ):
+            # A refused command beside a recognised one: skipping it would leave the
+            # closure non-empty and the check green.
+            register("python3 hooks/entry.py", command)
+            expect(
+                f"a registered hook running {label} is refused, not skipped",
+                "does not run a script under hooks/ or tools/ with python3"
+                in mutation_sweep_coverage_error(
+                    root=coverage_root, swept={"hooks/entry.py"}, unswept=set()),
+            )
+    # The three checks read one plan and report in gate order. Each production call is
+    # replaced by a recorder so a dropped or blanked call, or a check handed another
+    # inventory, is visible without generating anything.
+    evidence_writer = types.SimpleNamespace(
+        GUARDS=("hooks/a.py", "hooks/b.py"),
+        mutation_plan=lambda: ([{"module": "hooks/a.py"}], {"x": "y"}),
+        load_policy=lambda: {"unswept_guards": [{"path": "hooks/u.py"}]})
+    received = {}
+
+    def recorder(name):
+        def record(**kwargs):
+            received[name] = kwargs
+            return f"planted {name} failure"
+        return record
+
+    planted_checks = {
+        "_mutation_writer": lambda _label: evidence_writer,
+        "mutation_plan_error": recorder("plan"),
+        "mutation_policy_file_error": recorder("policy"),
+        "mutation_sweep_coverage_error": recorder("coverage"),
+    }
+    restored_checks = {name: globals()[name] for name in planted_checks}
+    globals().update(planted_checks)
+    try:
+        evidence = mutation_evidence_problems()
+    finally:
+        globals().update(restored_checks)
+    expect(
+        "every mutation check's result reaches the gate under its own name",
+        evidence == [("mutation-plan", "planted plan failure"),
+                     ("mutation-policy", "planted policy failure"),
+                     ("mutation-sweep-coverage", "planted coverage failure")],
+    )
+    expect(
+        "the three mutation checks judge one plan, and coverage counts only its targets",
+        received.get("plan") == {"plan": [{"module": "hooks/a.py"}], "exclusions": {"x": "y"}}
+        and received.get("policy") == {"plan": [{"module": "hooks/a.py"}],
+                                       "writer": evidence_writer}
+        and received.get("coverage") == {"swept": {"hooks/a.py"},
+                                         "unswept": {"hooks/u.py"}},
+    )
+
+    def unloadable_writer(_label):
+        raise ValueError("planted writer failure")
+
+    globals()["_mutation_writer"] = unloadable_writer
+    try:
+        unloadable = mutation_evidence_problems()
+    finally:
+        globals()["_mutation_writer"] = restored_checks["_mutation_writer"]
+    expect(
+        "a plan that cannot be generated fails every mutation check by name",
+        [name for name, problem in unloadable if "planted writer failure" in problem]
+        == ["mutation-plan", "mutation-policy", "mutation-sweep-coverage"],
+    )
     handoff_sources = {
         relative: (ROOT / relative).read_text(encoding="utf-8")
         for relative in HANDOFF_DOCTRINE
@@ -5182,14 +5311,29 @@ def selftest() -> int:
     finally:
         SUITE_FLOORS["harness_check"] = recorded_harness_floor
     original_handoff_policy = review_handoff_policy_error
+    original_mutation_evidence = mutation_evidence_problems
     globals()["review_handoff_policy_error"] = lambda: "planted handoff-policy failure"
+    # One gate run carries two planted failures, each asserted by its own summary line:
+    # dropping either adoption removes that line while the other keeps the exit red.
+    globals()["mutation_evidence_problems"] = lambda: [
+        ("mutation-plan", ""), ("mutation-policy", "planted mutation-evidence failure"),
+        ("mutation-sweep-coverage", "")]
+    adopted = io.StringIO()
     try:
-        expect(
-            "production gate adopts the review handoff policy result",
-            gate(fake_runner, emit_child_output=False) != 0,
-        )
+        with contextlib.redirect_stdout(adopted):
+            adopted_code = gate(fake_runner, emit_child_output=False)
     finally:
         globals()["review_handoff_policy_error"] = original_handoff_policy
+        globals()["mutation_evidence_problems"] = original_mutation_evidence
+    adopted_lines = adopted.getvalue().splitlines()
+    expect(
+        "production gate adopts the review handoff policy result",
+        adopted_code != 0 and "  - planted handoff-policy failure" in adopted_lines,
+    )
+    expect(
+        "production gate adopts a failure from any mutation check",
+        adopted_code != 0 and "  - planted mutation-evidence failure" in adopted_lines,
+    )
     original_ownership_source = repository_ownership_source_error
     globals()["repository_ownership_source_error"] = (
         lambda *a, **k: "planted repository-ownership source failure")

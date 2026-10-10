@@ -5,7 +5,7 @@
     "askq_timeout_guard": "85c136dc24f3b4f41a60987b8abecb97779e209e49c4e29e74a5d46174d695ef",
     "bash_command_guard": "7063aa5b833422bfd0eec65ae06da7792d951b652ddb668b93fe5d2a6066f9bc",
     "cc-cost": "972b0122b5f84de10f41915a133132f555b943c46061d91b07e3f7b534a4d003",
-    "ci-gate": "a77251662372749c061235c98a2706294970c67d3eca7a85e32fb0047c70ce84",
+    "ci-gate": "2da26b39e51db38c05087abf33e7fe5c581daadd315f650c7385c2c07a76e43d",
     "claim-provenance": "4552d3a8ec1da9b90e47a2dcd36abb0c3b1ad49a873731f50effb9268635e67f",
     "codex-cost": "fc46c95da8babd276e705c9578c5857a6563588b588da540ea4222c2c6ca793c",
     "codex_session_start": "b9dbedba94d623304ef97ca1b13a14b2f7b000cc98f35e016448ed4c85030567",
@@ -14,7 +14,7 @@
     "enumerate-survivors": "77993a5bf38e672a47723abe4bf28d12ff87e215de1d2687787aeb58d5d58f03",
     "fuzz-judge-diff": "69c1877f874e7172810cacb691034fe3e452d392132895bc05b0f259976aa671",
     "git_grep_engine_guard": "74d1d059b686d316c49f374f206a7f5bd68370303d54c12c96ab0e4ad8a485f9",
-    "harness_check": "74ad7ef39377171d3c64154cf80719d45f8f7d78603972533952ae5a9d82ef4d",
+    "harness_check": "92bca06a07694437f328190f222636ba70fd496fda6b3ce9e35449efdfde531c",
     "harness_report": "eec022de9c2f7dec81c612e751dac472f2f8b695029d627784e7e5d840312cbc",
     "portable-conformance": "8eb48510971d0e4f7371cd7a4d16c41850e8e1324a739b70b71d3b85c5823606",
     "pr-delivery-state": "4fa74be86a09a0047c3d960fda37a87930d7a6b8dfd39361a8850e3d0f4ef9b5",
@@ -23,7 +23,7 @@
     "run-skill-evals": "38115603816e7698926a290d401179c3db2f4f5ffa12b49e2bfe04b3f294a508",
     "spawn_preflight_guard": "9e9f7c1aa5eb64d756613315210ddfacdf999ffe8e7182edb18fbcdf3cda7980",
     "verify-review-publication": "fb7a4b95248de1f664180ad0598a54778591f321963b2265e734b37ff7bcd455",
-    "write-mutation-receipt": "89a48577ddb0ef80f3c0363a5eaf336cd6dcff07ccc3a4b0d71477fcb09e230d",
+    "write-mutation-receipt": "d3cde081e6dc4f0d70f4a543f07f7fe1959b99225f27132de6fe77946f702069",
     "zsh_rev_modifier_guard": "3434e79a2e6532a6445e7a962c4f3a356eab5a23302c3c51e5edf0f069bccedd"
   }
 }

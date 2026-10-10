@@ -132,9 +132,9 @@ DESC_CAP = 400                # house cap (spec ceiling is 1024)
 # checks=111, so a suite can be gutted with nothing failing. Raise a floor in the same
 # commit that adds the checks; lowering one is a deliberate, reviewable edit.
 SELFTEST_SUITES = [
-    ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"], 1873),
+    ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"], 1881),
     ("credential_reach_guard",
-     ["hooks/guards/credential_reach_guard.py", "--selftest"], 78),
+     ["hooks/guards/credential_reach_guard.py", "--selftest"], 84),
     ("askq_timeout_guard", ["hooks/askq_timeout_guard.py", "--selftest"], 13),
     ("announced_work_guard", ["hooks/announced_work_guard.py", "--selftest"], 922),
     ("harness_report", ["hooks/harness_report.py", "--selftest"], 12),
@@ -175,9 +175,9 @@ def expected_selftest_checks(name):
     if name in fixed:
         return fixed[name]
     if name == "bash_command_guard":
-        return 1873
+        return 1881
     if name == "credential_reach_guard":
-        return 78
+        return 84
     if name == "zsh_rev_modifier_guard":
         return 523
     if name != "git_grep_engine_guard":

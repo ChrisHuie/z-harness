@@ -1322,6 +1322,40 @@ def selftest():
               f"want=deny {time.monotonic() - started:.3f}s (cap 4.5s)"
               f"{_budget_note(faults, 1)}")
 
+    # The credential check runs after both predicates, so its own work must fit the same
+    # deadline. Twelve thousand heredoc headers inside one quoted argument once held the
+    # hook past its timeout after a deny was already decided, and a megabyte the credential
+    # tokenizer could not finish once let a keychain read through on the main thread.
+    credential_cases = (
+        ("heredoc-headers", "claude", None,
+         "printf %s '" + "x <<TAG\n" * 12_000 + "'; " + flood_hazard, "deny"),
+        ("heredoc-headers", "codex", None,
+         "printf %s '" + "x <<TAG\n" * 12_000 + "'; " + flood_hazard, "deny"),
+        ("spent-on-keychain", "claude", None,
+         "/bin/echo " + "x" * 1_000_000 + "; security find-generic-password -s svc -w",
+         "ask"))
+    for label, runtime, agent, command, want in credential_cases:
+        payload = {"tool_name": "Bash", "tool_input": {"command": command}}
+        if agent:
+            payload["agent_id"] = agent
+        argv = [sys.executable, __file__]
+        if runtime == "codex":
+            argv.extend(("--runtime", "codex"))
+        started = time.monotonic()
+        try:
+            result = subprocess.run(argv, input=json.dumps(payload), capture_output=True,
+                                    text=True, timeout=5)
+            faults = _budget_faults([(result.returncode, result.stdout, result.stderr,
+                                      time.monotonic() - started)], want, 4.5)
+        except subprocess.TimeoutExpired:
+            faults = ["was killed at the 5s hook timeout"]
+        ok = not faults
+        total += 1
+        failures += (not ok)
+        print(f"  {'PASS' if ok else 'FAIL'} credential-budget  {label:<17} {runtime:<6} "
+              f"want={want} {time.monotonic() - started:.3f}s (cap 4.5s)"
+              f"{_budget_note(faults, 1)}")
+
     cache_probe_source = "f(){ /bin/echo safe; }; f;" + "( : );" * 64
     annotation_calls = []
     original_annotate = grep_guard.annotate_function_declarations
@@ -1396,6 +1430,59 @@ def selftest():
     failures += (not credential_deadline_ok)
     print(f"  {'PASS' if credential_deadline_ok else 'FAIL'} credential-deadline "
           "the credential check shares the predicates' deadline")
+
+    # The predicates can finish inside the deadline and allow, leaving the credential check
+    # to run out of it. Its scan then stopped early, so the hook must not allow on the
+    # strength of predicates that never looked for a credential. The clock here is live
+    # while the predicates run and spent from the moment the credential check starts.
+    class SpentClock:
+        def __init__(self, at):
+            self.at = at
+
+        def monotonic(self):
+            return self.at
+
+        def __getattr__(self, name):
+            return getattr(time, name)
+
+    def spent_after_predicates(at):
+        def checked(command, *, subagent, runtime="claude", deadline=None):
+            saved = (cred_guard.time, grep_guard.time)
+            cred_guard.time = grep_guard.time = SpentClock(at)
+            try:
+                return original_cred_decide(
+                    command, subagent=subagent, runtime=runtime, deadline=deadline)
+            finally:
+                cred_guard.time, grep_guard.time = saved
+        return checked
+
+    keychain = "security find-generic-password -s svc -w"
+    for label, command, agent, runtime, before, want in (
+            ("keychain read, main thread", keychain, None, "claude", "allow", "ask"),
+            ("quoted model CLI, main thread", 'co""dex exec hi', None, "claude", "allow",
+             "ask"),
+            ("ordinary command, subagent", "git status", "sub-1", "claude", "allow", "deny"),
+            ("keychain read, Codex main thread", keychain, None, "codex", "allow", None),
+            ("prior deny kept", "git grep -E 'harness\\b' -- README.md; " + keychain,
+             None, "claude", "deny", "deny")):
+        payload = {"tool_name": "Bash", "tool_input": {"command": command}}
+        if agent:
+            payload["agent_id"] = agent
+        live = time.monotonic() + 600
+        predicates, _reason = decide(command, _deadline=live)
+        cred_guard.decide = spent_after_predicates(live + 1)
+        try:
+            output = evaluate_payload(payload, runtime=runtime, deadline=live)
+            got = (output or {}).get("hookSpecificOutput", {}).get("permissionDecision")
+        except BaseException as exc:          # a mutated production path fails this case
+            got = f"raised {type(exc).__name__}"
+        finally:
+            cred_guard.decide = original_cred_decide
+        ok = predicates == before and got == want
+        total += 1
+        failures += (not ok)
+        print(f"  {'PASS' if ok else 'FAIL'} credential-spent   {label:<32} predicates="
+              f"{predicates:<5} want={want!s:<5} got={got!s:<5}")
 
     # The hook entry point anchors that deadline at process start, before the guard
     # imports, not when a decision begins.

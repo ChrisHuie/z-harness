@@ -18,9 +18,8 @@ When a skill covers any part of the task, load and read its complete `SKILL.md` 
 ## Chris (@chrishuie)
 
 Chris is the solo maintainer; implementation runs through agents. Replace named roles, on-call
-rosters, handoffs, and sign-offs with agent equivalents. Use standalone skills and standard git,
-not beads, `bd`, or formula tooling. Use `@chrishuie` for CODEOWNERS, reviewers, and mentions;
-the local git author name is not proof of the GitHub account.
+rosters, handoffs, and sign-offs with agent equivalents. Use `@chrishuie` for CODEOWNERS, reviewers,
+and mentions; the local git author name is not proof of the GitHub account.
 
 Use a dense register for strategy, market, and protocol work. Use plain language for
 infrastructure, with a concrete example before an acronym. Make the call when a trade-off depends

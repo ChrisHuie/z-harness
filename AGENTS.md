@@ -2,7 +2,6 @@
 
 Skill routing is mandatory. Before substantive action, inspect the available skill list.
 When a skill covers any part of the task, load and read its complete `SKILL.md` before acting.
-After compaction, a summary that says a skill was loaded is not its body; reload it when needed.
 
 | Load it first | When |
 |---|---|
@@ -141,9 +140,7 @@ the workflow did not run. Assert a non-empty run list for the exact head.
 Measure before reconstructing. Record the query that regenerates a number, not a drifting literal.
 An A/B changing two variables proves only that the pair matters.
 
-Use the runtime-specific accounting command supplied by its adapter: `CLAUDE.md` names Claude's
-installed command, while Codex SessionStart injects the resolved plugin-cache command. Do not
-naively sum repeated usage records.
+Do not naively sum repeated usage records.
 
 ## Destructive operations and scope
 

@@ -137,6 +137,7 @@ SELFTEST_SUITES = [
      ["hooks/guards/credential_reach_guard.py", "--selftest"], 84),
     ("askq_timeout_guard", ["hooks/askq_timeout_guard.py", "--selftest"], 13),
     ("announced_work_guard", ["hooks/announced_work_guard.py", "--selftest"], 922),
+    ("claim_evidence_guard", ["hooks/claim_evidence_guard.py", "--selftest"], 30),
     ("harness_report", ["hooks/harness_report.py", "--selftest"], 12),
     ("cc-cost", ["tools/cc-cost.py", "--selftest"], 8),
     ("codex-cost", ["tools/codex-cost.py", "--selftest"], 28),
@@ -166,6 +167,7 @@ def expected_selftest_checks(name):
     fixed = {
         "announced_work_guard": 922,
         "ci-gate": 345,
+        "claim_evidence_guard": 30,
         "enumerate-survivors": 28,
         "fuzz-judge-diff": 65,
         "corpus-delta": 20,
@@ -391,6 +393,7 @@ ROUTING_SKILLS = ["git-workflow", "pr-review-method", "testing-ci", "agent-dispa
 # the event instead.
 REQUIRED_CLAUDE_HANDLERS = [
     ("Stop", None, "hooks/announced_work_guard.py", ()),
+    ("Stop", None, "hooks/claim_evidence_guard.py", ()),
     ("PostToolUse", "AskUserQuestion", "hooks/askq_timeout_guard.py", ()),
     ("PreToolUse", "Bash", "hooks/bash_command_guard.py", ()),
     ("PreToolUse", "Agent|Task", "hooks/spawn_preflight_guard.py",

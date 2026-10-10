@@ -94,6 +94,7 @@
  "count_only_kills": [],
  "unswept_guards": [
   {"path": "hooks/askq_timeout_guard.py", "reason": "Claude AskUserQuestion timeout hook registered in settings.json; no mutation in the sweep targets it"},
+  {"path": "hooks/claim_evidence_guard.py", "reason": "Claude Stop claim-verification hook registered in settings.json; no mutation in the sweep targets it"},
   {"path": "hooks/codex_session_start.py", "reason": "Codex SessionStart and SubagentStart hook registered in hooks/hooks.json; no mutation in the sweep targets it"},
   {"path": "hooks/guards/credential_reach_guard.py", "reason": "imported by hooks/bash_command_guard.py for both runtimes; its collections are not enumerated and its source is not in the swept set"},
   {"path": "hooks/spawn_preflight_guard.py", "reason": "Agent and Task spawn guard registered for both runtimes; no mutation in the sweep targets it"}

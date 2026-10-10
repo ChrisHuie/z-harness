@@ -7826,18 +7826,26 @@ def check_alias_shadowing_against_installed_gits(*, runner=None):
 
 # The engine the log-family probe selects; the selftest swaps it to prove the probe reports.
 _LOG_FAMILY_PROBE_ENGINE = "-E"
+# The interval, and the subjects carrying it as five literal characters and as its
+# expansion. A stash entry's message holds its base commit's abbreviated hash, so with an
+# expansion of hex letters (`aab`) the literal entry matched whenever that hash contained
+# it, about one probe in eight hundred. `x` and `y` are not hex digits.
+_LOG_FAMILY_PROBE_PATTERN = "x{2}y"
+_LOG_FAMILY_PROBE_LITERAL = "subject x{2}y here"
+_LOG_FAMILY_PROBE_INTERVAL = "subject xxy here"
 
 
 def _check_log_family_against_git(env):
     """Each table subcommand that runs must filter `--grep` with the selected engine.
 
-    A two-commit repository with file changes: the first subject carries `a{2}b` as
-    five literal characters, the second what the interval expands to. `-E` must select
-    only the second. A subcommand this Git refuses to run is loud, not a silent wrong
+    A two-commit repository with file changes: the first subject carries
+    _LOG_FAMILY_PROBE_PATTERN as five literal characters, the second what the interval
+    expands to. `-E` must select only the second. A subcommand this Git refuses to run is loud, not a silent wrong
     result, and is not a failure here.
     """
     failures = []
-    literal, interval = "subject a{2}b here", "subject aab here"
+    literal, interval = _LOG_FAMILY_PROBE_LITERAL, _LOG_FAMILY_PROBE_INTERVAL
+    grep = "--grep=" + _LOG_FAMILY_PROBE_PATTERN
     probes = {
         "whatchanged": ["git", "whatchanged", "--format=%s"],
         "show": ["git", "show", "-s", "--format=%s", "HEAD~1", "HEAD"],
@@ -7862,7 +7870,7 @@ def _check_log_family_against_git(env):
             if run(["git", "commit", "--quiet", "-m", subject]).returncode:
                 return ["cannot commit the temporary Git log-family fixture"]
         for subcommand, argv in probes.items():
-            result = run([*argv, _LOG_FAMILY_PROBE_ENGINE, "--grep=a{2}b"])
+            result = run([*argv, _LOG_FAMILY_PROBE_ENGINE, grep])
             if result.returncode:
                 continue
             if interval not in result.stdout or literal in result.stdout:
@@ -7877,8 +7885,7 @@ def _check_log_family_against_git(env):
                 handle.write("stashed\n")
             if run(["git", "stash", "--quiet"]).returncode:
                 return failures + ["cannot stash in the temporary Git log-family fixture"]
-        result = run(["git", "stash", "list", "--format=%s", _LOG_FAMILY_PROBE_ENGINE,
-                      "--grep=a{2}b"])
+        result = run(["git", "stash", "list", "--format=%s", _LOG_FAMILY_PROBE_ENGINE, grep])
         if not result.returncode and (interval not in result.stdout
                                       or literal in result.stdout):
             failures.append(
@@ -7888,8 +7895,8 @@ def _check_log_family_against_git(env):
         for subcommand in ("cherry-pick", "revert"):
             run(["git", "checkout", "--quiet", "-B", "probe-" + subcommand,
                  "base" if subcommand == "cherry-pick" else "side"])
-            result = run(["git", subcommand, "--no-edit", _LOG_FAMILY_PROBE_ENGINE,
-                          "--grep=a{2}b", "base..side"])
+            result = run(["git", subcommand, "--no-edit", _LOG_FAMILY_PROBE_ENGINE, grep,
+                          "base..side"])
             subject = run(["git", "log", "-1", "--format=%s"]).stdout.strip()
             run(["git", subcommand, "--abort"])
             if result.returncode:
@@ -11477,6 +11484,18 @@ def selftest():
         bad += 0 if _live else 1
         print("  %s the %s detector still reports when its input is broken" % (
             "PASS" if _live else "FAIL", _label))
+
+    # `stash list --grep` matches a message that holds a commit hash, so the log-family
+    # interval must expand to text no hash can contain, and the literal subject must not
+    # carry the expansion at all.
+    _expansion = re.search(_LOG_FAMILY_PROBE_PATTERN, _LOG_FAMILY_PROBE_INTERVAL)
+    _hash_proof = (_expansion is not None
+                   and re.search(_LOG_FAMILY_PROBE_PATTERN, _LOG_FAMILY_PROBE_LITERAL) is None
+                   and bool(set(_expansion.group()) - set("0123456789abcdef")))
+    bad += 0 if _hash_proof else 1
+    print("  %s the log-family probe interval expands to text no commit hash can hold (%r)"
+          % ("PASS" if _hash_proof else "FAIL",
+             _expansion.group() if _expansion else None))
 
     def _shadow_every_proof_member(argv, **kwargs):
         # Shadow whichever name the probe is currently testing, so this control witnesses

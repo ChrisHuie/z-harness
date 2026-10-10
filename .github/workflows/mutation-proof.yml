@@ -7,8 +7,9 @@ name: mutation-proof
 # Every accepted head is measured afresh by the same six shards. A path filter, selector, or
 # inherited result would leave the verdict dependent on unverified prior workflow and runner
 # state; absence and self-consistency are not measurement evidence. A pull-request run is
-# cancelled only when a newer head of the same pull request supersedes it, and a run for a
-# push to main is never cancelled.
+# cancelled only when a newer run of the same pull request supersedes it. Each push and
+# dispatch run is its own concurrency group, because GitHub replaces a pending run in a shared
+# group whatever cancel-in-progress says; none of those runs is ever cancelled or replaced.
 on:
   pull_request:
   push:
@@ -19,7 +20,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: mutation-proof-${{ github.event.pull_request.number || github.sha }}
+  group: mutation-proof-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

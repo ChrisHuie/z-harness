@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import traceback
 from pathlib import Path
 
 
@@ -3274,6 +3275,7 @@ def policy_error(policy: object, plan: list[dict], guards=None, root: Path | Non
         (item["module"], item["name"], item["element"])
         for item in plan if item.get("kind") == "set-element"
     }
+    listed = {}
     for section, keys in (("allowed_survivors", POLICY_SURVIVOR_KEYS),
                           ("count_only_kills", POLICY_COUNT_ONLY_KEYS)):
         items = policy[section]
@@ -3295,6 +3297,12 @@ def policy_error(policy: object, plan: list[dict], guards=None, root: Path | Non
             return f"{section} is not sorted by module, collection and element"
         if len(identities) != len(set(identities)):
             return f"{section} lists an element more than once"
+        listed[section] = set(identities)
+    # Each element carries one reviewed expectation. Listed in both sections, it may survive
+    # or be killed by arithmetic alone, and neither outcome would be reported.
+    both = sorted(listed["allowed_survivors"] & listed["count_only_kills"])
+    if both:
+        return f"{both[0]} is listed both as an allowed survivor and as a count-only kill"
     unswept = policy["unswept_guards"]
     if not isinstance(unswept, list):
         return "unswept_guards is not a list"
@@ -3406,6 +3414,10 @@ def policy_verdict(observation: dict, policy: dict) -> dict:
     for symbol, policy_class in sorted(allowed.items()):
         result = by_symbol[symbol]
         if result["outcome"] != "caught":
+            continue
+        # A kill scored by check count alone asserted nothing, so it retires no debt; the
+        # count-only rule below reports it instead.
+        if policy_class == "debt" and result["reason"] == UNASSERTED_KILL_REASON:
             continue
         fired = "; ".join(result["failed_checks"][:3]) or "no failing check recorded"
         line = f"{mutation_label(result)} caught by {result['reason']} ({fired})"
@@ -3804,6 +3816,15 @@ def selftest() -> int:
     record("a count-only kill the policy does not allow is a violation",
            policy_verdict(count_only, verdict_policy)["violations"] == [
                "kill scored by check count alone, not in the policy: m.py T: removing 'b'"])
+    count_only_debt = policy_verdict(observation_with(
+        debt=observed("set-element", "caught", UNASSERTED_KILL_REASON, element="a")),
+        verdict_policy)
+    record("a debt entry killed by check count alone is a violation, not a ratchet candidate",
+           count_only_debt["code"] == EXIT_VIOLATION
+           and count_only_debt["ratchet_candidates"] == []
+           and count_only_debt["violations"] == [
+               "kill scored by check count alone, not in the policy: m.py T: removing 'a'"],
+           str(count_only_debt))
     allowing = dict(verdict_policy, count_only_kills=[symbol("b")])
     equal("a count-only kill the policy names conforms",
           policy_verdict(count_only, allowing)["code"], EXIT_CONFORMS)
@@ -3877,6 +3898,129 @@ def selftest() -> int:
         record("the report is appended to the job summary when one is provided",
                step_summary.is_file()
                and "**Verdict:** conforms" in step_summary.read_text(encoding="utf-8"))
+    saved_aggregate = globals()["aggregate"]
+    globals()["aggregate"] = lambda _paths: {}["unanticipated"]
+    unanticipated = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(unanticipated):
+            code = main(["--aggregate", "fragment.json"])
+    except Exception as exc:
+        code = repr(exc)
+    finally:
+        globals()["aggregate"] = saved_aggregate
+    record("an unanticipated aggregation error exits two, never the violation code",
+           code == EXIT_INSTRUMENT
+           and "KeyError: 'unanticipated'" in unanticipated.getvalue(),
+           unanticipated.getvalue()[-300:])
+
+    # ---- observation_from_fragments: each refusal that makes the aggregate exit two ----
+    # Exit two is the only signal that a fragment set is not one complete measurement of
+    # this head, so every refusal is driven here. The live inputs -- plan, digests, checkout
+    # head and the aggregator's own baseline -- are fixtures, so no suite or process runs.
+    fragment_plan = [
+        {"id": f"m{index}", "kind": "set-element", "module": BASH, "name": "T",
+         "collection_kind": "set", "element": element}
+        for index, element in enumerate("abcd")]
+    fragment_baseline = {relative: dict(baseline) for relative in GUARDS}
+
+    def shard_result(killed):
+        return {"owner": completed(returncode=1, failures=1) if killed else completed(),
+                "merged": None, "outcome": "caught" if killed else "survived",
+                "reason": "suite-failure" if killed else "survived"}
+
+    def fragment(index, count=2, **changes):
+        value = {
+            "schema_version": SCHEMA_VERSION, "kind": "mutation-fragment",
+            "head_sha": "a" * 40, "generator_sha256": "b" * 64,
+            "source_digests": {BASH: "c" * 64}, "plan_sha256": digest(fragment_plan),
+            "environment": verdict_environment, "shard": {"index": index, "count": count},
+            "baseline": fragment_baseline,
+            "results": {item["id"]: shard_result(position % 2 == 0)
+                        for position, item in enumerate(fragment_plan)
+                        if position % count == index}}
+        value.update(changes)
+        return value
+
+    def observe(fragments, generator="b" * 64, sources=None, head="a" * 40,
+                aggregator_baseline=None):
+        patched = {
+            "mutation_plan": lambda: (fragment_plan, {}),
+            "file_sha256": lambda _path: generator,
+            "source_digests": lambda: {BASH: "c" * 64} if sources is None else sources,
+            "baseline_results": lambda _tree, _plan: (
+                fragment_baseline if aggregator_baseline is None else aggregator_baseline),
+            "git_head": lambda: head,
+        }
+        restored = {name: globals()[name] for name in patched}
+        globals().update(patched)
+        try:
+            return observation_from_fragments(fragments, verdict_environment)
+        finally:
+            globals().update(restored)
+
+    whole = observe([fragment(1), fragment(0)])
+    equal("a complete fragment set in any order is one observation",
+          (whole["caught"], whole["total"], whole["survivors"]), (2, 4, ["m1", "m3"]))
+    for name, message, fragments, live in (
+            ("no fragment at all is not a measurement",
+             "no mutation fragments supplied", [], {}),
+            ("a fragment from another schema is refused",
+             "fragment schema version differs",
+             [fragment(0, schema_version=SCHEMA_VERSION - 1), fragment(1)], {}),
+            ("a fragment missing its environment is refused",
+             "fragment fields are not exact",
+             [{key: value for key, value in fragment(0).items() if key != "environment"},
+              fragment(1)], {}),
+            ("a fragment without the Bash baseline is not evidence over all guards",
+             "fragment baseline inventory differs",
+             [fragment(0, baseline={relative: result for relative, result
+                                    in fragment_baseline.items() if relative != BASH}),
+              fragment(1)], {}),
+            ("shards from two heads are not one observation",
+             "fragments disagree on head_sha",
+             [fragment(0), fragment(1, head_sha="d" * 40)], {}),
+            ("shards on different tools are refused where the aggregate reads them",
+             "fragments were measured under different tool versions",
+             [fragment(0),
+              fragment(1, environment=dict(verdict_environment, python="3.12.0"))], {}),
+            ("a fragment from an edited generator is stale",
+             "fragment generator digest is stale",
+             [fragment(0), fragment(1)], {"generator": "e" * 64}),
+            ("a fragment from edited guards is stale",
+             "fragment guard digests are stale",
+             [fragment(0), fragment(1)], {"sources": {BASH: "e" * 64}}),
+            ("a fragment from another plan is stale",
+             "fragment plan digest is stale",
+             [fragment(0, plan_sha256="e" * 64), fragment(1, plan_sha256="e" * 64)], {}),
+            ("a fragment of a head other than the checkout is refused",
+             "fragment head is not the aggregate checkout head",
+             [fragment(0), fragment(1)], {"head": "e" * 40}),
+            ("a fragment baseline the aggregator does not reproduce is refused",
+             "fragment baseline differs from the aggregate checkout baseline",
+             [fragment(0), fragment(1)],
+             {"aggregator_baseline": {relative: dict(baseline, checks=41)
+                                      for relative in GUARDS}}),
+            ("shards that disagree on the shard count are refused",
+             "fragments disagree on shard count",
+             [fragment(0), fragment(1, count=3)], {}),
+            ("a missing shard is refused",
+             "fragment shard inventory is incomplete or duplicated: [0]",
+             [fragment(0)], {}),
+            ("a duplicated shard is refused",
+             "fragment shard inventory is incomplete or duplicated: [0, 0]",
+             [fragment(0), fragment(0)], {}),
+            ("a shard carrying another shard's mutation is refused",
+             "fragment shard 0 assignment differs: foreign=['m1'] missing=['m0']",
+             [fragment(0, results={"m1": shard_result(False), "m2": shard_result(True)}),
+              fragment(1)], {}),
+            ("a raw outcome that disagrees with its own suite results is refused",
+             "raw classification disagrees with recomputation for m0",
+             [fragment(0, results={
+                 "m0": dict(shard_result(True), outcome="survived", reason="survived"),
+                 "m2": shard_result(True)}), fragment(1)], {}),
+    ):
+        raises(name, ValueError, message,
+               lambda value=fragments, changes=live: observe(value, **changes))
 
     # ---- evidence the observation carries: failing names and the measured tools -------
     equal("only the suite's FAIL lines are kept as failing names",
@@ -4252,6 +4396,11 @@ def selftest() -> int:
               checked(policy_with(allowed_survivors=[
                   policy_entry("--one"), policy_entry("--one")])),
               "allowed_survivors lists an element more than once")
+        equal("an element listed both as a survivor and as a count-only kill is refused",
+              checked(policy_with(count_only_kills=[
+                  {"module": guard_relative, "collection": "OPTS", "element": "--one"}])),
+              f"('{guard_relative}', 'OPTS', '--one') is listed both as an allowed survivor "
+              "and as a count-only kill")
         record("an entry carrying an extra field is refused",
                "does not carry exactly" in checked(policy_with(allowed_survivors=[
                    dict(policy_entry("--one"), note="x")])))
@@ -4281,9 +4430,9 @@ def selftest() -> int:
            and rendered_policy.count('\n  {"module": ') == 2, rendered_policy)
 
     # collection_scope_sentence is the summary's only statement about which swept sources
-    # had their collections walked. Its only gate is a byte comparison against a CI
-    # re-measurement, and a deterministic falsehood passes that forever, so each arm's truth
-    # is asserted here on message content rather than on the call not raising.
+    # had their collections walked. It reaches only the run's report, which nothing later
+    # compares, so a deterministic falsehood would stand forever; each arm's truth is
+    # asserted here on message content rather than on the call not raising.
     def scope(sources, results, exclusions=None) -> str:
         return collection_scope_sentence({
             "source_digests": {name: "0" * 64 for name in sources},
@@ -4323,7 +4472,7 @@ def selftest() -> int:
     # The completeness clause is the sentence's only unconditional claim, so it needs
     # assertions in the WITHHELD direction too. Asserted positively alone, an operand can be
     # dropped from its guard and the summary then claims completeness over an incomplete
-    # sweep -- a falsehood the byte-comparison gate passes forever because it is stable.
+    # sweep -- a falsehood nothing downstream compares, so it would stand forever.
     complete_phrase = "complete for every swept source"
     record("completeness is withheld when a swept source carried no mutation",
            complete_phrase not in scope(
@@ -4434,6 +4583,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         print(f"mutation proof failed: {exc}", file=sys.stderr)
+        return 2
+    except Exception:
+        # Uncaught, this would exit 1, which the aggregate reserves for a policy violation.
+        traceback.print_exc()
         return 2
 
 

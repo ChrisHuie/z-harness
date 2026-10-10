@@ -168,8 +168,9 @@ EXPECTED_MUTATION_WORKFLOW = """name: mutation-proof
 # Every accepted head is measured afresh by the same six shards. A path filter, selector, or
 # inherited result would leave the verdict dependent on unverified prior workflow and runner
 # state; absence and self-consistency are not measurement evidence. A pull-request run is
-# cancelled only when a newer head of the same pull request supersedes it, and a run for a
-# push to main is never cancelled.
+# cancelled only when a newer run of the same pull request supersedes it. Each push and
+# dispatch run is its own concurrency group, because GitHub replaces a pending run in a shared
+# group whatever cancel-in-progress says; none of those runs is ever cancelled or replaced.
 on:
   pull_request:
   push:
@@ -180,7 +181,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: mutation-proof-${{ github.event.pull_request.number || github.sha }}
+  group: mutation-proof-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -549,12 +550,14 @@ def mutation_workflow_authority_error(data: str) -> str:
     if top_fields != ["name: mutation-proof", "on:", "permissions:", "concurrency:", "jobs:"]:
         return "mutation workflow top-level fields permit an unreviewed environment"
     # Cancelling a superseded pull-request head is safe because that head is no longer a
-    # merge candidate. A main push or a dispatch keyed only by event would let one head's
-    # run cancel another's, leaving an accepted head with no measurement.
+    # merge candidate. Push and dispatch runs are keyed by run, not by head: GitHub replaces a
+    # pending run in a shared group even without cancel-in-progress, so any key two of those
+    # runs could share would let one leave an accepted head with no measurement.
     if _yaml_fields(_yaml_mapping_block(data, "concurrency:"), 2) != [
-            "group: mutation-proof-${{ github.event.pull_request.number || github.sha }}",
+            "group: mutation-proof-${{ github.event.pull_request.number || github.run_id }}",
             "cancel-in-progress: ${{ github.event_name == 'pull_request' }}"]:
-        return "mutation workflow concurrency is not exactly per-head with pull-request-only cancellation"
+        return ("mutation workflow concurrency is not exactly per pull request and per run, "
+                "with pull-request-only cancellation")
     # The key alone leaves the block's CONTENT unread, and neither job overrides it, so a
     # widened workflow-level token reaches every shard and the aggregator silently.
     granted = [
@@ -1084,8 +1087,8 @@ EXPECTED_RETAINED_DECISION_COMMANDS = (
 )
 
 
-def _json_without_duplicate_keys(path: Path):
-    """Load JSON while rejecting duplicate object keys hidden by ordinary json.loads."""
+def _unique_json(raw: bytes):
+    """Parse JSON while rejecting duplicate object keys hidden by ordinary json.loads."""
     def unique_object(pairs):
         value = {}
         for key, item in pairs:
@@ -1094,7 +1097,11 @@ def _json_without_duplicate_keys(path: Path):
             value[key] = item
         return value
 
-    return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_object)
+    return json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object)
+
+
+def _json_without_duplicate_keys(path: Path):
+    return _unique_json(path.read_bytes())
 
 
 def decision_writer_source_error(source_bytes=None) -> str:
@@ -2048,18 +2055,6 @@ def _mutation_writer(label: str):
     return module
 
 
-def _unique_json(raw: bytes):
-    def unique_object(pairs):
-        value = {}
-        for key, item in pairs:
-            if key in value:
-                raise ValueError(f"duplicate JSON object key {key!r}")
-            value[key] = item
-        return value
-
-    return json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object)
-
-
 def mutation_policy_file_error(policy_bytes=None, plan=None, writer=None) -> str:
     """The reviewed mutation policy names only planned element deletions, canonically.
 
@@ -2088,16 +2083,26 @@ def registered_hook_closure(root: Path | None = None) -> set:
 
     Commands are read from both runtimes' registrations, and imports are followed through
     the directories a hook can import from. A module loaded some other way is outside this
-    closure, so the closure is a lower bound on what runs.
+    closure, so the closure is a lower bound on what runs. A registered command that runs a
+    Python file outside those directories is refused rather than skipped: skipping it would
+    let a new registration escape the scan set with every check green.
     """
     root = ROOT if root is None else root
     scripts = set()
+    tops = "|".join(sorted({base.split("/")[0] for base in HOOK_IMPORT_ROOTS}))
+    repository_module = re.compile(rf"(?:^|/)((?:{tops})/[A-Za-z0-9_./-]+\.py)$")
 
     def walk(node):
         if isinstance(node, dict):
             command = node.get("command")
             if node.get("type") == "command" and isinstance(command, str):
-                scripts.update(re.findall(r"hooks/[A-Za-z0-9_./-]+\.py", command))
+                for token in re.findall(r"[^\s'\"]+\.py\b", command):
+                    found = repository_module.search(token)
+                    if found is None:
+                        raise ValueError(
+                            f"registered command {command!r} runs {token}, which is outside "
+                            "the directories this closure reads")
+                    scripts.add(found.group(1))
             for value in node.values():
                 walk(value)
         elif isinstance(node, list):
@@ -3359,8 +3364,9 @@ def selftest() -> int:
         ) is not None,
     )
     # The sweep is the only check that measures at all; the offline gate validates only the
-    # policy it is held against, so every accepted head must execute all six shards. A selector or job-level
-    # condition would make the result depend on an unproved base run and mutable runner state.
+    # policy it is held against, so every accepted head must execute all six shards. A
+    # selector or job-level condition would make the result depend on an unproved base run
+    # and mutable runner state.
     expect(
         "mutation workflow carries no path filter that would silence a head",
         "paths:" not in EXPECTED_MUTATION_WORKFLOW
@@ -3641,8 +3647,13 @@ def selftest() -> int:
          "mutation aggregate shard-failure gate does not exit non-zero"),
         ("a concurrency group shared by every head",
          sweep_replacement(
-             "  group: mutation-proof-${{ github.event.pull_request.number || github.sha }}\n",
+             "  group: mutation-proof-${{ github.event.pull_request.number || github.run_id }}\n",
              "  group: mutation-proof\n"),
+         "mutation workflow concurrency"),
+        ("push runs of one head sharing a group a later run can replace",
+         sweep_replacement(
+             "  group: mutation-proof-${{ github.event.pull_request.number || github.run_id }}\n",
+             "  group: mutation-proof-${{ github.event.pull_request.number || github.sha }}\n"),
          "mutation workflow concurrency"),
         ("a sweep that cancels pushes to main",
          sweep_replacement(
@@ -4064,12 +4075,7 @@ def selftest() -> int:
         },
         "floor": 3,
     }
-    writer_spec = importlib.util.spec_from_file_location(
-        "_ci_gate_mutation_writer_selftest",
-        ROOT / "tools/write-mutation-receipt.py")
-    assert writer_spec is not None and writer_spec.loader is not None
-    writer = importlib.util.module_from_spec(writer_spec)
-    writer_spec.loader.exec_module(writer)
+    writer = _mutation_writer("_ci_gate_mutation_writer_selftest")
     original_writer_which = writer.shutil.which
     writer.shutil.which = (
         lambda name: None if name == "zsh" else original_writer_which(name))
@@ -4425,6 +4431,29 @@ def selftest() -> int:
         expect(
             "registrations naming no hook module are unverified, not clean",
             "unverified" in mutation_sweep_coverage_error(
+                root=coverage_root, guards=(), unswept=set()),
+        )
+        (coverage_root / "tools").mkdir()
+        (coverage_root / "tools/stop_tool.py").write_text("", encoding="utf-8")
+
+        def register(command):
+            (coverage_root / "settings.json").write_text(json.dumps({"hooks": {
+                "Stop": [{"hooks": [{"type": "command", "command": command}]}]}}),
+                encoding="utf-8")
+
+        register("python3 ~/.claude/tools/stop_tool.py")
+        try:
+            tools_closure = registered_hook_closure(coverage_root)
+        except ValueError as exc:
+            tools_closure = repr(exc)
+        expect(
+            "a registered module under tools/ enters the closure",
+            tools_closure == {"tools/stop_tool.py"},
+        )
+        register("python3 ~/.claude/scripts/stop_tool.py")
+        expect(
+            "a registered Python file outside the read directories is refused, not skipped",
+            "outside the directories this closure reads" in mutation_sweep_coverage_error(
                 root=coverage_root, guards=(), unswept=set()),
         )
     handoff_sources = {

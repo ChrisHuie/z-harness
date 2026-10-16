@@ -152,7 +152,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 363
+SELFTEST_FLOOR = 373
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -1329,19 +1329,30 @@ def agents_sections(agents_text):
 def claim_blocks(text):
     """-> [(first line number, block text)]: paragraphs, list items, table rows and headings.
 
-    Lines inside a fenced code block (``` or ~~~) are examples, not prose, and are skipped.
-    A table row is its own block: rows carry no sentence terminator, so a quoted phrase in
-    one row and a file mention in another would otherwise read as one sentence.
+    Lines inside a fenced code block are examples, not prose, and are skipped. A fence is
+    tracked the way GFM reads it: a run of three or more backticks or tildes opens one (a
+    backtick run only when no backtick follows it on the line), and only a run of the same
+    character at least as long, followed by nothing but spaces, closes it; an unclosed fence
+    runs to the end of the file. Indentation before a fence is not limited to GFM's three
+    spaces: a fence inside a list item sits at the item's own offset, and this scanner has
+    no container model. A table row is its own block: rows carry no sentence terminator, so
+    a quoted phrase in one row and a file mention in another would otherwise read as one
+    sentence.
     """
-    blocks, current, start, fenced = [], [], 0, False
+    blocks, current, start, fence = [], [], 0, None
     for number, line in enumerate(text.splitlines(), 1):
-        if line.lstrip().startswith(("```", "~~~")):
-            fenced = not fenced
+        stripped = line.lstrip()
+        run = re.match(r"`{3,}|~{3,}", stripped)
+        if fence is not None:
+            if (run and run.group()[0] == fence[0] and len(run.group()) >= fence[1]
+                    and not stripped[run.end():].strip()):
+                fence = None
+            continue
+        if run and not (run.group()[0] == "`" and "`" in stripped[run.end():]):
+            fence = (run.group()[0], len(run.group()))
             if current:
                 blocks.append((start, "\n".join(current)))
                 current = []
-            continue
-        if fenced:
             continue
         item = re.match(r"\s*(?:(?:[-*+]|\d+\.)\s|\|)", line) is not None
         heading = line.startswith("#")
@@ -5902,6 +5913,43 @@ def selftest():
         code_span = c12_on("Run `cat ~/.claude/CLAUDE.md` to read the installed file.\n")
         expect_red("C12 control: a command example carrying the path in a code span is not a claim",
                    lambda: not code_span.failures)
+
+        # A fence is read as GFM reads it (review thread 4298561325): the delimiter character
+        # and run length decide what closes it, and a backtick run followed by a backtick on
+        # its line is an inline span, not an opener.
+        fence_claim = 'AGENTS.md says "A made-up mandatory policy."\n'
+
+        def claims_in(text, module=None):
+            run = c12_on(text) if module is None else None
+            if module is not None:
+                open(bind_ref, "w").write(text)
+                run = module.Run(bind_root, ci=True)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    run.c12_claim_binding()
+            return run.counters["C12"]["claims"]
+
+        fence_base = claims_in("")
+        expect_red("C12 fence control: a bare claim counts once; the same claim inside a tilde fence counts "
+                   "nothing",
+                   lambda: claims_in(fence_claim) == fence_base + 1
+                   and claims_in("~~~text\n" + fence_claim + "~~~\n") == fence_base)
+        expect_red("C12 finds a claim after a tilde fence that holds a backtick run (the run does not close it)",
+                   lambda: claims_in("~~~text\n```\n~~~\n\n" + fence_claim) == fence_base + 1)
+        expect_red("C12 finds a claim after a four-backtick fence that holds a three-backtick run",
+                   lambda: claims_in("````text\n```\n````\n\n" + fence_claim) == fence_base + 1)
+        expect_red("C12 finds a claim after a line whose backtick run is an inline span, not a fence",
+                   lambda: claims_in("```AGENTS.md``` is a filename.\n\n" + fence_claim) == fence_base + 1
+                   and claims_in("``` `x` ```\n\n" + fence_claim) == fence_base + 1)
+        expect_red("C12 keeps a claim inside a fence whose would-be closer is shorter than the opener, "
+                   "or whose closer carries text, or that never closes",
+                   lambda: claims_in("````\n```\n" + fence_claim + "````\n") == fence_base
+                   and claims_in("~~~\n~~~ end\n" + fence_claim + "~~~\n") == fence_base
+                   and claims_in("```\n" + fence_claim) == fence_base)
+        expect_red("C12 closes a fence on a longer run of the same character or a closer with trailing "
+                   "spaces, and a tilde opener may carry backticks in its info string",
+                   lambda: claims_in("```\n" + fence_claim + "`````\n\n" + fence_claim) == fence_base + 1
+                   and claims_in("```\n" + fence_claim + "```   \n\n" + fence_claim) == fence_base + 1
+                   and claims_in("~~~ `x`\n" + fence_claim + "~~~\n") == fence_base)
         swallowed = c12_on('A "stray quote. The rule is always-on in `~/.claude/CLAUDE.md` '
                            '("Named a tool? Run exactly that and stop."), as "noted.\n')
         expect_red("C12 still reports a claim that a stray earlier quote would otherwise swallow",
@@ -6266,16 +6314,30 @@ def selftest():
                                   timeout=900, env=dict(os.environ, ZH_REVIEW_REPRODUCTIONS="nested"))
             return done.returncode == 0 and expected_line in done.stdout
 
-        expect_red("review reproduction 4294811805: a quote anywhere in a sentence naming AGENTS.md "
-                   "is a claim, (0,1) (1,1) (1,1) (1,1)",
-                   lambda: reproduction(4294811805, "'The policy \"Add a made-up mandatory policy\" is "
-                                                    "required by AGENTS.md.' findings= 1 claims= 1"))
-        expect_red("review reproduction 4294811820: an edit past the old 200-character cut is one new "
-                   "item and one stale entry, both red; restored is green",
-                   lambda: reproduction(4294811820, "changed failures= 3 worklist_occurrences= 14"))
-        expect_red("review reproduction 4294811833: the forward elision binds, the reversed one is stale",
-                   lambda: reproduction(4294811833, "'AGENTS.md \"trailers to commits ... Do not add AI "
-                                                    "co-author\"' findings= 1 bound= 0"))
+        def reproduction_case(thread_id, label, expected_line):
+            """One proof per reproduction. A nested run (one that a reproduction launched) does
+            not re-run any of them: each is a subprocess that loads this module from disk, so
+            inside the mutated suite it would judge the unmutated file."""
+            if os.environ.get("ZH_REVIEW_REPRODUCTIONS") == "nested":
+                expect_red(f"review reproduction {thread_id}: not re-run inside a nested suite run, where "
+                           f"a subprocess would load the unmutated file",
+                           lambda: os.environ.get("ZH_REVIEW_REPRODUCTIONS") == "nested")
+            else:
+                expect_red(f"review reproduction {thread_id}: {label}",
+                           lambda: reproduction(thread_id, expected_line))
+
+        reproduction_case(4294811805, "a quote anywhere in a sentence naming AGENTS.md is a claim, "
+                          "(0,1) (1,1) (1,1) (1,1)",
+                          "'The policy \"Add a made-up mandatory policy\" is required by AGENTS.md.' "
+                          "findings= 1 claims= 1")
+        reproduction_case(4294811820, "an edit past the old 200-character cut is one new item and one "
+                          "stale entry, both red; restored is green",
+                          "changed failures= 3 worklist_occurrences= 14")
+        reproduction_case(4294811833, "the forward elision binds, the reversed one is stale",
+                          "'AGENTS.md \"trailers to commits ... Do not add AI co-author\"' findings= 1 bound= 0")
+        reproduction_case(4298561325, "a claim after a mixed, shorter or inline run is found, scan set "
+                          "fixed at 86 governed files",
+                          "mixed_fence_then_claim governed_files= 86 failures, claims = (2, 13)")
         expect_red("C12 on this tree prints the known stale citations as its worklist",
                    lambda: all(any(rel in d for d in real_c12.worklists.get("C12", [])) for rel in (
                        "skills/agent-dispatch/references/deferred.md:88",
@@ -6644,6 +6706,24 @@ def selftest():
                        "proof in the mutated suite; the baseline and restored suites pass",
                        lambda: reproduction(4294811841, "mutated bound_control= 0 SELFTEST-SUMMARY "
                                                         "suite=harness_check checks="))
+
+        # --- fence mutants, each failing one shape proof above by name; search strings are
+        # assembled so this block adds no occurrence of the site it mutates
+        any_run_closes = private_copy("            if (run and run.group()[0] == fence[0] and len(run.group()) >= "
+                                      + "fence[1]\n                    and not stripped[run.end():].strip()):\n",
+                                      "            if run and not stripped[run.end():].strip():\n")
+        expect_red("mutation: a fence closed by any run swallows the claim after a tilde fence holding "
+                   "a backtick run (the mixed-fence proof goes red)",
+                   lambda: claims_in("~~~text\n```\n~~~\n\n" + fence_claim, any_run_closes) == fence_base)
+        length_ignored = private_copy("[0] == fence[0] and len(run.group()) >= " + "fence[1]",
+                                      "[0] == fence[0]")
+        expect_red("mutation: a fence closed by a shorter run swallows the claim after a four-backtick "
+                   "fence holding three (the shorter-fence proof goes red)",
+                   lambda: claims_in("````text\n```\n````\n\n" + fence_claim, length_ignored) == fence_base)
+        info_ignored = private_copy(' and not (run.group()[0] == "`" and "`" in ' + 'stripped[run.end():])', "")
+        expect_red("mutation: a backtick run followed by a backtick opening a fence swallows the claim "
+                   "after an inline span (the inline-span proof goes red)",
+                   lambda: claims_in("```AGENTS.md``` is a filename.\n\n" + fence_claim, info_ignored) == fence_base)
 
     # +1 for this assertion's own increment, so SELFTEST_FLOOR is the number the receipt
     # prints. Comparing the pre-increment count made the floor one less than the reported

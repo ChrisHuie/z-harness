@@ -17,6 +17,7 @@ the expected observation line.
 | 4294811833 | an elided quote binds only in source order | `hooks/harness_check.py --selftest` |
 | 4294811841 | a disabled bound counter fails a named proof | `hooks/harness_check.py --selftest` |
 | 4298561313 | the receipt vouches for the modules the interpreter loads, in its search order | `tools/install-claude.py --selftest` |
+| 4298561325 | a fence closes only on a run of its own character at least as long; an inline run is not a fence | `hooks/harness_check.py --selftest` |
 | 4298561334 | a staged target that no longer matches its receipt is refused before any write | `tools/install-claude.py --selftest` |
 
 Each script loads the tool from its repository path and works in temporary directories or

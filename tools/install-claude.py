@@ -494,6 +494,9 @@ def marker_problems(marker):
 # calls return their argument's path unchanged.
 PATH_IDENTITY_CALLS = frozenset({"str", "Path", "pathlib.Path", "os.fspath", "os.path.abspath",
                                  "os.path.normpath", "os.path.realpath"})
+# The interpreter's own sys.path entries (its zip, stdlib, extension and site directories),
+# whose number varies by host: one sentinel between the script's directory and appended ones.
+INTERPRETER_ENTRIES = "<the interpreter's own entries>"
 
 
 def sys_path_mutation(node):
@@ -542,23 +545,31 @@ def hook_import_problems(tree, receipt):
 
     The receipt vouches for a hook only when every module the interpreter would load for it
     is in the files map, resolved the way `python3 <tree>/hooks/<script>.py` resolves them.
-    Each owned script is its own process: the search path starts at the script's directory;
-    a top-level `sys.path.insert(i, …)` or `sys.path.append(…)` whose argument is built from
-    `__file__` mutates the one shared path at the point it executes; an import resolves
-    against the path as it stands then, the first directory holding `<name>.py` or
-    `<name>/__init__.py` wins, and a module imported from the tree is walked right there,
-    its own mutations and imports included; a name resolves once, as `sys.modules` does.
-    A dotted import descends the package from the file that resolved its first segment;
-    `from pkg import name` walks `pkg/name.py` when the receipt holds it. An import inside a
+    Each owned script is its own process: the search path is the script's directory, then
+    the interpreter's own entries, modelled as one sentinel; a top-level `sys.path.insert(0,
+    …)` or `insert(1, …)` (the only indices whose position relative to those entries is
+    fixed) or `sys.path.append(…)`, with an argument built from `__file__`, mutates the one
+    shared path at the point it executes; an import resolves against the path as it stands
+    then, the first directory holding `<name>/__init__.py` or else `<name>.py` wins (the
+    interpreter prefers a package to a module of the same name), and a module imported from
+    the tree is walked right there, its own mutations and imports included; a name resolves
+    once per process, as `sys.modules` does. A dotted import descends the package from the
+    file that resolved its first segment; `from pkg import name` walks `mod/name.py` when it
+    exists and otherwise requires `mod` to bind `name`; a relative import resolves from the importing
+    file's package. An import inside a
     function or compound statement, and an `importlib.import_module` or `__import__` call
     with a constant name, resolve against the final path.
 
-    Reported: a module that no searched directory holds; a dotted segment the package does
-    not hold, or a segment under a plain module; a file on the path named like a
-    standard-library module, which shadows it for every interpreter that has not already
-    loaded that module; a sys.path mutation outside a top-level call statement, which the
-    path cannot order; an argument the evaluator does not model; a target outside the tree;
-    a dynamic import whose name is not a constant; a script that does not parse.
+    Reported: a module that no searched directory holds; a file that wins the search but is
+    not in the receipt's files map; a dotted segment the package does not hold, or a segment
+    under a plain module; a from-import of a name the module neither binds nor holds as a submodule; a relative import from
+    a file that is not in a package; a file on
+    the path named like a standard-library module, which shadows it for every interpreter
+    that has not already loaded that module (also reported for an appended directory, which
+    the interpreter searches after its own entries); a sys.path mutation outside a top-level
+    call statement, or with an index other than 0 or 1; an argument the evaluator does not
+    model; a target outside the tree; a dynamic import whose name is not a constant; a
+    script that does not parse.
     """
     files = receipt.get("files", {})
     stdlib = getattr(sys, "stdlib_module_names", frozenset())
@@ -578,7 +589,7 @@ def hook_import_problems(tree, receipt):
         """-> the constant name of an importlib.import_module or __import__ call, "" when
         the name is not a constant, None when `node` is no such call."""
         if (isinstance(node, ast.Call) and node.args
-                and ast.unparse(node.func) in ("importlib.import_module", "__import__")):
+                and ast.unparse(node.func) in ("importlib.import_module", "__import__", "importlib.__import__")):
             first = node.args[0]
             return first.value if isinstance(first, ast.Constant) and isinstance(first.value, str) else ""
         return None
@@ -592,22 +603,65 @@ def hook_import_problems(tree, receipt):
         return []
 
     def process(entry):
-        path = [os.path.dirname(entry)]
+        path = [os.path.dirname(entry), INTERPRETER_ENTRIES]
         loaded = {}
         walked = set()
         deferred = []
 
+        def present(relative):
+            return relative in files or os.path.isfile(os.path.join(tree, relative))
+
         def locate(name):
+            # The interpreter loads what is on disk, listed or not; an unlisted file that wins
+            # is reported by `vouch`, and `tree_problems` names it as unreceipted.
             for directory in path:
-                for candidate in (f"{name}.py", f"{name}/__init__.py"):
+                if directory is INTERPRETER_ENTRIES:
+                    continue
+                for candidate in (f"{name}/__init__.py", f"{name}.py"):
                     relative = os.path.normpath(os.path.join(directory, candidate))
-                    if relative in files:
+                    if present(relative):
                         return relative
             return None
 
+        def vouch(relative, dotted, found):
+            if found not in files:
+                problems.append(f"{relative} imports {dotted}, which loads {found}, a file the receipt "
+                                f"does not list")
+
+        def binds(module_file, name):
+            """A module binds `name` when any statement stores it, defines it, or imports it."""
+            module = module_ast(module_file)
+            if module is None:
+                return True
+            for node in ast.walk(module):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == name:
+                    return True
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id == name:
+                    return True
+                if isinstance(node, ast.Import) and any((a.asname or a.name.split(".")[0]) == name for a in node.names):
+                    return True
+                if isinstance(node, ast.ImportFrom) and any(a.name == "*" or (a.asname or a.name) == name
+                                                            for a in node.names):
+                    return True
+            return False
+
+        def from_name(relative, dotted, current, name):
+            """`from <current> import name`: a submodule of a package is walked; otherwise the
+            module must bind the name, as the interpreter raises when it does neither."""
+            if name == "*":
+                return
+            inner = submodule(current, name) if current.endswith("/__init__.py") else None
+            if inner is not None:
+                vouch(relative, f"{dotted}.{name}", inner)
+                walk(inner)
+            elif not binds(current, name):
+                problems.append(f"{relative} imports {name} from {dotted}, which {current} neither binds "
+                                f"nor holds as a submodule")
+
         def mutate(relative, call):
             if (call.func.attr == "insert" and len(call.args) == 2
-                    and isinstance(call.args[0], ast.Constant) and type(call.args[0].value) is int):
+                    and isinstance(call.args[0], ast.Constant) and call.args[0].value in (0, 1)
+                    and type(call.args[0].value) is int):
                 index, argument = call.args[0].value, call.args[1]
             elif call.func.attr == "append" and len(call.args) == 1:
                 index, argument = len(path), call.args[0]
@@ -629,9 +683,9 @@ def hook_import_problems(tree, receipt):
 
         def submodule(package_file, segment):
             directory = os.path.dirname(package_file)
-            for candidate in (f"{segment}.py", f"{segment}/__init__.py"):
+            for candidate in (f"{segment}/__init__.py", f"{segment}.py"):
                 relative = os.path.normpath(os.path.join(directory, candidate))
-                if relative in files:
+                if present(relative):
                     return relative
             return None
 
@@ -647,9 +701,11 @@ def hook_import_problems(tree, receipt):
                     return
                 if found is None:
                     problems.append(f"{relative} imports {name}, which is neither standard library nor "
-                                    f"in the receipt's files under {', '.join(dict.fromkeys(path))}")
+                                    f"in the receipt's files under "
+                                    f"{', '.join(d for d in dict.fromkeys(path) if d is not INTERPRETER_ENTRIES)}")
                     return
                 loaded[name] = found
+                vouch(relative, name, found)
                 walk(found)
             elif name in stdlib:
                 return
@@ -662,12 +718,33 @@ def hook_import_problems(tree, receipt):
                 if current is None:
                     problems.append(f"{relative} imports {dotted}, which is not in the receipt's files")
                     return
+                vouch(relative, dotted, current)
                 walk(current)
-            if current.endswith("/__init__.py"):
-                for from_name in from_names:
-                    inner = submodule(current, from_name)
-                    if inner is not None:
-                        walk(inner)
+            for name in from_names:
+                from_name(relative, dotted, current, name)
+
+        def resolve_relative(relative, node):
+            """`from .a.b import c` from `relative`: every directory climbed must be a package."""
+            package = os.path.dirname(relative)
+            for _ in range(node.level):
+                marker = os.path.normpath(os.path.join(package, "__init__.py"))
+                if not present(marker):
+                    problems.append(f"{relative} line {node.lineno}: relative import "
+                                    f"{ast.unparse(node)} from a file that is not inside a package")
+                    return
+                if _ < node.level - 1:
+                    package = os.path.dirname(package)
+            current = os.path.normpath(os.path.join(package, "__init__.py"))
+            dotted = "." * node.level + (node.module or "")
+            for segment in (node.module or "").split(".") if node.module else []:
+                current = submodule(current, segment)
+                if current is None:
+                    problems.append(f"{relative} imports {dotted}, which is not in the receipt's files")
+                    return
+                vouch(relative, dotted, current)
+                walk(current)
+            for alias in node.names:
+                from_name(relative, dotted, current, alias.name)
 
         def walk(relative):
             if relative in walked:
@@ -680,6 +757,8 @@ def hook_import_problems(tree, receipt):
                 call = sys_path_mutation(statement.value) if isinstance(statement, ast.Expr) else None
                 if call is not None:
                     mutate(relative, call)
+                elif isinstance(statement, ast.ImportFrom) and statement.level > 0:
+                    resolve_relative(relative, statement)
                 elif isinstance(statement, (ast.Import, ast.ImportFrom)):
                     for dotted, from_names in import_targets(statement):
                         resolve(relative, dotted, from_names)
@@ -689,6 +768,8 @@ def hook_import_problems(tree, receipt):
                         if sys_path_mutation(node) is not None:
                             problems.append(f"{relative} line {node.lineno}: sys.path mutated outside a "
                                             f"top-level call statement; the search path cannot be ordered")
+                        elif isinstance(node, ast.ImportFrom) and node.level > 0:
+                            deferred.append((relative, node))
                         elif isinstance(node, (ast.Import, ast.ImportFrom)):
                             deferred.extend((relative, target) for target in import_targets(node))
                         elif dynamic == "":
@@ -700,8 +781,11 @@ def hook_import_problems(tree, receipt):
 
         walk(entry)
         while deferred:
-            relative, (dotted, from_names) = deferred.pop(0)
-            resolve(relative, dotted, from_names)
+            relative, target = deferred.pop(0)
+            if isinstance(target, ast.ImportFrom):
+                resolve_relative(relative, target)
+            else:
+                resolve(relative, *target)
 
     for h in receipt.get("owned_hooks", []):
         pointed = HARNESS_COMMAND.match(h.get("command", "")) if isinstance(h.get("command"), str) else None
@@ -714,32 +798,45 @@ def tree_problems(tree, receipt):
     """-> (file problems, hook problems) for one staged tree against its receipt.
 
     File problems are "missing <path>" and "changed <path>" over the receipt's files map in
-    path order; hook problems are those of `hook_import_problems`. --check applies this to
+    path order, then "unreceipted <path>" for every file under the tree the map does not
+    list (a file the digests never verify, which a hook's search path may load ahead of a
+    listed one); hook problems are those of `hook_import_problems`. --check applies this to
     the active tree and reports each line; --activate applies it to the target at the commit
-    fence, before the pending marker and the settings replace, so a tree that no longer
-    matches what was staged is refused before anything durable is written.
+    fence, before the temp file, the pending marker and the settings replace, so a tree that
+    no longer matches what was staged is refused before anything is written.
     """
+    recorded = receipt.get("files", {})
     files = []
-    for relative, record in sorted(receipt.get("files", {}).items()):
+    for relative, record in sorted(recorded.items()):
         full = os.path.join(tree, relative)
         if not os.path.isfile(full):
             files.append(f"missing {relative}")
         elif sha256_file(full) != record["sha256"]:
             files.append(f"changed {relative}")
+    if os.path.isdir(tree):
+        files.extend(f"unreceipted {relative}" for relative in sorted(set(tree_files(tree)) - set(recorded)))
     return files, hook_import_problems(tree, receipt)
 
 
 # ---- stage ---------------------------------------------------------------------
-def tree_file_digests(tree):
-    digests = {}
+def tree_files(tree):
+    """-> every file under the tree that a receipt describes: all but the receipt itself and
+    byte-compiled copies, in walk order."""
+    found = []
     for dirpath, dirs, files in os.walk(tree):
         dirs[:] = sorted(d for d in dirs if d != "__pycache__")
         for name in sorted(files):
             if name == RECEIPT_NAME or name.endswith(".pyc"):
                 continue
-            full = os.path.join(dirpath, name)
-            relative = os.path.relpath(full, tree).replace(os.sep, "/")
-            digests[relative] = {"sha256": sha256_file(full), "bytes": os.path.getsize(full)}
+            found.append(os.path.relpath(os.path.join(dirpath, name), tree).replace(os.sep, "/"))
+    return found
+
+
+def tree_file_digests(tree):
+    digests = {}
+    for relative in tree_files(tree):
+        full = os.path.join(tree, relative)
+        digests[relative] = {"sha256": sha256_file(full), "bytes": os.path.getsize(full)}
     return digests
 
 
@@ -1093,7 +1190,7 @@ def installation_state(home, source_root=None):
             verdicts.append(f"owned hook {problem}; re-stage {active_version}")
         try:
             tree_copy = read_text(os.path.join(tree, "CLAUDE.generated.md"))
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             tree_copy = None
             state["drift"].append(f"instruction file unreadable: {exc}")
         if tree_copy is not None and installed_text != tree_copy:
@@ -1189,8 +1286,9 @@ def activate(home, version_id, fault=None, between_read_and_replace=None, after_
                if leftover else "every version's entries are removed before this one's are added"))
 
     def refuse_unverified_target():
-        # Judged at the commit fence, on every attempt: nothing durable precedes the verdict,
-        # and a target edited after staging is refused with its files named.
+        # Judged on every attempt, before the temp file and before the stat guard reads the
+        # settings state, so nothing is written on refusal and a settings write that lands
+        # during the check is still seen; a target edited after staging is named.
         drifted, unloadable = tree_problems(tree, receipt)
         if drifted:
             raise InstallError(f"refusing to activate {version_id}: the staged tree does not match "
@@ -1217,6 +1315,7 @@ def activate(home, version_id, fault=None, between_read_and_replace=None, after_
         data = (json.dumps(merged, indent=2) + "\n").encode("utf-8")
         if between_read_and_replace is not None:
             between_read_and_replace(attempt)
+        refuse_unverified_target()
         fd, tmp = tempfile.mkstemp(prefix=".settings-", dir=os.path.dirname(settings_path))
         try:
             with os.fdopen(fd, "wb") as fh:
@@ -1230,7 +1329,6 @@ def activate(home, version_id, fault=None, between_read_and_replace=None, after_
             if fault == "before-replace":
                 os.remove(tmp)
                 raise InstallError("planted fault: activation abandoned before the settings replace")
-            refuse_unverified_target()
             marker = {
                 "schema_version": PENDING_SCHEMA_VERSION,
                 "from": active_version,
@@ -2097,18 +2195,21 @@ def selftest():
 
         # --- the module must sit in a directory the hook actually searches: its own
         # directory always, hooks/guards/ and tools/ only when its source inserts them
-        def import_check(tree_files, scripts_by_path, fn=None):
-            """-> hook_import_problems over a throwaway tree: files map plus the named scripts."""
+        def import_check(tree_files, scripts_by_path, fn=None, owned=None):
+            """-> hook_import_problems over a throwaway tree: files map plus the named scripts;
+            every script directly under hooks/ is an owned hook unless `owned` names them."""
             root = os.path.join(td, "import-tree")
             shutil.rmtree(root, ignore_errors=True)
             for rel, body in scripts_by_path.items():
                 os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
                 open(os.path.join(root, rel), "w").write(body)
+            if owned is None:
+                owned = [rel[len("hooks/"):] for rel in scripts_by_path
+                         if rel.startswith("hooks/") and "/" not in rel[len("hooks/"):]]
             receipt = {"files": {rel: {"sha256": "0" * 64} for rel in tree_files},
                        "owned_hooks": [{"event": "Stop", "matcher": None, "type": "command",
-                                        "command": f"python3 ~/.claude/harness/v1/hooks/{rel[len('hooks/'):]}",
-                                        "timeout": 5} for rel in scripts_by_path if rel.startswith("hooks/")
-                                       and "/" not in rel[len("hooks/"):]]}
+                                        "command": f"python3 ~/.claude/harness/v1/hooks/{name}",
+                                        "timeout": 5} for name in owned]}
             return (fn or hook_import_problems)(root, receipt)
 
         inserts_guards = "import os, sys\nsys.path.insert(0, os.path.join(os.path.dirname(__file__), \"guards\"))\n"
@@ -2247,10 +2348,25 @@ def selftest():
             "dynamic_constant": ({"hooks/a.py": 'import importlib\nlib = importlib.import_module("lib")\nprint(lib.VALUE)\n',
                                   "hooks/lib.py": "VALUE = 42\n"}, (True, True)),
             "dynamic_missing": ({"hooks/a.py": 'import importlib\nlib = importlib.import_module("nope")\n'}, (False, False)),
+            "package_over_module": ({"hooks/a.py": "import lib\nprint(lib.VALUE)\n", "hooks/lib.py": "import missing_review_dependency\n",
+                                     "hooks/lib/__init__.py": "VALUE = 42\n"}, (True, True)),
+            "append_after_own_dir": ({"hooks/a.py": 'import sys\nfrom pathlib import Path\n'
+                                                    'sys.path.append(str(Path(__file__).parent / "guards"))\nimport lib\n',
+                                      "hooks/lib.py": "VALUE = 42\n",
+                                      "hooks/guards/lib.py": "import missing_review_dependency\n"}, (True, True)),
+            "insert_index_2_refused": ({"hooks/a.py": prefix.replace("insert(0,", "insert(2,") + "import lib\n",
+                                        "hooks/guards/lib.py": "VALUE = 42\n"}, (False, True)),
+            "relative_in_package": ({"hooks/a.py": "import pkg.sub\nprint(pkg.sub.VALUE)\n", "hooks/pkg/__init__.py": "",
+                                     "hooks/pkg/sub.py": "from . import helper\nVALUE = helper.VALUE\n",
+                                     "hooks/pkg/helper.py": "VALUE = 42\n"}, (True, True)),
+            "relative_outside_package": ({"hooks/a.py": "from . import helper\n", "hooks/helper.py": "VALUE = 42\n"}, (False, False)),
+            "relative_missing": ({"hooks/a.py": "import pkg.sub\n", "hooks/pkg/__init__.py": "",
+                                  "hooks/pkg/sub.py": "from . import nope\n"}, (False, False)),
         }
         outcomes = {name: differential(files) for name, (files, _) in shapes.items()}
-        chk("differential: for sixteen tree shapes the checker's verdict equals a fresh interpreter's "
-            "(clear iff the hook exits 0): " + ", ".join(f"{n}={v}" for n, v in outcomes.items()),
+        chk("differential: for twenty-two tree shapes the checker's verdict equals a fresh interpreter's "
+            "(clear iff the hook exits 0), except the one index the model refuses by design: "
+            + ", ".join(f"{n}={v}" for n, v in outcomes.items()),
             outcomes == {name: expected for name, (_, expected) in shapes.items()})
         chk("search order: an insert at 0 is searched before the script's directory, an insert at 1 after it",
             import_check(["hooks/a.py", "hooks/lib.py", "hooks/guards/lib.py"], shapes["precedence"][0])
@@ -2286,7 +2402,7 @@ def selftest():
             and import_check(["hooks/a.py", "hooks/lib.py"], shapes["dirname_abspath"][0]) == []
             and import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/sub.py"], shapes["package"][0]) == []
             and import_check(["hooks/a.py", "hooks/pkg/__init__.py"], shapes["package"][0])
-            == ["hooks/pkg/__init__.py imports sub, which is neither standard library nor in the receipt's files under hooks"])
+            == ["hooks/pkg/__init__.py imports sub, which loads hooks/sub.py, a file the receipt does not list"])
         chk("a dotted import descends the package: a missing segment, or a segment under a plain module, is reported",
             import_check(["hooks/a.py", "hooks/pkg/__init__.py"], shapes["dotted_missing"][0])
             == ["hooks/a.py imports pkg.nope, which is not in the receipt's files"]
@@ -2302,6 +2418,58 @@ def selftest():
             and import_check(["hooks/a.py"], {"hooks/a.py": 'import importlib\nname = "lib"\nlib = importlib.import_module(name)\n'})
             == ["hooks/a.py line 3: dynamic import importlib.import_module(name) names no constant module; the "
                 "checker cannot resolve it"])
+        chk("an import inside a function is required to resolve, against the final path",
+            import_check(["hooks/a.py"], {"hooks/a.py": "def call():\n    import missing_dep\ncall()\n"})
+            == ["hooks/a.py imports missing_dep, which is neither standard library nor in the receipt's files under hooks"]
+            and import_check(["hooks/a.py", "hooks/guards/lib.py"], {"hooks/a.py": "def call():\n    import lib\n" + prefix,
+                                                                     "hooks/guards/lib.py": "X = 1\n"}) == [])
+        chk("every identity call and `.absolute()` resolve a path built from __file__",
+            all(import_check(["hooks/a.py", "hooks/guards/lib.py"],
+                             {"hooks/a.py": f'import os, pathlib, sys\nsys.path.insert(0, {call}(os.path.join(os.path.dirname(__file__), "guards")))\nimport lib\n',
+                              "hooks/guards/lib.py": "X = 1\n"}) == []
+                for call in sorted(PATH_IDENTITY_CALLS))
+            and import_check(["hooks/a.py", "hooks/guards/lib.py"],
+                             {"hooks/a.py": 'import pathlib, sys\nsys.path.insert(0, str(pathlib.Path(__file__).absolute().parent / "guards"))\nimport lib\n',
+                              "hooks/guards/lib.py": "X = 1\n"}) == [])
+        chk("a file on the search path that the receipt does not list is what the interpreter loads, and is reported",
+            import_check(["hooks/a.py", "hooks/lib.py"], {"hooks/a.py": prefix + "import lib\n", "hooks/lib.py": "X = 1\n",
+                                                          "hooks/guards/lib.py": "import missing_review_dependency\n"})
+            == ["hooks/a.py imports lib, which loads hooks/guards/lib.py, a file the receipt does not list",
+                "hooks/guards/lib.py imports missing_review_dependency, which is neither standard library nor in the "
+                "receipt's files under hooks/guards, hooks"])
+        chk("a package directory beats a module file of the same name, as the interpreter's finder does",
+            import_check(["hooks/a.py", "hooks/lib.py", "hooks/lib/__init__.py"], shapes["package_over_module"][0],
+                         owned=["a.py"]) == [])
+        chk("a from-import requires the module to bind the name or hold it as a submodule",
+            import_check(["hooks/a.py", "hooks/mod.py"], {"hooks/a.py": "from mod import missing_name\n",
+                                                          "hooks/mod.py": "present = 1\ndef f(): pass\n"}, owned=["a.py"])
+            == ["hooks/a.py imports missing_name from mod, which hooks/mod.py neither binds nor holds as a submodule"]
+            and import_check(["hooks/a.py", "hooks/mod.py"], {"hooks/a.py": "from mod import present, f, imported, aliased\n",
+                                                              "hooks/mod.py": "import os as imported\nfrom sys import argv as aliased\n"
+                                                                              "present = 1\ndef f(): pass\n"}, owned=["a.py"]) == []
+            and import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/pkg/sub.py"],
+                             {"hooks/a.py": "from pkg import sub, attr\n", "hooks/pkg/__init__.py": "attr = 1\n",
+                              "hooks/pkg/sub.py": "X = 1\n"}, owned=["a.py"]) == [])
+        chk("an appended directory is searched after the script's own; an insert index other than 0 or 1 is reported",
+            import_check(["hooks/a.py", "hooks/lib.py", "hooks/guards/lib.py"], shapes["append_after_own_dir"][0]) == []
+            and import_check(["hooks/a.py", "hooks/guards/lib.py"], shapes["insert_index_2_refused"][0])
+            == ["hooks/a.py line 3: unsupported sys.path mutation sys.path.insert(2, str(Path(__file__).parent / 'guards'))",
+                "hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks"])
+        chk("a relative import resolves from the importing file's package; outside a package it is reported",
+            import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/pkg/sub.py", "hooks/pkg/helper.py"],
+                         shapes["relative_in_package"][0]) == []
+            and import_check(["hooks/a.py", "hooks/helper.py"], shapes["relative_outside_package"][0])
+            == ["hooks/a.py line 1: relative import from . import helper from a file that is not inside a package"]
+            and import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/pkg/sub.py"], shapes["relative_missing"][0])
+            == ["hooks/pkg/sub.py imports nope from ., which hooks/pkg/__init__.py neither binds nor holds as a submodule"])
+        chk("the module cache is per owned script: two hooks importing one name from different search paths "
+            "each get their own file",
+            import_check(["hooks/a.py", "hooks/b.py", "hooks/lib.py", "hooks/guards/lib.py"],
+                         {"hooks/a.py": prefix + "import lib\n", "hooks/b.py": "import lib\n",
+                          "hooks/lib.py": "import missing_review_dependency\n", "hooks/guards/lib.py": "X = 1\n"},
+                         owned=["a.py", "b.py"])
+            == ["hooks/lib.py imports missing_review_dependency, which is neither standard library nor in the "
+                "receipt's files under hooks"])
         chk("a name resolves once per process: a later import of the same name from another directory is the cached module",
             import_check(["hooks/a.py", "hooks/lib.py", "hooks/guards/lib.py", "hooks/guards/second.py"],
                          {"hooks/a.py": "import lib\n" + prefix + "import second\n", "hooks/lib.py": "X = 1\n",
@@ -2316,8 +2484,8 @@ def selftest():
         chk("mutation proof: inserted directories searched after the script's own make the precedence case clear",
             import_check(["hooks/a.py", "hooks/lib.py", "hooks/guards/lib.py"], shapes["precedence"][0],
                          fn=order_first.hook_import_problems) == [])
-        reset_path = private_copy("                loaded[name] = found\n                walk(found)\n",
-                                  "                loaded[name] = found\n                kept = list(path)\n"
+        reset_path = private_copy("                vouch(relative, name, found)\n                walk(found)\n",
+                                  "                vouch(relative, name, found)\n                kept = list(path)\n"
                                   "                path[:] = [os.path.dirname(found)]\n"
                                   "                walk(found)\n                path[:] = kept\n")
         chk("mutation proof: a path reset per module rejects the inherited-path case",
@@ -2342,6 +2510,43 @@ def selftest():
         no_dynamic = private_copy("                        elif dynamic is not " + "None:\n", "                        elif False:\n")
         chk("mutation proof: ignoring dynamic imports makes the missing dynamic module clear",
             import_check(["hooks/a.py"], shapes["dynamic_missing"][0], fn=no_dynamic.hook_import_problems) == [])
+        no_deferred = private_copy("        while " + "deferred:\n", "        while False:\n")
+        chk("mutation proof: dropping deferred imports makes a missing import inside a function clear",
+            import_check(["hooks/a.py"], {"hooks/a.py": "def call():\n    import missing_dep\ncall()\n"},
+                         fn=no_deferred.hook_import_problems) == [])
+        no_realpath = private_copy('"os.path.normpath", "os.path.' + 'realpath"})', '"os.path.normpath"})')
+        chk("mutation proof: dropping one identity call makes its form unsupported",
+            import_check(["hooks/a.py", "hooks/guards/lib.py"],
+                         {"hooks/a.py": 'import os, sys\nsys.path.insert(0, os.path.realpath(os.path.join(os.path.dirname(__file__), "guards")))\nimport lib\n',
+                          "hooks/guards/lib.py": "X = 1\n"}, fn=no_realpath.hook_import_problems) != [])
+        shared_cache = private_copy("    def process(entry):\n        path = [os.path.dirname(entry), INTERPRETER_ENTRIES]\n        " + "loaded = {}\n",
+                                    "    loaded = {}\n\n    def process(entry):\n        path = [os.path.dirname(entry), INTERPRETER_ENTRIES]\n")
+        chk("mutation proof: a module cache shared across owned scripts clears the second hook's bad sibling",
+            import_check(["hooks/a.py", "hooks/b.py", "hooks/lib.py", "hooks/guards/lib.py"],
+                         {"hooks/a.py": prefix + "import lib\n", "hooks/b.py": "import lib\n",
+                          "hooks/lib.py": "import missing_review_dependency\n", "hooks/guards/lib.py": "X = 1\n"},
+                         fn=shared_cache.hook_import_problems, owned=["a.py", "b.py"]) == [])
+        binds_all = private_copy("            elif not binds(current, " + "name):\n", "            elif False:\n")
+        chk("mutation proof: a from-import that never checks the binding clears the missing name",
+            import_check(["hooks/a.py", "hooks/mod.py"], {"hooks/a.py": "from mod import missing_name\n",
+                                                          "hooks/mod.py": "present = 1\n"}, owned=["a.py"],
+                         fn=binds_all.hook_import_problems) == [])
+        append_front = private_copy("                index, argument = len(path), " + "call.args[0]\n",
+                                    "                index, argument = 0, call.args[0]\n")
+        chk("mutation proof: an append treated as a front insert reports the appended directory's bad sibling",
+            import_check(["hooks/a.py", "hooks/lib.py", "hooks/guards/lib.py"], shapes["append_after_own_dir"][0],
+                         fn=append_front.hook_import_problems) != [])
+        module_first = private_copy('                for candidate in (f"{name}/__init__.py", ' + 'f"{name}.py"):\n',
+                                    '                for candidate in (f"{name}.py", f"{name}/__init__.py"):\n')
+        chk("mutation proof: preferring the module file to the package reports the package case's bad module",
+            import_check(["hooks/a.py", "hooks/lib.py", "hooks/lib/__init__.py"], shapes["package_over_module"][0],
+                         fn=module_first.hook_import_problems) != [])
+        listed_only = private_copy("            return relative in files or os.path.isfile(os.path.join(tree, " + "relative))\n",
+                                   "            return relative in files\n")
+        chk("mutation proof: resolving against the receipt alone clears an unlisted file that wins the search",
+            import_check(["hooks/a.py", "hooks/lib.py"], {"hooks/a.py": prefix + "import lib\n", "hooks/lib.py": "X = 1\n",
+                                                          "hooks/guards/lib.py": "import missing_review_dependency\n"},
+                         fn=listed_only.hook_import_problems) == [])
         moved_home = os.path.join(td, "moved-home")
         shutil.copytree(dep_home, moved_home)
         stage(dep_source, moved_home, version_id="v2")
@@ -2557,6 +2762,22 @@ def selftest():
             open(settings_path, "rb").read() == before and not os.path.exists(marker_path)
             and check(home, source, out=io.StringIO()) == 0)
         open(damaged, "w").write(pristine)
+
+        def damage_on_first_attempt(attempt):
+            if attempt == 0:
+                open(damaged, "w").write('raise RuntimeError("edited during the switch")\n')
+        chk("the target is judged on every attempt: a file edited after the activation began is refused",
+            raises(lambda: activate(home, "v2", between_read_and_replace=damage_on_first_attempt),
+                   "changed hooks/a.py")
+            and open(settings_path, "rb").read() == before and not os.path.exists(marker_path)
+            and not [n for n in os.listdir(os.path.dirname(settings_path)) if n.startswith(".settings-")])
+        open(damaged, "w").write(pristine)
+        planted = os.path.join(target, "hooks", "extra.py")
+        open(planted, "w").write("X = 1\n")
+        chk("a file under the tree that the receipt does not list is refused as unreceipted",
+            tree_problems(target, receipt_v2) == (["unreceipted hooks/extra.py"], [])
+            and raises(lambda: activate(home, "v2"), "does not match its receipt: unreceipted hooks/extra.py"))
+        os.remove(planted)
         os.remove(generated)
         chk("--activate refuses a target whose instruction file is missing, before any write",
             raises(lambda: activate(home, "v2"), "does not match its receipt: missing CLAUDE.generated.md")
@@ -2612,8 +2833,8 @@ def selftest():
         chk("mutation proof: validating the active tree instead of the target blocks the switch away from a "
             "damaged active version (the recovery control above goes red)",
             mutant_raises(wrong_tree, lambda: wrong_tree.activate(mh, "v1", processes=lambda: []), "does not match"))
-        late = private_copy("            refuse_unverified_target()\n            marker = {\n",
-                            "            marker = {\n",
+        late = private_copy("        refuse_unverified_target()\n        fd, tmp = tempfile.mkstemp(",
+                            "        fd, tmp = tempfile.mkstemp(",
                             more=[("            os.replace(tmp, settings_path)\n",
                                    "            os.replace(tmp, settings_path)\n"
                                    "            refuse_unverified_target()\n")])
@@ -2625,6 +2846,21 @@ def selftest():
             mutant_raises(late, lambda: late.activate(mh, "v2", processes=lambda: []), "does not match")
             and open(os.path.join(mh, ".claude", "settings.json"), "rb").read() != before
             and os.path.exists(pending_marker_path(mh)))
+        once = private_copy("        refuse_unverified_target()\n        fd, tmp = tempfile.mkstemp(",
+                            "        fd, tmp = tempfile.mkstemp(",
+                            more=[("    for attempt in range(attempts):\n        before = _settings_state(settings_path)\n",
+                                   "    refuse_unverified_target()\n    for attempt in range(attempts):\n"
+                                   "        before = _settings_state(settings_path)\n")])
+        mh = fresh_home("once")
+        edited = os.path.join(tree_path(mh, "v2"), "hooks", "a.py")
+
+        def edit_on_first_attempt(attempt):
+            if attempt == 0:
+                open(edited, "w").write("raise RuntimeError\n")
+        chk("mutation proof: a check made once before the attempts accepts a target edited after it "
+            "(the every-attempt proof above goes red)",
+            not mutant_raises(once, lambda: once.activate(mh, "v2", between_read_and_replace=edit_on_first_attempt,
+                                                          processes=lambda: []), "does not match"))
 
     print(f"\n  selftest: {bad} failure(s)")
     print(f"SELFTEST-SUMMARY suite=install-claude checks={checks} failures={bad}")

@@ -152,7 +152,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 373
+SELFTEST_FLOOR = 379
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -182,7 +182,7 @@ SELFTEST_SUITES = [
     ("verify-review-publication",
      ["tools/verify-review-publication.py", "--selftest"], 94),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 53),
-    ("install-claude", ["tools/install-claude.py", "--selftest"], 192),
+    ("install-claude", ["tools/install-claude.py", "--selftest"], 210),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
     ("ci-gate", ["tools/ci-gate.py", "--selftest"], 345),
     ("write-mutation-receipt",
@@ -275,7 +275,7 @@ SELFTEST_TIMEOUTS = {
     "ci-gate": 120,
     "fuzz-judge-diff": 25,
     # Stages and activates several temporary trees, runs three reviewer reproductions as
-    # subprocesses and sixteen fixture hooks in fresh interpreters; measured 16.1s at 192 proofs.
+    # subprocesses and twenty-two fixture hooks in fresh interpreters; measured 16.8s at 210 proofs.
     "install-claude": 60,
 }
 DEFAULT_SELFTEST_TIMEOUT = 15
@@ -1326,35 +1326,84 @@ def agents_sections(agents_text):
     return sections
 
 
+HTML_BLOCK_TAGS = frozenset(
+    "address article aside base basefont blockquote body caption center col colgroup dd details "
+    "dialog dir div dl dt fieldset figcaption figure footer form frame frameset h1 h2 h3 h4 h5 h6 "
+    "head header hr html iframe legend li link main menu menuitem nav noframes ol optgroup option "
+    "p param search section summary table tbody td tfoot th thead title tr track ul".split())
+HTML_TAG_LINE = re.compile(
+    r"(<[a-z][a-z0-9-]*(\s+[a-z_:][a-z0-9_.:-]*(\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s\"'=<>`]+))?)*\s*/?>"
+    r"|</[a-z][a-z0-9-]*\s*>)\s*")
+
+
+def html_block_end(stripped, in_paragraph):
+    """-> the predicate on later lines that ends the HTML block `stripped` opens, or None.
+
+    The seven start conditions of CommonMark 4.6: a pre, script, style or textarea tag
+    (ended by its closing tag), a comment (`-->`), a processing instruction (`?>`), a
+    declaration (`>`), CDATA (`]]>`), a known block-level tag and, outside a paragraph, any
+    complete tag standing alone (both ended by a blank line).
+    """
+    lower = stripped.lower()
+    raw = re.match(r"<(pre|script|style|textarea)(?=[ \t>]|$)", lower)
+    if raw:
+        return lambda line: f"</{raw.group(1)}>" in line.lower()
+    if lower.startswith("<!--"):
+        return lambda line: "-->" in line
+    if lower.startswith("<?"):
+        return lambda line: "?>" in line
+    if lower.startswith("<![cdata["):
+        return lambda line: "]]>" in line
+    if re.match(r"<![a-z]", lower):
+        return lambda line: ">" in line
+    tag = re.match(r"</?([a-z][a-z0-9-]*)(?=[ \t>]|/>|$)", lower)
+    if tag and tag.group(1) in HTML_BLOCK_TAGS:
+        return lambda line: not line.strip()
+    if (not in_paragraph and tag and tag.group(1) not in ("pre", "script", "style", "textarea")
+            and HTML_TAG_LINE.fullmatch(lower)):
+        return lambda line: not line.strip()
+    return None
+
+
 def claim_blocks(text):
     """-> [(first line number, block text)]: paragraphs, list items, table rows and headings.
 
     Lines inside a fenced code block are examples, not prose, and are skipped. A fence is
-    tracked the way GFM reads it: a run of three or more backticks or tildes opens one (a
-    backtick run only when no backtick follows it on the line), and only a run of the same
-    character at least as long, followed by nothing but spaces, closes it; an unclosed fence
-    runs to the end of the file. Indentation before a fence is not limited to GFM's three
-    spaces: a fence inside a list item sits at the item's own offset, and this scanner has
-    no container model, so a fence inside a block quote (`> ```) is not seen either; the
-    governed corpus has neither. A table row is its own block: rows carry no sentence terminator, so
-    a quoted phrase in one row and a file mention in another would otherwise read as one
-    sentence.
+    tracked the way CommonMark reads it: a run of three or more backticks or tildes,
+    indented at most three columns (a tab counts to the next multiple of four), opens one (a
+    backtick run only when no backtick follows it on the line); only a run of the same
+    character at least as long, indented at most three columns and followed by nothing but
+    spaces or tabs, closes it; an unclosed fence runs to the end of the file. A run indented
+    further is content, never a fence, so what follows it stays prose. A run on a line of an
+    HTML block (CommonMark 4.6) is literal too, and the block's lines stay prose, since the
+    file is read as text. There is no container model: a fence inside a block quote
+    (`> ```) is not seen, so its content counts as prose rather than being hidden. Lines are
+    `str.splitlines()` lines. A table row is its own block: rows carry no sentence
+    terminator, so a quoted phrase in one row and a file mention in another would otherwise
+    read as one sentence.
     """
-    blocks, current, start, fence = [], [], 0, None
+    blocks, current, start, fence, html_end = [], [], 0, None, None
     for number, line in enumerate(text.splitlines(), 1):
-        stripped = line.lstrip()
+        expanded = line.expandtabs(4)
+        indent = len(expanded) - len(expanded.lstrip(" "))
+        stripped = expanded.lstrip(" ") if indent <= 3 else ""
         run = re.match(r"`{3,}|~{3,}", stripped)
         if fence is not None:
             if (run and run.group()[0] == fence[0] and len(run.group()) >= fence[1]
-                    and not stripped[run.end():].strip()):
+                    and not stripped[run.end():].strip(" \t")):
                 fence = None
             continue
-        if run and not (run.group()[0] == "`" and "`" in stripped[run.end():]):
-            fence = (run.group()[0], len(run.group()))
-            if current:
-                blocks.append((start, "\n".join(current)))
-                current = []
-            continue
+        if html_end is not None:
+            if html_end(line):
+                html_end = None
+        else:
+            html_end = html_block_end(stripped, bool(current)) if stripped.startswith("<") else None
+            if html_end is None and run and not (run.group()[0] == "`" and "`" in stripped[run.end():]):
+                fence = (run.group()[0], len(run.group()))
+                if current:
+                    blocks.append((start, "\n".join(current)))
+                    current = []
+                continue
         item = re.match(r"\s*(?:(?:[-*+]|\d+\.)\s|\|)", line) is not None
         heading = line.startswith("#")
         if not line.strip():
@@ -5951,6 +6000,26 @@ def selftest():
                    lambda: claims_in("```\n" + fence_claim + "`````\n\n" + fence_claim) == fence_base + 1
                    and claims_in("```\n" + fence_claim + "```   \n\n" + fence_claim) == fence_base + 1
                    and claims_in("~~~ `x`\n" + fence_claim + "~~~\n") == fence_base)
+        expect_red("C12 reads only spaces and tabs after a closer: a no-break space keeps the fence open, "
+                   "and a no-break space before a run is not indentation",
+                   lambda: claims_in("```\n```\u00a0\n" + fence_claim + "```\n") == fence_base
+                   and claims_in("```\n```\t\n" + fence_claim) == fence_base + 1
+                   and claims_in("\u00a0```\n" + fence_claim + "\n```\n") == fence_base + 1)
+        expect_red("C12 treats a run indented four or more columns, or by a tab, as content: it opens no fence "
+                   "and closes none",
+                   lambda: claims_in("    ```\n" + fence_claim + "\n    ```\n") == fence_base + 1
+                   and claims_in("```\n\t```\n" + fence_claim) == fence_base
+                   and claims_in("   ```\n" + fence_claim + "\n   ```\n") == fence_base
+                   and claims_in("- item\n  ```\n  " + fence_claim + "  ```\n") == fence_base)
+        expect_red("C12 does not open a fence on a run inside an HTML block (pre, comment, div), and the "
+                   "block's lines stay prose",
+                   lambda: claims_in("<pre>\n```\n</pre>\n\n" + fence_claim) == fence_base + 1
+                   and claims_in("<!--\n```\n-->\n\n" + fence_claim) == fence_base + 1
+                   and claims_in("<div>\n~~~\n</div>\n\n" + fence_claim) == fence_base + 1
+                   and claims_in("<div>\n" + fence_claim + "</div>\n") == fence_base + 1
+                   and claims_in("<div>\n~~~\n</div>\n\n```\n" + fence_claim + "```\n") == fence_base
+                   and claims_in("<custom>\n```\n</custom>\n\n" + fence_claim) == fence_base + 1
+                   and claims_in("para\n<custom>\n```\n" + fence_claim + "```\n") == fence_base)
         swallowed = c12_on('A "stray quote. The rule is always-on in `~/.claude/CLAUDE.md` '
                            '("Named a tool? Run exactly that and stop."), as "noted.\n')
         expect_red("C12 still reports a claim that a stray earlier quote would otherwise swallow",
@@ -6711,8 +6780,8 @@ def selftest():
         # --- fence mutants, each failing one shape proof above by name; search strings are
         # assembled so this block adds no occurrence of the site it mutates
         any_run_closes = private_copy("            if (run and run.group()[0] == fence[0] and len(run.group()) >= "
-                                      + "fence[1]\n                    and not stripped[run.end():].strip()):\n",
-                                      "            if run and not stripped[run.end():].strip():\n")
+                                      + "fence[1]\n                    and not stripped[run.end():].strip(\" \\t\")):\n",
+                                      "            if run and not stripped[run.end():].strip(\" \\t\"):\n")
         expect_red("mutation: a fence closed by any run swallows the claim after a tilde fence holding "
                    "a backtick run (the mixed-fence proof goes red)",
                    lambda: claims_in("~~~text\n```\n~~~\n\n" + fence_claim, any_run_closes) == fence_base)
@@ -6725,6 +6794,21 @@ def selftest():
         expect_red("mutation: a backtick run followed by a backtick opening a fence swallows the claim "
                    "after an inline span (the inline-span proof goes red)",
                    lambda: claims_in("```AGENTS.md``` is a filename.\n\n" + fence_claim, info_ignored) == fence_base)
+        any_whitespace = private_copy("                    and not stripped[run.end():].strip(" + '" \\t")):\n',
+                                      "                    and not stripped[run.end():].strip()):\n")
+        expect_red("mutation: stripping any whitespace after a closer makes a no-break space close the fence "
+                   "(the no-break-space proof goes red)",
+                   lambda: claims_in("```\n```\u00a0\n" + fence_claim + "```\n", any_whitespace) == fence_base + 1)
+        any_indent = private_copy('        stripped = expanded.lstrip(" ") if indent <= ' + '3 else ""\n',
+                                  '        stripped = expanded.lstrip(" ")\n')
+        expect_red("mutation: unrestricted indentation lets a four-space run open a fence and hide the claim "
+                   "(the indentation proof goes red)",
+                   lambda: claims_in("    ```\n" + fence_claim + "\n    ```\n", any_indent) == fence_base)
+        no_html = private_copy('            html_end = html_block_end(stripped, bool(current)) if stripped.startswith("<") ' + 'else None\n',
+                               '            html_end = None\n')
+        expect_red("mutation: ignoring HTML blocks lets a run inside <pre> open a fence and hide the claim "
+                   "(the HTML-block proof goes red)",
+                   lambda: claims_in("<pre>\n```\n</pre>\n\n" + fence_claim, no_html) == fence_base)
 
     # +1 for this assertion's own increment, so SELFTEST_FLOOR is the number the receipt
     # prints. Comparing the pre-increment count made the floor one less than the reported

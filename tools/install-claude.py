@@ -495,8 +495,10 @@ def hook_import_problems(tree, receipt):
 
     A hook locates sibling modules by inserting its own directory, hooks/guards/ or tools/
     on sys.path and importing them by name, so every top-level import that is not standard
-    library must resolve to a file in the receipt's files map, transitively. A module that
-    is missing from the files map is one the digests never verify and the hook cannot load.
+    library must resolve to a file in the receipt's files map, transitively, in a directory
+    that script actually searches: its own directory always, hooks/guards/ and tools/ only
+    when its source inserts them on sys.path. A module missing from that search path is one
+    the digests never verify and the hook cannot load.
     """
     files = receipt.get("files", {})
     problems = []
@@ -514,10 +516,17 @@ def hook_import_problems(tree, receipt):
         seen.add(relative)
         path = os.path.join(tree, relative)
         try:
-            module_ast = ast.parse(read_text(path))
+            source_text = read_text(path)
+            module_ast = ast.parse(source_text)
         except (OSError, SyntaxError, UnicodeDecodeError) as exc:
             problems.append(f"{relative} cannot be parsed: {exc}")
             continue
+        searched = [os.path.dirname(relative)]
+        if "sys.path.insert(" in source_text:
+            if '"guards"' in source_text:
+                searched.append("hooks/guards")
+            if '"tools"' in source_text:
+                searched.append("tools")
         names = set()
         for node in ast.walk(module_ast):
             if isinstance(node, ast.Import):
@@ -527,12 +536,10 @@ def hook_import_problems(tree, receipt):
         for name in sorted(names):
             if name in stdlib:
                 continue
-            candidates = [f"{os.path.dirname(relative)}/{name}.py", f"hooks/{name}.py",
-                          f"hooks/guards/{name}.py", f"tools/{name}.py"]
-            found = next((c for c in candidates if c in files), None)
+            found = next((f"{d}/{name}.py" for d in searched if f"{d}/{name}.py" in files), None)
             if found is None:
                 problems.append(f"{relative} imports {name}, which is neither standard library nor in "
-                                f"the receipt's files")
+                                f"the receipt's files under {', '.join(searched)}")
             else:
                 scripts.append(found)
     return problems
@@ -1876,9 +1883,72 @@ def selftest():
         chk("--check names a hook whose sibling module is neither standard library nor in the files map",
             check(dep_home, dep_source, out=buf) == 1
             and "owned hook hooks/dep_guard.py imports helper_lib, which is neither standard library nor "
-                "in the receipt's files" in buf.getvalue())
+                "in the receipt's files under hooks" in buf.getvalue())
         chk("--activate refuses a tree whose hooks cannot load",
             raises(lambda: activate(dep_home, "v1"), "hooks cannot load: hooks/dep_guard.py imports helper_lib"))
+
+        # --- the module must sit in a directory the hook actually searches: its own
+        # directory always, hooks/guards/ and tools/ only when its source inserts them
+        def import_check(tree_files, scripts_by_path):
+            """-> hook_import_problems over a throwaway tree: files map plus the named scripts."""
+            root = os.path.join(td, "import-tree")
+            shutil.rmtree(root, ignore_errors=True)
+            for rel, body in scripts_by_path.items():
+                os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
+                open(os.path.join(root, rel), "w").write(body)
+            receipt = {"files": {rel: {"sha256": "0" * 64} for rel in tree_files},
+                       "owned_hooks": [{"event": "Stop", "matcher": None, "type": "command",
+                                        "command": f"python3 ~/.claude/harness/v1/hooks/{rel[len('hooks/'):]}",
+                                        "timeout": 5} for rel in scripts_by_path if rel.startswith("hooks/")
+                                       and "/" not in rel[len("hooks/"):]]}
+            return hook_import_problems(root, receipt)
+
+        inserts_guards = "import os, sys\nsys.path.insert(0, os.path.join(os.path.dirname(__file__), \"guards\"))\n"
+        inserts_tools = "import os, sys\nsys.path.insert(0, os.path.join(os.path.dirname(__file__), \"..\", \"tools\"))\n"
+        chk("a sibling under hooks/guards/ is accepted only when the hook inserts \"guards\" on sys.path",
+            import_check(["hooks/a.py", "hooks/guards/lib.py"], {"hooks/a.py": inserts_guards + "import lib\n",
+                                                                 "hooks/guards/lib.py": "X = 1\n"}) == []
+            and import_check(["hooks/a.py", "hooks/guards/lib.py"], {"hooks/a.py": "import os, sys\nimport lib\n",
+                                                                     "hooks/guards/lib.py": "X = 1\n"})
+            == ["hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks"])
+        chk("a module under tools/ is accepted only when the hook inserts \"tools\" on sys.path",
+            import_check(["hooks/a.py", "tools/lib.py"], {"hooks/a.py": inserts_tools + "import lib\n",
+                                                          "tools/lib.py": "X = 1\n"}) == []
+            and import_check(["hooks/a.py", "tools/lib.py"], {"hooks/a.py": inserts_guards + "import lib\n",
+                                                              "tools/lib.py": "X = 1\n"})
+            == ["hooks/a.py imports lib, which is neither standard library nor in the receipt's files under "
+                "hooks, hooks/guards"])
+        chk("imports are followed transitively: a sibling's own missing import is named",
+            import_check(["hooks/a.py", "hooks/lib.py"], {"hooks/a.py": "import lib\n",
+                                                          "hooks/lib.py": "import deeper\n"})
+            == ["hooks/lib.py imports deeper, which is neither standard library nor in the receipt's files under hooks"])
+        chk("a `from x import y` and every alias of one `import a, b` are inspected",
+            import_check(["hooks/a.py", "hooks/one.py"], {"hooks/a.py": "from two import X\n",
+                                                          "hooks/one.py": "X = 1\n"})
+            == ["hooks/a.py imports two, which is neither standard library nor in the receipt's files under hooks"]
+            and import_check(["hooks/a.py", "hooks/one.py"], {"hooks/a.py": "import one, three\n",
+                                                              "hooks/one.py": "X = 1\n"})
+            == ["hooks/a.py imports three, which is neither standard library nor in the receipt's files under hooks"])
+        chk("a hook that cannot be parsed is reported, never skipped",
+            import_check(["hooks/a.py"], {"hooks/a.py": "def (:\n"})[0].startswith("hooks/a.py cannot be parsed"))
+        moved_home = os.path.join(td, "moved-home")
+        shutil.copytree(dep_home, moved_home)
+        stage(dep_source, moved_home, version_id="v2")
+        activate(moved_home, "v2")
+        moved_tree = tree_path(moved_home, "v2")
+        os.replace(os.path.join(moved_tree, "hooks", "helper_lib.py"), os.path.join(moved_tree, "tools", "helper_lib.py"))
+        for receipt_path in (os.path.join(moved_tree, RECEIPT_NAME), active_receipt_path(moved_home)):
+            moved = load_json(receipt_path)
+            moved["files"]["tools/helper_lib.py"] = moved["files"].pop("hooks/helper_lib.py")
+            atomic_write(receipt_path, (json.dumps(moved, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+        buf = io.StringIO()
+        chk("--check names a sibling module relocated to a directory the hook does not search",
+            check(moved_home, dep_source, out=buf) == 1
+            and "hooks/dep_guard.py imports helper_lib" in buf.getvalue())
+        chk("every interpreter option that takes an operand is skipped with its operand",
+            all(script_operand("/usr/local/bin/node", f"node {option} value /x/@anthropic-ai/claude-code/cli.js")
+                == "/x/@anthropic-ai/claude-code/cli.js" for option in sorted(OPTIONS_WITH_OPERAND))
+            and script_operand("/usr/local/bin/node", "node --unknown-flag /x/cli.js") == "/x/cli.js")
 
         chk("review reproduction 4294811755: a switch killed after its settings replace rolls back "
             "to exactly v1's entries",

@@ -151,7 +151,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 354
+SELFTEST_FLOOR = 357
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -181,7 +181,7 @@ SELFTEST_SUITES = [
     ("verify-review-publication",
      ["tools/verify-review-publication.py", "--selftest"], 94),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 53),
-    ("install-claude", ["tools/install-claude.py", "--selftest"], 148),
+    ("install-claude", ["tools/install-claude.py", "--selftest"], 155),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
     ("ci-gate", ["tools/ci-gate.py", "--selftest"], 345),
     ("write-mutation-receipt",
@@ -502,7 +502,9 @@ BARE_LINE_CITATION = re.compile(r"`:\d+(?:-\d+)?`")
 STRAIGHT_QUOTE = re.compile(r"\"([^\"]{1,2000})\"", re.S)
 # A code span is a run of backticks, its content, and the same run; a longer run may hold a
 # shorter one, and the content may span lines.
-CODE_SPAN = re.compile(r"(?<![`\\])(`+)(?!`)(.+?)(?<![`\\])\1(?!`)", re.S)
+# Only the opening run can be escaped: inside a span a backslash is literal and does not
+# protect the closing run, so `literal\` closes at its own backtick.
+CODE_SPAN = re.compile(r"(?<![`\\])(`+)(?!`)(.+?)(?<!`)\1(?!`)", re.S)
 # Masking tokens are private-use characters, which authored prose never carries; any that do
 # occur are stripped before masking so text cannot impersonate a token.
 SPAN_TOKEN = re.compile("(\\d+)")
@@ -1550,9 +1552,18 @@ def vacuous_expect_red_lines(source_text):
             if not isinstance(arg, ast.Lambda):
                 continue
             body = arg.body
+
+            def platform_gate(expr):
+                """Exactly `sys.platform != "<name>"`: an attribute compared, with `!=`, to a string."""
+                return (isinstance(expr, ast.Compare) and len(expr.ops) == 1
+                        and isinstance(expr.ops[0], ast.NotEq)
+                        and isinstance(expr.left, ast.Attribute) and expr.left.attr == "platform"
+                        and isinstance(expr.left.value, ast.Name) and expr.left.value.id == "sys"
+                        and isinstance(expr.comparators[0], ast.Constant)
+                        and isinstance(expr.comparators[0].value, str))
+
             gate = (isinstance(body, ast.BoolOp) and isinstance(body.op, ast.Or)
-                    and len(body.values) == 2 and isinstance(body.values[0], ast.Compare)
-                    and (ast.get_source_segment(source_text, body.values[0]) or "").startswith("sys.platform"))
+                    and len(body.values) == 2 and platform_gate(body.values[0]))
             judged = body.values[1] if gate else body
             text = ast.get_source_segment(source_text, judged) or ""
 
@@ -6034,6 +6045,21 @@ def selftest():
                    lambda: vacuous_expect_red_lines('expect_red("x", lambda: all(x for x in frozenset()))') == [1]
                    and vacuous_expect_red_lines('expect_red("x", lambda: all(x for x in dict()))') == [1]
                    and vacuous_expect_red_lines('expect_red("x", lambda: all(x for x in items))') == [])
+        # A backslash before a closing backtick is literal: the span closes there, and the
+        # quotation after it is prose. Only an opening run can be escaped.
+        closer = c12_on('Run `literal\\` before AGENTS.md says "Escalate the copper comet". Then `tail`.\n')
+        expect_red("C12 judges a quotation after a code span whose content ends in a backslash",
+                   lambda: any(c == "C12" and "stale quote: 'Escalate the copper comet'" in d
+                               for c, d in closer.failures))
+        opener = c12_on('Run \\`printf "fabricated policy"` before reading AGENTS.md.\n')
+        expect_red("C12 judges a quotation after an escaped opening backtick as prose",
+                   lambda: any(c == "C12" and "stale quote: 'fabricated policy'" in d for c, d in opener.failures))
+        negated_wrapped = claim_findings("skills/delta/references/deferred.md",
+                                         '`~/.claude/CLAUDE.md` does not carry "Named a tool? Run exactly that and\nstop." '
+                                         'or "Default to one\tagent and no fan-out."\n', bind_policy)[0]
+        expect_red("C12 identity of a negated claim survives a wrap and a tab inside its quotes",
+                   lambda: [f["kind"] for f in negated_wrapped] == ["negated claim"]
+                   and negated_wrapped[0]["key"] == two_bound[0]["key"])
         os.remove(os.path.join(bind_root, "AGENTS.md"))
         no_policy = Run(bind_root, ci=True)
         no_policy.c12_claim_binding()
@@ -6503,6 +6529,8 @@ def selftest():
             "lambda: all(x for x in {})": True,
             "lambda: all(x for x in set())": True,
             "lambda: True": True,
+            "lambda: sys.platform == sys.platform or not run.failures": True,
+            'lambda: sys.platform == "darwin" or not run.failures': True,
             'lambda: sys.platform != "darwin" or (a and b)': False,
             'lambda: "x" in (error or "")': False,
             'lambda: a == 1 or b == 2': False,

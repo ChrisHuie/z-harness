@@ -34,9 +34,17 @@ derivation, installation_state(), feeds both --check and --activate.
 
 Why read-merge-replace-verify: the desktop app writes settings.json itself (app-managed keys),
 so the file is read immediately before writing, only receipt-owned entries are replaced in that
-content, the write is an atomic replace guarded by a stat comparison (a concurrent change
-between the read and the replace discards the merge and retries), and the result is re-read; a
-mismatch after the write is a failed activation, never an assumed success.
+content, the write is an atomic replace guarded by a stat comparison, and the result is re-read;
+a mismatch after the write is a failed activation, never an assumed success. What the stat
+comparison covers: a change to settings.json between the read and the final stat, which is
+taken immediately before the rename, discards the merge and retries. What it does not cover: a
+write that lands between that final stat and the rename. The rename overwrites it, nothing can
+detect it afterwards because the lost content is unknown, and no cooperative lock around
+settings.json is documented for the Claude Code runtime. That residual is bounded, not closed:
+the final stat sits directly before the rename, and --activate and --check print the Claude Code
+processes that could write the file while they run. --require-quiescent turns the report into
+a refusal for an operator who has closed every session and wants the window provably empty; it
+is opt-in because a precondition that every real run overrides would guarantee nothing.
 
 Ownership is by exact identity: an entry is owned when its (event, matcher, type, command,
 timeout) tuple is listed in a receipt; the same command registered under another event or
@@ -51,7 +59,7 @@ is stable for the budget ceiling; the installer renders it with the real values.
 
   install-claude.py --render [--source DIR] [--tree PATH] [--commit SHA]
   install-claude.py --stage [--home DIR] [--source DIR] [--version-id ID] [--allow-dirty]
-  install-claude.py --activate ID [--home DIR] [--remove-orphans]
+  install-claude.py --activate ID [--home DIR] [--remove-orphans] [--require-quiescent]
   install-claude.py --check [--home DIR] [--source DIR]
   install-claude.py --selftest
 
@@ -455,6 +463,54 @@ PENDING_SCHEMA_VERSION = 1
 # Registered commands name a tree in display form; one under this prefix that no staged
 # receipt owns is an orphan, never a user entry.
 HARNESS_TREE_PREFIX = "~/.claude/harness/"
+# The Claude Code runtime processes that write $HOME/.claude/settings.json: the desktop
+# app's embedded runtime (claude-code/<version>/.../claude.app/Contents/MacOS/claude), the
+# CLI binary (claude/versions/<version>, usually run through a `claude` symlink, so the
+# executable's basename is what both share), and the npm entry point. The Electron shell
+# `Claude`, its `Claude Helper` processes and `disclaimer` are not the runtime.
+CLAUDE_CODE_EXECUTABLE = "claude"
+CLAUDE_CODE_ENTRY_POINT = "@anthropic-ai/claude-code"
+RESIDUAL_SENTENCE = ("a settings.json write by one of them between the installer's final stat and "
+                     "its rename would be overwritten and cannot be detected afterwards")
+
+
+def claude_processes(ps_rows=None):
+    """-> [(pid, executable)] Claude Code runtime processes, or None when ps cannot be read.
+
+    `ps_rows` is the selftest seam: [(pid, comm, args)]. The real list comes from two ps
+    columns read separately, because a path with spaces cannot be split out of one row.
+    """
+    if ps_rows is None:
+        try:
+            comm_out = subprocess.run(["ps", "-axo", "pid=,comm="], capture_output=True,
+                                      text=True, check=True).stdout
+            args_out = subprocess.run(["ps", "-axo", "pid=,args="], capture_output=True,
+                                      text=True, check=True).stdout
+        except (OSError, subprocess.CalledProcessError):
+            return None
+        args_by_pid = {}
+        for line in args_out.splitlines():
+            pid, _sep, args = line.strip().partition(" ")
+            if pid.isdigit():
+                args_by_pid[int(pid)] = args.strip()
+        ps_rows = []
+        for line in comm_out.splitlines():
+            pid, _sep, comm = line.strip().partition(" ")
+            if pid.isdigit():
+                ps_rows.append((int(pid), comm.strip(), args_by_pid.get(int(pid), "")))
+    found = []
+    for pid, comm, args in ps_rows:
+        if os.path.basename(comm) == CLAUDE_CODE_EXECUTABLE or CLAUDE_CODE_ENTRY_POINT in args:
+            found.append((int(pid), comm if os.path.basename(comm) == CLAUDE_CODE_EXECUTABLE else args))
+    return found
+
+
+def process_report(running):
+    """-> the one-sentence residual for a non-empty process list, or '' when it is empty."""
+    if not running:
+        return ""
+    listed = ", ".join(str(pid) for pid, _exe in running[:8])
+    return (f"{len(running)} Claude Code process(es) running (pids {listed}): {RESIDUAL_SENTENCE}")
 
 
 def pending_marker_path(home):
@@ -639,23 +695,37 @@ def _settings_state(path):
 
 
 def activate(home, version_id, fault=None, between_read_and_replace=None, after_replace=None,
-             attempts=5, remove_orphans=False, log=None):
+             attempts=5, remove_orphans=False, log=None, processes=None, require_quiescent=False):
     """Switch $HOME/.claude/settings.json to the tree's owned hooks as a logged transaction.
 
-    In order: derive the installation state and refuse on an unreadable staged receipt or
-    an orphaned harness handler (unless `remove_orphans`); build the removal set from every
-    staged receipt plus the active receipt; write the pending marker; read-merge-replace
-    settings.json under the stat guard with retries; verify the written file; install
-    CLAUDE.md; write the active receipt; clear the marker. A stop anywhere after the marker
-    is written leaves it in place, --check names the stage, and the next --activate of any
-    version completes a consistent switch because the removal set covers every version.
+    In order: report the Claude Code processes that could write settings.json meanwhile
+    (refuse when `require_quiescent` and any is running, or the list cannot be read); derive
+    the installation state and refuse on an unreadable staged receipt or an orphaned harness
+    handler (unless `remove_orphans`); build the removal set from every staged receipt plus
+    the active receipt; write the pending marker; read-merge-replace settings.json under the
+    stat guard with retries; verify the written file; install CLAUDE.md; write the active
+    receipt; clear the marker. A stop anywhere after the marker is written leaves it in
+    place, --check names the stage, and the next --activate of any version completes a
+    consistent switch because the removal set covers every version.
 
     `fault` plants a stop: "before-replace" (the merged file is written beside settings.json,
     the replace never happens), "after-instruction-file", or "after-receipt".
     `between_read_and_replace` and `after_replace` are selftest seams for a concurrent
-    writer and for a stop after the replace. `log` receives one line per notable event.
+    writer and for a stop after the replace; `processes` is the seam for the process list.
+    `log` receives one line per notable event.
     """
     log = log or (lambda line: None)
+    running = claude_processes() if processes is None else processes()
+    if running is None:
+        if require_quiescent:
+            raise InstallError("cannot list processes, so quiescence cannot be confirmed "
+                               "(--require-quiescent)")
+        log("cannot list processes: whether a Claude Code process could write settings.json "
+            "meanwhile is unknown")
+    elif running:
+        if require_quiescent:
+            raise InstallError(f"refusing to activate (--require-quiescent): {process_report(running)}")
+        log(process_report(running))
     tree = tree_path(home, version_id)
     receipt = load_receipt(os.path.join(tree, RECEIPT_NAME))
     owned = receipt["owned_hooks"]
@@ -780,9 +850,18 @@ def harness_scripts(source_root):
     return names
 
 
-def check(home, source_root, out=sys.stdout):
-    """-> 0 when the active install is consistent, matches its receipt and the generator; else 1."""
+def check(home, source_root, out=sys.stdout, processes=None):
+    """-> 0 when the active install is consistent, matches its receipt and the generator; else 1.
+
+    The residual of the settings-write race is named whenever a Claude Code process is
+    running; it is a report, never a verdict, because --check does not write anything.
+    """
     p = lambda *a: print(*a, file=out)
+    running = claude_processes() if processes is None else processes()
+    if running is None:
+        p("  processes: cannot list; whether a Claude Code process is running is unknown")
+    elif running:
+        p(f"  residual: {process_report(running)}")
     state = installation_state(home, source_root)
     scripts = harness_scripts(source_root)
     installed_md = os.path.join(claude_home(home), "CLAUDE.md")
@@ -852,6 +931,14 @@ def selftest():
         except InstallError as exc:
             return needle in str(exc)
         return False
+
+    # Every activation below runs with an empty process list so this host's own sessions
+    # cannot change a verdict; the residual proofs pass their own lists to the real function.
+    real_activate = globals()["activate"]
+
+    def activate(home, version_id, **seams):
+        seams.setdefault("processes", lambda: [])
+        return real_activate(home, version_id, **seams)
 
     def reproduction(thread_id, expected_line):
         """Run a reviewer's reproduction script verbatim; it exits 0 only at the expected outcome."""
@@ -1206,15 +1293,67 @@ def selftest():
         json.dump(user_settings, open(os.path.join(mutant_home, ".claude", "settings.json"), "w"))
         mutant.stage(source, mutant_home, version_id="v1")
         mutant.stage(source, mutant_home, version_id="v2")
-        mutant.activate(mutant_home, "v1")
+        mutant.activate(mutant_home, "v1", processes=lambda: [])
         try:
-            mutant.activate(mutant_home, "v2", after_replace=stop)
+            mutant.activate(mutant_home, "v2", after_replace=stop, processes=lambda: [])
         except Stopped:
             pass
-        mutant.activate(mutant_home, "v1")
+        mutant.activate(mutant_home, "v1", processes=lambda: [])
         chk("mutation: removal from the active receipt only leaves both versions wired after a "
             "post-switch stop, which the rollback proof rejects",
             wired(mutant_home) == {"v1": 2, "v2": 2})
+
+        # --- the interval between the final stat and the rename: reported, bounded, and
+        # proven uncovered; refused only on request
+        rows = [
+            (12, "/Applications/Claude.app/Contents/MacOS/Claude",
+             "/Applications/Claude.app/Contents/MacOS/Claude"),
+            (13, "/Applications/Claude.app/Contents/Frameworks/Claude Helper.app/Contents/MacOS/Claude Helper",
+             "/Applications/Claude.app/Contents/Frameworks/Claude Helper.app/Contents/MacOS/Claude Helper --type=utility"),
+            (14, "/Applications/Claude.app/Contents/Helpers/disclaimer",
+             "/Applications/Claude.app/Contents/Helpers/disclaimer --pgroup -- /x/claude.app/Contents/MacOS/claude"),
+            (15, "/Library/Application Support/Claude/claude-code/2.1.299/4fa9/claude.app/Contents/MacOS/claude",
+             "/Library/Application Support/Claude/claude-code/2.1.299/4fa9/claude.app/Contents/MacOS/claude --output-format stream-json"),
+            (16, "/opt/claude/versions/2.1.299", "claude --continue"),
+            (17, "/usr/local/bin/node", "node /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js"),
+            (18, "/usr/bin/python3", "python3 tools/install-claude.py --activate v1"),
+        ]
+        chk("claude_processes names the desktop runtime, the CLI and the npm entry point, and not "
+            "the Electron shell, its helpers or the disclaimer wrapper",
+            [pid for pid, _exe in claude_processes(ps_rows=rows)] == [15, 17]
+            and claude_processes(ps_rows=[(16, "/opt/homebrew/bin/claude", "claude")]) == [
+                (16, "/opt/homebrew/bin/claude")])
+        chk("claude_processes on an empty table is an empty list, not unknown",
+            claude_processes(ps_rows=[]) == [])
+        chk("claude_processes reads the live table without raising",
+            isinstance(claude_processes(), (list, type(None))))
+        two = lambda: [(15, "/x/claude.app/Contents/MacOS/claude"), (16, "/y/claude")]
+        chk("--require-quiescent refuses while Claude Code processes run, naming their pids",
+            raises(lambda: real_activate(home, "v1", processes=two, require_quiescent=True),
+                   "refusing to activate (--require-quiescent): 2 Claude Code process(es) running (pids 15, 16)"))
+        chk("--require-quiescent refuses when the process table cannot be read",
+            raises(lambda: real_activate(home, "v1", processes=lambda: None, require_quiescent=True),
+                   "cannot list processes"))
+        lines = []
+        real_activate(home, "v1", processes=two, log=lines.append)
+        chk("without the flag the same list proceeds and prints the residual with the pids",
+            wired(home) == {"v1": 2, "v2": 0}
+            and any(line.startswith("2 Claude Code process(es) running (pids 15, 16): ")
+                    and "between the installer's final stat and its rename" in line for line in lines))
+        lines = []
+        real_activate(home, "v1", processes=lambda: [], log=lines.append)
+        chk("with no process running nothing is reported", not any("process" in line for line in lines))
+        buf = io.StringIO()
+        chk("--check names the residual when a Claude Code process is running, and stays clean",
+            check(home, source, out=buf, processes=two) == 0
+            and "residual: 2 Claude Code process(es) running (pids 15, 16)" in buf.getvalue())
+        buf = io.StringIO()
+        chk("--check says when the process table cannot be read",
+            check(home, source, out=buf, processes=lambda: None) == 0
+            and "processes: cannot list" in buf.getvalue())
+        chk("review reproduction 4294811773 (known residual, not covered): a write landing between "
+            "the final stat and the rename is lost; the assertion is the reviewer's, unchanged",
+            reproduction(4294811773, "activation= v1 writer_completed= True app_update= None"))
 
         # --- a concurrent writer between the read and the replace
         seen = []
@@ -1311,7 +1450,7 @@ def main(argv):
         return selftest()
     options = {"--home": os.path.expanduser("~"), "--source": ROOT, "--tree": TEMPLATE_TREE,
                "--commit": TEMPLATE_COMMIT, "--version-id": None}
-    flags = {"--allow-dirty": False, "--remove-orphans": False}
+    flags = {"--allow-dirty": False, "--remove-orphans": False, "--require-quiescent": False}
     positional = []
     while args:
         item = args.pop(0)
@@ -1343,7 +1482,8 @@ def main(argv):
                 sys.stderr.write("--activate takes exactly one version id\n")
                 return 2
             active = activate(options["--home"], positional[0],
-                              remove_orphans=flags["--remove-orphans"], log=print)
+                              remove_orphans=flags["--remove-orphans"], log=print,
+                              require_quiescent=flags["--require-quiescent"])
             print(f"activated {active['tree']} at {active['activated_at']}")
             return 0
         if mode == "--check":

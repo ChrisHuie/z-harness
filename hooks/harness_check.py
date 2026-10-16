@@ -182,7 +182,7 @@ SELFTEST_SUITES = [
     ("verify-review-publication",
      ["tools/verify-review-publication.py", "--selftest"], 94),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 53),
-    ("install-claude", ["tools/install-claude.py", "--selftest"], 175),
+    ("install-claude", ["tools/install-claude.py", "--selftest"], 188),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
     ("ci-gate", ["tools/ci-gate.py", "--selftest"], 345),
     ("write-mutation-receipt",
@@ -274,8 +274,9 @@ SELFTEST_TIMEOUTS = {
     "announced_work_guard": 90,
     "ci-gate": 120,
     "fuzz-judge-diff": 25,
-    # Stages and activates several temporary trees per run; measured 9.1s at 156 proofs.
-    "install-claude": 30,
+    # Stages and activates several temporary trees, runs three reviewer reproductions as
+    # subprocesses and eleven fixture hooks in fresh interpreters; measured 16.2s at 188 proofs.
+    "install-claude": 60,
 }
 DEFAULT_SELFTEST_TIMEOUT = 15
 # A suite may use this much of its registered timeout before C1 says so. Without it the

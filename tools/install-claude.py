@@ -490,72 +490,178 @@ def marker_problems(marker):
     return problems
 
 
+# The argument of a sys.path mutation is evaluated symbolically, anchored on __file__; these
+# calls return their argument's path unchanged.
+PATH_IDENTITY_CALLS = frozenset({"str", "Path", "pathlib.Path", "os.fspath", "os.path.abspath",
+                                 "os.path.normpath", "os.path.realpath"})
+
+
+def sys_path_mutation(node):
+    """-> `node` when it is a `sys.path.insert(...)` or `sys.path.append(...)` call, else None."""
+    return (node if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("insert", "append") and isinstance(node.func.value, ast.Attribute)
+            and node.func.value.attr == "path" and isinstance(node.func.value.value, ast.Name)
+            and node.func.value.value.id == "sys" else None)
+
+
+def path_expression(node, script):
+    """-> the tree-relative path `node` denotes for the script at `script`, or None.
+
+    Modelled: `__file__`, string constants, `.parent`, `os.path.dirname(...)`,
+    `os.path.join(...)`, `/`, `.resolve()`, `.absolute()` and the identity calls. Anything
+    else is None: the checker refuses what it cannot resolve rather than certify it.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name) and node.id == "__file__":
+        return script
+    if isinstance(node, ast.Attribute) and node.attr == "parent":
+        base = path_expression(node.value, script)
+        return None if base is None else os.path.dirname(base)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        left, right = path_expression(node.left, script), path_expression(node.right, script)
+        return None if left is None or right is None else os.path.join(left, right)
+    if isinstance(node, ast.Call) and not node.keywords:
+        callee = ast.unparse(node.func)
+        if callee in PATH_IDENTITY_CALLS and len(node.args) == 1:
+            return path_expression(node.args[0], script)
+        if callee == "os.path.dirname" and len(node.args) == 1:
+            base = path_expression(node.args[0], script)
+            return None if base is None else os.path.dirname(base)
+        if callee == "os.path.join" and node.args:
+            parts = [path_expression(a, script) for a in node.args]
+            return None if any(part is None for part in parts) else os.path.join(*parts)
+        if (isinstance(node.func, ast.Attribute) and node.func.attr in ("resolve", "absolute")
+                and not node.args):
+            return path_expression(node.func.value, script)
+    return None
+
+
 def hook_import_problems(tree, receipt):
     """-> [problem] for an owned hook script whose imports the receipt cannot vouch for.
 
-    A hook locates sibling modules by inserting its own directory, hooks/guards/ or tools/
-    on sys.path and importing them by name, so every top-level import that is not standard
-    library must resolve to a file in the receipt's files map, transitively, in a directory
-    that script actually searches: its own directory always, hooks/guards/ and tools/ only
-    when its source inserts them on sys.path. A module missing from that search path is one
-    the digests never verify and the hook cannot load.
+    The receipt vouches for a hook only when every module the interpreter would load for it
+    is in the files map, resolved the way `python3 <tree>/hooks/<script>.py` resolves them.
+    Each owned script is its own process: the search path starts at the script's directory;
+    a top-level `sys.path.insert(i, …)` or `sys.path.append(…)` whose argument is built from
+    `__file__` mutates the one shared path at the point it executes; an import resolves
+    against the path as it stands then, the first directory holding `<name>.py` or
+    `<name>/__init__.py` wins, and a module imported from the tree is walked right there,
+    its own mutations and imports included; a name resolves once, as `sys.modules` does.
+    An import inside a function or compound statement resolves against the final path.
+
+    Reported: a module that no searched directory holds; a file on the path named like a
+    standard-library module, which shadows it for every interpreter that has not already
+    loaded that module; a sys.path mutation outside a top-level call statement, which the
+    path cannot order; an argument the evaluator does not model; a target outside the tree;
+    a script that does not parse.
     """
     files = receipt.get("files", {})
-    problems = []
     stdlib = getattr(sys, "stdlib_module_names", frozenset())
-    scripts = []
+    problems = []
+    parsed = {}
+
+    def module_ast(relative):
+        if relative not in parsed:
+            try:
+                parsed[relative] = ast.parse(read_text(os.path.join(tree, relative)))
+            except (OSError, SyntaxError, UnicodeDecodeError) as exc:
+                problems.append(f"{relative} cannot be parsed: {exc}")
+                parsed[relative] = None
+        return parsed[relative]
+
+    def imported_names(node):
+        if isinstance(node, ast.Import):
+            return [alias.name.split(".")[0] for alias in node.names]
+        if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            return [node.module.split(".")[0]]
+        return []
+
+    def process(entry):
+        path = [os.path.dirname(entry)]
+        loaded = {}
+        walked = set()
+        deferred = []
+
+        def locate(name):
+            for directory in path:
+                for candidate in (f"{name}.py", f"{name}/__init__.py"):
+                    relative = os.path.normpath(os.path.join(directory, candidate))
+                    if relative in files:
+                        return relative
+            return None
+
+        def mutate(relative, call):
+            if (call.func.attr == "insert" and len(call.args) == 2
+                    and isinstance(call.args[0], ast.Constant) and type(call.args[0].value) is int):
+                index, argument = call.args[0].value, call.args[1]
+            elif call.func.attr == "append" and len(call.args) == 1:
+                index, argument = len(path), call.args[0]
+            else:
+                problems.append(f"{relative} line {call.lineno}: unsupported sys.path mutation "
+                                f"{ast.unparse(call)}")
+                return
+            anchored = any(isinstance(n, ast.Name) and n.id == "__file__" for n in ast.walk(argument))
+            target = path_expression(argument, relative) if anchored else None
+            if target is None:
+                problems.append(f"{relative} line {call.lineno}: sys.path entry {ast.unparse(argument)} "
+                                f"is not a path built from __file__ that the checker resolves")
+                return
+            target = os.path.normpath(target)
+            if os.path.isabs(target) or target == ".." or target.startswith("../"):
+                problems.append(f"{relative} inserts a sys.path entry outside the tree ({target})")
+                return
+            path.insert(index, target)
+
+        def resolve(relative, name):
+            if name in loaded:
+                return
+            found = locate(name)
+            if name in stdlib:
+                if found is not None:
+                    loaded[name] = found
+                    problems.append(f"{relative} imports {name}, but {found} on its search path "
+                                    f"shadows the standard-library module")
+                return
+            if found is None:
+                problems.append(f"{relative} imports {name}, which is neither standard library nor in "
+                                f"the receipt's files under {', '.join(dict.fromkeys(path))}")
+                return
+            loaded[name] = found
+            walk(found)
+
+        def walk(relative):
+            if relative in walked:
+                return
+            walked.add(relative)
+            module = module_ast(relative)
+            if module is None:
+                return
+            for statement in module.body:
+                call = sys_path_mutation(statement.value) if isinstance(statement, ast.Expr) else None
+                if call is not None:
+                    mutate(relative, call)
+                elif isinstance(statement, (ast.Import, ast.ImportFrom)):
+                    for name in imported_names(statement):
+                        resolve(relative, name)
+                else:
+                    for node in ast.walk(statement):
+                        if sys_path_mutation(node) is not None:
+                            problems.append(f"{relative} line {node.lineno}: sys.path mutated outside a "
+                                            f"top-level call statement; the search path cannot be ordered")
+                        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                            deferred.append((relative, node))
+
+        walk(entry)
+        while deferred:
+            relative, node = deferred.pop(0)
+            for name in imported_names(node):
+                resolve(relative, name)
+
     for h in receipt.get("owned_hooks", []):
         pointed = HARNESS_COMMAND.match(h.get("command", "")) if isinstance(h.get("command"), str) else None
         if pointed:
-            scripts.append(f"hooks/{pointed.group(2)}")
-    seen = set()
-    while scripts:
-        relative = scripts.pop()
-        if relative in seen:
-            continue
-        seen.add(relative)
-        path = os.path.join(tree, relative)
-        try:
-            source_text = read_text(path)
-            module_ast = ast.parse(source_text)
-        except (OSError, SyntaxError, UnicodeDecodeError) as exc:
-            problems.append(f"{relative} cannot be parsed: {exc}")
-            continue
-        # A searched directory comes from an executable `sys.path.insert(...)` call, resolved
-        # the way the hooks write it: the string segments of its path argument joined onto
-        # the script's own directory (`Path(__file__).parent / "guards"`,
-        # `os.path.join(os.path.dirname(__file__), "..", "tools")`). A comment, an unrelated
-        # string, or a segment that lands somewhere else authorises nothing.
-        script_dir = os.path.dirname(relative)
-        searched = [script_dir]
-        for node in ast.walk(module_ast):
-            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "insert" and isinstance(node.func.value, ast.Attribute)
-                    and node.func.value.attr == "path" and isinstance(node.func.value.value, ast.Name)
-                    and node.func.value.value.id == "sys" and len(node.args) == 2):
-                segments = [c.value for c in ast.walk(node.args[1])
-                            if isinstance(c, ast.Constant) and isinstance(c.value, str)]
-                target = os.path.normpath(os.path.join(script_dir, *segments)) if segments else script_dir
-                if target == "." or target.startswith(".."):
-                    problems.append(f"{relative} inserts a sys.path entry outside the tree "
-                                    f"({'/'.join(segments)})")
-                elif target not in searched:
-                    searched.append(target)
-        names = set()
-        for node in ast.walk(module_ast):
-            if isinstance(node, ast.Import):
-                names.update(alias.name.split(".")[0] for alias in node.names)
-            elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-                names.add(node.module.split(".")[0])
-        for name in sorted(names):
-            if name in stdlib:
-                continue
-            found = next((f"{d}/{name}.py" for d in searched if f"{d}/{name}.py" in files), None)
-            if found is None:
-                problems.append(f"{relative} imports {name}, which is neither standard library nor in "
-                                f"the receipt's files under {', '.join(searched)}")
-            else:
-                scripts.append(found)
+            process(f"hooks/{pointed.group(2)}")
     return problems
 
 
@@ -1944,7 +2050,7 @@ def selftest():
 
         # --- the module must sit in a directory the hook actually searches: its own
         # directory always, hooks/guards/ and tools/ only when its source inserts them
-        def import_check(tree_files, scripts_by_path):
+        def import_check(tree_files, scripts_by_path, fn=None):
             """-> hook_import_problems over a throwaway tree: files map plus the named scripts."""
             root = os.path.join(td, "import-tree")
             shutil.rmtree(root, ignore_errors=True)
@@ -1956,7 +2062,7 @@ def selftest():
                                         "command": f"python3 ~/.claude/harness/v1/hooks/{rel[len('hooks/'):]}",
                                         "timeout": 5} for rel in scripts_by_path if rel.startswith("hooks/")
                                        and "/" not in rel[len("hooks/"):]]}
-            return hook_import_problems(root, receipt)
+            return (fn or hook_import_problems)(root, receipt)
 
         inserts_guards = "import os, sys\nsys.path.insert(0, os.path.join(os.path.dirname(__file__), \"guards\"))\n"
         inserts_tools = "import os, sys\nsys.path.insert(0, os.path.join(os.path.dirname(__file__), \"..\", \"tools\"))\n"
@@ -1972,7 +2078,7 @@ def selftest():
             and import_check(["hooks/a.py", "tools/lib.py"], {"hooks/a.py": inserts_guards + "import lib\n",
                                                               "tools/lib.py": "X = 1\n"})
             == ["hooks/a.py imports lib, which is neither standard library nor in the receipt's files under "
-                "hooks, hooks/guards"])
+                "hooks/guards, hooks"])
         transitive_root = os.path.join(td, "transitive-tree")
         shutil.rmtree(transitive_root, ignore_errors=True)
         os.makedirs(os.path.join(transitive_root, "hooks"))
@@ -1987,28 +2093,36 @@ def selftest():
         chk("an insert is resolved onto the script's directory: \"tools\" under hooks/ is not the tree's tools/",
             import_check(["hooks/a.py", "tools/lib.py"], {"hooks/a.py": 'import os, sys\nsys.path.insert(0, os.path.join(os.path.dirname(__file__), "tools"))\nimport lib\n',
                                                           "tools/lib.py": "X = 1\n"})
-            == ["hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks, hooks/tools"]
+            == ["hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks/tools, hooks"]
             and import_check(["hooks/a.py", "hooks/tools/lib.py"], {"hooks/a.py": 'import os, sys\nsys.path.insert(0, os.path.join(os.path.dirname(__file__), "tools"))\nimport lib\n',
                                                                     "hooks/tools/lib.py": "X = 1\n"}) == [])
         chk("an insert that lands outside the tree is reported",
             import_check(["hooks/a.py"], {"hooks/a.py": 'import os, sys\nsys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "elsewhere"))\n'})
-            == ["hooks/a.py inserts a sys.path entry outside the tree (../../elsewhere)"])
-        chk("only a call to sys.path.insert authorises a directory: other receivers, attributes and methods do not",
+            == ["hooks/a.py inserts a sys.path entry outside the tree (../elsewhere)"])
+        chk("only a sys.path.insert or sys.path.append of the right arity authorises a directory: other "
+            "receivers and attributes do not, and a two-argument append is reported",
             all(import_check(["hooks/a.py", "tools/lib.py"], {"hooks/a.py": f'import os, sys\n{call}(0, os.path.join(os.path.dirname(__file__), "..", "tools"))\nimport lib\n',
                                                               "tools/lib.py": "X = 1\n"})
                 == ["hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks"]
-                for call in ("other.path.insert", "sys.other.insert", "sys.path.append"))
+                for call in ("other.path.insert", "sys.other.insert"))
+            and import_check(["hooks/a.py", "tools/lib.py"], {"hooks/a.py": 'import os, sys\nsys.path.append(0, os.path.join(os.path.dirname(__file__), "..", "tools"))\nimport lib\n',
+                                                              "tools/lib.py": "X = 1\n"})
+            == ["hooks/a.py line 2: unsupported sys.path mutation sys.path.append(0, os.path.join(os.path.dirname(__file__), '..', 'tools'))",
+                "hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks"]
             and import_check(["hooks/a.py", "tools/lib.py", "hooks/guards/g.py"], {
                 "hooks/a.py": 'import os, sys\nDIRECTORY = "tools"\nsys.path.insert(0, os.path.join(os.path.dirname(__file__), "guards"))\nimport lib\n',
                 "tools/lib.py": "X = 1\n", "hooks/guards/g.py": "X = 1\n"})
-            == ["hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks, hooks/guards"])
-        chk("an insert with the wrong arity, or whose directory string sits in the index argument, authorises nothing",
+            == ["hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks/guards, hooks"])
+        chk("an insert with the wrong arity, or whose directory string sits in the index argument, is reported "
+            "as unsupported and authorises nothing",
             import_check(["hooks/a.py", "tools/lib.py"], {"hooks/a.py": 'import os, sys\nsys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"), 99)\nimport lib\n',
                                                           "tools/lib.py": "X = 1\n"})
-            == ["hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks"]
+            == ["hooks/a.py line 2: unsupported sys.path mutation sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tools'), 99)",
+                "hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks"]
             and import_check(["hooks/a.py", "tools/lib.py"], {"hooks/a.py": 'import os, sys\nsys.path.insert("../tools", os.path.dirname(__file__))\nimport lib\n',
                                                               "tools/lib.py": "X = 1\n"})
-            == ["hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks"])
+            == ["hooks/a.py line 2: unsupported sys.path mutation sys.path.insert('../tools', os.path.dirname(__file__))",
+                "hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks"])
         chk("a commented-out sys.path.insert, or a string naming the directory, authorises nothing",
             import_check(["hooks/a.py", "tools/lib.py"], {"hooks/a.py": 'import os, sys\n# sys.path.insert(0, "tools")\nimport lib\n',
                                                           "tools/lib.py": "X = 1\n"})
@@ -2028,6 +2142,128 @@ def selftest():
         chk("a hook that cannot be parsed is reported, never skipped",
             any(p.startswith("hooks/a.py cannot be parsed")
                 for p in import_check(["hooks/a.py"], {"hooks/a.py": "def (:\n"})))
+
+        # --- the resolver follows the interpreter (review thread 4298561313): search order,
+        # the inherited path, shadowing of the standard library, unordered mutations
+        def differential(scripts_by_path):
+            """-> (checker clear, child exit 0) for one tree whose entry is hooks/a.py, the child
+            run by a fresh interpreter with an empty PYTHONPATH."""
+            root = os.path.join(td, "differential-tree")
+            shutil.rmtree(root, ignore_errors=True)
+            for rel, body in scripts_by_path.items():
+                os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
+                open(os.path.join(root, rel), "w").write(body)
+            receipt = {"files": {rel: {"sha256": "0" * 64} for rel in scripts_by_path},
+                       "owned_hooks": [{"event": "Stop", "matcher": None, "type": "command",
+                                        "command": "python3 ~/.claude/harness/v1/hooks/a.py", "timeout": 5}]}
+            child = subprocess.run([sys.executable, os.path.join(root, "hooks", "a.py")], cwd=td,
+                                   capture_output=True, text=True, timeout=60,
+                                   env=dict(os.environ, PYTHONPATH="", PYTHONDONTWRITEBYTECODE="1"))
+            return hook_import_problems(root, receipt) == [], child.returncode == 0
+
+        prefix = 'import sys\nfrom pathlib import Path\nsys.path.insert(0, str(Path(__file__).parent / "guards"))\n'
+        shapes = {
+            "control": ({"hooks/a.py": prefix + "import lib\nprint(lib.VALUE)\n",
+                         "hooks/guards/lib.py": "VALUE = 42\n"}, (True, True)),
+            "precedence": ({"hooks/a.py": prefix + "import lib\n", "hooks/lib.py": "VALUE = 42\n",
+                            "hooks/guards/lib.py": "import missing_review_dependency\n"}, (False, False)),
+            "inherited_path": ({"hooks/a.py": prefix + "import lib\n",
+                                "hooks/guards/lib.py": "import helper_lib\nVALUE = helper_lib.VALUE\n",
+                                "hooks/helper_lib.py": "VALUE = 42\n"}, (True, True)),
+            "stdlib_shadow": ({"hooks/a.py": "import json\n",
+                               "hooks/json.py": "import missing_review_dependency\n"}, (False, False)),
+            "unexecuted_insert": ({"hooks/a.py": 'import sys\nfrom pathlib import Path\nif False:\n'
+                                                 '    sys.path.insert(0, str(Path(__file__).parent / "guards"))\n'
+                                                 'import lib\n',
+                                   "hooks/guards/lib.py": "VALUE = 42\n"}, (False, False)),
+            "insert_after_own_dir": ({"hooks/a.py": prefix.replace("insert(0,", "insert(1,") + "import lib\n",
+                                      "hooks/lib.py": "VALUE = 42\n",
+                                      "hooks/guards/lib.py": "import missing_review_dependency\n"}, (True, True)),
+            "append": ({"hooks/a.py": 'import sys\nfrom pathlib import Path\n'
+                                      'sys.path.append(str(Path(__file__).parent / "guards"))\nimport lib\n',
+                        "hooks/guards/lib.py": "VALUE = 42\n"}, (True, True)),
+            "parent_parent": ({"hooks/a.py": 'import sys\nfrom pathlib import Path\n'
+                                             'sys.path.insert(0, str(Path(__file__).parent.parent / "tools"))\nimport lib\n',
+                               "tools/lib.py": "VALUE = 42\n"}, (True, True)),
+            "dirname_abspath": ({"hooks/a.py": 'import os, sys\nsys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))\n'
+                                               'import lib\n', "hooks/lib.py": "VALUE = 42\n"}, (True, True)),
+            "package": ({"hooks/a.py": "import pkg\nprint(pkg.VALUE)\n",
+                         "hooks/pkg/__init__.py": "import sub\nVALUE = sub.VALUE\n",
+                         "hooks/sub.py": "VALUE = 42\n"}, (True, True)),
+            "unanchored_entry": ({"hooks/a.py": 'import sys\nsys.path.insert(0, "/nonexistent/guards")\nimport lib\n',
+                                  "hooks/guards/lib.py": "VALUE = 42\n"}, (False, False)),
+        }
+        outcomes = {name: differential(files) for name, (files, _) in shapes.items()}
+        chk("differential: for eleven tree shapes the checker's verdict equals a fresh interpreter's "
+            "(clear iff the hook exits 0): " + ", ".join(f"{n}={v}" for n, v in outcomes.items()),
+            outcomes == {name: expected for name, (_, expected) in shapes.items()})
+        chk("search order: an insert at 0 is searched before the script's directory, an insert at 1 after it",
+            import_check(["hooks/a.py", "hooks/lib.py", "hooks/guards/lib.py"], shapes["precedence"][0])
+            == ["hooks/guards/lib.py imports missing_review_dependency, which is neither standard library nor "
+                "in the receipt's files under hooks/guards, hooks"]
+            and import_check(["hooks/a.py", "hooks/lib.py", "hooks/guards/lib.py"], shapes["insert_after_own_dir"][0]) == [])
+        chk("the inherited path: a module under guards/ may import a sibling of the entry script",
+            import_check(["hooks/a.py", "hooks/guards/lib.py", "hooks/helper_lib.py"], shapes["inherited_path"][0]) == [])
+        chk("a file named like a standard-library module on the search path is reported as shadowing it",
+            import_check(["hooks/a.py", "hooks/json.py"], {"hooks/a.py": "import json\n"})
+            == ["hooks/a.py imports json, but hooks/json.py on its search path shadows the standard-library module"]
+            and import_check(["hooks/a.py"], {"hooks/a.py": "import json\n"}) == [])
+        chk("a sys.path mutation inside control flow is reported and authorises nothing",
+            import_check(["hooks/a.py", "hooks/guards/lib.py"], shapes["unexecuted_insert"][0])
+            == ["hooks/a.py line 4: sys.path mutated outside a top-level call statement; the search path cannot be ordered",
+                "hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks"])
+        chk("an entry not built from __file__, or an expression the evaluator does not model, is reported",
+            import_check(["hooks/a.py", "hooks/guards/lib.py"], shapes["unanchored_entry"][0])
+            == ["hooks/a.py line 2: sys.path entry '/nonexistent/guards' is not a path built from __file__ that "
+                "the checker resolves",
+                "hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks"]
+            and import_check(["hooks/a.py", "hooks/guards/lib.py"], {"hooks/a.py": 'import os, sys\nd = "guards"\n'
+                             'sys.path.insert(0, os.path.join(os.path.dirname(__file__), d))\nimport lib\n',
+                             "hooks/guards/lib.py": "X = 1\n"})
+            == ["hooks/a.py line 3: sys.path entry os.path.join(os.path.dirname(__file__), d) is not a path built "
+                "from __file__ that the checker resolves",
+                "hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks"])
+        chk("`.parent.parent`, `.resolve()`, `os.path.abspath` and a package __init__ resolve as the interpreter does",
+            import_check(["hooks/a.py", "tools/lib.py"], shapes["parent_parent"][0]) == []
+            and import_check(["hooks/a.py", "hooks/guards/lib.py"], {"hooks/a.py": 'import sys\nfrom pathlib import Path\n'
+                             'sys.path.insert(0, str(Path(__file__).resolve().parent / "guards"))\nimport lib\n',
+                             "hooks/guards/lib.py": "X = 1\n"}) == []
+            and import_check(["hooks/a.py", "hooks/lib.py"], shapes["dirname_abspath"][0]) == []
+            and import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/sub.py"], shapes["package"][0]) == []
+            and import_check(["hooks/a.py", "hooks/pkg/__init__.py"], shapes["package"][0])
+            == ["hooks/pkg/__init__.py imports sub, which is neither standard library nor in the receipt's files under hooks"])
+        chk("a name resolves once per process: a later import of the same name from another directory is the cached module",
+            import_check(["hooks/a.py", "hooks/lib.py", "hooks/guards/lib.py", "hooks/guards/second.py"],
+                         {"hooks/a.py": "import lib\n" + prefix + "import second\n", "hooks/lib.py": "X = 1\n",
+                          "hooks/guards/lib.py": "import missing_review_dependency\n",
+                          "hooks/guards/second.py": "import lib\n"}) == [])
+        chk("review reproduction 4298561313: the checker's verdict follows the module Python loads",
+            reproduction(4298561313, "precedence preflight_clear, activated, check_exit, hook_exit = "
+                                     "(False, False, 1, 1)"))
+
+        # --- mutation proofs on private copies: each resolver rule fails one case above by name
+        order_first = private_copy("            path.insert(index, " + "target)\n", "            path.append(target)\n")
+        chk("mutation proof: inserted directories searched after the script's own make the precedence case clear",
+            import_check(["hooks/a.py", "hooks/lib.py", "hooks/guards/lib.py"], shapes["precedence"][0],
+                         fn=order_first.hook_import_problems) == [])
+        reset_path = private_copy("            loaded[name] = found\n            walk(found)\n",
+                                  "            loaded[name] = found\n            kept = list(path)\n"
+                                  "            path[:] = [os.path.dirname(found)]\n            walk(found)\n"
+                                  "            path[:] = kept\n")
+        chk("mutation proof: a path reset per module rejects the inherited-path case",
+            import_check(["hooks/a.py", "hooks/guards/lib.py", "hooks/helper_lib.py"], shapes["inherited_path"][0],
+                         fn=reset_path.hook_import_problems) != [])
+        stdlib_first = private_copy("            found = locate(name)\n            if name in " + "stdlib:\n",
+                                    "            found = None if name in stdlib else locate(name)\n            if name in stdlib:\n")
+        chk("mutation proof: skipping standard-library names before the tree makes the shadowing case clear",
+            import_check(["hooks/a.py", "hooks/json.py"], {"hooks/a.py": "import json\n"},
+                         fn=stdlib_first.hook_import_problems) == [])
+        nested_counts = private_copy("                            problems.append(f\"{relative} line {node.lineno}: sys.path mutated outside a \"\n"
+                                     "                                            f\"top-level call statement; the search path cannot be ordered\")\n",
+                                     "                            mutate(relative, node)\n")
+        chk("mutation proof: counting a mutation inside control flow makes the unexecuted-insert case clear",
+            import_check(["hooks/a.py", "hooks/guards/lib.py"], shapes["unexecuted_insert"][0],
+                         fn=nested_counts.hook_import_problems) == [])
         moved_home = os.path.join(td, "moved-home")
         shutil.copytree(dep_home, moved_home)
         stage(dep_source, moved_home, version_id="v2")

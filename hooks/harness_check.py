@@ -152,7 +152,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 379
+SELFTEST_FLOOR = 380
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -182,7 +182,7 @@ SELFTEST_SUITES = [
     ("verify-review-publication",
      ["tools/verify-review-publication.py", "--selftest"], 94),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 53),
-    ("install-claude", ["tools/install-claude.py", "--selftest"], 210),
+    ("install-claude", ["tools/install-claude.py", "--selftest"], 220),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
     ("ci-gate", ["tools/ci-gate.py", "--selftest"], 345),
     ("write-mutation-receipt",
@@ -275,7 +275,7 @@ SELFTEST_TIMEOUTS = {
     "ci-gate": 120,
     "fuzz-judge-diff": 25,
     # Stages and activates several temporary trees, runs three reviewer reproductions as
-    # subprocesses and twenty-two fixture hooks in fresh interpreters; measured 16.8s at 210 proofs.
+    # subprocesses and thirty-two fixture hooks in fresh interpreters; measured 16.7s at 220 proofs.
     "install-claude": 60,
 }
 DEFAULT_SELFTEST_TIMEOUT = 15
@@ -5994,7 +5994,8 @@ def selftest():
                    "or whose closer carries text, or that never closes",
                    lambda: claims_in("````\n```\n" + fence_claim + "````\n") == fence_base
                    and claims_in("~~~\n~~~ end\n" + fence_claim + "~~~\n") == fence_base
-                   and claims_in("```\n" + fence_claim) == fence_base)
+                   and claims_in("```\n" + fence_claim) == fence_base
+                   and claims_in("```\n\n" + fence_claim) == fence_base)
         expect_red("C12 closes a fence on a longer run of the same character or a closer with trailing "
                    "spaces, and a tilde opener may carry backticks in its info string",
                    lambda: claims_in("```\n" + fence_claim + "`````\n\n" + fence_claim) == fence_base + 1
@@ -6380,9 +6381,12 @@ def selftest():
             script that launched it is not run again; the case is reported as such.
             """
             path = os.path.join(ROOT, "instruments", "reproductions", "pr-36", f"{thread_id}.py")
+            launched.append(thread_id)
             done = subprocess.run([sys.executable, path], cwd=ROOT, capture_output=True, text=True,
                                   timeout=900, env=dict(os.environ, ZH_REVIEW_REPRODUCTIONS="nested"))
             return done.returncode == 0 and expected_line in done.stdout
+
+        launched = []
 
         def reproduction_case(thread_id, label, expected_line):
             """One proof per reproduction. A nested run (one that a reproduction launched) does
@@ -6776,6 +6780,13 @@ def selftest():
                        "proof in the mutated suite; the baseline and restored suites pass",
                        lambda: reproduction(4294811841, "mutated bound_control= 0 SELFTEST-SUMMARY "
                                                         "suite=harness_check checks="))
+
+        if os.environ.get("ZH_REVIEW_REPRODUCTIONS") == "nested":
+            expect_red("a nested suite run launched no reproduction subprocess",
+                       lambda: launched == [])
+        else:
+            expect_red("the top-level suite run launched each of this module's five reproductions once",
+                       lambda: sorted(launched) == [4294811805, 4294811820, 4294811833, 4294811841, 4298561325])
 
         # --- fence mutants, each failing one shape proof above by name; search strings are
         # assembled so this block adds no occurrence of the site it mutates

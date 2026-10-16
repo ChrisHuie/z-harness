@@ -61,9 +61,13 @@ MANIFEST_TOP_LEVEL_KEYS = {"schema_version", "note", "skills"}
 MANIFEST_STATUSES = {"tested", "exempt"}
 MANIFEST_ENTRY_KEYS = {"status", "required", "reason"}
 WORKLISTS = "contracts/worklists.json"
-WORKLIST_SCHEMA_VERSION = 1
+WORKLIST_SCHEMA_VERSION = 2
+# Schema 1 differs only in the C12 item shape; it loads, and its items meet the same
+# shape rule, so a schema 1 file with legacy text keys fails on the first key.
+WORKLIST_SCHEMA_VERSIONS = (1, 2)
 WORKLIST_KEYS = {"schema_version", "note", "C12", "C13"}
-WORKLIST_C12_ITEM_KEYS = {"file", "kind", "key"}
+WORKLIST_C12_ITEM_KEYS = {"file", "kind", "key", "display"}
+WORKLIST_KEY_SHAPE = re.compile(r"sha256:[0-9a-f]{64}")
 
 
 def load_corpus(root):
@@ -110,10 +114,13 @@ def load_manifest(root):
 def load_worklists(root):
     """-> (baseline dict or None, error). The shrink-only baseline of items deliberately open.
 
-    `C12` holds claim-binding findings as {file, kind, key} objects keyed on the claim text,
-    never on a line number, so line drift does not change an item's identity; `C13` holds the
-    names of skills left unlisted in the coverage manifest. A missing or malformed file is an
-    error, never an empty baseline.
+    `C12` holds claim-binding findings as {file, kind, key, display} objects: key is
+    "sha256:" plus the digest of the whole whitespace-collapsed claim text, never a line
+    number or a prefix, so line drift keeps an item's identity and any edit to the text is
+    a new item; display is the readable form and carries no identity. A key of any other
+    shape is refused, so a hand-edited or legacy key fails loudly. `C13` holds the names of
+    skills left unlisted in the coverage manifest. A missing or malformed file is an error,
+    never an empty baseline.
     """
     path = os.path.join(root, WORKLISTS)
     try:
@@ -137,8 +144,9 @@ def load_worklists(root):
         return None, f"{WORKLISTS}: top level is not an object"
     if set(data) != WORKLIST_KEYS:
         return None, (f"{WORKLISTS}: keys {sorted(data)} differ from {sorted(WORKLIST_KEYS)}")
-    if data.get("schema_version") != WORKLIST_SCHEMA_VERSION:
-        return None, f"{WORKLISTS}: schema_version is not {WORKLIST_SCHEMA_VERSION}"
+    if data.get("schema_version") not in WORKLIST_SCHEMA_VERSIONS:
+        return None, (f"{WORKLISTS}: schema_version {data.get('schema_version')!r} is not one of "
+                      f"{WORKLIST_SCHEMA_VERSIONS}")
     if not isinstance(data.get("note"), str) or not data["note"].strip():
         return None, f"{WORKLISTS}: note must be a non-empty string"
     c12 = data.get("C12")
@@ -150,6 +158,9 @@ def load_worklists(root):
                 or not all(isinstance(item[k], str) and item[k] for k in WORKLIST_C12_ITEM_KEYS)):
             return None, (f"{WORKLISTS}: C12[{index}] must be an object with non-empty string "
                           f"keys {sorted(WORKLIST_C12_ITEM_KEYS)}")
+        if not WORKLIST_KEY_SHAPE.fullmatch(item["key"]):
+            return None, (f"{WORKLISTS}: C12[{index}] key {item['key'][:40]!r} is not sha256: plus "
+                          f"64 hex characters; a hand-edited or legacy key is refused")
         identity = (item["file"], item["kind"], item["key"])
         if identity in seen:
             return None, f"{WORKLISTS}: C12 repeats {identity!r}"
@@ -615,14 +626,29 @@ def selftest():
             validate(root, out=buf) == 1 and "cannot apply the ratchet" in buf.getvalue()
             and "unreadable" in buf.getvalue())
         write_baseline(["beta"], c12=[{"file": "x.md", "kind": "stale quote"}])
-        chk("baseline loader rejects a C12 item without the file/kind/key shape",
+        chk("baseline loader rejects a C12 item without the file/kind/key/display shape",
             "C12[0]" in (load_worklists(root)[1] or ""))
+        write_baseline(["beta"], c12=[{"file": "x.md", "kind": "stale quote", "key": "build the gate",
+                                       "display": "build the gate"}])
+        chk("baseline loader rejects a C12 key that is not sha256: plus 64 hex characters",
+            "is not sha256: plus 64 hex" in (load_worklists(root)[1] or ""))
+        write_baseline(["beta"], c12=[{"file": "x.md", "kind": "stale quote",
+                                       "key": "sha256:" + "0" * 64, "display": "build the gate"}])
+        chk("baseline loader accepts a well-formed digest key",
+            load_worklists(root)[1] is None)
         write_baseline(["beta", "beta"])
         chk("baseline loader rejects a repeated C13 skill", "repeats" in (load_worklists(root)[1] or ""))
         write_baseline(["beta"], extra=1)
         chk("baseline loader rejects an unknown top-level key", "differ from" in (load_worklists(root)[1] or ""))
-        write_baseline(["beta"], schema_version=2)
-        chk("baseline loader rejects a foreign schema version", "schema_version" in (load_worklists(root)[1] or ""))
+        write_baseline(["beta"], schema_version=3)
+        chk("baseline loader rejects a foreign schema version", "schema_version 3 is not one of" in (load_worklists(root)[1] or ""))
+        write_baseline(["beta"], schema_version=1)
+        chk("baseline loader accepts schema 1 with no C12 items: the item shape, not the number, is the contract",
+            load_worklists(root)[1] is None)
+        write_baseline(["beta"], schema_version=1, c12=[{"file": "x.md", "kind": "stale quote", "key": "build the gate",
+                                                          "display": "build the gate"}])
+        chk("baseline loader refuses a schema 1 file carrying a legacy text key",
+            "is not sha256: plus 64 hex" in (load_worklists(root)[1] or ""))
         chk("ratchet helper: new and stale are the two set differences",
             ratchet(["a", "b"], ["b", "c"]) == (["a"], ["c"]) and ratchet([], []) == ([], []))
         write_baseline(["beta"])

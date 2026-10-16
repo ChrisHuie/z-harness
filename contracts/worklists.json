@@ -1,76 +1,90 @@
 {
-  "schema_version": 1,
-  "note": "Shrink-only worklists for checks that are deliberately open at a phase boundary. C12 items are claim-binding findings identified by (file, kind, claim text), never by line number; C13 items are skills unlisted in release/evals.json. A check is green while its live list equals or is a subset of its baseline, red on any live item not here, and red on any item here that is no longer live, so this file shrinks only in the change that fixes the item. When a list is empty the check is an ordinary blocking check.",
+  "schema_version": 2,
+  "note": "Shrink-only worklists for checks that are deliberately open at a phase boundary. C12 items are claim-binding findings identified by (file, kind, sha256 of the whole claim text) with a display field for reading, never by line number; C13 items are skills unlisted in release/evals.json. A check is green while its live list equals or is a subset of its baseline, red on any live item not here, and red on any item here that is no longer live, so this file shrinks only in the change that fixes the item. When a list is empty the check is an ordinary blocking check.",
   "C12": [
     {
       "file": "skills/agent-dispatch/references/deferred.md",
       "kind": "line citation",
-      "key": "CLAUDE.md`:43"
+      "key": "sha256:d7cc9a406b5f82e7633a3feef0b6ff786893649b14a2b5648afac8a27aac7cea",
+      "display": "CLAUDE.md`:43"
     },
     {
       "file": "skills/agent-dispatch/references/deferred.md",
       "kind": "line citation",
-      "key": "CLAUDE.md:48"
+      "key": "sha256:d365dbfb90dcb763b8fc9e0d524f9dcaa0f387d7acb84999c7a55dfb7a471c86",
+      "display": "CLAUDE.md:48"
     },
     {
       "file": "skills/agent-dispatch/references/deferred.md",
       "kind": "unbound claim",
-      "key": "Four of those rows (R206 reclaim order, R207 stray `model` pins, R208 absolute paths, R209 isolated clone pinned to the commit) are OUT specifically because `~/.claude/CLAUDE.md` already carries them "
+      "key": "sha256:0f7152b2f2241fe1aed8a9bee57c7e5c43f457621ee1dc19e986978d4da86093",
+      "display": "Four of those rows (R206 reclaim order, R207 stray `model` pins, R208 absolute paths, R209 isolated clone pinned to the…"
     },
     {
       "file": "skills/git-workflow/references/deferred.md",
       "kind": "stale quote",
-      "key": "Never run a bulk auto-rewriter … over source without per-site review"
+      "key": "sha256:066edd02c711b23ea6f93a063842fee0a655381e86144b33eb70eb036c8448f2",
+      "display": "Never run a bulk auto-rewriter … over source without per-site review"
     },
     {
       "file": "skills/git-workflow/references/deferred.md",
       "kind": "unbound claim",
-      "key": "## Deliberately absent — already always-on in `~/.claude/CLAUDE.md`"
+      "key": "sha256:f4fa0bcc117cddfc3e229959d53f372f088084d0140b767abd04af4c75718240",
+      "display": "## Deliberately absent — already always-on in `~/.claude/CLAUDE.md`"
     },
     {
       "file": "skills/git-workflow/references/deferred.md",
       "kind": "bare line citation",
-      "key": "`:61-64`"
+      "key": "sha256:f588f8b5335436f067690236a0811fa101b0766ca07c80ebca3d49ffeff1846a",
+      "display": "`:61-64`"
     },
     {
       "file": "skills/git-workflow/references/deferred.md",
       "kind": "unbound claim",
-      "key": "- `AGENTS.md` Authority boundaries — PR-directed requests grant scoped ordinary-push/PR-creation authority; merge, force-push, comments, thread resolution, issues, and unrelated outward mutations stil"
+      "key": "sha256:f002727656c08fb9164bc5b345ff7956aaa6d13d6e4edbb2e6c25d25eac1e526",
+      "display": "- `AGENTS.md` Authority boundaries — PR-directed requests grant scoped ordinary-push/PR-creation authority; merge, forc…"
     },
     {
       "file": "skills/git-workflow/references/deferred.md",
       "kind": "bare line citation",
-      "key": "`:92`"
+      "key": "sha256:e4c04e82cf8794fd461e90c48f221b8ab20320b824f01ee106906df522d74cdf",
+      "display": "`:92`"
     },
     {
       "file": "skills/git-workflow/references/deferred.md",
       "kind": "bare line citation",
-      "key": "`:105-109`"
+      "key": "sha256:38b7e72a6a1f352c920b5f922062635533c3deb0e9628fe5c07dca06cb239135",
+      "display": "`:105-109`"
     },
     {
       "file": "skills/git-workflow/references/deferred.md",
       "kind": "unbound claim",
-      "key": "**Delivered twice as of 2026-08-02, and this body deliberately carries neither copy:** the empty-grep rule (*an empty result set is a hypothesis about your matcher; POSIX-ERE silently ignores `\\b`*) i"
+      "key": "sha256:3ca64b7126dca3e96fb09776947ff8dc13f81deaf1e08cc5532e7a2e855e9469",
+      "display": "**Delivered twice as of 2026-08-02, and this body deliberately carries neither copy:** the empty-grep rule (*an empty r…"
     },
     {
       "file": "skills/outbound-drafts/SKILL.md",
       "kind": "unbound claim",
-      "key": "`~/.claude/CLAUDE.md` carries the always-on filter — technical fact only, no provenance, more structure not less content."
+      "key": "sha256:df04564b6567b0b281b91cbf9751c709a920707d6f5c5a40fd74bd73a31afb3d",
+      "display": "`~/.claude/CLAUDE.md` carries the always-on filter — technical fact only, no provenance, more structure not less conten…"
     },
     {
       "file": "skills/pr-review-method/references/deferred.md",
       "kind": "unbound claim",
-      "key": "It belongs in `~/.claude/CLAUDE.md`, not here."
+      "key": "sha256:18ceddc6de73664826c8b4e8ce2173e7622e4fa0d1405f34ff2f08c98dc910f4",
+      "display": "It belongs in `~/.claude/CLAUDE.md`, not here."
     },
     {
       "file": "skills/pr-review-method/references/deferred.md",
       "kind": "stale quote",
-      "key": "Never run `git push`, `gh pr create/merge/comment`, or `gh issue create` on my own initiative"
+      "key": "sha256:57ce89c3636354c52b60042b0c877488158ece832a20fd3534191a300137f103",
+      "display": "Never run `git push`, `gh pr create/merge/comment`, or `gh issue create` on my own initiative"
     },
     {
       "file": "skills/testing-ci/references/deferred.md",
       "kind": "stale quote",
-      "key": "build the gate"
+      "key": "sha256:890246b30bf114a8cb47d742cdf68a9a9aed56c3afadc4fdec1dc500c92acbd1",
+      "display": "build the gate"
     }
   ],
   "C13": [

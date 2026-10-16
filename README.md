@@ -306,10 +306,13 @@ every direct selftest to be registered with a positive floor and a unique termin
 
 Two checks carry open worklists as shrink-only ratchets against `contracts/worklists.json`. C12
 requires every skill sentence that names the always-on file (`~/.claude/CLAUDE.md`, or `AGENTS.md`
-with a section heading, a quoted phrase, or a line number) to carry a straight-quoted phrase that is
-verbatim in `AGENTS.md`; a line citation, an unbound claim, a stale quote, a negated claim whose
+with a section heading, a quoted phrase anywhere in the sentence, or a line number) to carry a
+straight-quoted phrase that is verbatim in `AGENTS.md`, with an elided quote keeping the source
+order of its fragments; a line citation, an unbound claim, a stale quote, a negated claim whose
 phrase is present, and a policy sentence duplicated outside a quote are findings, identified by
-file, kind and claim text rather than line number. C13 requires `release/evals.json` to list every
+file, kind and the sha256 of the whole claim text rather than a line number or a prefix, with a
+display field for reading. Fenced code, command examples in code spans and curly quotes are not
+citations, and each table row is its own block. C13 requires `release/evals.json` to list every
 skill as tested or exempt; the unlisted skills are its findings. Each check prints every live
 finding as `WORKLIST`, exits green while the live list equals or is a subset of the baseline, and
 exits red on a finding the baseline lacks or on a baseline item that is no longer live, so the

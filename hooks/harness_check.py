@@ -148,7 +148,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 306
+SELFTEST_FLOOR = 322
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -177,7 +177,7 @@ SELFTEST_SUITES = [
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 25),
     ("verify-review-publication",
      ["tools/verify-review-publication.py", "--selftest"], 94),
-    ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 49),
+    ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 53),
     ("install-claude", ["tools/install-claude.py", "--selftest"], 82),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
     ("ci-gate", ["tools/ci-gate.py", "--selftest"], 345),
@@ -1280,9 +1280,11 @@ def agents_sections(agents_text):
 
 
 def claim_blocks(text):
-    """-> [(first line number, block text)]: paragraphs, list items and headings.
+    """-> [(first line number, block text)]: paragraphs, list items, table rows and headings.
 
     Lines inside a fenced code block (``` or ~~~) are examples, not prose, and are skipped.
+    A table row is its own block: rows carry no sentence terminator, so a quoted phrase in
+    one row and a file mention in another would otherwise read as one sentence.
     """
     blocks, current, start, fenced = [], [], 0, False
     for number, line in enumerate(text.splitlines(), 1):
@@ -1294,7 +1296,7 @@ def claim_blocks(text):
             continue
         if fenced:
             continue
-        item = re.match(r"\s*(?:[-*+]|\d+\.)\s", line) is not None
+        item = re.match(r"\s*(?:[-*+]|\d+\.|\|)\s", line) is not None
         heading = line.startswith("#")
         if not line.strip():
             if current:
@@ -1316,26 +1318,55 @@ def claim_blocks(text):
 
 
 def quote_binds(quote, policy_normalized):
-    """Every ellipsis-separated fragment of the quote appears verbatim in the policy text."""
+    """Every ellipsis-separated fragment of the quote appears verbatim in the policy text, in order.
+
+    An elision keeps the source order: each fragment is searched after the end of the
+    previous match. Leftmost-after-the-previous-end is exact for the existence of an ordered
+    occurrence, so a fragment that occurs twice binds when its later occurrence is in order.
+    """
     # Punctuation at a fragment's boundary belongs to the citing sentence, not to the claim:
     # a skill may close its quote with a period where the policy continues with a comma.
     fragments = [normalize_policy_text(f).strip(" ,;:.!()[]") for f in QUOTE_ELLIPSIS.split(quote)]
     fragments = [f for f in fragments if f]
-    return bool(fragments) and all(f in policy_normalized for f in fragments)
+    if not fragments:
+        return False
+    position = 0
+    for fragment in fragments:
+        found = policy_normalized.find(fragment, position)
+        if found < 0:
+            return False
+        position = found + len(fragment)
+    return True
 
 
-def claim_identity_key(text, limit=200):
-    """The claim text that identifies a finding across line drift: whitespace-collapsed."""
-    return re.sub(r"\s+", " ", text).strip()[:limit]
+CLAIM_DISPLAY_LIMIT = 120
+
+
+def claim_identity_key(text):
+    """-> "sha256:" + the digest of the whitespace-collapsed claim text: the identity across
+    line drift, never truncated, so an edit past any prefix is a new item."""
+    collapsed = re.sub(r"\s+", " ", text).strip()
+    return "sha256:" + hashlib.sha256(collapsed.encode("utf-8")).hexdigest()
+
+
+def claim_display(text, limit=CLAIM_DISPLAY_LIMIT):
+    """-> the human-readable form of a claim for worklists and receipts; display only."""
+    collapsed = re.sub(r"\s+", " ", text).strip()
+    return collapsed if len(collapsed) <= limit else collapsed[:limit - 1] + "…"
 
 
 def claim_findings(rel, text, agents_text):
     """-> (findings, counters) for one governed file.
 
-    A finding is {"line", "kind", "key", "reason"}; (rel, kind, key) is its identity in the
-    shrink-only baseline, so a claim that moves to another line keeps its identity and a
-    claim whose text changes is a new item.
+    A finding is {"line", "kind", "key", "display", "reason"}; (rel, kind, key) is its
+    identity in the shrink-only baseline, where key is the digest of the whole claim text,
+    so a claim that moves to another line keeps its identity and a claim whose text changes
+    anywhere is a new item. display is the readable form and carries no identity.
     """
+
+    def finding(line, kind, text, reason):
+        return {"line": line, "kind": kind, "key": claim_identity_key(text),
+                "display": claim_display(text), "reason": reason}
     findings = []
     counters = {"claims": 0, "bound": 0}
     sections = agents_sections(agents_text)
@@ -1354,15 +1385,14 @@ def claim_findings(rel, text, agents_text):
         cited = False
         for match in POLICY_LINE_CITATION.finditer(block):
             citation = match.group(0).strip()
-            findings.append({"line": line_of(match.start()), "kind": "line citation", "key": citation,
-                             "reason": f"line citation {citation!r}: cite a verbatim phrase, "
-                                       f"never a line number"})
+            findings.append(finding(line_of(match.start()), "line citation", citation,
+                                    f"line citation {citation!r}: cite a verbatim phrase, never a "
+                                    f"line number"))
             cited = True
         for match in BARE_LINE_CITATION.finditer(block):
-            findings.append({"line": line_of(match.start()), "kind": "bare line citation",
-                             "key": match.group(0),
-                             "reason": f"bare line citation {match.group(0)}: cite a verbatim "
-                                       f"phrase, never a line number"})
+            findings.append(finding(line_of(match.start()), "bare line citation", match.group(0),
+                                    f"bare line citation {match.group(0)}: cite a verbatim phrase, "
+                                    f"never a line number"))
             cited = True
         # A code span that carries the path beside other text (`cat ~/.claude/CLAUDE.md`) is a
         # command example, not a claim; only the bare path or file name in a span is a mention.
@@ -1393,7 +1423,11 @@ def claim_findings(rel, text, agents_text):
             offset = position + len(sentence) if position >= 0 else offset
             section = section_mention.search(sentence) if section_mention else None
             path_mention = ALWAYS_ON_PATH.search(sentence)
-            quote_mention = re.search(r"`?AGENTS\.md`?\s*,?\s*QUOTE\d+Q", sentence)
+            # A straight-quoted phrase anywhere in a sentence that names AGENTS.md is the
+            # citation: `AGENTS.md says "..."` and `The rule "..." is in AGENTS.md` carry the
+            # same claim as `AGENTS.md "..."`, in either order and with any words between.
+            agents_name = re.search(r"`?AGENTS\.md`?", sentence)
+            quote_mention = agents_name if agents_name and re.search(r"QUOTE\d+Q", sentence) else None
             mention = path_mention or section or quote_mention
             if mention is None:
                 continue
@@ -1416,23 +1450,20 @@ def claim_findings(rel, text, agents_text):
             bound = [q for q in quoted if quote_binds(q, scope)]
             unbound = [q for q in quoted if not quote_binds(q, scope)]
             if not quoted:
-                findings.append({"line": line, "kind": "unbound claim",
-                                 "key": claim_identity_key(sentence),
-                                 "reason": "unbound claim about the always-on file: quote a verbatim "
-                                           "AGENTS.md phrase in straight double quotes in the same "
-                                           "sentence, or drop the claim"})
+                findings.append(finding(line, "unbound claim", sentence,
+                                        "unbound claim about the always-on file: quote a verbatim "
+                                        "AGENTS.md phrase in straight double quotes in the same "
+                                        "sentence, or drop the claim"))
             elif negated and bound:
-                findings.append({"line": line, "kind": "negated claim",
-                                 "key": claim_identity_key(bound[0]),
-                                 "reason": f"negated claim contradicts {where}: {bound[0][:60]!r} is present"})
+                findings.append(finding(line, "negated claim", bound[0],
+                                        f"negated claim contradicts {where}: {bound[0][:60]!r} is present"))
             elif negated:
                 counters["bound"] += 1
             elif unbound:
                 # Every quote in a positive claim must bind: one verbatim phrase beside a
                 # stale one would otherwise carry the stale one through.
-                findings.append({"line": line, "kind": "stale quote",
-                                 "key": claim_identity_key(unbound[0]),
-                                 "reason": f"stale quote: {unbound[0][:70]!r} is not verbatim in {where}"})
+                findings.append(finding(line, "stale quote", unbound[0],
+                                        f"stale quote: {unbound[0][:70]!r} is not verbatim in {where}"))
             else:
                 counters["bound"] += 1
     # Duplication: a policy sentence restated outside a quote is a second copy on the same
@@ -1447,9 +1478,8 @@ def claim_findings(rel, text, agents_text):
             words = [re.escape(w) for w in needle.split()[:6]]
             located = re.search(r"\s+".join(r"[`*]*" + w + r"[`*]*" for w in words), text, re.I)
             line = text.count("\n", 0, located.start()) + 1 if located else 1
-            findings.append({"line": line, "kind": "duplicated policy sentence",
-                             "key": claim_identity_key(sentence),
-                             "reason": f"duplicated policy sentence outside a quote: {sentence[:70]!r}"})
+            findings.append(finding(line, "duplicated policy sentence", sentence,
+                                    f"duplicated policy sentence outside a quote: {sentence[:70]!r}"))
     return findings, counters
 
 
@@ -2446,10 +2476,13 @@ class Run:
                     self.worklist("C12", item)
                 else:
                     self.result("C12", False, f"{item} (not in baseline {evals.WORKLISTS})")
+        displays = {(i["file"], i["kind"], i["key"]): i.get("display", "") for i in worklists["C12"]} \
+            if worklists else {}
         for rel, kind, key in stale:
             self.result("C12", False,
-                        f"stale baseline: {evals.WORKLISTS} C12 lists {rel} {kind} {key[:60]!r}, "
-                        f"which is no longer found; shrink the baseline in the same change")
+                        f"stale baseline: {evals.WORKLISTS} C12 lists {rel} {kind} "
+                        f"{displays.get((rel, kind, key), '')[:60]!r} ({key[:19]}…), which is no "
+                        f"longer found; shrink the baseline in the same change")
         if baseline_error:
             self.result("C12", False, f"cannot apply the ratchet: {baseline_error}")
         self.result(
@@ -5620,7 +5653,7 @@ def selftest():
 
         def write_bind_baseline(c12, c13=()):
             open(bind_baseline, "w").write(json.dumps(
-                {"schema_version": 1, "note": "fixture", "C12": list(c12), "C13": list(c13)}))
+                {"schema_version": 2, "note": "fixture", "C12": list(c12), "C13": list(c13)}))
 
         write_bind_baseline([])
 
@@ -5713,6 +5746,48 @@ def selftest():
         generic = c12_on("A CLAUDE.md-class file stays under 200 lines; AGENTS.md as the single source.\n")
         expect_red("C12 control: generic class talk about CLAUDE.md and AGENTS.md is not a claim",
                    lambda: not generic.failures)
+        # A quotation anywhere in the sentence that names AGENTS.md is the citation, whether
+        # it follows the name directly, after other words, or precedes it.
+        says = c12_on('AGENTS.md says "Named a tool? Run exactly that and stop."\n')
+        expect_red("C12 binds a verbatim quote that follows 'AGENTS.md says' in the same sentence",
+                   lambda: not says.failures)
+        says_stale = c12_on('AGENTS.md says "zorblat the widget".\n')
+        expect_red("C12 goes red on a fabricated quote introduced by 'AGENTS.md says'",
+                   lambda: any(c == "C12" and "deferred.md:1: stale quote: 'zorblat the widget'" in d
+                               for c, d in says_stale.failures))
+        quote_first = c12_on('The rule "zorblat the widget" is required by AGENTS.md.\n')
+        expect_red("C12 goes red on a fabricated quote placed before AGENTS.md in the same sentence",
+                   lambda: any(c == "C12" and "deferred.md:1: stale quote: 'zorblat the widget'" in d
+                               for c, d in quote_first.failures))
+        next_sentence = c12_on('The rule is "zorblat the widget". AGENTS.md is the policy file.\n')
+        expect_red("C12 control: a quote in the sentence before the AGENTS.md mention is not a citation",
+                   lambda: not next_sentence.failures)
+        curly = c12_on('AGENTS.md says “zorblat the widget”.\n')
+        expect_red("C12 control: curly quotes are not a citation and stay out of scope",
+                   lambda: not curly.failures)
+        # An elision keeps the source order: the same fragments reversed are not a quotation,
+        # and a fragment that occurs twice binds when its later occurrence is in order.
+        forward = c12_on('AGENTS.md says "Named a tool ... no fan-out".\n')
+        expect_red("C12 binds an elided quote whose fragments keep the source order",
+                   lambda: not forward.failures)
+        reversed_quote = c12_on('AGENTS.md says "no fan-out ... Named a tool".\n')
+        expect_red("C12 goes red on an elided quote whose fragments are out of source order",
+                   lambda: any(c == "C12" and "stale quote: 'no fan-out ... Named a tool'" in d
+                               for c, d in reversed_quote.failures))
+        expect_red("quote_binds: a fragment that occurs twice binds through its later, in-order occurrence",
+                   lambda: quote_binds("gate ... remember", normalize_policy_text(
+                       "Prefer a gate. Prefer a gate over a promise to remember."))
+                   and not quote_binds("remember ... gate", normalize_policy_text(
+                       "Prefer a gate over a promise to remember.")))
+        # Table rows carry no sentence terminator; each row is its own block.
+        table = c12_on('| # | Rule | Note |\n|---|---|---|\n| 1 | Negative-only | "never X" with no target |\n'
+                       '| 2 | Kitchen-sink | bloated file (>32KiB AGENTS.md) |\n')
+        expect_red("C12 control: a quoted placeholder in one table row and AGENTS.md in another are not one claim",
+                   lambda: not table.failures)
+        table_claim = c12_on('| # | Rule | Note |\n|---|---|---|\n| 1 | Policy | AGENTS.md says "zorblat the widget" |\n')
+        expect_red("C12 goes red on a fabricated quote beside AGENTS.md inside one table row",
+                   lambda: any(c == "C12" and "deferred.md:3: stale quote: 'zorblat the widget'" in d
+                               for c, d in table_claim.failures))
         os.remove(os.path.join(bind_root, "AGENTS.md"))
         no_policy = Run(bind_root, ci=True)
         no_policy.c12_claim_binding()
@@ -5720,10 +5795,13 @@ def selftest():
                    lambda: any(c == "C12" and "cannot enforce" in d for c, d in no_policy.failures))
         open(os.path.join(bind_root, "AGENTS.md"), "w").write(bind_policy)
         # ---- the shrink-only ratchet over C12 findings --------------------------------
+        def baseline_item(kind, text, rel="skills/delta/references/deferred.md"):
+            return {"file": rel, "kind": kind, "key": claim_identity_key(text),
+                    "display": claim_display(text)}
+
         unbound_text = "The reclaim-order rule is already always-on in `~/.claude/CLAUDE.md`.\n"
-        unbound_key = "The reclaim-order rule is already always-on in `~/.claude/CLAUDE.md`."
-        unbound_item = {"file": "skills/delta/references/deferred.md", "kind": "unbound claim",
-                        "key": unbound_key}
+        unbound_key = claim_identity_key(unbound_text)
+        unbound_item = baseline_item("unbound claim", unbound_text)
         write_bind_baseline([unbound_item])
         ratchet_same = c12_on(unbound_text)
         expect_red("C12 ratchet: a finding the baseline carries is green and printed as WORKLIST",
@@ -5739,12 +5817,34 @@ def selftest():
                    lambda: not drifted.failures and drifted.worklists.get("C12", [""])[0].startswith(
                        "skills/delta/references/deferred.md:5: unbound claim"))
         findings, _counters = claim_findings("skills/delta/references/deferred.md", unbound_text, bind_policy)
-        expect_red("C12 ratchet: the identity key is the whitespace-collapsed claim sentence",
-                   lambda: [(f["kind"], f["key"]) for f in findings] == [("unbound claim", unbound_key)])
-        write_bind_baseline([unbound_item, {"file": "skills/delta/references/deferred.md",
-                                            "kind": "stale quote", "key": "gone phrase"}])
+        expect_red("C12 ratchet: the identity key is sha256 of the whitespace-collapsed claim sentence, "
+                   "and the display is the sentence itself",
+                   lambda: [(f["kind"], f["key"], f["display"]) for f in findings]
+                   == [("unbound claim", unbound_key, unbound_text.strip())]
+                   and unbound_key == "sha256:" + hashlib.sha256(
+                       unbound_text.strip().encode("utf-8")).hexdigest())
+        # The identity is the whole text: an edit past any fixed prefix length is a new item,
+        # so a prefix can never inherit the baseline entry of the claim it replaced.
+        long_text = ("The reclaim-order rule is already always-on in `~/.claude/CLAUDE.md`, and this "
+                     "sentence runs well past the two-hundredth character so that an edit near its "
+                     "end sits beyond any fixed-length prefix of the identity, which must carry the "
+                     "whole text to tell the edited claim apart.\n")
+        write_bind_baseline([baseline_item("unbound claim", long_text)])
+        long_same = c12_on(long_text)
+        expect_red("C12 ratchet: a claim longer than 200 characters is carried by its digest",
+                   lambda: len(long_text) > 200 and not long_same.failures
+                   and len(long_same.worklists.get("C12", [])) == 1)
+        long_edited = c12_on(long_text.replace("tell the edited claim apart", "let the edit inherit the entry"))
+        expect_red("C12 ratchet: an edit past the 200th character is a new item and the old one stale",
+                   lambda: any(c == "C12" and "(not in baseline" in d for c, d in long_edited.failures)
+                   and any(c == "C12" and "stale baseline" in d for c, d in long_edited.failures))
+        long_restored = c12_on(long_text)
+        expect_red("C12 ratchet: restoring the text is green again",
+                   lambda: not long_restored.failures)
+        write_bind_baseline([unbound_item])
+        write_bind_baseline([unbound_item, baseline_item("stale quote", "gone phrase")])
         stale_extra = c12_on(unbound_text)
-        expect_red("C12 ratchet: a baseline item that is no longer found is red (stale)",
+        expect_red("C12 ratchet: a baseline item that is no longer found is red (stale), shown by display",
                    lambda: any(c == "C12" and "stale baseline" in d and "'gone phrase'" in d
                                for c, d in stale_extra.failures))
         write_bind_baseline([unbound_item])
@@ -5761,7 +5861,7 @@ def selftest():
                    lambda: any(c == "C12" and "deferred.md:3: stale quote" in d and "(not in baseline" in d
                                for c, d in second.failures)
                    and len(second.worklists.get("C12", [])) == 1)
-        open(bind_baseline, "w").write(json.dumps({"schema_version": 1, "note": "x", "C12": "no", "C13": []}))
+        open(bind_baseline, "w").write(json.dumps({"schema_version": 2, "note": "x", "C12": "no", "C13": []}))
         malformed = c12_on(unbound_text)
         expect_red("C12 ratchet: a malformed baseline is red, never an empty baseline",
                    lambda: any(c == "C12" and "cannot apply the ratchet" in d and "C12 is not a list" in d
@@ -5771,8 +5871,7 @@ def selftest():
         expect_red("C12 ratchet: a missing baseline is red and every live finding is reported",
                    lambda: any(c == "C12" and "cannot apply the ratchet" in d for c, d in missing_baseline.failures)
                    and any("deferred.md:1: unbound claim" in d for _c, d in missing_baseline.failures))
-        twice_item = {"file": "skills/delta/references/deferred.md", "kind": "stale quote",
-                      "key": "build the gate"}
+        twice_item = baseline_item("stale quote", "build the gate")
         write_bind_baseline([twice_item])
         twice = c12_on('`~/.claude/CLAUDE.md` says "build the gate" here.\n\n'
                        'And `~/.claude/CLAUDE.md` says "build the gate" again here.\n')
@@ -5785,6 +5884,28 @@ def selftest():
         real_c12.c12_claim_binding()
         expect_red("C12 on this tree is green with its 15 worklist occurrences carried by the committed baseline",
                    lambda: not real_c12.failures and len(real_c12.worklists.get("C12", [])) == 15)
+
+        def reproduction(thread_id, expected_line):
+            """Run a reviewer's reproduction script verbatim; it exits 0 only at the expected outcome.
+
+            Inside a run that one of them launched (ZH_REVIEW_REPRODUCTIONS=nested) the
+            script that launched it is not run again; the case is reported as such.
+            """
+            path = os.path.join(ROOT, "instruments", "reproductions", "pr-36", f"{thread_id}.py")
+            done = subprocess.run([sys.executable, path], cwd=ROOT, capture_output=True, text=True,
+                                  timeout=900, env=dict(os.environ, ZH_REVIEW_REPRODUCTIONS="nested"))
+            return done.returncode == 0 and expected_line in done.stdout
+
+        expect_red("review reproduction 4294811805: a quote anywhere in a sentence naming AGENTS.md "
+                   "is a claim, (0,1) (1,1) (1,1) (1,1)",
+                   lambda: reproduction(4294811805, "'The policy \"Add a made-up mandatory policy\" is "
+                                                    "required by AGENTS.md.' findings= 1 claims= 1"))
+        expect_red("review reproduction 4294811820: an edit past the old 200-character cut is one new "
+                   "item and one stale entry, both red; restored is green",
+                   lambda: reproduction(4294811820, "changed failures= 3 worklist_occurrences= 14"))
+        expect_red("review reproduction 4294811833: the forward elision binds, the reversed one is stale",
+                   lambda: reproduction(4294811833, "'AGENTS.md \"trailers to commits ... Do not add AI "
+                                                    "co-author\"' findings= 1 bound= 0"))
         expect_red("C12 on this tree prints the known stale citations as its worklist",
                    lambda: all(any(rel in d for d in real_c12.worklists.get("C12", [])) for rel in (
                        "skills/agent-dispatch/references/deferred.md:88",
@@ -5814,7 +5935,7 @@ def selftest():
 
         def write_cover_baseline(c13):
             open(cover_baseline, "w").write(json.dumps(
-                {"schema_version": 1, "note": "fixture", "C12": [], "C13": list(c13)}))
+                {"schema_version": 2, "note": "fixture", "C12": [], "C13": list(c13)}))
 
         def c13_on(entries, baseline=()):
             json.dump({"schema_version": 1, "note": "fixture", "skills": entries},
@@ -5849,7 +5970,7 @@ def selftest():
         shrunk_cover = c13_on(listed_all, baseline=[])
         expect_red("C13 ratchet: the shrunk baseline matching the shrunk list is green",
                    lambda: not shrunk_cover.failures)
-        json.dump({"schema_version": 1, "note": "fixture", "skills": {"alpha": {"status": "tested", "required": []}}},
+        json.dump({"schema_version": 2, "note": "fixture", "skills": {"alpha": {"status": "tested", "required": []}}},
                   open(os.path.join(cover_root, "release", "evals.json"), "w"))
         open(cover_baseline, "w").write("{broken")
         malformed_cover = Run(cover_root, ci=True)

@@ -151,7 +151,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 335
+SELFTEST_FLOOR = 348
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -500,6 +500,14 @@ ALWAYS_ON_PATH = re.compile(r"`?~/\.claude/CLAUDE\.md`?")
 POLICY_LINE_CITATION = re.compile(r"(?:CLAUDE|AGENTS)\.md`?\s*:\s*\d+(?:\s*[-–]\s*\d+)?")
 BARE_LINE_CITATION = re.compile(r"`:\d+(?:-\d+)?`")
 STRAIGHT_QUOTE = re.compile(r"\"([^\"]{1,2000})\"", re.S)
+# A code span is a run of backticks, its content, and the same run; a longer run may hold a
+# shorter one, and the content may span lines.
+CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)", re.S)
+# Masking tokens are private-use characters, which authored prose never carries; any that do
+# occur are stripped before masking so text cannot impersonate a token.
+SPAN_TOKEN = re.compile("(\\d+)")
+QUOTE_TOKEN = re.compile("(\\d+)")
+PRIVATE_USE = re.compile("[-]")
 QUOTE_ELLIPSIS = re.compile(r"…|\.\.\.")
 CLAIM_NEGATION = re.compile(
     r"\b(?:does not|do not|did not|is not|are not|was not|were not|no longer|not carried|"
@@ -1331,7 +1339,8 @@ def quote_binds(quote, policy_normalized):
     # a skill may close its quote with a period where the policy continues with a comma.
     fragments = [normalize_policy_text(f).strip(" ,;:.!()[]") for f in QUOTE_ELLIPSIS.split(quote)]
     fragments = [f for f in fragments if f]
-    if not fragments:
+    # A fragment under three characters is a substring of almost any text and cites nothing.
+    if not fragments or any(len(f) < 3 for f in fragments):
         return False
     position = 0
     for fragment in fragments:
@@ -1367,9 +1376,9 @@ def claim_findings(rel, text, agents_text):
     anywhere is a new item. display is the readable form and carries no identity.
     """
 
-    def finding(line, kind, text, reason):
+    def finding(line, kind, text, reason, display=None):
         return {"line": line, "kind": kind, "key": claim_identity_key(text),
-                "display": claim_display(text), "reason": reason}
+                "display": claim_display(text if display is None else display), "reason": reason}
     findings = []
     counters = {"claims": 0, "bound": 0}
     sections = agents_sections(agents_text)
@@ -1382,6 +1391,8 @@ def claim_findings(rel, text, agents_text):
     ) if headings else None
     sentences_seen = set()
     for start, block in claim_blocks(text):
+        block = PRIVATE_USE.sub("", block)
+
         def line_of(offset):
             return start + block.count("\n", 0, offset)
 
@@ -1403,12 +1414,12 @@ def claim_findings(rel, text, agents_text):
         spans = []
 
         def neutralize_span(match):
-            span = match.group(1)
+            span = match.group(2).strip()
             if span in ("~/.claude/CLAUDE.md", "AGENTS.md") or re.fullmatch(r":\d+(?:-\d+)?", span):
                 return match.group(0)
-            spans.append(span)
-            return f"SPAN{len(spans) - 1}S"
-        prose = re.sub(r"`([^`\n]+)`", neutralize_span, block)
+            spans.append(match.group(0))
+            return f"{len(spans) - 1}"
+        prose = CODE_SPAN.sub(neutralize_span, block)
         # Mask every straight-quoted span before sentence splitting so a quoted question
         # mark or period cannot split the sentence that carries it. A quote that itself
         # contains a file mention (a stray quote earlier in the block, a quoted YAML value, a
@@ -1416,17 +1427,17 @@ def claim_findings(rel, text, agents_text):
         quotes = []
 
         def restore_spans(text):
-            return re.sub(r"SPAN(\d+)S", lambda m: "`" + spans[int(m.group(1))] + "`", text)
+            return SPAN_TOKEN.sub(lambda m: spans[int(m.group(1))], text)
 
         def mask(match):
             # A quote keeps the code spans it contains: `"Use `git grep -P` for PCRE atoms"`
             # must bind against the policy text, where the backticks are stripped anyway.
             quotes.append(restore_spans(match.group(1)))
-            return f"QUOTE{len(quotes) - 1}Q"
+            return f"{len(quotes) - 1}"
         masked = STRAIGHT_QUOTE.sub(mask, prose)
 
         def restored(text):
-            text = re.sub(r"QUOTE(\d+)Q", lambda m: '"' + quotes[int(m.group(1))] + '"', text)
+            text = QUOTE_TOKEN.sub(lambda m: '"' + quotes[int(m.group(1))] + '"', text)
             return restore_spans(text)
 
         def mentions(text):
@@ -1436,7 +1447,7 @@ def claim_findings(rel, text, agents_text):
         for sentence in SENTENCE_BREAK.split(masked):
             position = masked.find(sentence, offset)
             offset = position + len(sentence) if position >= 0 else offset
-            tokens = list(re.finditer(r"QUOTE(\d+)Q", sentence))
+            tokens = list(QUOTE_TOKEN.finditer(sentence))
             section = section_mention.search(sentence) if section_mention else None
             path_mention = ALWAYS_ON_PATH.search(sentence)
             # A straight-quoted phrase anywhere in a sentence that names AGENTS.md is the
@@ -1449,19 +1460,22 @@ def claim_findings(rel, text, agents_text):
             if mention is None:
                 continue
             # Report the line carrying the file mention, not the sentence's first line: a
-            # masked quote before the mention may have spanned lines, so add those back.
+            # masked quote or code span before the mention may have spanned lines, so add
+            # those back.
             prefix = masked[:max(position, 0) + mention.start()]
             line = start + prefix.count("\n") + sum(
-                quotes[int(n)].count("\n") for n in re.findall(r"QUOTE(\d+)Q", prefix))
+                quotes[int(n)].count("\n") for n in QUOTE_TOKEN.findall(prefix)) + sum(
+                spans[int(n)].count("\n") for n in SPAN_TOKEN.findall(prefix))
             key = (line, sentence)
             if key in sentences_seen:
                 continue
             sentences_seen.add(key)
             counters["claims"] += 1
             original = restored(sentence)
-            # A sentence that cites a line number is already reported above; only that
-            # sentence is skipped, so a claim elsewhere in the same block is still judged.
-            if POLICY_LINE_CITATION.search(original) or BARE_LINE_CITATION.search(original):
+            # A sentence that cites a line number is already reported above. Without a quote
+            # it is skipped so the citation stands alone; with quotes they are judged, so a
+            # fabricated quotation cannot hide beside a citation.
+            if not tokens and (POLICY_LINE_CITATION.search(original) or BARE_LINE_CITATION.search(original)):
                 continue
             quoted = [quotes[int(t.group(1))] for t in tokens]
             negated = CLAIM_NEGATION.search(sentence) is not None
@@ -1475,17 +1489,21 @@ def claim_findings(rel, text, agents_text):
                                         "AGENTS.md phrase in straight double quotes in the same "
                                         "sentence, or drop the claim"))
             elif negated and bound:
-                findings.append(finding(line, "negated claim", " | ".join(bound),
-                                        f"negated claim contradicts {where}: {bound[0][:60]!r} is present"))
+                findings.append(finding(line, "negated claim", json.dumps(bound),
+                                        f"negated claim contradicts {where}: {bound[0][:60]!r} is present",
+                                        display=" | ".join(bound)))
             elif negated:
                 counters["bound"] += 1
             elif unbound:
                 # Every quote in a positive claim must bind, and every stale quote is part of
-                # the identity: one verbatim phrase beside a stale one would otherwise carry
-                # the stale one through, and a second stale quote could change unnoticed.
-                findings.append(finding(line, "stale quote", " | ".join(unbound),
+                # the identity, serialised as a JSON list so two quotes and one quote holding
+                # a delimiter never collide: one verbatim phrase beside a stale one would
+                # otherwise carry the stale one through, and a second stale quote could change
+                # unnoticed.
+                findings.append(finding(line, "stale quote", json.dumps(unbound),
                                         f"stale quote: {unbound[0][:70]!r} is not verbatim in {where}"
-                                        + (f" (+{len(unbound) - 1} more)" if len(unbound) > 1 else "")))
+                                        + (f" (+{len(unbound) - 1} more)" if len(unbound) > 1 else ""),
+                                        display=" | ".join(unbound)))
             else:
                 counters["bound"] += 1
     # Duplication: a policy sentence restated outside a quote is a second copy on the same
@@ -1504,6 +1522,55 @@ def claim_findings(rel, text, agents_text):
                                     f"duplicated policy sentence outside a quote: {sentence[:70]!r}"))
     return findings, counters
 
+
+
+def vacuous_expect_red_lines(source_text):
+    """-> line numbers of expect_red calls whose lambda cannot fail for the stated reason.
+
+    Rejected: an `or` whose last operand is a parenthesised clause, a truthy constant or a
+    negation (it holds whenever the real condition fails); a comprehension over an empty
+    literal or an empty constructor call; a constant body. A leading platform gate
+    (`sys.platform != "darwin" or ...`) keeps the check count equal across CI platforms and
+    is the one sanctioned leading `or`; everything under it is judged like any other body.
+    `x or ""` coalescing and ordinary disjunctions stay.
+    """
+    vacuous = []
+    for node in ast.walk(ast.parse(source_text)):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "expect_red"):
+            continue
+        for arg in node.args:
+            if not isinstance(arg, ast.Lambda):
+                continue
+            body = arg.body
+            gate = (isinstance(body, ast.BoolOp) and isinstance(body.op, ast.Or)
+                    and len(body.values) == 2 and isinstance(body.values[0], ast.Compare)
+                    and (ast.get_source_segment(source_text, body.values[0]) or "").startswith("sys.platform"))
+            judged = body.values[1] if gate else body
+            text = ast.get_source_segment(source_text, judged) or ""
+
+            def fallback(inner):
+                last = inner.values[-1]
+                return (isinstance(last, ast.UnaryOp) and isinstance(last.op, ast.Not)
+                        or isinstance(last, ast.Constant) and bool(last.value))
+
+            def empty(iterable):
+                if isinstance(iterable, (ast.List, ast.Tuple, ast.Set)):
+                    return not iterable.elts
+                if isinstance(iterable, ast.Dict):
+                    return not iterable.keys
+                return (isinstance(iterable, ast.Call) and isinstance(iterable.func, ast.Name)
+                        and iterable.func.id in ("list", "tuple", "dict", "set", "frozenset")
+                        and not iterable.args and not iterable.keywords)
+
+            has_fallback = " or (" in text or any(
+                isinstance(inner, ast.BoolOp) and isinstance(inner.op, ast.Or) and fallback(inner)
+                for inner in ast.walk(judged))
+            empty_iteration = any(isinstance(inner, ast.comprehension) and empty(inner.iter)
+                                  for inner in ast.walk(arg))
+            if has_fallback or empty_iteration or isinstance(judged, ast.Constant):
+                vacuous.append(node.lineno)
+    return vacuous
 
 
 class Run:
@@ -5868,6 +5935,71 @@ def selftest():
                    lambda: [f["kind"] for f in two_stale] == ["stale quote"]
                    and two_stale[0]["key"] != two_stale_changed[0]["key"]
                    and two_stale[0]["display"] == "zorblat | widget")
+        one_joined = claim_findings("skills/delta/references/deferred.md",
+                                    'AGENTS.md says "zorblat | widget".\n', bind_policy)[0]
+        expect_red("C12 identity: one quote holding a delimiter and two quotes are different items",
+                   lambda: one_joined[0]["key"] != two_stale[0]["key"]
+                   and two_stale[0]["key"] == claim_identity_key(json.dumps(["zorblat", "widget"])))
+        two_bound = claim_findings("skills/delta/references/deferred.md",
+                                   '`~/.claude/CLAUDE.md` does not carry "Named a tool? Run exactly that and stop." '
+                                   'or "Default to one agent and no fan-out."\n', bind_policy)[0]
+        two_bound_changed = claim_findings("skills/delta/references/deferred.md",
+                                           '`~/.claude/CLAUDE.md` does not carry "Named a tool? Run exactly that and stop." '
+                                           'or "Prefer a gate over a promise to remember."\n', bind_policy)[0]
+        expect_red("C12 identity of a negated-claim finding covers every bound quote in the sentence",
+                   lambda: [f["kind"] for f in two_bound] == ["negated claim"]
+                   and two_bound[0]["key"] != two_bound_changed[0]["key"]
+                   and two_bound[0]["display"].startswith("Named a tool? Run exactly that and stop. | "))
+        # Quotes at the ends of the accepted range are judged.
+        one_char = c12_on('AGENTS.md says "X".\n')
+        expect_red("C12 goes red on a one-character fabricated quotation",
+                   lambda: any(c == "C12" and "stale quote: 'X'" in d for c, d in one_char.failures))
+        six_hundred = c12_on('AGENTS.md says "' + "fabricated policy text " * 26 + '".\n')
+        expect_red("C12 goes red on a 600-character fabricated quotation",
+                   lambda: any(c == "C12" and "stale quote: 'fabricated policy text" in d
+                               for c, d in six_hundred.failures))
+        # Authored text cannot impersonate a masking token.
+        impersonate = c12_on('AGENTS.md says "SPAN0S" and "QUOTE0Q" and "0".\n')
+        expect_red("C12 judges literal token-like text as text, and strips private-use characters",
+                   lambda: any(c == "C12" and "stale quote: 'SPAN0S'" in d and "(+2 more)" in d
+                               for c, d in impersonate.failures))
+        # Code spans of any backtick run, on one line or several, are examples.
+        double_tick = c12_on('Run ``printf "fabricated policy"`` before reading AGENTS.md.\n')
+        expect_red("C12 control: a double-backtick code span holding a quote is not a citation",
+                   lambda: not double_tick.failures)
+        multiline_span = c12_on('Run `printf\n"fabricated policy"` before reading AGENTS.md.\n')
+        expect_red("C12 control: a code span that spans lines holding a quote is not a citation",
+                   lambda: not multiline_span.failures)
+        # A quotation beside a line citation in the same sentence is judged.
+        cited_and_quoted = c12_on('The lead clause is `~/.claude/CLAUDE.md`:43 and AGENTS.md says '
+                                  '"Publish all secrets".\n')
+        expect_red("C12 judges a fabricated quotation in the same sentence as a line citation",
+                   lambda: any(c == "C12" and "line citation" in d for c, d in cited_and_quoted.failures)
+                   and any(c == "C12" and "stale quote: 'Publish all secrets'" in d
+                           for c, d in cited_and_quoted.failures))
+        cited_only = c12_on("The lead clause is `~/.claude/CLAUDE.md`:43 verbatim.\n")
+        expect_red("C12 control: a citing sentence without a quote yields the citation finding alone",
+                   lambda: [d.split(": ", 1)[1][:13] for c, d in cited_only.failures if "deferred.md:1:" in d]
+                   == ["line citation"])
+        # A bound quotation that contains a code span binds, against the real policy.
+        real_policy = open(os.path.join(ROOT, "AGENTS.md"), encoding="utf-8").read()
+        span_quote = claim_findings("skills/delta/references/deferred.md",
+                                    'AGENTS.md says "Use `git grep -P` for PCRE atoms".\n', real_policy)
+        span_quote_changed = claim_findings("skills/delta/references/deferred.md",
+                                            'AGENTS.md says "Use `git grep -E` for PCRE atoms".\n', real_policy)
+        expect_red("C12 binds a verbatim quote that contains a code span, and reddens when the span text changes",
+                   lambda: span_quote[1] == {"claims": 1, "bound": 1} and not span_quote[0]
+                   and [f["kind"] for f in span_quote_changed[0]] == ["stale quote"])
+        authored = ("The reclaim-order rule is already always-on in `~/.claude/CLAUDE.md` because `cat x` "
+                    "and ``say \"so\"`` say so.\n")
+        expect_red("C12 identity is the digest of the sentence as authored, with its spans restored",
+                   lambda: [(f["kind"], f["key"]) for f in
+                            claim_findings("skills/delta/references/deferred.md", authored, bind_policy)[0]]
+                   == [("unbound claim", claim_identity_key(authored.strip()))])
+        expect_red("quote_binds: a fragment under three characters cites nothing",
+                   lambda: not quote_binds("X", normalize_policy_text(bind_policy))
+                   and not quote_binds("to", normalize_policy_text(bind_policy))
+                   and quote_binds("Named a tool", normalize_policy_text(bind_policy)))
         os.remove(os.path.join(bind_root, "AGENTS.md"))
         no_policy = Run(bind_root, ci=True)
         no_policy.c12_claim_binding()
@@ -5964,7 +6096,7 @@ def selftest():
         expect_red("C12 ratchet: a missing baseline is red and every live finding is reported",
                    lambda: any(c == "C12" and "cannot apply the ratchet" in d for c, d in missing_baseline.failures)
                    and any("deferred.md:1: unbound claim" in d for _c, d in missing_baseline.failures))
-        twice_item = baseline_item("stale quote", "build the gate")
+        twice_item = baseline_item("stale quote", json.dumps(["build the gate"]))
         write_bind_baseline([twice_item])
         twice = c12_on('`~/.claude/CLAUDE.md` says "build the gate" here.\n\n'
                        'And `~/.claude/CLAUDE.md` says "build the gate" again here.\n')
@@ -6322,44 +6454,30 @@ def selftest():
                        '("grew" if current > recorded ' + 'else "shrank")',
                        '("grew" if current > recorded else "equal")')))
 
-        # ---- no expect_red lambda in this suite may carry a fallback clause or iterate an
-        # empty list: that shape passes for a neighbour's reason and proves nothing -----------
-        vacuous = []
-        for node in ast.walk(ast.parse(source_text)):
-            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                    and node.func.id == "expect_red"):
-                continue
-            for arg in node.args:
-                if not isinstance(arg, ast.Lambda):
-                    continue
-                body = arg.body
-                # A leading platform gate (`sys.platform != "darwin" or ...`) keeps the check
-                # count equal across CI platforms and is the one sanctioned leading `or`;
-                # everything under it is judged like any other body.
-                gate = (isinstance(body, ast.BoolOp) and isinstance(body.op, ast.Or)
-                        and len(body.values) == 2 and isinstance(body.values[0], ast.Compare)
-                        and (ast.get_source_segment(source_text, body.values[0]) or "").startswith("sys.platform"))
-                judged = body.values[1] if gate else body
-                text = ast.get_source_segment(source_text, judged) or ""
-
-                def fallback(inner):
-                    """An `or` whose last operand is a parenthesised clause, a truthy constant
-                    or a negation holds whenever the real condition fails; `x or ""` does not."""
-                    last = inner.values[-1]
-                    return (isinstance(last, ast.UnaryOp) and isinstance(last.op, ast.Not)
-                            or isinstance(last, ast.Constant) and bool(last.value))
-
-                has_fallback = " or (" in text or any(
-                    isinstance(inner, ast.BoolOp) and isinstance(inner.op, ast.Or) and fallback(inner)
-                    for inner in ast.walk(judged))
-                empty_iteration = any(
-                    isinstance(inner, ast.comprehension) and isinstance(inner.iter, (ast.List, ast.Tuple))
-                    and not inner.iter.elts for inner in ast.walk(arg))
-                if has_fallback or empty_iteration or isinstance(judged, ast.Constant):
-                    vacuous.append(node.lineno)
-        expect_red("no expect_red lambda in this suite carries an 'or' fallback or iterates an empty list"
-                   + (f" (found at lines {vacuous})" if vacuous else ""),
+        # ---- no expect_red lambda in this suite may carry a fallback clause, iterate an
+        # empty literal or be a constant: that shape passes for a neighbour's reason ----------
+        vacuous = vacuous_expect_red_lines(source_text)
+        expect_red("no expect_red lambda in this suite carries an 'or' fallback, iterates an empty "
+                   "literal or is a constant" + (f" (found at lines {vacuous})" if vacuous else ""),
                    lambda: vacuous == [])
+        shapes = {
+            "lambda: False or True": True,
+            "lambda: False or (True)": True,
+            "lambda: run.checks == 1 or not run.failures": True,
+            "lambda: all(x for x in [])": True,
+            "lambda: all(x for x in ())": True,
+            "lambda: all(x for x in {})": True,
+            "lambda: all(x for x in set())": True,
+            "lambda: True": True,
+            'lambda: sys.platform != "darwin" or (a and b)': False,
+            'lambda: "x" in (error or "")': False,
+            'lambda: a == 1 or b == 2': False,
+            "lambda: not run.failures and run.checks == 1": False,
+        }
+        verdicts = {shape: bool(vacuous_expect_red_lines(f'expect_red("x", {shape})')) for shape in shapes}
+        expect_red("the lambda sweep rejects each vacuous shape and accepts each sound one"
+                   + "".join(f"; wrong on {s!r}" for s, v in verdicts.items() if v != shapes[s]),
+                   lambda: verdicts == shapes)
 
         if os.environ.get("ZH_REVIEW_REPRODUCTIONS") == "nested":
             expect_red("review reproduction 4294811841: not re-run inside the suite run it launched; "

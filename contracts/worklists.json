@@ -23,7 +23,7 @@
     {
       "file": "skills/git-workflow/references/deferred.md",
       "kind": "stale quote",
-      "key": "sha256:066edd02c711b23ea6f93a063842fee0a655381e86144b33eb70eb036c8448f2",
+      "key": "sha256:17608ce49cf9b4caa8aee4fcc5dc7932a142e7b21d99c5c27c405492368b9c30",
       "display": "Never run a bulk auto-rewriter … over source without per-site review"
     },
     {
@@ -77,13 +77,13 @@
     {
       "file": "skills/pr-review-method/references/deferred.md",
       "kind": "stale quote",
-      "key": "sha256:57ce89c3636354c52b60042b0c877488158ece832a20fd3534191a300137f103",
+      "key": "sha256:0e5022598705dac32723ed3499d9a1306304aee47f069ffcefda62688b6f00d1",
       "display": "Never run `git push`, `gh pr create/merge/comment`, or `gh issue create` on my own initiative"
     },
     {
       "file": "skills/testing-ci/references/deferred.md",
       "kind": "stale quote",
-      "key": "sha256:890246b30bf114a8cb47d742cdf68a9a9aed56c3afadc4fdec1dc500c92acbd1",
+      "key": "sha256:811cbd0743cc670a3184edcd9c8134200efe37419c25225da461e446ccb5d300",
       "display": "build the gate"
     }
   ],

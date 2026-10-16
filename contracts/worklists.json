@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "note": "Shrink-only worklists for checks that are deliberately open at a phase boundary. C12 items are claim-binding findings identified by (file, kind, claim text), never by line number; C13 items are skills unlisted in release/evals.json. A check is green while its live list equals or is a subset of its baseline, red on any live item not here, and red on any item here that is no longer live, so this file shrinks only in the change that fixes the item. When a list is empty the check is an ordinary blocking check.",
+  "C12": [
+    {
+      "file": "skills/agent-dispatch/references/deferred.md",
+      "kind": "line citation",
+      "key": "CLAUDE.md`:43"
+    },
+    {
+      "file": "skills/agent-dispatch/references/deferred.md",
+      "kind": "line citation",
+      "key": "CLAUDE.md:48"
+    },
+    {
+      "file": "skills/agent-dispatch/references/deferred.md",
+      "kind": "unbound claim",
+      "key": "Four of those rows (R206 reclaim order, R207 stray `model` pins, R208 absolute paths, R209 isolated clone pinned to the commit) are OUT specifically because `~/.claude/CLAUDE.md` already carries them "
+    },
+    {
+      "file": "skills/git-workflow/references/deferred.md",
+      "kind": "stale quote",
+      "key": "Never run a bulk auto-rewriter … over source without per-site review"
+    },
+    {
+      "file": "skills/git-workflow/references/deferred.md",
+      "kind": "unbound claim",
+      "key": "## Deliberately absent — already always-on in `~/.claude/CLAUDE.md`"
+    },
+    {
+      "file": "skills/git-workflow/references/deferred.md",
+      "kind": "bare line citation",
+      "key": "`:61-64`"
+    },
+    {
+      "file": "skills/git-workflow/references/deferred.md",
+      "kind": "unbound claim",
+      "key": "- `AGENTS.md` Authority boundaries — PR-directed requests grant scoped ordinary-push/PR-creation authority; merge, force-push, comments, thread resolution, issues, and unrelated outward mutations stil"
+    },
+    {
+      "file": "skills/git-workflow/references/deferred.md",
+      "kind": "bare line citation",
+      "key": "`:92`"
+    },
+    {
+      "file": "skills/git-workflow/references/deferred.md",
+      "kind": "bare line citation",
+      "key": "`:105-109`"
+    },
+    {
+      "file": "skills/git-workflow/references/deferred.md",
+      "kind": "unbound claim",
+      "key": "**Delivered twice as of 2026-08-02, and this body deliberately carries neither copy:** the empty-grep rule (*an empty result set is a hypothesis about your matcher; POSIX-ERE silently ignores `\\b`*) i"
+    },
+    {
+      "file": "skills/outbound-drafts/SKILL.md",
+      "kind": "unbound claim",
+      "key": "`~/.claude/CLAUDE.md` carries the always-on filter — technical fact only, no provenance, more structure not less content."
+    },
+    {
+      "file": "skills/pr-review-method/references/deferred.md",
+      "kind": "unbound claim",
+      "key": "It belongs in `~/.claude/CLAUDE.md`, not here."
+    },
+    {
+      "file": "skills/pr-review-method/references/deferred.md",
+      "kind": "stale quote",
+      "key": "Never run `git push`, `gh pr create/merge/comment`, or `gh issue create` on my own initiative"
+    },
+    {
+      "file": "skills/testing-ci/references/deferred.md",
+      "kind": "stale quote",
+      "key": "build the gate"
+    }
+  ],
+  "C13": [
+    "agent-dispatch",
+    "pr-review-method",
+    "prebid-adcp",
+    "system-design",
+    "testing-ci"
+  ]
+}

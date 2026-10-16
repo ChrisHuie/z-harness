@@ -304,12 +304,17 @@ turn red; a zero-input scan is an error, not a clean verdict. C1 requires
 every direct selftest to be registered with a positive floor and a unique terminal suite receipt;
 `harness_check.py` is the sole recursive meta-suite exemption.
 
-Two checks are red by design until their worklists are worked off, and each prints its list. C12
+Two checks carry open worklists as shrink-only ratchets against `contracts/worklists.json`. C12
 requires every skill sentence that names the always-on file (`~/.claude/CLAUDE.md`, or `AGENTS.md`
 with a section heading, a quoted phrase, or a line number) to carry a straight-quoted phrase that is
 verbatim in `AGENTS.md`; a line citation, an unbound claim, a stale quote, a negated claim whose
-phrase is present, and a policy sentence duplicated outside a quote each fail. C13 requires
-`release/evals.json` to list every skill as tested or exempt. Later work may only shrink either list.
+phrase is present, and a policy sentence duplicated outside a quote are findings, identified by
+file, kind and claim text rather than line number. C13 requires `release/evals.json` to list every
+skill as tested or exempt; the unlisted skills are its findings. Each check prints every live
+finding as `WORKLIST`, exits green while the live list equals or is a subset of the baseline, and
+exits red on a finding the baseline lacks or on a baseline item that is no longer live, so the
+baseline shrinks only in the change that fixes the item; `run-skill-evals --validate` applies the
+same baseline to its coverage receipt. An empty list makes the check an ordinary blocking check.
 C14 holds `AGENTS.md` and the generated instruction file at or under the sizes recorded in
 `contracts/budget-ceilings.json`, and pins the dynamic hook block (7,500 characters, 190 lines) and
 per-turn carrier (600 bytes) ceilings under the runtime caps. C15 decodes every committed hook

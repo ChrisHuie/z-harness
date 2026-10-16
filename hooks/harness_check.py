@@ -34,11 +34,16 @@ Runs from either clone (repo root auto-detected from this file's location). Chec
       phrase present in AGENTS.md (inside the named section when one is named). A
       `CLAUDE.md:<n>` or `AGENTS.md:<n>` line citation, a bare `:<n>` citation, an
       unbound claim, a stale quote, a negated claim whose quote IS present, and an
-      AGENTS.md sentence duplicated outside a quote each fail. The bare noun
-      "always-on" and generic CLAUDE.md/AGENTS.md class talk are out of scope. The
-      failure list is a worklist later phases may only shrink
+      AGENTS.md sentence duplicated outside a quote are findings. The bare noun
+      "always-on" and generic CLAUDE.md/AGENTS.md class talk are out of scope. Findings
+      are a shrink-only worklist against contracts/worklists.json: identities are
+      (file, kind, claim text), never line numbers; green while every live finding is
+      in the baseline, red on a finding the baseline lacks and red on a baseline item
+      that is no longer live, so the baseline shrinks only by a deliberate edit in the
+      change that fixes the item. Every live finding still prints as WORKLIST
   C13 eval coverage: release/evals.json lists every skill as tested or exempt with a
-      reason; an unlisted skill is a worklist item later phases may only shrink
+      reason; unlisted skills are the same shrink-only worklist against the baseline's
+      C13 list, printed in full; every other manifest defect is a plain failure
   C14 budget ceilings: AGENTS.md and the generated instruction file never exceed the
       sizes recorded in contracts/budget-ceilings.json (fail only on growth); the Claude
       dynamic hook block and the per-turn carrier ceilings sit under the runtime caps and
@@ -79,7 +84,7 @@ import sys
 import tempfile
 import time
 
-VERSION = "3.4.0"
+VERSION = "3.5.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOLS_DIR = os.path.join(ROOT, "tools")
 if TOOLS_DIR not in sys.path:
@@ -143,7 +148,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 282
+SELFTEST_FLOOR = 299
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -172,7 +177,7 @@ SELFTEST_SUITES = [
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 25),
     ("verify-review-publication",
      ["tools/verify-review-publication.py", "--selftest"], 94),
-    ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 26),
+    ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 39),
     ("install-claude", ["tools/install-claude.py", "--selftest"], 41),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
     ("ci-gate", ["tools/ci-gate.py", "--selftest"], 345),
@@ -1309,8 +1314,18 @@ def quote_binds(quote, policy_normalized):
     return bool(fragments) and all(f in policy_normalized for f in fragments)
 
 
+def claim_identity_key(text, limit=200):
+    """The claim text that identifies a finding across line drift: whitespace-collapsed."""
+    return re.sub(r"\s+", " ", text).strip()[:limit]
+
+
 def claim_findings(rel, text, agents_text):
-    """-> (findings, counters) for one governed file. A finding is (line, reason)."""
+    """-> (findings, counters) for one governed file.
+
+    A finding is {"line", "kind", "key", "reason"}; (rel, kind, key) is its identity in the
+    shrink-only baseline, so a claim that moves to another line keeps its identity and a
+    claim whose text changes is a new item.
+    """
     findings = []
     counters = {"claims": 0, "bound": 0}
     sections = agents_sections(agents_text)
@@ -1329,12 +1344,16 @@ def claim_findings(rel, text, agents_text):
 
         cited = False
         for match in POLICY_LINE_CITATION.finditer(block):
-            findings.append((line_of(match.start()), f"line citation {match.group(0).strip()!r}: "
-                             f"cite a verbatim phrase, never a line number"))
+            citation = match.group(0).strip()
+            findings.append({"line": line_of(match.start()), "kind": "line citation", "key": citation,
+                             "reason": f"line citation {citation!r}: cite a verbatim phrase, "
+                                       f"never a line number"})
             cited = True
         for match in BARE_LINE_CITATION.finditer(block):
-            findings.append((line_of(match.start()), f"bare line citation {match.group(0)}: cite a "
-                             f"verbatim phrase, never a line number"))
+            findings.append({"line": line_of(match.start()), "kind": "bare line citation",
+                             "key": match.group(0),
+                             "reason": f"bare line citation {match.group(0)}: cite a verbatim "
+                                       f"phrase, never a line number"})
             cited = True
         # Mask straight-quoted spans before sentence splitting so a quoted question mark or
         # period cannot split the sentence that carries it.
@@ -1372,16 +1391,22 @@ def claim_findings(rel, text, agents_text):
             where = f"AGENTS.md section {section.group(1)!r}" if section else "AGENTS.md"
             bound = [q for q in quoted if quote_binds(q, scope)]
             if not quoted:
-                findings.append((line, "unbound claim about the always-on file: quote a verbatim "
-                                 "AGENTS.md phrase in straight double quotes, or drop the claim"))
+                findings.append({"line": line, "kind": "unbound claim",
+                                 "key": claim_identity_key(sentence),
+                                 "reason": "unbound claim about the always-on file: quote a verbatim "
+                                           "AGENTS.md phrase in straight double quotes, or drop the claim"})
             elif negated and bound:
-                findings.append((line, f"negated claim contradicts {where}: {bound[0][:60]!r} is present"))
+                findings.append({"line": line, "kind": "negated claim",
+                                 "key": claim_identity_key(bound[0]),
+                                 "reason": f"negated claim contradicts {where}: {bound[0][:60]!r} is present"})
             elif negated:
                 counters["bound"] += 1
             elif bound:
                 counters["bound"] += 1
             else:
-                findings.append((line, f"stale quote: {quoted[0][:70]!r} is not verbatim in {where}"))
+                findings.append({"line": line, "kind": "stale quote",
+                                 "key": claim_identity_key(quoted[0]),
+                                 "reason": f"stale quote: {quoted[0][:70]!r} is not verbatim in {where}"})
     # Duplication: a policy sentence restated outside a quote is a second copy on the same
     # dispatch, which the routing rule forbids; a quoted citation is the sanctioned form.
     unquoted = normalize_policy_text(STRAIGHT_QUOTE.sub(" ", text))
@@ -1393,7 +1418,9 @@ def claim_findings(rel, text, agents_text):
         if needle and needle in unquoted:
             index = unquoted.find(needle)
             line = text.count("\n", 0, max(0, int(index * len(text) / max(1, len(unquoted))))) + 1
-            findings.append((line, f"duplicated policy sentence outside a quote: {sentence[:70]!r}"))
+            findings.append({"line": line, "kind": "duplicated policy sentence",
+                             "key": claim_identity_key(sentence),
+                             "reason": f"duplicated policy sentence outside a quote: {sentence[:70]!r}"})
     return findings, counters
 
 
@@ -1401,6 +1428,12 @@ def claim_findings(rel, text, agents_text):
 class Run:
     def __init__(self, root, ci):
         self.root, self.ci, self.failures, self.checks = root, ci, [], 0
+        self.worklists = {}
+
+    def worklist(self, check, item):
+        """Print a live, baseline-covered item in full without counting it as a failure."""
+        self.worklists.setdefault(check, []).append(item)
+        print(f"  WORKLIST {check:4s} {item}")
 
     def result(self, check, ok, detail):
         self.checks += 1
@@ -2356,18 +2389,46 @@ class Run:
         if not governed:
             self.result("C12", False, "cannot enforce: zero governed files")
             return
-        claims = bound = failures = 0
+        try:
+            evals = load_tool_module("run-skill-evals")
+            worklists, baseline_error = evals.load_worklists(self.root)
+        except Exception as exc:
+            worklists, baseline_error = None, f"baseline loader failed: {exc!r}"
+        baseline = {(i["file"], i["kind"], i["key"]) for i in worklists["C12"]} if worklists else set()
+        claims = bound = 0
+        live = {}
         for rel, text in sorted(governed.items()):
             findings, counters = claim_findings(rel, text, agents_text)
             claims += counters["claims"]
             bound += counters["bound"]
-            for line, reason in sorted(findings):
-                failures += 1
-                self.result("C12", False, f"{rel}:{line}: {reason}")
+            for finding in sorted(findings, key=lambda f: (f["line"], f["kind"], f["key"])):
+                live.setdefault((rel, finding["kind"], finding["key"]), []).append(finding)
+        new, stale = evals.ratchet(live, baseline) if worklists is not None else (sorted(live), [])
+        # One identity may occur more than once in a file (the same stale quote twice); every
+        # occurrence prints, and the identity leaves the baseline only when none is left.
+        in_baseline = occurrences = 0
+        for identity, found in sorted(live.items(), key=lambda kv: (kv[0][0], kv[1][0]["line"], kv[0][1])):
+            rel = identity[0]
+            in_baseline += identity in baseline
+            for finding in sorted(found, key=lambda f: f["line"]):
+                occurrences += 1
+                item = f"{rel}:{finding['line']}: {finding['reason']}"
+                if identity in baseline:
+                    self.worklist("C12", item)
+                else:
+                    self.result("C12", False, f"{item} (not in baseline {evals.WORKLISTS})")
+        for rel, kind, key in stale:
+            self.result("C12", False,
+                        f"stale baseline: {evals.WORKLISTS} C12 lists {rel} {kind} {key[:60]!r}, "
+                        f"which is no longer found; shrink the baseline in the same change")
+        if baseline_error:
+            self.result("C12", False, f"cannot apply the ratchet: {baseline_error}")
         self.result(
-            "C12", failures == 0,
+            "C12", not new and not stale and not baseline_error,
             f"always-on claims bind to verbatim AGENTS.md text: {claims} claim sentence(s) over "
-            f"{len(governed)} governed file(s), {bound} bound, {failures} finding(s); "
+            f"{len(governed)} governed file(s), {bound} bound, {len(live)} finding identity(ies) "
+            f"over {occurrences} occurrence(s): {in_baseline} in the shrink-only baseline, "
+            f"{len(new)} new, {len(stale)} stale; "
             f"scope: {C12_SCOPE}",
         )
 
@@ -2376,18 +2437,32 @@ class Run:
         """release/evals.json accounts for every skill; the unlisted set is the worklist."""
         try:
             evals = load_tool_module("run-skill-evals")
-            problems, summary = evals.validate_coverage(self.root)
+            verdict = evals.coverage_verdict(self.root)
         except Exception as exc:
             self.result("C13", False, f"cannot enforce: eval coverage module failed: {exc!r}")
             return
-        for problem in problems:
+        summary = verdict["summary"]
+        for name in verdict["in_baseline"]:
+            self.worklist("C13", f"unlisted skill {name}: add a tested or exempt entry to "
+                                 f"{EVAL_MANIFEST} and remove it from {evals.WORKLISTS}")
+        for problem in verdict["hard"]:
             self.result("C13", False, problem)
+        for name in verdict["new"]:
+            self.result("C13", False, f"unlisted skill {name}: not in the baseline {evals.WORKLISTS}")
+        for name in verdict["stale"]:
+            self.result("C13", False, f"stale baseline: {evals.WORKLISTS} C13 lists {name}, which is "
+                                      f"no longer unlisted; shrink the baseline in the same change")
+        if verdict["baseline_error"]:
+            self.result("C13", False, f"cannot apply the ratchet: {verdict['baseline_error']}")
         listed = summary["tested"] + summary["exempt"]
+        red = (verdict["hard"] or verdict["new"] or verdict["stale"] or verdict["baseline_error"])
         self.result(
-            "C13", not problems and listed > 0,
+            "C13", not red and listed > 0,
             f"eval coverage manifest {EVAL_MANIFEST}: tested={summary['tested']} "
-            f"exempt={summary['exempt']} unlisted={summary['unlisted']} "
-            f"unknown={summary['unknown']} required_scenarios={summary['required']}",
+            f"exempt={summary['exempt']} unlisted={verdict['unlisted']} "
+            f"({len(verdict['in_baseline'])} in the shrink-only baseline, {len(verdict['new'])} new, "
+            f"{len(verdict['stale'])} stale) unknown={summary['unknown']} "
+            f"required_scenarios={summary['required']}",
         )
 
     # ---- C14 ---------------------------------------------------------------
@@ -5511,6 +5586,14 @@ def selftest():
         bind_skill = os.path.join(bind_root, "skills", "delta", "SKILL.md")
         open(bind_skill, "w").write("---\nname: delta\ndescription: ok\n---\n\nBody with no claims.\n")
         bind_ref = os.path.join(bind_refs, "deferred.md")
+        os.makedirs(os.path.join(bind_root, "contracts"))
+        bind_baseline = os.path.join(bind_root, "contracts", "worklists.json")
+
+        def write_bind_baseline(c12, c13=()):
+            open(bind_baseline, "w").write(json.dumps(
+                {"schema_version": 1, "note": "fixture", "C12": list(c12), "C13": list(c13)}))
+
+        write_bind_baseline([])
 
         def c12_on(reference_text, extra_file=None):
             open(bind_ref, "w").write(reference_text)
@@ -5586,10 +5669,74 @@ def selftest():
         expect_red("C12 fails loud without AGENTS.md, never silently clean",
                    lambda: any(c == "C12" and "cannot enforce" in d for c, d in no_policy.failures))
         open(os.path.join(bind_root, "AGENTS.md"), "w").write(bind_policy)
+        # ---- the shrink-only ratchet over C12 findings --------------------------------
+        unbound_text = "The reclaim-order rule is already always-on in `~/.claude/CLAUDE.md`.\n"
+        unbound_key = "The reclaim-order rule is already always-on in `~/.claude/CLAUDE.md`."
+        unbound_item = {"file": "skills/delta/references/deferred.md", "kind": "unbound claim",
+                        "key": unbound_key}
+        write_bind_baseline([unbound_item])
+        ratchet_same = c12_on(unbound_text)
+        expect_red("C12 ratchet: a finding the baseline carries is green and printed as WORKLIST",
+                   lambda: not ratchet_same.failures
+                   and ratchet_same.worklists.get("C12") == [
+                       "skills/delta/references/deferred.md:1: unbound claim about the always-on "
+                       "file: quote a verbatim AGENTS.md phrase in straight double quotes, or drop the claim"]
+                   and any("1 in the shrink-only baseline, 0 new, 0 stale" in d
+                           for d in [ratchet_same_detail for ratchet_same_detail in []] ) or
+                   (not ratchet_same.failures and len(ratchet_same.worklists.get("C12", [])) == 1))
+        drifted = c12_on("Intro paragraph that moves the claim down.\n\nSecond paragraph.\n\n" + unbound_text)
+        expect_red("C12 ratchet: identity is the claim text, so line drift stays green",
+                   lambda: not drifted.failures and drifted.worklists.get("C12", [""])[0].startswith(
+                       "skills/delta/references/deferred.md:5: unbound claim"))
+        findings, _counters = claim_findings("skills/delta/references/deferred.md", unbound_text, bind_policy)
+        expect_red("C12 ratchet: the identity key is the whitespace-collapsed claim sentence",
+                   lambda: [(f["kind"], f["key"]) for f in findings] == [("unbound claim", unbound_key)])
+        write_bind_baseline([unbound_item, {"file": "skills/delta/references/deferred.md",
+                                            "kind": "stale quote", "key": "gone phrase"}])
+        stale_extra = c12_on(unbound_text)
+        expect_red("C12 ratchet: a baseline item that is no longer found is red (stale)",
+                   lambda: any(c == "C12" and "stale baseline" in d and "'gone phrase'" in d
+                               for c, d in stale_extra.failures))
+        write_bind_baseline([unbound_item])
+        fixed_not_shrunk = c12_on("No claims here any more.\n")
+        expect_red("C12 ratchet: fixing the item without shrinking the baseline is red",
+                   lambda: any(c == "C12" and "stale baseline" in d for c, d in fixed_not_shrunk.failures))
+        write_bind_baseline([])
+        shrunk = c12_on("No claims here any more.\n")
+        expect_red("C12 ratchet: the shrunk baseline matching the empty list is green",
+                   lambda: not shrunk.failures and not shrunk.worklists.get("C12"))
+        write_bind_baseline([unbound_item])
+        second = c12_on(unbound_text + "\nSee `~/.claude/CLAUDE.md`'s \"zorblat rule\" too.\n")
+        expect_red("C12 ratchet: a second finding outside the baseline is red and named as new",
+                   lambda: any(c == "C12" and "deferred.md:3: stale quote" in d and "(not in baseline" in d
+                               for c, d in second.failures)
+                   and len(second.worklists.get("C12", [])) == 1)
+        open(bind_baseline, "w").write(json.dumps({"schema_version": 1, "note": "x", "C12": "no", "C13": []}))
+        malformed = c12_on(unbound_text)
+        expect_red("C12 ratchet: a malformed baseline is red, never an empty baseline",
+                   lambda: any(c == "C12" and "cannot apply the ratchet" in d and "C12 is not a list" in d
+                               for c, d in malformed.failures))
+        os.remove(bind_baseline)
+        missing_baseline = c12_on(unbound_text)
+        expect_red("C12 ratchet: a missing baseline is red and every live finding is reported",
+                   lambda: any(c == "C12" and "cannot apply the ratchet" in d for c, d in missing_baseline.failures)
+                   and any("deferred.md:1: unbound claim" in d for _c, d in missing_baseline.failures))
+        twice_item = {"file": "skills/delta/references/deferred.md", "kind": "stale quote",
+                      "key": "build the gate"}
+        write_bind_baseline([twice_item])
+        twice = c12_on('`~/.claude/CLAUDE.md` says "build the gate" here.\n\n'
+                       'And `~/.claude/CLAUDE.md` says "build the gate" again here.\n')
+        expect_red("C12 ratchet: one identity occurring twice prints both occurrences and counts once",
+                   lambda: not twice.failures and len(twice.worklists.get("C12", [])) == 2
+                   and twice.worklists["C12"][0].startswith("skills/delta/references/deferred.md:1: stale quote")
+                   and twice.worklists["C12"][1].startswith("skills/delta/references/deferred.md:3: stale quote"))
+        write_bind_baseline([])
         real_c12 = Run(ROOT, ci=True)
         real_c12.c12_claim_binding()
-        expect_red("C12 on this tree names the known stale citations as its worklist",
-                   lambda: all(any(rel in d for _c, d in real_c12.failures) for rel in (
+        expect_red("C12 on this tree is green with its 15 worklist occurrences carried by the committed baseline",
+                   lambda: not real_c12.failures and len(real_c12.worklists.get("C12", [])) == 15)
+        expect_red("C12 on this tree prints the known stale citations as its worklist",
+                   lambda: all(any(rel in d for d in real_c12.worklists.get("C12", [])) for rel in (
                        "skills/agent-dispatch/references/deferred.md:88",
                        "skills/agent-dispatch/references/deferred.md:89",
                        "skills/git-workflow/references/deferred.md:57",
@@ -5599,6 +5746,9 @@ def selftest():
                        "skills/testing-ci/references/deferred.md:79",
                        "skills/testing-ci/references/deferred.md:147",
                        "skills/outbound-drafts/SKILL.md:8")))
+        expect_red("the committed baseline carries exactly the 14 live C12 identities",
+                   lambda: load_tool_module("run-skill-evals").load_worklists(ROOT)[1] is None
+                   and len(load_tool_module("run-skill-evals").load_worklists(ROOT)[0]["C12"]) == 14)
 
         # ---- C13: the coverage manifest accounts for every skill -------------------------
         cover_root = os.path.join(td, "eval-coverage")
@@ -5609,31 +5759,65 @@ def selftest():
         json.dump({"skills": ["alpha"], "query": "q", "files": [], "expected_behavior": ["## Files"]},
                   open(os.path.join(cover_root, "skills", "alpha", "evals", "001-happy.json"), "w"))
         os.makedirs(os.path.join(cover_root, "release"))
+        os.makedirs(os.path.join(cover_root, "contracts"))
+        cover_baseline = os.path.join(cover_root, "contracts", "worklists.json")
 
-        def c13_on(entries):
+        def write_cover_baseline(c13):
+            open(cover_baseline, "w").write(json.dumps(
+                {"schema_version": 1, "note": "fixture", "C12": [], "C13": list(c13)}))
+
+        def c13_on(entries, baseline=()):
             json.dump({"schema_version": 1, "note": "fixture", "skills": entries},
                       open(os.path.join(cover_root, "release", "evals.json"), "w"))
+            write_cover_baseline(baseline)
             run = Run(cover_root, ci=True)
             run.c13_eval_coverage()
             return run
 
-        covered = c13_on({"alpha": {"status": "tested", "required": []},
-                          "beta": {"status": "exempt", "reason": "nothing to pin"}})
-        expect_red("C13 control: every skill listed is green", lambda: not covered.failures)
+        listed_all = {"alpha": {"status": "tested", "required": []},
+                      "beta": {"status": "exempt", "reason": "nothing to pin"}}
+        covered = c13_on(listed_all)
+        expect_red("C13 control: every skill listed with an empty baseline is green",
+                   lambda: not covered.failures and not covered.worklists.get("C13"))
         uncovered = c13_on({"alpha": {"status": "tested", "required": []}})
-        expect_red("C13 goes red naming the unlisted skill",
-                   lambda: any(c == "C13" and "unlisted skill beta" in d for c, d in uncovered.failures)
+        expect_red("C13 goes red naming an unlisted skill the baseline does not carry",
+                   lambda: any(c == "C13" and "unlisted skill beta: not in the baseline" in d
+                               for c, d in uncovered.failures)
                    and any("unlisted=['beta']" in d for _c, d in uncovered.failures))
+        carried = c13_on({"alpha": {"status": "tested", "required": []}}, baseline=["beta"])
+        expect_red("C13 ratchet: an unlisted skill the baseline carries is green and printed as WORKLIST",
+                   lambda: not carried.failures and carried.worklists.get("C13") == [
+                       "unlisted skill beta: add a tested or exempt entry to release/evals.json and "
+                       "remove it from contracts/worklists.json"])
+        stale_cover = c13_on({"alpha": {"status": "tested", "required": []}}, baseline=["beta", "alpha"])
+        expect_red("C13 ratchet: a baseline naming a listed skill is red (stale)",
+                   lambda: any(c == "C13" and "stale baseline" in d and "lists alpha" in d
+                               for c, d in stale_cover.failures))
+        fixed_cover = c13_on(listed_all, baseline=["beta"])
+        expect_red("C13 ratchet: listing the skill without shrinking the baseline is red",
+                   lambda: any(c == "C13" and "stale baseline" in d for c, d in fixed_cover.failures))
+        shrunk_cover = c13_on(listed_all, baseline=[])
+        expect_red("C13 ratchet: the shrunk baseline matching the shrunk list is green",
+                   lambda: not shrunk_cover.failures)
+        json.dump({"schema_version": 1, "note": "fixture", "skills": {"alpha": {"status": "tested", "required": []}}},
+                  open(os.path.join(cover_root, "release", "evals.json"), "w"))
+        open(cover_baseline, "w").write("{broken")
+        malformed_cover = Run(cover_root, ci=True)
+        malformed_cover.c13_eval_coverage()
+        expect_red("C13 ratchet: a malformed baseline is red and the unlisted skill still reported",
+                   lambda: any(c == "C13" and "cannot apply the ratchet" in d for c, d in malformed_cover.failures)
+                   and any("unlisted skill beta" in d for _c, d in malformed_cover.failures))
         os.remove(os.path.join(cover_root, "release", "evals.json"))
+        write_cover_baseline([])
         no_manifest = Run(cover_root, ci=True)
         no_manifest.c13_eval_coverage()
         expect_red("C13 fails loud without the manifest",
                    lambda: any(c == "C13" and "unreadable" in d for c, d in no_manifest.failures))
         real_c13 = Run(ROOT, ci=True)
         real_c13.c13_eval_coverage()
-        expect_red("C13 on this tree names exactly the five uncovered skills as its worklist",
-                   lambda: sorted(d.split()[2].rstrip(":") for _c, d in real_c13.failures
-                                  if d.startswith("unlisted skill "))
+        expect_red("C13 on this tree is green with the five uncovered skills carried by the baseline",
+                   lambda: not real_c13.failures
+                   and sorted(d.split()[2].rstrip(":") for d in real_c13.worklists.get("C13", []))
                    == ["agent-dispatch", "pr-review-method", "prebid-adcp", "system-design", "testing-ci"])
 
         # ---- C14: ceilings fail only on growth ---------------------------------------------

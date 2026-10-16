@@ -5,10 +5,16 @@ Corpus: `skills/<name>/evals/*.json`, schema per craft-skill Step 2:
   {"skills": [...], "query": "...", "files": [{"path","content"}], "expected_behavior": [...]}
 
 Coverage manifest: `release/evals.json` lists EVERY skill as tested or exempt. A skill that is
-absent from it is a validation failure, printed as a worklist; an exempt skill carries a
-reason and has no scenarios; a tested skill has scenarios and the doctrine's three shapes.
-The manifest, not SKILL.md frontmatter, carries coverage because the renderer rejects unknown
-frontmatter keys.
+absent from it is an unlisted item; an exempt skill carries a reason and has no scenarios; a
+tested skill has scenarios and the doctrine's three shapes. The manifest, not SKILL.md
+frontmatter, carries coverage because the renderer rejects unknown frontmatter keys.
+
+Shrink-only baseline: `contracts/worklists.json` records the unlisted skills deliberately left
+open (its `C13` list; its `C12` list serves the gate's claim-binding check). Validation is
+green while the live unlisted set equals or is a subset of the baseline, red on any unlisted
+skill not in it, and red when the baseline names a skill that is no longer unlisted, so the
+baseline can only shrink by a deliberate edit in the same change that fixes the item. The
+items still print, as a worklist. Every other manifest defect is a plain failure.
 
 Two modes, deliberately separated by cost:
 
@@ -41,7 +47,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REQUIRED_SHAPES = {"happy", "failure", "near-miss"}
 SECTION_RX = re.compile(r"^## [A-Z]", re.M)
@@ -50,6 +56,10 @@ MANIFEST_SCHEMA_VERSION = 1
 MANIFEST_TOP_LEVEL_KEYS = {"schema_version", "note", "skills"}
 MANIFEST_STATUSES = {"tested", "exempt"}
 MANIFEST_ENTRY_KEYS = {"status", "required", "reason"}
+WORKLISTS = "contracts/worklists.json"
+WORKLIST_SCHEMA_VERSION = 1
+WORKLIST_KEYS = {"schema_version", "note", "C12", "C13"}
+WORKLIST_C12_ITEM_KEYS = {"file", "kind", "key"}
 
 
 def load_corpus(root):
@@ -91,6 +101,93 @@ def load_manifest(root):
     if not isinstance(data, dict):
         return None, f"{MANIFEST}: top level is not an object"
     return data, None
+
+
+def load_worklists(root):
+    """-> (baseline dict or None, error). The shrink-only baseline of items deliberately open.
+
+    `C12` holds claim-binding findings as {file, kind, key} objects keyed on the claim text,
+    never on a line number, so line drift does not change an item's identity; `C13` holds the
+    names of skills left unlisted in the coverage manifest. A missing or malformed file is an
+    error, never an empty baseline.
+    """
+    path = os.path.join(root, WORKLISTS)
+    try:
+        raw = open(path, "rb").read()
+    except OSError as exc:
+        return None, f"{WORKLISTS}: unreadable ({exc.strerror or exc})"
+
+    def unique(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"duplicate key {key!r}")
+            value[key] = item
+        return value
+
+    try:
+        data = json.loads(raw.decode("utf-8"), object_pairs_hook=unique)
+    except (UnicodeDecodeError, ValueError) as exc:
+        return None, f"{WORKLISTS}: not valid JSON ({exc})"
+    if not isinstance(data, dict):
+        return None, f"{WORKLISTS}: top level is not an object"
+    if set(data) != WORKLIST_KEYS:
+        return None, (f"{WORKLISTS}: keys {sorted(data)} differ from {sorted(WORKLIST_KEYS)}")
+    if data.get("schema_version") != WORKLIST_SCHEMA_VERSION:
+        return None, f"{WORKLISTS}: schema_version is not {WORKLIST_SCHEMA_VERSION}"
+    if not isinstance(data.get("note"), str) or not data["note"].strip():
+        return None, f"{WORKLISTS}: note must be a non-empty string"
+    c12 = data.get("C12")
+    if not isinstance(c12, list):
+        return None, f"{WORKLISTS}: C12 is not a list"
+    seen = set()
+    for index, item in enumerate(c12):
+        if (not isinstance(item, dict) or set(item) != WORKLIST_C12_ITEM_KEYS
+                or not all(isinstance(item[k], str) and item[k] for k in WORKLIST_C12_ITEM_KEYS)):
+            return None, (f"{WORKLISTS}: C12[{index}] must be an object with non-empty string "
+                          f"keys {sorted(WORKLIST_C12_ITEM_KEYS)}")
+        identity = (item["file"], item["kind"], item["key"])
+        if identity in seen:
+            return None, f"{WORKLISTS}: C12 repeats {identity!r}"
+        seen.add(identity)
+    c13 = data.get("C13")
+    if not isinstance(c13, list) or not all(isinstance(n, str) and n for n in c13):
+        return None, f"{WORKLISTS}: C13 must be a list of skill names"
+    if len(set(c13)) != len(c13):
+        return None, f"{WORKLISTS}: C13 repeats a skill"
+    return data, None
+
+
+def ratchet(live, baseline):
+    """-> (new, stale): live items absent from the baseline; baseline items no longer live.
+
+    Either list non-empty is red. New items need a deliberate baseline edit in the same
+    change; stale items mean the baseline was not shrunk when its item was fixed.
+    """
+    live, baseline = set(live), set(baseline)
+    return sorted(live - baseline), sorted(baseline - live)
+
+
+def coverage_verdict(root, corpus=None):
+    """-> the coverage check's full verdict with the C13 ratchet applied.
+
+    hard            manifest defects that are never ratcheted
+    unlisted        every skill absent from the manifest (the live worklist)
+    in_baseline     unlisted skills the baseline deliberately leaves open
+    new             unlisted skills the baseline does not carry (red)
+    stale           baseline skills that are no longer unlisted (red)
+    baseline_error  why the baseline could not be read (red)
+    """
+    problems, summary = validate_coverage(root, corpus)
+    hard = [p for p in problems if not p.startswith("unlisted skill ")]
+    worklists, error = load_worklists(root)
+    baseline = worklists["C13"] if worklists else []
+    new, stale = ratchet(summary["unlisted"], baseline)
+    return {
+        "hard": hard, "unlisted": list(summary["unlisted"]),
+        "in_baseline": sorted(set(summary["unlisted"]) & set(baseline)),
+        "new": new, "stale": stale, "baseline_error": error, "summary": summary,
+    }
 
 
 def validate_coverage(root, corpus=None):
@@ -238,13 +335,26 @@ def validate(root, out=sys.stdout):
         p("EVAL-VALIDATE-SUMMARY scenarios=0 skills=0 failures=1 scope=shape-and-coverage exit=2")
         return 2
     bad = validate_shapes(root, corpus, out=out)
-    problems, summary = validate_coverage(root, corpus)
+    verdict = coverage_verdict(root, corpus)
+    summary = verdict["summary"]
     p(f"\n  coverage: {summary['tested']} tested, {summary['exempt']} exempt, "
-      f"{len(summary['unlisted'])} unlisted, {len(summary['unknown'])} unknown, "
+      f"{len(verdict['unlisted'])} unlisted ({len(verdict['in_baseline'])} in the shrink-only "
+      f"baseline {WORKLISTS}), {len(summary['unknown'])} unknown, "
       f"{summary['required']} required scenario(s)")
-    for problem in problems:
+    for name in verdict["in_baseline"]:
+        p(f"  coverage WORKLIST unlisted skill {name}: add a tested or exempt entry to "
+          f"{MANIFEST} and remove it from {WORKLISTS}")
+    for problem in verdict["hard"]:
         p(f"  coverage FAIL {problem}")
-    bad += len(problems)
+    for name in verdict["new"]:
+        p(f"  coverage FAIL unlisted skill {name}: not in the baseline {WORKLISTS}")
+    for name in verdict["stale"]:
+        p(f"  coverage FAIL stale baseline: {WORKLISTS} C13 lists {name}, which is no longer "
+          f"unlisted; shrink the baseline in the same change")
+    if verdict["baseline_error"]:
+        p(f"  coverage FAIL cannot apply the ratchet: {verdict['baseline_error']}")
+    bad += (len(verdict["hard"]) + len(verdict["new"]) + len(verdict["stale"])
+            + (1 if verdict["baseline_error"] else 0))
     scenario_count = sum(len(v) for v in corpus.values())
     p(f"\n  {scenario_count} scenarios, {bad} failure(s)")
     code = 1 if bad else 0
@@ -381,12 +491,22 @@ def selftest():
         for name in ("001-happy.json", "002-failure.json", "003-near-miss.json"):
             json.dump(scenario, open(os.path.join(evals, name), "w"))
         os.makedirs(os.path.join(root, "release"))
+        os.makedirs(os.path.join(root, "contracts"))
         manifest_path = os.path.join(root, MANIFEST)
+        baseline_path = os.path.join(root, WORKLISTS)
 
         def write_manifest(entries, **top):
             data = {"schema_version": MANIFEST_SCHEMA_VERSION, "note": "fixture", "skills": entries}
             data.update(top)
             open(manifest_path, "w").write(json.dumps(data))
+
+        def write_baseline(c13, c12=None, **top):
+            data = {"schema_version": WORKLIST_SCHEMA_VERSION, "note": "fixture",
+                    "C12": [] if c12 is None else c12, "C13": c13}
+            data.update(top)
+            open(baseline_path, "w").write(json.dumps(data))
+
+        write_baseline([])
 
         def coverage():
             return validate_coverage(root)
@@ -404,8 +524,67 @@ def selftest():
         problems, summary = coverage()
         chk("coverage names an unlisted skill as the worklist",
             summary["unlisted"] == ["beta"] and any("unlisted skill beta" in p for p in problems))
-        chk("--validate goes red on an unlisted skill", validate(root, out=io.StringIO()) == 1)
+        buf = io.StringIO()
+        chk("--validate goes red on an unlisted skill the baseline does not carry",
+            validate(root, out=buf) == 1 and "FAIL unlisted skill beta: not in the baseline" in buf.getvalue())
 
+        # --- the shrink-only ratchet
+        write_baseline(["beta"])
+        buf = io.StringIO()
+        chk("ratchet: an unlisted skill carried by the baseline is green and still printed",
+            validate(root, out=buf) == 0 and "WORKLIST unlisted skill beta" in buf.getvalue()
+            and "EVAL-VALIDATE-SUMMARY scenarios=3 skills=1 failures=0" in buf.getvalue())
+        verdict = coverage_verdict(root)
+        chk("ratchet verdict separates in-baseline, new, and stale",
+            verdict["in_baseline"] == ["beta"] and verdict["new"] == [] and verdict["stale"] == []
+            and verdict["hard"] == [] and verdict["baseline_error"] is None)
+        write_baseline(["beta", "alpha"])
+        buf = io.StringIO()
+        chk("ratchet: a baseline naming a skill that is no longer unlisted is red (stale)",
+            validate(root, out=buf) == 1 and "stale baseline" in buf.getvalue()
+            and "lists alpha" in buf.getvalue())
+        write_baseline(["beta"])
+        write_manifest(good)
+        buf = io.StringIO()
+        chk("ratchet: fixing the item without shrinking the baseline is red",
+            validate(root, out=buf) == 1 and "stale baseline" in buf.getvalue())
+        write_baseline([])
+        chk("ratchet: the shrunk baseline matching the shrunk (empty) list is green",
+            validate(root, out=io.StringIO()) == 0)
+        os.remove(os.path.join(root, "skills", "alpha", "evals", "003-near-miss.json"))
+        write_manifest({})
+        write_baseline(["beta"])
+        buf = io.StringIO()
+        chk("ratchet: a second unlisted skill outside the baseline is red and named",
+            validate(root, out=buf) == 1 and "FAIL unlisted skill alpha: not in the baseline" in buf.getvalue()
+            and "WORKLIST unlisted skill beta" in buf.getvalue())
+        json.dump(scenario, open(os.path.join(root, "skills", "alpha", "evals", "003-near-miss.json"), "w"))
+        write_manifest({"alpha": good["alpha"]})
+        open(baseline_path, "w").write("{not json")
+        buf = io.StringIO()
+        chk("ratchet: a malformed baseline is red, never an empty baseline",
+            validate(root, out=buf) == 1 and "cannot apply the ratchet" in buf.getvalue()
+            and "not valid JSON" in buf.getvalue())
+        os.remove(baseline_path)
+        buf = io.StringIO()
+        chk("ratchet: a missing baseline is red",
+            validate(root, out=buf) == 1 and "cannot apply the ratchet" in buf.getvalue()
+            and "unreadable" in buf.getvalue())
+        write_baseline(["beta"], c12=[{"file": "x.md", "kind": "stale quote"}])
+        chk("baseline loader rejects a C12 item without the file/kind/key shape",
+            "C12[0]" in (load_worklists(root)[1] or ""))
+        write_baseline(["beta", "beta"])
+        chk("baseline loader rejects a repeated C13 skill", "repeats" in (load_worklists(root)[1] or ""))
+        write_baseline(["beta"], extra=1)
+        chk("baseline loader rejects an unknown top-level key", "differ from" in (load_worklists(root)[1] or ""))
+        write_baseline(["beta"], schema_version=2)
+        chk("baseline loader rejects a foreign schema version", "schema_version" in (load_worklists(root)[1] or ""))
+        chk("ratchet helper: new and stale are the two set differences",
+            ratchet(["a", "b"], ["b", "c"]) == (["a"], ["c"]) and ratchet([], []) == ([], []))
+        write_baseline(["beta"])
+        write_manifest({"alpha": good["alpha"]})
+
+        write_baseline([])
         write_manifest(dict(good, gamma={"status": "exempt", "reason": "ghost"}))
         problems, summary = coverage()
         chk("coverage rejects an entry naming no skill",

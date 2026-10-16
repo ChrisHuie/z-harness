@@ -69,6 +69,8 @@ zero inputs (an empty scan set is an error, never a clean verdict).
                                     presence is version-bound structural evidence; it
                                     never proves dispatch, enforcement, or delivery
 """
+import ast
+import contextlib
 import fnmatch
 import hashlib
 import importlib.util
@@ -83,6 +85,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 
 VERSION = "3.5.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -148,7 +151,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 322
+SELFTEST_FLOOR = 328
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -1488,6 +1491,10 @@ class Run:
     def __init__(self, root, ci):
         self.root, self.ci, self.failures, self.checks = root, ci, [], 0
         self.worklists = {}
+        # Structured results beside the printed verdicts, so a proof compares exact values
+        # instead of searching a detail string: counters["C12"], ratchets["C12"/"C13"],
+        # ceilings["C14"].
+        self.counters, self.ratchets, self.ceilings = {}, {}, {}
 
     def worklist(self, check, item):
         """Print a live, baseline-covered item in full without counting it as a failure."""
@@ -2485,6 +2492,9 @@ class Run:
                         f"longer found; shrink the baseline in the same change")
         if baseline_error:
             self.result("C12", False, f"cannot apply the ratchet: {baseline_error}")
+        self.counters["C12"] = {"claims": claims, "bound": bound}
+        self.ratchets["C12"] = {"baseline": len(baseline), "live": len(live), "in_baseline": in_baseline,
+                                "new": len(new), "stale": len(stale), "occurrences": occurrences}
         self.result(
             "C12", not new and not stale and not baseline_error,
             f"always-on claims bind to verbatim AGENTS.md text: {claims} claim sentence(s) over "
@@ -2518,6 +2528,9 @@ class Run:
             self.result("C13", False, f"cannot apply the ratchet: {verdict['baseline_error']}")
         listed = summary["tested"] + summary["exempt"]
         red = (verdict["hard"] or verdict["new"] or verdict["stale"] or verdict["baseline_error"])
+        self.ratchets["C13"] = {"baseline": len(verdict["in_baseline"]) + len(verdict["stale"]),
+                                "live": len(verdict["unlisted"]), "in_baseline": len(verdict["in_baseline"]),
+                                "new": len(verdict["new"]), "stale": len(verdict["stale"])}
         self.result(
             "C13", not red and listed > 0,
             f"eval coverage manifest {EVAL_MANIFEST}: tested={summary['tested']} "
@@ -2559,15 +2572,18 @@ class Run:
             ("generated-instruction-file", "bytes", generated_bytes),
             ("generated-instruction-file", "lines", generated_lines),
         )
+        surfaces = self.ceilings.setdefault("C14", {})
         for name, unit, current in measured:
             recorded = ceilings.get(name, {}).get(unit) if isinstance(ceilings.get(name), dict) else None
             if not isinstance(recorded, int):
+                surfaces[f"{name}:{unit}"] = {"measured": current, "recorded": None, "verdict": "unrecorded"}
                 self.result("C14", False, f"{name} {unit}: no recorded ceiling in {BUDGET_CEILINGS}")
                 continue
-            note = "" if current == recorded else (
-                " (grew; raise the record only with the content that justifies it)"
-                if current > recorded else " (shrank; the record can be lowered)")
-            self.result("C14", current <= recorded,
+            verdict = "equal" if current == recorded else ("grew" if current > recorded else "shrank")
+            surfaces[f"{name}:{unit}"] = {"measured": current, "recorded": recorded, "verdict": verdict}
+            note = {"equal": "", "grew": " (grew; raise the record only with the content that justifies it)",
+                    "shrank": " (shrank; the record can be lowered)"}[verdict]
+            self.result("C14", verdict != "grew",
                         f"{name}: {current} {unit} <= recorded ceiling {recorded}{note}")
         expected_hard = {
             "claude-hook-context-cap": {"chars": CLAUDE_HOOK_CONTEXT_CHAR_CAP,
@@ -5672,14 +5688,23 @@ def selftest():
         good = ('The lead rule is always-on in `~/.claude/CLAUDE.md` ("Named a tool? Run exactly '
                 'that and stop."), so this body carries only the mechanism.\n\n'
                 'Nearest coverage: `AGENTS.md`, "Prefer a gate over a promise to remember."\n')
+        # Controls that a mutation proof below re-runs against a private, mutated copy of this
+        # module: each takes the module so the same assertion judges both.
+        def bound_control(module):
+            run = module.Run(bind_root, ci=True)
+            with contextlib.redirect_stdout(io.StringIO()):
+                run.c12_claim_binding()
+            return not run.failures and run.counters["C12"] == {"claims": 2, "bound": 2}
+
         bound_run = c12_on(good)
         expect_red("C12 control: claims quoting verbatim AGENTS.md phrases stay green",
-                   lambda: not bound_run.failures and any("2 claim sentence(s)" in d and "2 bound" in d
-                                                          for _c, d in [(c, d) for c, d in
-                                                                         ((r[0], r[1]) for r in [])] ) or
-                   (not bound_run.failures))
-        expect_red("C12 counts the two bound claims in its verdict",
-                   lambda: bound_run.checks == 1 and not bound_run.failures)
+                   lambda: not bound_run.failures and bound_run.checks == 1)
+        expect_red("C12 control: the bound control reports claims == 2 and bound == 2",
+                   lambda: bound_control(sys.modules[__name__]))
+        expect_red("C12 control: with no finding the ratchet reports an empty live list against an "
+                   "empty baseline",
+                   lambda: bound_run.ratchets["C12"] == {"baseline": 0, "live": 0, "in_baseline": 0,
+                                                         "new": 0, "stale": 0, "occurrences": 0})
         quoted_question = c12_on('See `AGENTS.md`, "Named a tool? Run exactly that and stop." Then go on.\n')
         expect_red("C12 keeps a quoted question mark inside the sentence that carries it",
                    lambda: not quoted_question.failures)
@@ -5808,10 +5833,10 @@ def selftest():
                    lambda: not ratchet_same.failures
                    and ratchet_same.worklists.get("C12") == [
                        "skills/delta/references/deferred.md:1: unbound claim about the always-on "
-                       "file: quote a verbatim AGENTS.md phrase in straight double quotes, or drop the claim"]
-                   and any("1 in the shrink-only baseline, 0 new, 0 stale" in d
-                           for d in [ratchet_same_detail for ratchet_same_detail in []] ) or
-                   (not ratchet_same.failures and len(ratchet_same.worklists.get("C12", [])) == 1))
+                       "file: quote a verbatim AGENTS.md phrase in straight double quotes in the "
+                       "same sentence, or drop the claim"]
+                   and ratchet_same.ratchets["C12"] == {"baseline": 1, "live": 1, "in_baseline": 1,
+                                                        "new": 0, "stale": 0, "occurrences": 1})
         drifted = c12_on("Intro paragraph that moves the claim down.\n\nSecond paragraph.\n\n" + unbound_text)
         expect_red("C12 ratchet: identity is the claim text, so line drift stays green",
                    lambda: not drifted.failures and drifted.worklists.get("C12", [""])[0].startswith(
@@ -5846,7 +5871,9 @@ def selftest():
         stale_extra = c12_on(unbound_text)
         expect_red("C12 ratchet: a baseline item that is no longer found is red (stale), shown by display",
                    lambda: any(c == "C12" and "stale baseline" in d and "'gone phrase'" in d
-                               for c, d in stale_extra.failures))
+                               for c, d in stale_extra.failures)
+                   and stale_extra.ratchets["C12"] == {"baseline": 2, "live": 1, "in_baseline": 1,
+                                                       "new": 0, "stale": 1, "occurrences": 1})
         write_bind_baseline([unbound_item])
         fixed_not_shrunk = c12_on("No claims here any more.\n")
         expect_red("C12 ratchet: fixing the item without shrinking the baseline is red",
@@ -5856,10 +5883,21 @@ def selftest():
         expect_red("C12 ratchet: the shrunk baseline matching the empty list is green",
                    lambda: not shrunk.failures and not shrunk.worklists.get("C12"))
         write_bind_baseline([unbound_item])
-        second = c12_on(unbound_text + "\nSee `~/.claude/CLAUDE.md`'s \"zorblat rule\" too.\n")
-        expect_red("C12 ratchet: a second finding outside the baseline is red and named as new",
-                   lambda: any(c == "C12" and "deferred.md:3: stale quote" in d and "(not in baseline" in d
-                               for c, d in second.failures)
+        second_text = unbound_text + "\nSee `~/.claude/CLAUDE.md`'s \"zorblat rule\" too.\n"
+
+        def new_item_control(module):
+            run = module.Run(bind_root, ci=True)
+            with contextlib.redirect_stdout(io.StringIO()):
+                run.c12_claim_binding()
+            return (any(c == "C12" and "deferred.md:3: stale quote" in d and "(not in baseline" in d
+                        for c, d in run.failures)
+                    and run.ratchets["C12"] == {"baseline": 1, "live": 2, "in_baseline": 1, "new": 1,
+                                                "stale": 0, "occurrences": 2})
+
+        second = c12_on(second_text)
+        expect_red("C12 ratchet: a second finding outside the baseline is red, named as new, and "
+                   "counted as one new item",
+                   lambda: new_item_control(sys.modules[__name__])
                    and len(second.worklists.get("C12", [])) == 1)
         open(bind_baseline, "w").write(json.dumps({"schema_version": 2, "note": "x", "C12": "no", "C13": []}))
         malformed = c12_on(unbound_text)
@@ -6025,9 +6063,15 @@ def selftest():
         roomy = json.loads(json.dumps(real_record))
         roomy["ceilings"]["AGENTS.md"]["bytes"] = agents_size + 1000
         under = c14_on(roomy)
-        expect_red("C14 control: a ceiling above the measurement passes and says the record can drop",
-                   lambda: not under.failures and any("shrank" in d for d in
-                                                      [line for line in []] ) or not under.failures)
+        def ceiling_control(module):
+            run = module.Run(budget_root, ci=True)
+            with contextlib.redirect_stdout(io.StringIO()):
+                run.c14_budget_ceilings()
+            return not run.failures and run.ceilings["C14"]["AGENTS.md:bytes"] == {
+                "measured": agents_size, "recorded": agents_size + 1000, "verdict": "shrank"}
+
+        expect_red("C14 control: a ceiling above the measurement passes and reports the surface as shrank",
+                   lambda: ceiling_control(sys.modules[__name__]))
         drifted = json.loads(json.dumps(real_record))
         drifted["hard"]["claude-dynamic-block"]["chars"] = 7600
         hard_drift = c14_on(drifted)
@@ -6188,6 +6232,73 @@ def selftest():
                    lambda: health_check_red != 0 and "harness_check FAILED (exit 1)" in check_log)
         expect_red("harness_health.sh exits non-zero when the planted runtime verifier fails",
                    lambda: health_verify_red != 0 and "--verify-runtime FAILED (exit 1)" in verify_log)
+
+        # ---- assertions that can fail: each control above is re-run against a private copy of
+        # this module carrying one planted defect, and must fail there by name ----------------
+        source_text = open(__file__, encoding="utf-8").read()
+
+        def private_copy(old, new, count=1):
+            if source_text.count(old) != count:
+                raise AssertionError(f"mutation site occurs {source_text.count(old)} time(s), "
+                                     f"expected {count}")
+            module = types.ModuleType("harness_check_mutant")
+            module.__file__ = __file__
+            exec(compile(source_text.replace(old, new), __file__, "exec"), module.__dict__)
+            return module
+
+        # The search strings are assembled, never written whole, so this block does not add
+        # an occurrence of the site it mutates; a wrong count fails the proof by name.
+        this_module = sys.modules[__name__]
+        write_bind_baseline([])
+        c12_on(good)
+        expect_red("mutation: counters['bound'] += 0 fails the bound control (claims == 2, bound == 2) "
+                   "by name",
+                   lambda: bound_control(this_module) and not bound_control(private_copy(
+                       'counters["bound"] ' + '+= 1\n', 'counters["bound"] ' + '+= 0\n', count=2)))
+        write_bind_baseline([unbound_item])
+        c12_on(second_text)
+        expect_red("mutation: the ratchet's new list forced empty fails the new-item control by name",
+                   lambda: new_item_control(this_module) and not new_item_control(private_copy(
+                       "new, stale = evals.ratchet(live, baseline) " + "if worklists is not None else (sorted(live), [])\n",
+                       "new, stale = ([], evals.ratchet(live, baseline)[1]) if worklists is not None else ([], [])\n")))
+        c14_on(roomy)
+        expect_red("mutation: a ceiling verdict that never says shrank fails the C14 control by name",
+                   lambda: ceiling_control(this_module) and not ceiling_control(private_copy(
+                       '("grew" if current > recorded ' + 'else "shrank")',
+                       '("grew" if current > recorded else "equal")')))
+
+        # ---- no expect_red lambda in this suite may carry a fallback clause or iterate an
+        # empty list: that shape passes for a neighbour's reason and proves nothing -----------
+        vacuous = []
+        for node in ast.walk(ast.parse(source_text)):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "expect_red"):
+                continue
+            for arg in node.args:
+                if not isinstance(arg, ast.Lambda):
+                    continue
+                text = ast.get_source_segment(source_text, arg) or ""
+                # A leading platform gate (`sys.platform != "darwin" or ...`) keeps the check
+                # count equal across CI platforms and is the one sanctioned leading `or`.
+                text = re.sub(r'^lambda:\s*\(?\s*sys\.platform != "[a-z0-9]+"\s+or\s*', "lambda: ", text)
+                empty_iteration = any(
+                    isinstance(inner, ast.comprehension) and isinstance(inner.iter, ast.List)
+                    and not inner.iter.elts for inner in ast.walk(arg))
+                if empty_iteration or " or (" in text or " or not " in text:
+                    vacuous.append(node.lineno)
+        expect_red("no expect_red lambda in this suite carries an 'or' fallback or iterates an empty list"
+                   + (f" (found at lines {vacuous})" if vacuous else ""),
+                   lambda: vacuous == [])
+
+        if os.environ.get("ZH_REVIEW_REPRODUCTIONS") == "nested":
+            expect_red("review reproduction 4294811841: not re-run inside the suite run it launched; "
+                       "this run is the reproduction's subject",
+                       lambda: os.environ.get("ZH_REVIEW_REPRODUCTIONS") == "nested")
+        else:
+            expect_red("review reproduction 4294811841: the disabled bound counter fails a named C12 "
+                       "proof in the mutated suite; the baseline and restored suites pass",
+                       lambda: reproduction(4294811841, "mutated bound_control= 0 SELFTEST-SUMMARY "
+                                                        "suite=harness_check checks="))
 
     # +1 for this assertion's own increment, so SELFTEST_FLOOR is the number the receipt
     # prints. Comparing the pre-increment count made the floor one less than the reported

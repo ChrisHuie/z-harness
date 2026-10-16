@@ -521,12 +521,22 @@ def hook_import_problems(tree, receipt):
         except (OSError, SyntaxError, UnicodeDecodeError) as exc:
             problems.append(f"{relative} cannot be parsed: {exc}")
             continue
+        # A searched directory comes from an executable `sys.path.insert(...)` call whose
+        # argument names it; a comment or an unrelated string never counts.
         searched = [os.path.dirname(relative)]
-        if "sys.path.insert(" in source_text:
-            if '"guards"' in source_text:
-                searched.append("hooks/guards")
-            if '"tools"' in source_text:
-                searched.append("tools")
+        inserted = set()
+        for node in ast.walk(module_ast):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "insert" and isinstance(node.func.value, ast.Attribute)
+                    and node.func.value.attr == "path" and isinstance(node.func.value.value, ast.Name)
+                    and node.func.value.value.id == "sys"):
+                for inner in node.args:
+                    inserted.update(c.value for c in ast.walk(inner)
+                                    if isinstance(c, ast.Constant) and isinstance(c.value, str))
+        if "guards" in inserted:
+            searched.append("hooks/guards")
+        if "tools" in inserted:
+            searched.append("tools")
         names = set()
         for node in ast.walk(module_ast):
             if isinstance(node, ast.Import):
@@ -1918,10 +1928,26 @@ def selftest():
                                                               "tools/lib.py": "X = 1\n"})
             == ["hooks/a.py imports lib, which is neither standard library nor in the receipt's files under "
                 "hooks, hooks/guards"])
-        chk("imports are followed transitively: a sibling's own missing import is named",
-            import_check(["hooks/a.py", "hooks/lib.py"], {"hooks/a.py": "import lib\n",
-                                                          "hooks/lib.py": "import deeper\n"})
+        transitive_root = os.path.join(td, "transitive-tree")
+        shutil.rmtree(transitive_root, ignore_errors=True)
+        os.makedirs(os.path.join(transitive_root, "hooks"))
+        open(os.path.join(transitive_root, "hooks", "a.py"), "w").write("import lib\n")
+        open(os.path.join(transitive_root, "hooks", "lib.py"), "w").write("import deeper\n")
+        only_a = {"files": {"hooks/a.py": {"sha256": "0" * 64}, "hooks/lib.py": {"sha256": "0" * 64}},
+                  "owned_hooks": [{"event": "Stop", "matcher": None, "type": "command",
+                                   "command": "python3 ~/.claude/harness/v1/hooks/a.py", "timeout": 5}]}
+        chk("imports are followed transitively: only a.py is owned, and lib.py's missing import is named",
+            hook_import_problems(transitive_root, only_a)
             == ["hooks/lib.py imports deeper, which is neither standard library nor in the receipt's files under hooks"])
+        chk("a commented-out sys.path.insert, or a string naming the directory, authorises nothing",
+            import_check(["hooks/a.py", "tools/lib.py"], {"hooks/a.py": 'import os, sys\n# sys.path.insert(0, "tools")\nimport lib\n',
+                                                          "tools/lib.py": "X = 1\n"})
+            == ["hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks"]
+            and import_check(["hooks/a.py", "tools/lib.py"], {"hooks/a.py": 'import os, sys\nDIRECTORY = "tools"\nimport lib\n',
+                                                              "tools/lib.py": "X = 1\n"})
+            == ["hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks"]
+            and import_check(["hooks/a.py", "tools/lib.py"], {"hooks/a.py": 'import os, sys\nsys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))\nimport lib\n',
+                                                              "tools/lib.py": "X = 1\n"}) == [])
         chk("a `from x import y` and every alias of one `import a, b` are inspected",
             import_check(["hooks/a.py", "hooks/one.py"], {"hooks/a.py": "from two import X\n",
                                                           "hooks/one.py": "X = 1\n"})
@@ -1930,7 +1956,8 @@ def selftest():
                                                               "hooks/one.py": "X = 1\n"})
             == ["hooks/a.py imports three, which is neither standard library nor in the receipt's files under hooks"])
         chk("a hook that cannot be parsed is reported, never skipped",
-            import_check(["hooks/a.py"], {"hooks/a.py": "def (:\n"})[0].startswith("hooks/a.py cannot be parsed"))
+            any(p.startswith("hooks/a.py cannot be parsed")
+                for p in import_check(["hooks/a.py"], {"hooks/a.py": "def (:\n"})))
         moved_home = os.path.join(td, "moved-home")
         shutil.copytree(dep_home, moved_home)
         stage(dep_source, moved_home, version_id="v2")
@@ -1945,9 +1972,13 @@ def selftest():
         chk("--check names a sibling module relocated to a directory the hook does not search",
             check(moved_home, dep_source, out=buf) == 1
             and "hooks/dep_guard.py imports helper_lib" in buf.getvalue())
-        chk("every interpreter option that takes an operand is skipped with its operand",
-            all(script_operand("/usr/local/bin/node", f"node {option} value /x/@anthropic-ai/claude-code/cli.js")
-                == "/x/@anthropic-ai/claude-code/cli.js" for option in sorted(OPTIONS_WITH_OPERAND))
+        operand_options = ["-r", "--require", "--import", "--loader", "--experimental-loader", "-C",
+                           "--conditions", "--input-type", "--title", "--stack-trace-limit",
+                           "--max-old-space-size", "-e", "--eval", "-p", "--print"]
+        chk("each of the fifteen interpreter options that take an operand is skipped with its operand",
+            sorted(operand_options) == sorted(OPTIONS_WITH_OPERAND)
+            and all(script_operand("/usr/local/bin/node", f"node {option} value /x/@anthropic-ai/claude-code/cli.js")
+                    == "/x/@anthropic-ai/claude-code/cli.js" for option in operand_options)
             and script_operand("/usr/local/bin/node", "node --unknown-flag /x/cli.js") == "/x/cli.js")
 
         chk("review reproduction 4294811755: a switch killed after its settings replace rolls back "

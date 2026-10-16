@@ -85,6 +85,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tokenize
 import types
 
 VERSION = "3.5.0"
@@ -151,7 +152,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 357
+SELFTEST_FLOOR = 359
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -181,7 +182,7 @@ SELFTEST_SUITES = [
     ("verify-review-publication",
      ["tools/verify-review-publication.py", "--selftest"], 94),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 53),
-    ("install-claude", ["tools/install-claude.py", "--selftest"], 155),
+    ("install-claude", ["tools/install-claude.py", "--selftest"], 156),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
     ("ci-gate", ["tools/ci-gate.py", "--selftest"], 345),
     ("write-mutation-receipt",
@@ -270,6 +271,8 @@ SELFTEST_TIMEOUTS = {
     "announced_work_guard": 60,
     "ci-gate": 120,
     "fuzz-judge-diff": 25,
+    # Stages and activates several temporary trees per run; measured 9.1s at 156 proofs.
+    "install-claude": 30,
 }
 DEFAULT_SELFTEST_TIMEOUT = 15
 # A suite may use this much of its registered timeout before C1 says so. Without it the
@@ -503,13 +506,16 @@ STRAIGHT_QUOTE = re.compile(r"\"([^\"]{1,2000})\"", re.S)
 # A code span is a run of backticks, its content, and the same run; a longer run may hold a
 # shorter one, and the content may span lines.
 # Only the opening run can be escaped: inside a span a backslash is literal and does not
-# protect the closing run, so `literal\` closes at its own backtick.
+# protect the closing run, so `literal\` closes at its own backtick. Backslash pairs are
+# stood in by a private-use character before matching, so `\\`` opens a span (the pair
+# escapes itself) while `\`` does not.
 CODE_SPAN = re.compile(r"(?<![`\\])(`+)(?!`)(.+?)(?<!`)\1(?!`)", re.S)
+BACKSLASH_PAIR = ""
 # Masking tokens are private-use characters, which authored prose never carries; any that do
 # occur are stripped before masking so text cannot impersonate a token.
 SPAN_TOKEN = re.compile("(\\d+)")
 QUOTE_TOKEN = re.compile("(\\d+)")
-PRIVATE_USE = re.compile("[-]")
+PRIVATE_USE = re.compile("[-]")
 QUOTE_ELLIPSIS = re.compile(r"…|\.\.\.")
 CLAIM_NEGATION = re.compile(
     r"\b(?:does not|do not|did not|is not|are not|was not|were not|no longer|not carried|"
@@ -1426,9 +1432,9 @@ def claim_findings(rel, text, agents_text):
             span = match.group(2).strip()
             if span in ("~/.claude/CLAUDE.md", "AGENTS.md") or re.fullmatch(r":\d+(?:-\d+)?", span):
                 return match.group(0)
-            spans.append(match.group(0))
+            spans.append(match.group(0).replace(BACKSLASH_PAIR, "\\\\"))
             return f"{len(spans) - 1}"
-        prose = CODE_SPAN.sub(neutralize_span, block)
+        prose = CODE_SPAN.sub(neutralize_span, block.replace("\\\\", BACKSLASH_PAIR)).replace(BACKSLASH_PAIR, "\\\\")
         # Mask every straight-quoted span before sentence splitting so a quoted question
         # mark or period cannot split the sentence that carries it. A quote that itself
         # contains a file mention (a stray quote earlier in the block, a quoted YAML value, a
@@ -1572,6 +1578,15 @@ def vacuous_expect_red_lines(source_text):
                 return (isinstance(last, ast.UnaryOp) and isinstance(last.op, ast.Not)
                         or isinstance(last, ast.Constant) and bool(last.value))
 
+            def parenthesised_or(expression_text):
+                """`or` followed by `(` as tokens, whatever whitespace sits between them."""
+                try:
+                    tokens = list(tokenize.generate_tokens(io.StringIO(expression_text).readline))
+                except (tokenize.TokenError, SyntaxError):
+                    return " or (" in expression_text
+                return any(a.type == tokenize.NAME and a.string == "or" and b.type == tokenize.OP
+                           and b.string == "(" for a, b in zip(tokens, tokens[1:]))
+
             def empty(iterable):
                 if isinstance(iterable, (ast.List, ast.Tuple, ast.Set)):
                     return not iterable.elts
@@ -1581,7 +1596,7 @@ def vacuous_expect_red_lines(source_text):
                         and iterable.func.id in ("list", "tuple", "dict", "set", "frozenset")
                         and not iterable.args and not iterable.keywords)
 
-            has_fallback = " or (" in text or any(
+            has_fallback = parenthesised_or(text) or any(
                 isinstance(inner, ast.BoolOp) and isinstance(inner.op, ast.Or) and fallback(inner)
                 for inner in ast.walk(judged))
             empty_iteration = any(isinstance(inner, ast.comprehension) and empty(inner.iter)
@@ -6054,6 +6069,15 @@ def selftest():
         opener = c12_on('Run \\`printf "fabricated policy"` before reading AGENTS.md.\n')
         expect_red("C12 judges a quotation after an escaped opening backtick as prose",
                    lambda: any(c == "C12" and "stale quote: 'fabricated policy'" in d for c, d in opener.failures))
+        # Backslash parity: a pair escapes itself, so the backtick after `\\` opens a span.
+        pair = c12_on('Run \\\\`literal` before AGENTS.md says "Authorize the violet satellite". Then `tail`.\n')
+        expect_red("C12 judges a quotation after a span opened by a backtick that follows a backslash pair",
+                   lambda: any(c == "C12" and "stale quote: 'Authorize the violet satellite'" in d
+                               for c, d in pair.failures))
+        triple_backslash = c12_on('Run \\\\\\`printf "fabricated policy"` before reading AGENTS.md.\n')
+        expect_red("C12 judges a quotation after a backtick escaped by the third of three backslashes as prose",
+                   lambda: any(c == "C12" and "stale quote: 'fabricated policy'" in d
+                               for c, d in triple_backslash.failures))
         negated_wrapped = claim_findings("skills/delta/references/deferred.md",
                                          '`~/.claude/CLAUDE.md` does not carry "Named a tool? Run exactly that and\nstop." '
                                          'or "Default to one\tagent and no fan-out."\n', bind_policy)[0]
@@ -6531,6 +6555,11 @@ def selftest():
             "lambda: True": True,
             "lambda: sys.platform == sys.platform or not run.failures": True,
             'lambda: sys.platform == "darwin" or not run.failures': True,
+            'lambda: other.platform != "darwin" or not run.failures': True,
+            'lambda: sys.version != "darwin" or not run.failures': True,
+            "lambda: sys.platform != 42 or not run.failures": True,
+            "lambda: bool(run.failures) or(bool)": True,
+            "lambda: bool(run.failures) or (bool)": True,
             'lambda: sys.platform != "darwin" or (a and b)': False,
             'lambda: "x" in (error or "")': False,
             'lambda: a == 1 or b == 2': False,

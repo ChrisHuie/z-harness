@@ -66,6 +66,7 @@ is stable for the budget ceiling; the installer renders it with the real values.
 Nothing here touches $HOME unless --stage or --activate names it; --check and --render only read.
 Exit codes: 0 ok · 1 drift, failed stage or activation, or selftest failure · 2 usage error.
 """
+import ast
 import compileall
 import contextlib
 import copy
@@ -479,9 +480,61 @@ def marker_problems(marker):
     digest = marker.get("merged_sha256")
     if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
         problems.append("merged_sha256 must be 64 hex characters")
-    if not isinstance(marker.get("started_at"), str) or not re.fullmatch(
-            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", marker["started_at"]):
-        problems.append("started_at must be a UTC timestamp like 2026-01-01T00:00:00Z")
+    started = marker.get("started_at")
+    try:
+        if not isinstance(started, str):
+            raise ValueError("not a string")
+        datetime.datetime.strptime(started, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        problems.append("started_at must be a real UTC timestamp like 2026-01-01T00:00:00Z")
+    return problems
+
+
+def hook_import_problems(tree, receipt):
+    """-> [problem] for an owned hook script whose imports the receipt cannot vouch for.
+
+    A hook locates sibling modules by inserting its own directory, hooks/guards/ or tools/
+    on sys.path and importing them by name, so every top-level import that is not standard
+    library must resolve to a file in the receipt's files map, transitively. A module that
+    is missing from the files map is one the digests never verify and the hook cannot load.
+    """
+    files = receipt.get("files", {})
+    problems = []
+    stdlib = getattr(sys, "stdlib_module_names", frozenset())
+    scripts = []
+    for h in receipt.get("owned_hooks", []):
+        pointed = HARNESS_COMMAND.match(h.get("command", "")) if isinstance(h.get("command"), str) else None
+        if pointed:
+            scripts.append(f"hooks/{pointed.group(2)}")
+    seen = set()
+    while scripts:
+        relative = scripts.pop()
+        if relative in seen:
+            continue
+        seen.add(relative)
+        path = os.path.join(tree, relative)
+        try:
+            module_ast = ast.parse(read_text(path))
+        except (OSError, SyntaxError, UnicodeDecodeError) as exc:
+            problems.append(f"{relative} cannot be parsed: {exc}")
+            continue
+        names = set()
+        for node in ast.walk(module_ast):
+            if isinstance(node, ast.Import):
+                names.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                names.add(node.module.split(".")[0])
+        for name in sorted(names):
+            if name in stdlib:
+                continue
+            candidates = [f"{os.path.dirname(relative)}/{name}.py", f"hooks/{name}.py",
+                          f"hooks/guards/{name}.py", f"tools/{name}.py"]
+            found = next((c for c in candidates if c in files), None)
+            if found is None:
+                problems.append(f"{relative} imports {name}, which is neither standard library nor in "
+                                f"the receipt's files")
+            else:
+                scripts.append(found)
     return problems
 
 
@@ -504,8 +557,9 @@ def stage(source_root, home, version_id=None, allow_dirty=False, now=None):
     sha, dirty = source_commit(source_root)
     if version_id is None:
         version_id, sha, dirty = derive_version_id(source_root, allow_dirty)
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9+._-]*", version_id):
-        raise InstallError(f"version id {version_id!r} is not a safe directory name")
+    if not VERSION_ID.fullmatch(version_id) or STAGING_MARK in version_id:
+        raise InstallError(f"version id {version_id!r} is not a safe directory name "
+                           f"({STAGING_MARK!r} is reserved for staging directories)")
     tree = tree_path(home, version_id)
     if os.path.lexists(tree):
         raise InstallError(f"tree already staged: {tree}; a staged tree is immutable")
@@ -580,13 +634,29 @@ RESIDUAL_SENTENCE = ("a settings.json write by one of them between the installer
                      "its rename would be overwritten and cannot be detected afterwards")
 
 
+# Interpreter options that take the next token as their operand; `--opt=value` is one token.
+OPTIONS_WITH_OPERAND = frozenset({
+    "-r", "--require", "--import", "--loader", "--experimental-loader", "-C", "--conditions",
+    "--input-type", "--title", "--stack-trace-limit", "--max-old-space-size", "-e", "--eval",
+    "-p", "--print"})
+
+
 def script_operand(comm, args):
-    """-> the script an interpreter process executes: the first non-flag argument after
-    the executable, which ps reports in `comm` so a path with spaces is removed whole."""
+    """-> the script an interpreter process executes: the first operand after the executable
+    that is neither an option nor the operand of an option that takes one. The executable is
+    the comm column, so a path with spaces is removed whole."""
     rest = args[len(comm):] if args.startswith(comm) else args.split(" ", 1)[1] if " " in args else ""
-    for token in rest.split():
-        if not token.startswith("-"):
-            return token
+    tokens = rest.split()
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in OPTIONS_WITH_OPERAND:
+            index += 2
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return token
     return ""
 
 
@@ -832,6 +902,8 @@ def installation_state(home, source_root=None):
                 state["drift"].append(f"missing {relative}")
             elif sha256_file(full) != record["sha256"]:
                 state["drift"].append(f"changed {relative}")
+        for problem in hook_import_problems(tree, active):
+            verdicts.append(f"owned hook {problem}; re-stage {active_version}")
         try:
             tree_copy = read_text(os.path.join(tree, "CLAUDE.generated.md"))
         except OSError as exc:
@@ -899,6 +971,10 @@ def activate(home, version_id, fault=None, between_read_and_replace=None, after_
     owned = receipt["owned_hooks"]
     if not owned:
         raise InstallError("receipt owns no hook entries")
+    import_problems = hook_import_problems(tree, receipt)
+    if import_problems:
+        raise InstallError("refusing to activate a tree whose hooks cannot load: "
+                           + "; ".join(import_problems))
     state = installation_state(home)
     if state["broken_trees"]:
         raise InstallError("refusing to activate with unreadable staged receipt(s): "
@@ -1735,6 +1811,74 @@ def selftest():
         chk("the default acquisition reads the arguments column: an interpreter process is found "
             "only through it",
             live == [(101, "node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js")])
+        chk("an interpreter option that takes an operand does not hide the script behind it",
+            is_claude_code_process("/usr/local/bin/node",
+                                   "node --require bootstrap.cjs /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js")
+            and is_claude_code_process("/usr/local/bin/node",
+                                       "node -r ./boot.js --no-warnings /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js")
+            and not is_claude_code_process("/usr/local/bin/node",
+                                           "node --require /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js other.js")
+            and script_operand("/usr/local/bin/node", "node --eval x") == "")
+
+        # --- every containment and typing branch alone, with otherwise-valid fixtures
+        for label, broken, needle in (
+                ("a home-prefixed files key", dict(good_receipt, files=dict(good_receipt["files"], **{
+                    "~/outside": {"sha256": "0" * 64}})), "'~/outside' is not a contained relative path"),
+                ("a dot segment in a files key", dict(good_receipt, files=dict(good_receipt["files"], **{
+                    "hooks/./x.py": {"sha256": "0" * 64}})), "'hooks/./x.py' is not a contained relative path"),
+                ("an empty segment in a files key", dict(good_receipt, files=dict(good_receipt["files"], **{
+                    "hooks//x.py": {"sha256": "0" * 64}})), "'hooks//x.py' is not a contained relative path"),
+                ("a numeric event", dict(good_receipt, owned_hooks=[dict(hook0, event=321)]
+                                         + good_receipt["owned_hooks"][1:]), "event must be a non-empty string"),
+                ("a short digest", dict(good_receipt, files=dict(good_receipt["files"], **{
+                    f"hooks/{script0}": {"sha256": "abc"}})), "must be an object with a 64-hex sha256")):
+            json.dump(broken, open(legacy_path, "w"))
+            chk(f"a receipt with {label} is refused by that branch alone",
+                raises(lambda: load_receipt(legacy_path), needle))
+        chk("a marker whose timestamp has the right shape but an impossible date is refused",
+            [p for p in marker_problems(dict(good_marker, started_at="2026-19-45T29:78:99Z"))]
+            == ["started_at must be a real UTC timestamp like 2026-01-01T00:00:00Z"])
+
+        # --- one version-name contract: a name carrying the staging mark is refused before
+        # staging writes anything, so it can never block activation afterwards
+        chk("stage refuses a version id carrying the staging mark",
+            raises(lambda: stage(source, home, version_id="v3.staging-release"), "reserved for staging")
+            and not os.path.lexists(tree_path(home, "v3.staging-release")))
+
+        # --- a hook whose sibling module is missing from the files map cannot load: the
+        # receipt vouches for the imports of every owned script, transitively
+        dep_source = os.path.join(td, "dep-source")
+        shutil.copytree(source, dep_source)
+        open(os.path.join(dep_source, "hooks", "helper_lib.py"), "w").write("VALUE = 1\n")
+        open(os.path.join(dep_source, "hooks", "dep_guard.py"), "w").write(
+            "import os, sys\nsys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))\n"
+            "import helper_lib\nsys.exit(0)\n")
+        dep_settings = json.load(open(os.path.join(dep_source, "settings.json")))
+        dep_settings["hooks"]["Stop"][0]["hooks"].append({
+            "type": "command", "command": "python3 ~/.claude/hooks/dep_guard.py", "timeout": 5})
+        json.dump(dep_settings, open(os.path.join(dep_source, "settings.json"), "w"), indent=2)
+        dep_home = os.path.join(td, "dep-home")
+        os.makedirs(os.path.join(dep_home, ".claude"))
+        json.dump(user_settings, open(os.path.join(dep_home, ".claude", "settings.json"), "w"))
+        dep_receipt = stage(dep_source, dep_home, version_id="v1")
+        chk("hook_import_problems is empty for a tree whose imports the receipt covers",
+            hook_import_problems(tree_path(dep_home, "v1"), dep_receipt) == [])
+        activate(dep_home, "v1")
+        buf = io.StringIO()
+        chk("--check is clean on the dependent tree", check(dep_home, dep_source, out=buf) == 0)
+        dep_tree = tree_path(dep_home, "v1")
+        os.remove(os.path.join(dep_tree, "hooks", "helper_lib.py"))
+        for receipt_path in (os.path.join(dep_tree, RECEIPT_NAME), active_receipt_path(dep_home)):
+            thinned = load_json(receipt_path)
+            del thinned["files"]["hooks/helper_lib.py"]
+            atomic_write(receipt_path, (json.dumps(thinned, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+        buf = io.StringIO()
+        chk("--check names a hook whose sibling module is neither standard library nor in the files map",
+            check(dep_home, dep_source, out=buf) == 1
+            and "owned hook hooks/dep_guard.py imports helper_lib, which is neither standard library nor "
+                "in the receipt's files" in buf.getvalue())
+        chk("--activate refuses a tree whose hooks cannot load",
+            raises(lambda: activate(dep_home, "v1"), "hooks cannot load: hooks/dep_guard.py imports helper_lib"))
 
         chk("review reproduction 4294811755: a switch killed after its settings replace rolls back "
             "to exactly v1's entries",

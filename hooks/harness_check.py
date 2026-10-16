@@ -151,7 +151,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 348
+SELFTEST_FLOOR = 354
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -181,7 +181,7 @@ SELFTEST_SUITES = [
     ("verify-review-publication",
      ["tools/verify-review-publication.py", "--selftest"], 94),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 53),
-    ("install-claude", ["tools/install-claude.py", "--selftest"], 136),
+    ("install-claude", ["tools/install-claude.py", "--selftest"], 148),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
     ("ci-gate", ["tools/ci-gate.py", "--selftest"], 345),
     ("write-mutation-receipt",
@@ -502,7 +502,7 @@ BARE_LINE_CITATION = re.compile(r"`:\d+(?:-\d+)?`")
 STRAIGHT_QUOTE = re.compile(r"\"([^\"]{1,2000})\"", re.S)
 # A code span is a run of backticks, its content, and the same run; a longer run may hold a
 # shorter one, and the content may span lines.
-CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)", re.S)
+CODE_SPAN = re.compile(r"(?<![`\\])(`+)(?!`)(.+?)(?<![`\\])\1(?!`)", re.S)
 # Masking tokens are private-use characters, which authored prose never carries; any that do
 # occur are stripped before masking so text cannot impersonate a token.
 SPAN_TOKEN = re.compile("(\\d+)")
@@ -1361,6 +1361,13 @@ def claim_identity_key(text):
     return "sha256:" + hashlib.sha256(collapsed.encode("utf-8")).hexdigest()
 
 
+def quote_list_key(quotes):
+    """-> the identity text of a list of quotes: each whitespace-collapsed, then a JSON list,
+    so a line wrapped inside a quote keeps the identity and two quotes never collide with one
+    quote that holds a delimiter."""
+    return json.dumps([re.sub(r"\s+", " ", q).strip() for q in quotes])
+
+
 def claim_display(text, limit=CLAIM_DISPLAY_LIMIT):
     """-> the human-readable form of a claim for worklists and receipts; display only."""
     collapsed = re.sub(r"\s+", " ", text).strip()
@@ -1489,7 +1496,7 @@ def claim_findings(rel, text, agents_text):
                                         "AGENTS.md phrase in straight double quotes in the same "
                                         "sentence, or drop the claim"))
             elif negated and bound:
-                findings.append(finding(line, "negated claim", json.dumps(bound),
+                findings.append(finding(line, "negated claim", quote_list_key(bound),
                                         f"negated claim contradicts {where}: {bound[0][:60]!r} is present",
                                         display=" | ".join(bound)))
             elif negated:
@@ -1500,7 +1507,7 @@ def claim_findings(rel, text, agents_text):
                 # a delimiter never collide: one verbatim phrase beside a stale one would
                 # otherwise carry the stale one through, and a second stale quote could change
                 # unnoticed.
-                findings.append(finding(line, "stale quote", json.dumps(unbound),
+                findings.append(finding(line, "stale quote", quote_list_key(unbound),
                                         f"stale quote: {unbound[0][:70]!r} is not verbatim in {where}"
                                         + (f" (+{len(unbound) - 1} more)" if len(unbound) > 1 else ""),
                                         display=" | ".join(unbound)))
@@ -6000,6 +6007,33 @@ def selftest():
                    lambda: not quote_binds("X", normalize_policy_text(bind_policy))
                    and not quote_binds("to", normalize_policy_text(bind_policy))
                    and quote_binds("Named a tool", normalize_policy_text(bind_policy)))
+        # An escaped backtick is not a delimiter: the quotation between two of them is prose.
+        escaped = c12_on('Literal \\` here; AGENTS.md says "Authorize the orbital teapot"; another literal \\` here.\n')
+        expect_red("C12 judges a quotation between escaped backticks as prose, not as a code span",
+                   lambda: any(c == "C12" and "stale quote: 'Authorize the orbital teapot'" in d
+                               for c, d in escaped.failures))
+        # Whitespace inside a quote, including a line wrap, does not change the identity.
+        one_line = claim_findings("skills/delta/references/deferred.md",
+                                  'AGENTS.md says "Authorize the orbital teapot".\n', bind_policy)[0]
+        wrapped = claim_findings("skills/delta/references/deferred.md",
+                                 'AGENTS.md says "Authorize the orbital\nteapot".\n', bind_policy)[0]
+        expect_red("C12 identity of a stale quote survives a line wrap inside the quote",
+                   lambda: one_line[0]["key"] == wrapped[0]["key"]
+                   and one_line[0]["key"] == claim_identity_key(json.dumps(["Authorize the orbital teapot"])))
+        expect_red("C12 identity of a negated claim is the JSON list of its bound quotes",
+                   lambda: two_bound[0]["key"] == claim_identity_key(json.dumps(
+                       ["Named a tool? Run exactly that and stop.", "Default to one agent and no fan-out."])))
+        # A private-use token with an index past the lists is judged as text, never indexed.
+        forged_index = c12_on('AGENTS.md says "7".\n')
+        expect_red("C12 strips a forged private-use token with an out-of-range index and judges the rest",
+                   lambda: any(c == "C12" and "stale quote: '7'" in d for c, d in forged_index.failures))
+        triple = c12_on('Run ```printf "fabricated policy"``` before reading AGENTS.md.\n')
+        expect_red("C12 control: a triple-backtick inline code span holding a quote is not a citation",
+                   lambda: not triple.failures)
+        expect_red("the lambda sweep rejects a comprehension over an empty frozenset() and over dict()",
+                   lambda: vacuous_expect_red_lines('expect_red("x", lambda: all(x for x in frozenset()))') == [1]
+                   and vacuous_expect_red_lines('expect_red("x", lambda: all(x for x in dict()))') == [1]
+                   and vacuous_expect_red_lines('expect_red("x", lambda: all(x for x in items))') == [])
         os.remove(os.path.join(bind_root, "AGENTS.md"))
         no_policy = Run(bind_root, ci=True)
         no_policy.c12_claim_binding()

@@ -182,7 +182,7 @@ SELFTEST_SUITES = [
     ("verify-review-publication",
      ["tools/verify-review-publication.py", "--selftest"], 94),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 53),
-    ("install-claude", ["tools/install-claude.py", "--selftest"], 188),
+    ("install-claude", ["tools/install-claude.py", "--selftest"], 192),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
     ("ci-gate", ["tools/ci-gate.py", "--selftest"], 345),
     ("write-mutation-receipt",
@@ -275,7 +275,7 @@ SELFTEST_TIMEOUTS = {
     "ci-gate": 120,
     "fuzz-judge-diff": 25,
     # Stages and activates several temporary trees, runs three reviewer reproductions as
-    # subprocesses and eleven fixture hooks in fresh interpreters; measured 16.2s at 188 proofs.
+    # subprocesses and sixteen fixture hooks in fresh interpreters; measured 16.1s at 192 proofs.
     "install-claude": 60,
 }
 DEFAULT_SELFTEST_TIMEOUT = 15
@@ -1335,7 +1335,8 @@ def claim_blocks(text):
     character at least as long, followed by nothing but spaces, closes it; an unclosed fence
     runs to the end of the file. Indentation before a fence is not limited to GFM's three
     spaces: a fence inside a list item sits at the item's own offset, and this scanner has
-    no container model. A table row is its own block: rows carry no sentence terminator, so
+    no container model, so a fence inside a block quote (`> ```) is not seen either; the
+    governed corpus has neither. A table row is its own block: rows carry no sentence terminator, so
     a quoted phrase in one row and a file mention in another would otherwise read as one
     sentence.
     """

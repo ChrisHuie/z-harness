@@ -210,10 +210,14 @@ therefore outside its argv-only proof boundary, especially when a command relies
 grep engine. The shared policy requires explicit `git grep -P` for PCRE atoms; sandbox and approval
 policy remain the authority boundary if hidden configuration changes that engine.
 
-C9's event allowlist follows the generated/runtime schema observed in Codex CLI 0.144.4. That schema
-contains ten events and does not contain `SessionEnd`; 0.144.4 silently drops that registration even
-though the public manual currently lists it. The gate rejects `SessionEnd` until an installed runtime
-accepts and executes it, and this compatibility pin must be rechecked when Codex is upgraded.
+C9's event allowlist is the twelve hook events whose input schemas are embedded in the installed
+Codex CLI 0.154.0 binary: `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`,
+`PostCompact`, `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `SubagentStart`, `SubagentStop`,
+`Stop`, and `Interrupt`. `SessionEnd` was observed executing under `codex exec` on 2026-10-15 and
+its envelope is committed under `hooks/fixtures_codex/`. `harness_check.py --verify-runtime`
+re-reads the installed binary for the event list, the per-event required-field lists, and the
+`project_doc_max_bytes` default, so an upgrade that changes them reddens the verifier rather than
+the pin going stale in prose.
 
 Hooks are guardrails, not a complete security boundary: specialized tool paths can opt out, and a
 PostToolUse hook cannot undo completed side effects. Sandbox and approval policy remain the primary

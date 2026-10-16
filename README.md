@@ -120,8 +120,13 @@ same shared policy at both user and project scope.
 | `hooks/announced_work_guard.py` | Claude | Stop hook that blocks a final message which announces work that has not begun; no claimed Codex equivalent |
 | `hooks/codex_session_start.py` | Codex | injects mandatory shared policy, resolved adapter commands, and optional host-local context |
 | `$CODEX_HOME/z-harness/AGENTS.local.md` | local Codex host | optional non-packaged machine instructions appended by the session adapter |
-| `hooks/harness_check.py` | shared | mechanical gate over skills, hooks, context files, and plugin packaging |
-| `hooks/harness_report.py` | Claude | transcript evidence for Claude skill firing/reference reads |
+| `hooks/harness_check.py` | shared | mechanical gate over skills, hooks, context files, plugin packaging, claim binding, eval coverage, budget ceilings, and envelope fixtures; `--verify-runtime` reads the installed binaries |
+| `hooks/harness_health.sh` | Claude | weekly health run; exits non-zero when the gate or the runtime verifier fails |
+| `hooks/harness_report.py` | Claude | transcript evidence for Claude skill firing/reference reads; capture is a per-context intersection, timestamps are UTC |
+| `hooks/fixtures_codex/` | Codex | six hook envelopes captured from codex-cli 0.154.0 plus one labeled synthetic Stop with a null message |
+| `tools/install-claude.py` | Claude | generates the user-level instruction file from `AGENTS.md` plus the adapter section; stages a versioned tree under `~/.claude/harness/<version>/`, activates it by one atomic settings replace of receipt-owned hook entries, and reports drift with `--check` |
+| `release/evals.json` | shared | eval coverage manifest: every skill listed as tested or exempt with a reason; `required` scenarios must grade mechanically under `--run` |
+| `contracts/budget-ceilings.json` | shared | recorded size ceilings for `AGENTS.md` and the generated instruction file, plus the hard caps the gate's constants pin |
 | `tools/cc-cost.py` | Claude | Claude request-deduplicated token accounting |
 | `tools/codex-cost.py` | Codex | per-request token accounting with copied/replayed record dedupe |
 | `tools/claim-provenance.py` | shared | explicitly bound byte-exact quote and successful-read provenance checks for local documents |
@@ -222,6 +227,10 @@ an explicit pattern engine when rewriting a questioned command.
 ```text
 python3 hooks/harness_check.py
 python3 hooks/harness_check.py --selftest
+python3 hooks/harness_check.py --verify-runtime
+python3 tools/install-claude.py --selftest
+python3 tools/install-claude.py --render
+python3 tools/install-claude.py --check
 python3 hooks/bash_command_guard.py --selftest
 python3 hooks/bash_command_guard.py --perf
 python3 hooks/guards/git_grep_engine_guard.py --perf
@@ -295,8 +304,31 @@ turn red; a zero-input scan is an error, not a clean verdict. C1 requires
 every direct selftest to be registered with a positive floor and a unique terminal suite receipt;
 `harness_check.py` is the sole recursive meta-suite exemption.
 
-Skill contract eval validation is free and offline. `tools/run-skill-evals.py --run` executes
-headless model scenarios and spends API budget, so it remains manual.
+Two checks are red by design until their worklists are worked off, and each prints its list. C12
+requires every skill sentence that names the always-on file (`~/.claude/CLAUDE.md`, or `AGENTS.md`
+with a section heading, a quoted phrase, or a line number) to carry a straight-quoted phrase that is
+verbatim in `AGENTS.md`; a line citation, an unbound claim, a stale quote, a negated claim whose
+phrase is present, and a policy sentence duplicated outside a quote each fail. C13 requires
+`release/evals.json` to list every skill as tested or exempt. Later work may only shrink either list.
+C14 holds `AGENTS.md` and the generated instruction file at or under the sizes recorded in
+`contracts/budget-ceilings.json`, and pins the dynamic hook block (7,500 characters, 190 lines) and
+per-turn carrier (600 bytes) ceilings under the runtime caps. C15 decodes every committed hook
+envelope against its event's required-field list.
+
+`harness_check.py --verify-runtime` reads the installed Claude CLI, every installed desktop build,
+and the installed Codex binary for the anchored contracts (Stop fields, `afkTimeoutMs`, the hook
+event enums, SessionStart and UserPromptSubmit input and output fields, the 8,000-character and
+200-line hook-output cap, instruction-file validation, the twelve Codex events, each event's
+required-field list, and `project_doc_max_bytes`) with fixed-window byte searches. Anchor presence
+is structural evidence bound to a binary version; it never establishes dispatch, enforcement, or
+delivery, so the output also prints the host-scenario catalog with every scenario that has no
+recorded host run as UNVERIFIED. The weekly `hooks/harness_health.sh` runs both modes and exits
+non-zero when either fails.
+
+Skill contract eval validation is free and offline and includes the coverage manifest.
+`tools/run-skill-evals.py --run` executes headless model scenarios and spends API budget, so it
+remains manual; it exits non-zero when a scenario the manifest marks `required` does not grade every
+expectation mechanically.
 
 Document quote/citation scans are also manual because they require the target document, artifact
 root, and session transcript. Their detector selftest is blocking through C1.

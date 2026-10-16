@@ -28,15 +28,41 @@ Runs from either clone (repo root auto-detected from this file's location). Chec
       and the ban on conflating local commits with the GitHub PR remain present
   C11 claim-vocabulary coherence: the phrases AGENTS.md bans outright appear
       nowhere in the instruction corpus it governs
+  C12 skill claims about the always-on file bind to verbatim AGENTS.md text: every
+      sentence naming `~/.claude/CLAUDE.md`, or `AGENTS.md` with one of its section
+      headings, a straight-quoted phrase, or a line number, must carry a straight-quoted
+      phrase present in AGENTS.md (inside the named section when one is named). A
+      `CLAUDE.md:<n>` or `AGENTS.md:<n>` line citation, a bare `:<n>` citation, an
+      unbound claim, a stale quote, a negated claim whose quote IS present, and an
+      AGENTS.md sentence duplicated outside a quote each fail. The bare noun
+      "always-on" and generic CLAUDE.md/AGENTS.md class talk are out of scope. The
+      failure list is a worklist later phases may only shrink
+  C13 eval coverage: release/evals.json lists every skill as tested or exempt with a
+      reason; an unlisted skill is a worklist item later phases may only shrink
+  C14 budget ceilings: AGENTS.md and the generated instruction file never exceed the
+      sizes recorded in contracts/budget-ceilings.json (fail only on growth); the Claude
+      dynamic hook block and the per-turn carrier ceilings sit under the runtime caps and
+      match the record; C4, C5 and C9 stay as they are
+  C15 hook envelope fixtures decode: every Codex envelope under hooks/fixtures_codex/
+      carries every field its event's input schema requires, host paths are scrubbed,
+      the synthetic fixture is labeled, and the Claude Stop fixture decodes
 
 Exit codes: 0 all checks pass · 1 one or more checks failed · 2 usage error or
 zero inputs (an empty scan set is an error, never a clean verdict).
 
-  harness_check.py             run every check (local mode)
-  harness_check.py --ci        skip [local]-tagged checks (no ~/.claude, no
-                               claude binary, no launchd on the runner)
-  harness_check.py --selftest  prove each check can go RED on a planted-defect
-                               tree, then exit
+  harness_check.py                  run every check (local mode)
+  harness_check.py --ci             skip [local]-tagged checks (no ~/.claude, no
+                                    claude binary, no launchd on the runner)
+  harness_check.py --selftest       prove each check can go RED on a planted-defect
+                                    tree, then exit
+  harness_check.py --verify-runtime structural evidence only: read the installed
+                                    Claude binaries (CLI and desktop builds) and the
+                                    installed Codex binary for the anchored contracts
+                                    with fixed-window byte searches, then print the
+                                    host-scenario catalog with every scenario that
+                                    has no recorded host run as UNVERIFIED. Anchor
+                                    presence is version-bound structural evidence; it
+                                    never proves dispatch, enforcement, or delivery
 """
 import fnmatch
 import hashlib
@@ -53,7 +79,7 @@ import sys
 import tempfile
 import time
 
-VERSION = "3.3.0"
+VERSION = "3.4.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOLS_DIR = os.path.join(ROOT, "tools")
 if TOOLS_DIR not in sys.path:
@@ -117,7 +143,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 236
+SELFTEST_FLOOR = 282
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -138,7 +164,7 @@ SELFTEST_SUITES = [
      ["hooks/guards/credential_reach_guard.py", "--selftest"], 84),
     ("askq_timeout_guard", ["hooks/askq_timeout_guard.py", "--selftest"], 13),
     ("announced_work_guard", ["hooks/announced_work_guard.py", "--selftest"], 922),
-    ("harness_report", ["hooks/harness_report.py", "--selftest"], 12),
+    ("harness_report", ["hooks/harness_report.py", "--selftest"], 33),
     ("cc-cost", ["tools/cc-cost.py", "--selftest"], 8),
     ("codex-cost", ["tools/codex-cost.py", "--selftest"], 28),
     ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 83),
@@ -146,7 +172,7 @@ SELFTEST_SUITES = [
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 25),
     ("verify-review-publication",
      ["tools/verify-review-publication.py", "--selftest"], 94),
-    ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
+    ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 26),
     ("install-claude", ["tools/install-claude.py", "--selftest"], 41),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
     ("ci-gate", ["tools/ci-gate.py", "--selftest"], 345),
@@ -288,6 +314,10 @@ PRODUCTION_CHECKS = (
     ("C9", "c9_codex_package"),
     ("C10", "c10_delivery_contract"),
     ("C11", "c11_claim_vocabulary"),
+    ("C12", "c12_claim_binding"),
+    ("C13", "c13_eval_coverage"),
+    ("C14", "c14_budget_ceilings"),
+    ("C15", "c15_envelope_fixtures"),
 )
 
 # C2: basenames shared verbatim across skills. A same-basename file NOT listed in
@@ -411,10 +441,14 @@ REQUIRED_CLAUDE_HANDLERS = [
 
 RESERVED_BASENAMES = {"claude.md", "agents.md", "gemini.md"}
 CODEX_HOOK_TOP_LEVEL_KEYS = {"description", "hooks"}
+# The twelve events whose input schemas are embedded in the installed codex-cli 0.154.0 binary;
+# --verify-runtime re-reads the binary for this list. SessionEnd and Interrupt were absent from
+# the 0.144.4 schema this allowlist once followed; SessionEnd was observed executing on
+# 2026-10-15 and its envelope is committed under hooks/fixtures_codex/.
 CODEX_VALID_HOOK_EVENTS = {
     "PreToolUse", "PermissionRequest", "PostToolUse", "PreCompact", "PostCompact",
-    "SessionStart", "SubagentStart", "SubagentStop",
-    "UserPromptSubmit", "Stop",
+    "SessionStart", "SessionEnd", "UserPromptSubmit", "SubagentStart", "SubagentStop",
+    "Stop", "Interrupt",
 }
 CODEX_REQUIRED_PACKAGE_EVENTS = {"SessionStart", "SubagentStart", "PreToolUse"}
 CODEX_HOOK_ENTRY_KEYS = {"matcher", "hooks", "enabled", "trusted_hash"}
@@ -447,6 +481,317 @@ DELIVERY_CONTRACT = {
         "A failed check leaves authority active for in-scope",
     ],
 }
+
+# ---- C12: skill claims about the always-on file ----------------------------------
+# A claim sentence names the installed always-on file by path, or names AGENTS.md together
+# with one of its section headings, a straight-quoted phrase, or a line number. Every such
+# sentence binds to a straight-quoted phrase present verbatim in AGENTS.md; an edited phrase
+# then fails the citing skill loudly, which is the intended signal. No rule identifiers are
+# added to the policy for this: the quote IS the binding.
+ALWAYS_ON_PATH = re.compile(r"`?~/\.claude/CLAUDE\.md`?")
+POLICY_LINE_CITATION = re.compile(r"(?:CLAUDE|AGENTS)\.md`?\s*:\s*\d+(?:\s*[-–]\s*\d+)?")
+BARE_LINE_CITATION = re.compile(r"`:\d+(?:-\d+)?`")
+AGENTS_QUOTE_MENTION = re.compile(r"`?AGENTS\.md`?[^\"\n]{0,40}\"")
+STRAIGHT_QUOTE = re.compile(r"\"([^\"]{3,400})\"", re.S)
+QUOTE_ELLIPSIS = re.compile(r"…|\.\.\.")
+CLAIM_NEGATION = re.compile(
+    r"\b(?:does not|do not|did not|is not|are not|was not|were not|no longer|not carried|"
+    r"not carry|absent from|nowhere in)\b", re.I)
+SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+")
+DUPLICATE_MIN_WORDS = 8
+C12_SCOPE = ("sentences naming ~/.claude/CLAUDE.md, or AGENTS.md with a section heading, a "
+             "straight-quoted phrase, or a line number; the bare noun always-on and generic "
+             "CLAUDE.md/AGENTS.md class talk are out of scope")
+
+# ---- C13 / C14 / C15: manifests and records --------------------------------------
+EVAL_MANIFEST = "release/evals.json"
+BUDGET_CEILINGS = "contracts/budget-ceilings.json"
+# Runtime caps read in-binary (see CLAUDE_RUNTIME_ANCHORS, hook_output.cap_table), and the
+# harness's own ceilings under them. The adapter that will emit the dynamic block asserts
+# CLAUDE_DYNAMIC_BLOCK_* in its selftest; the per-turn carrier asserts the carrier ceiling.
+CLAUDE_HOOK_CONTEXT_CHAR_CAP = 8000
+CLAUDE_HOOK_CONTEXT_LINE_CAP = 200
+CLAUDE_DYNAMIC_BLOCK_CHAR_CEILING = 7500
+CLAUDE_DYNAMIC_BLOCK_LINE_CEILING = 190
+PROMPT_SUBMIT_CARRIER_BYTE_CEILING = 600
+CODEX_SESSION_START_BYTE_CEILING = 30000
+CODEX_SESSION_START_CONSTANT = re.compile(r"^MAX_CONTEXT_BYTES = ([0-9_]+)$", re.M)
+CODEX_FIXTURE_DIR = "hooks/fixtures_codex"
+CODEX_FIXTURES = {
+    "C1_session_start.json": "SessionStart",
+    "C2_user_prompt_submit.json": "UserPromptSubmit",
+    "C3_pre_tool_use.json": "PreToolUse",
+    "C4_post_tool_use.json": "PostToolUse",
+    "C5_stop.json": "Stop",
+    "C6_session_end.json": "SessionEnd",
+    "C7_stop_null_message_synthetic.json": "Stop",
+}
+CODEX_SYNTHETIC_FIXTURES = {"C7_stop_null_message_synthetic.json"}
+CLAUDE_STOP_FIXTURE = "hooks/fixtures_stop/S1_stop_real_envelope.json"
+# Per-event required-field lists read from the input schemas embedded in codex-cli 0.154.0
+# (each schema's own top-level "required" array). C15 decodes the committed fixtures against
+# this table; --verify-runtime compares the table against the installed binary.
+CODEX_HOOK_INPUT_REQUIRED = {
+    "PreToolUse": ("cwd", "hook_event_name", "model", "permission_mode", "session_id",
+                   "tool_input", "tool_name", "tool_use_id", "transcript_path", "turn_id"),
+    "PermissionRequest": ("cwd", "hook_event_name", "model", "permission_mode", "session_id",
+                          "tool_input", "tool_name", "transcript_path", "turn_id"),
+    "PostToolUse": ("cwd", "hook_event_name", "model", "permission_mode", "session_id",
+                    "tool_input", "tool_name", "tool_response", "tool_use_id",
+                    "transcript_path", "turn_id"),
+    "PreCompact": ("cwd", "hook_event_name", "model", "session_id", "transcript_path",
+                   "trigger", "turn_id"),
+    "PostCompact": ("cwd", "hook_event_name", "model", "session_id", "transcript_path",
+                    "trigger", "turn_id"),
+    "SessionStart": ("cwd", "hook_event_name", "model", "permission_mode", "session_id",
+                     "source", "transcript_path"),
+    "SessionEnd": ("cwd", "hook_event_name", "reason", "session_id", "transcript_path"),
+    "UserPromptSubmit": ("cwd", "hook_event_name", "model", "permission_mode", "prompt",
+                         "session_id", "transcript_path", "turn_id"),
+    "SubagentStart": ("agent_id", "agent_type", "cwd", "hook_event_name", "model",
+                      "permission_mode", "session_id", "transcript_path", "turn_id"),
+    "SubagentStop": ("agent_id", "agent_transcript_path", "agent_type", "cwd",
+                     "hook_event_name", "last_assistant_message", "model", "permission_mode",
+                     "session_id", "stop_hook_active", "transcript_path", "turn_id"),
+    "Stop": ("cwd", "hook_event_name", "last_assistant_message", "model", "permission_mode",
+             "session_id", "stop_hook_active", "transcript_path", "turn_id"),
+    "Interrupt": ("cwd", "hook_event_name", "model", "permission_mode", "session_id",
+                  "transcript_path", "turn_id"),
+}
+CODEX_SESSION_START_SOURCES = ("startup", "resume", "clear", "compact")
+CODEX_PERMISSION_MODES = ("default", "acceptEdits", "plan", "dontAsk", "bypassPermissions")
+CODEX_EVENT_KEBAB = {
+    "PreToolUse": "pre-tool-use", "PermissionRequest": "permission-request",
+    "PostToolUse": "post-tool-use", "PreCompact": "pre-compact", "PostCompact": "post-compact",
+    "SessionStart": "session-start", "SessionEnd": "session-end",
+    "UserPromptSubmit": "user-prompt-submit", "SubagentStart": "subagent-start",
+    "SubagentStop": "subagent-stop", "Stop": "stop", "Interrupt": "interrupt",
+}
+CODEX_EVENT_VARIANT_RUN = (
+    b"PreToolUsePermissionRequestPostToolUsePreCompactPostCompactSessionStartSessionEnd"
+    b"UserPromptSubmitSubagentStartSubagentStopStopInterrupt"
+)
+
+# ---- --verify-runtime: anchored contracts and the host-scenario catalog ------------
+# Each anchor is a fixed-window byte search: the needle is located with bytes.find, and a
+# bounded window around it is checked by a small regex or parser. No regex runs over the
+# whole binary. A needle may occur many times; the anchor holds when ANY occurrence's window
+# satisfies the check. `sample` is bytes that satisfy the anchor, used only to assemble the
+# selftest's fixture binary; against a real binary the sample plays no part.
+_IDENT = rb"[A-Za-z0-9_$]+"
+
+
+def _regex_anchor(pattern):
+    compiled = re.compile(pattern)
+
+    def verify(window):
+        return "" if compiled.search(window) else f"window does not match {pattern!r}"
+    return verify
+
+
+def _event_array_anchor(required):
+    def verify(window):
+        end = window.find(b"]")
+        if end < 0:
+            return "no closing bracket in window"
+        try:
+            names = json.loads(window[:end + 1].decode("ascii"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            return f"event array does not parse: {exc}"
+        missing = sorted(set(required) - set(names))
+        return f"event array lacks {missing}" if missing else ""
+    return verify
+
+
+CLAUDE_REQUIRED_EVENTS = ("PreToolUse", "PostToolUse", "UserPromptSubmit", "SessionStart",
+                          "SessionEnd", "Stop", "SubagentStart", "SubagentStop",
+                          "PreCompact", "PermissionRequest")
+CLAUDE_EVENT_ARRAY_SAMPLE = (
+    b'["PreToolUse","PostToolUse","PostToolUseFailure","PostToolBatch","Notification",'
+    b'"UserPromptSubmit","UserPromptExpansion","SessionStart","SessionEnd","Stop","StopFailure",'
+    b'"SubagentStart","SubagentStop","PreCompact","PostCompact","PreModelSwitch",'
+    b'"PostModelSwitch","PermissionRequest","PermissionDenied","Setup"]'
+)
+# (name, needle, bytes before, bytes after, verify, sample, what it establishes)
+CLAUDE_RUNTIME_ANCHORS = (
+    ("stop.input.fields", b'("Stop"),stop_hook_active:', 0, 160,
+     _regex_anchor(rb'\("Stop"\),stop_hook_active:' + _IDENT + rb'\(\),last_assistant_message:'
+                   + _IDENT + rb'\(\)\.optional\(\)'),
+     b'hook_event_name:C("Stop"),stop_hook_active:H(),last_assistant_message:o().optional().describe("Text")',
+     "Stop input: stop_hook_active required, last_assistant_message optional"),
+    ("askq.afkTimeoutMs.optional", b"afkTimeoutMs:", 0, 80,
+     _regex_anchor(rb"afkTimeoutMs:" + _IDENT + rb"\(\)\.int\(\)\.positive\(\)\.optional\(\)"),
+     b"afkTimeoutMs:v().int().positive().optional().describe(\"Set when\")",
+     "AskUserQuestion result: afkTimeoutMs is an optional positive integer"),
+    ("pretooluse.input.tool_input", b'("PreToolUse"),tool_name:', 0, 160,
+     _regex_anchor(rb'\("PreToolUse"\),tool_name:' + _IDENT + rb'\(\),tool_input:' + _IDENT
+                   + rb'\(\),tool_use_id:'),
+     b'hook_event_name:C("PreToolUse"),tool_name:o(),tool_input:oe(),tool_use_id:o()',
+     "PreToolUse input: tool_name, tool_input, tool_use_id"),
+    ("agent.tool_input.prompt", b'"The task for the agent to perform"', 0, 0, lambda w: "",
+     b'oys="The task for the agent to perform"',
+     "Agent tool: the prompt parameter the spawn guard reads is the task text"),
+    ("events.registered", b'["PreToolUse","PostToolUse","PostToolUseFailure","PostToolBatch","Notification","UserPromptSubmit"', 0, 1200,
+     _event_array_anchor(CLAUDE_REQUIRED_EVENTS), CLAUDE_EVENT_ARRAY_SAMPLE,
+     "hook event enum carries every event the harness registers or reads"),
+    ("sessionstart.input.source", b'("SessionStart"),source:', 0, 160,
+     _regex_anchor(rb'\("SessionStart"\),source:' + _IDENT
+                   + rb'\(\["startup","resume","clear","compact","fork"\]\)'),
+     b'hook_event_name:C("SessionStart"),source:U(["startup","resume","clear","compact","fork"]),agent_type:o().optional()',
+     "SessionStart input: source enum startup|resume|clear|compact|fork"),
+    ("userpromptsubmit.input.prompt_source", b'("UserPromptSubmit"),prompt:', 0, 240,
+     _regex_anchor(rb'\("UserPromptSubmit"\),prompt:' + _IDENT + rb'\(\),source:' + _IDENT
+                   + rb'\(\["user","sdk","system","loop_wakeup","schedule_wakeup","poll_event"\]\)\.optional\(\)'),
+     b'hook_event_name:C("UserPromptSubmit"),prompt:o(),source:U(["user","sdk","system","loop_wakeup","schedule_wakeup","poll_event"]).optional().describe("Who")',
+     "UserPromptSubmit input: prompt, and the optional source enum incl. sdk"),
+    ("sessionstart.output.additionalContext", b'("SessionStart"),additionalContext:', 0, 100,
+     _regex_anchor(rb'\("SessionStart"\),additionalContext:' + _IDENT + rb'\(\)\.optional\(\)'),
+     b'hookEventName:C("SessionStart"),additionalContext:o().optional(),initialUserMessage:o().optional()',
+     "SessionStart output accepts hookSpecificOutput.additionalContext"),
+    ("userpromptsubmit.output.additionalContext", b'("UserPromptSubmit"),additionalContext:', 0, 100,
+     _regex_anchor(rb'\("UserPromptSubmit"\),additionalContext:' + _IDENT + rb'\(\)\.optional\(\)'),
+     b'hookEventName:C("UserPromptSubmit"),additionalContext:o().optional(),sessionTitle:o().optional()',
+     "UserPromptSubmit output accepts hookSpecificOutput.additionalContext"),
+    ("hook_output.cap_table", b"additionalContext:8000,permissionDecisionReason:2000}", 90, 140,
+     _regex_anchor(rb"\{reason:2000,stopReason:2000,systemMessage:4000,additionalContext:8000,"
+                   rb"permissionDecisionReason:2000\}," + _IDENT + rb"=200,"),
+     b"var T1={reason:2000,stopReason:2000,systemMessage:4000,additionalContext:8000,permissionDecisionReason:2000},rE=200,v1={reason:20}",
+     "hook output cap table: additionalContext 8000 chars and 200 lines on the capped path"),
+    ("instructionFiles.shape", b"instructionFiles that is not a list of { path, kind, content }", 0, 0,
+     lambda w: "", b"instructionFiles that is not a list of { path, kind, content }",
+     "instructionFiles hook output is a list of { path, kind, content }"),
+    ("instructionFiles.kind_validation", b"an instruction file whose kind is not one of ", 0, 0,
+     lambda w: "", b"an instruction file whose kind is not one of ",
+     "instructionFiles entries are validated by kind"),
+)
+
+
+def _codex_schema_window(window):
+    """The last top-level `"required"` array before the title, as a tuple."""
+    matches = list(re.finditer(rb'\n  "required": \[\n((?:    "[^"]+",?\n)+)  \]', window))
+    if not matches:
+        return None
+    return tuple(item.decode("ascii").strip().strip('",')
+                 for item in matches[-1].group(1).split(b"\n") if item.strip())
+
+
+def _codex_required_anchor(event):
+    expected = CODEX_HOOK_INPUT_REQUIRED[event]
+
+    def verify(window):
+        found = _codex_schema_window(window)
+        if found is None:
+            return "no top-level required array before the title"
+        if found != expected:
+            return f"required {list(found)} != recorded {list(expected)}"
+        return ""
+    return verify
+
+
+def _codex_enum_anchor(prop, expected):
+    pattern = re.compile(
+        rb'"' + prop.encode("ascii") + rb'": \{\n      "enum": \[\n((?:        "[^"]+",?\n)+)      \]')
+
+    def verify(window):
+        matches = list(pattern.finditer(window))
+        if not matches:
+            return f"no {prop} enum in window"
+        found = tuple(item.decode("ascii").strip().strip('",')
+                      for item in matches[-1].group(1).split(b"\n") if item.strip())
+        return "" if found == tuple(expected) else f"{prop} enum {list(found)} != {list(expected)}"
+    return verify
+
+
+def _codex_presence_anchor(present, absent):
+    def verify(window):
+        for needle in present:
+            if needle not in window:
+                return f"missing {needle!r}"
+        for needle in absent:
+            if needle in window:
+                return f"unexpected {needle!r}"
+        return ""
+    return verify
+
+
+def codex_schema_sample(event, required=None, extra_props=""):
+    """A minimal schema text in the binary's layout: `<kebab>.command.input{...}` then title."""
+    kebab = CODEX_EVENT_KEBAB[event]
+    required = CODEX_HOOK_INPUT_REQUIRED[event] if required is None else required
+    props = ''.join(f'    "{name}": {{\n      "type": "string"\n    }},\n' for name in required)
+    body = (f'{kebab}.command.input{{\n  "$schema": "x",\n  "properties": {{\n{props}{extra_props}'
+            f'    "hook_event_name": {{\n      "const": "{event}",\n      "type": "string"\n    }}\n  }},\n'
+            f'  "required": [\n' + "".join(f'    "{name}",\n' for name in required[:-1])
+            + f'    "{required[-1]}"\n  ],\n  "title": "{kebab}.command.input",\n  "type": "object"\n}}')
+    return body.encode("utf-8")
+
+
+def _codex_anchor_table():
+    anchors = [
+        ("events.twelve", CODEX_EVENT_VARIANT_RUN, 0, 0, lambda w: "", CODEX_EVENT_VARIANT_RUN,
+         "the twelve hook event names in one serde variant run"),
+        ("project_doc_max_bytes.default", b"project_doc_max_bytes = 32768", 0, 0, lambda w: "",
+         b"project_doc_max_bytes = 32768", "AGENTS chain budget default 32768 bytes"),
+        ("pretooluse.ask_rejected_at_runtime",
+         b"PreToolUse hook returned unsupported permissionDecision:ask", 0, 0, lambda w: "",
+         b"PreToolUse hook returned unsupported permissionDecision:ask",
+         "permissionDecision ask is parsed but rejected by the dispatcher"),
+    ]
+    for event in CODEX_HOOK_INPUT_REQUIRED:
+        kebab = CODEX_EVENT_KEBAB[event]
+        anchors.append((f"schema.{event}.required", f'"title": "{kebab}.command.input"'.encode("ascii"),
+                        2600, 0, _codex_required_anchor(event), codex_schema_sample(event),
+                        f"{event} input schema required fields"))
+    session_sample = codex_schema_sample(
+        "SessionStart",
+        extra_props='    "source": {\n      "enum": [\n' + "".join(
+            f'        "{s}",\n' for s in CODEX_SESSION_START_SOURCES[:-1])
+        + f'        "{CODEX_SESSION_START_SOURCES[-1]}"\n      ],\n      "type": "string"\n    }},\n')
+    anchors.append(("schema.SessionStart.source_enum", b'"title": "session-start.command.input"',
+                    2600, 0, _codex_enum_anchor("source", CODEX_SESSION_START_SOURCES),
+                    session_sample, "SessionStart source enum has no fork"))
+    pretool_sample = codex_schema_sample(
+        "PreToolUse",
+        extra_props='    "permission_mode": {\n      "enum": [\n' + "".join(
+            f'        "{m}",\n' for m in CODEX_PERMISSION_MODES[:-1])
+        + f'        "{CODEX_PERMISSION_MODES[-1]}"\n      ],\n      "type": "string"\n    }},\n')
+    anchors.append(("schema.PreToolUse.permission_mode_enum", b'"title": "pre-tool-use.command.input"',
+                    2600, 0, _codex_enum_anchor("permission_mode", CODEX_PERMISSION_MODES),
+                    pretool_sample, "permission_mode enum incl. bypassPermissions"))
+    anchors.append(("schema.UserPromptSubmit.no_source", b"user-prompt-submit.command.input{", 0, 2600,
+                    _codex_presence_anchor((b'"prompt": {',), (b'"source": {',)),
+                    codex_schema_sample("UserPromptSubmit"),
+                    "UserPromptSubmit input carries prompt and no source"))
+    stop_sample = codex_schema_sample(
+        "Stop",
+        extra_props='    "last_assistant_message": {\n      "$ref": "#/definitions/NullableString"\n    },\n'
+                    '    "stop_hook_active": {\n      "type": "boolean"\n    },\n')
+    anchors.append(("schema.Stop.nullable_message", b'"title": "stop.command.input"', 2600, 0,
+                    _codex_presence_anchor((b'"last_assistant_message": {\n      "$ref": "#/definitions/NullableString"',
+                                            b'"stop_hook_active": {\n      "type": "boolean"'), ()),
+                    stop_sample, "Stop input: last_assistant_message nullable, stop_hook_active boolean"))
+    return tuple(anchors)
+
+
+CODEX_RUNTIME_ANCHORS = _codex_anchor_table()
+
+# What a host run would have to establish per runtime before any of the above counts as more
+# than structural evidence. A record here is (runtime, scenario) -> {"host": ..., "date": ...,
+# "result": ...}; none exists yet, so every scenario prints as UNVERIFIED.
+HOST_SCENARIO_CATALOG = tuple(
+    (runtime, scenario, meaning)
+    for runtime in ("claude", "codex")
+    for scenario, meaning in (
+        ("allow", "a PreToolUse hook answering allow lets the call run"),
+        ("deny", "a PreToolUse hook answering deny stops the call and the reason reaches the model"),
+        ("malformed output", "a hook printing non-JSON is treated as the documented failure, not as allow"),
+        ("crash", "a hook exiting non-zero without a reason is treated as the documented failure"),
+        ("timeout", "a hook past its registered timeout is treated as the documented failure"),
+        ("untrusted hook", "a changed or untrusted hook definition is skipped and reported"),
+        ("delivered context", "additionalContext from SessionStart and UserPromptSubmit reaches the model"),
+    )
+)
+HOST_SCENARIO_EVIDENCE = {}
 
 
 def body_chars(path):
@@ -899,6 +1244,158 @@ def git_owned_live_paths(root, runner=None):
         "paths": tuple(retained),
         "error": "",
     }
+
+def load_tool_module(name):
+    """Import a hyphenated tool script by path; the gate's own tools, never the fixture's."""
+    path = os.path.join(ROOT, "tools", f"{name}.py")
+    spec = importlib.util.spec_from_file_location(f"_harness_check_{name.replace('-', '_')}", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def normalize_policy_text(text):
+    """Collapse markup and whitespace so a quoted phrase and its source compare as prose."""
+    text = text.replace("`", "").replace("*", "").replace("’", "'")
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+def agents_sections(agents_text):
+    """-> [(heading or '', text)] by `## ` heading, preamble first."""
+    sections, heading, lines = [], "", []
+    for line in agents_text.splitlines():
+        if line.startswith("## "):
+            sections.append((heading, "\n".join(lines)))
+            heading, lines = line[3:].strip(), []
+        else:
+            lines.append(line)
+    sections.append((heading, "\n".join(lines)))
+    return sections
+
+
+def claim_blocks(text):
+    """-> [(first line number, block text)]: paragraphs, list items and headings."""
+    blocks, current, start = [], [], 0
+    for number, line in enumerate(text.splitlines(), 1):
+        item = re.match(r"\s*(?:[-*+]|\d+\.)\s", line) is not None
+        heading = line.startswith("#")
+        if not line.strip():
+            if current:
+                blocks.append((start, "\n".join(current)))
+                current = []
+            continue
+        if (item or heading) and current:
+            blocks.append((start, "\n".join(current)))
+            current = []
+        if not current:
+            start = number
+        current.append(line)
+        if heading:
+            blocks.append((start, "\n".join(current)))
+            current = []
+    if current:
+        blocks.append((start, "\n".join(current)))
+    return blocks
+
+
+def quote_binds(quote, policy_normalized):
+    """Every ellipsis-separated fragment of the quote appears verbatim in the policy text."""
+    # Punctuation at a fragment's boundary belongs to the citing sentence, not to the claim:
+    # a skill may close its quote with a period where the policy continues with a comma.
+    fragments = [normalize_policy_text(f).strip(" ,;:.!()[]") for f in QUOTE_ELLIPSIS.split(quote)]
+    fragments = [f for f in fragments if f]
+    return bool(fragments) and all(f in policy_normalized for f in fragments)
+
+
+def claim_findings(rel, text, agents_text):
+    """-> (findings, counters) for one governed file. A finding is (line, reason)."""
+    findings = []
+    counters = {"claims": 0, "bound": 0}
+    sections = agents_sections(agents_text)
+    whole = normalize_policy_text(agents_text)
+    by_heading = {h: normalize_policy_text(body) for h, body in sections if h}
+    headings = sorted(by_heading, key=len, reverse=True)
+    section_mention = re.compile(
+        r"`?AGENTS\.md`?\s*(?:§|section)?\s*,?\s*(" + "|".join(re.escape(h) for h in headings) + r")\b"
+    ) if headings else None
+    sentences_seen = set()
+    for start, block in claim_blocks(text):
+        block_lines = block.splitlines()
+
+        def line_of(offset):
+            return start + block.count("\n", 0, offset)
+
+        cited = False
+        for match in POLICY_LINE_CITATION.finditer(block):
+            findings.append((line_of(match.start()), f"line citation {match.group(0).strip()!r}: "
+                             f"cite a verbatim phrase, never a line number"))
+            cited = True
+        for match in BARE_LINE_CITATION.finditer(block):
+            findings.append((line_of(match.start()), f"bare line citation {match.group(0)}: cite a "
+                             f"verbatim phrase, never a line number"))
+            cited = True
+        # Mask straight-quoted spans before sentence splitting so a quoted question mark or
+        # period cannot split the sentence that carries it.
+        quotes = []
+
+        def mask(match):
+            quotes.append(match.group(1))
+            return f" QUOTE{len(quotes) - 1}Q "
+        masked = STRAIGHT_QUOTE.sub(mask, block)
+        offset = 0
+        for sentence in SENTENCE_BREAK.split(masked):
+            position = masked.find(sentence, offset)
+            offset = position + len(sentence) if position >= 0 else offset
+            section = section_mention.search(sentence) if section_mention else None
+            path_mention = ALWAYS_ON_PATH.search(sentence)
+            quote_mention = re.search(r"`?AGENTS\.md`?\s*,?\s*QUOTE\d+Q", sentence)
+            mention = path_mention or section or quote_mention
+            if mention is None:
+                continue
+            # Report the line carrying the file mention, not the sentence's first line: a
+            # masked quote before the mention may have spanned lines, so add those back.
+            prefix = masked[:max(position, 0) + mention.start()]
+            line = start + prefix.count("\n") + sum(
+                quotes[int(n)].count("\n") for n in re.findall(r"QUOTE(\d+)Q", prefix))
+            key = (line, sentence)
+            if key in sentences_seen:
+                continue
+            sentences_seen.add(key)
+            counters["claims"] += 1
+            if cited:
+                continue
+            quoted = [quotes[int(n)] for n in re.findall(r"QUOTE(\d+)Q", sentence)]
+            negated = CLAIM_NEGATION.search(sentence) is not None
+            scope = by_heading[section.group(1)] if section else whole
+            where = f"AGENTS.md section {section.group(1)!r}" if section else "AGENTS.md"
+            bound = [q for q in quoted if quote_binds(q, scope)]
+            if not quoted:
+                findings.append((line, "unbound claim about the always-on file: quote a verbatim "
+                                 "AGENTS.md phrase in straight double quotes, or drop the claim"))
+            elif negated and bound:
+                findings.append((line, f"negated claim contradicts {where}: {bound[0][:60]!r} is present"))
+            elif negated:
+                counters["bound"] += 1
+            elif bound:
+                counters["bound"] += 1
+            else:
+                findings.append((line, f"stale quote: {quoted[0][:70]!r} is not verbatim in {where}"))
+    # Duplication: a policy sentence restated outside a quote is a second copy on the same
+    # dispatch, which the routing rule forbids; a quoted citation is the sanctioned form.
+    unquoted = normalize_policy_text(STRAIGHT_QUOTE.sub(" ", text))
+    policy_prose = re.sub(r"^#.*$", "", agents_text, flags=re.M)
+    for sentence in SENTENCE_BREAK.split(re.sub(r"\s+", " ", policy_prose)):
+        if len(sentence.split()) < DUPLICATE_MIN_WORDS:
+            continue
+        needle = normalize_policy_text(sentence)
+        if needle and needle in unquoted:
+            index = unquoted.find(needle)
+            line = text.count("\n", 0, max(0, int(index * len(text) / max(1, len(unquoted))))) + 1
+            findings.append((line, f"duplicated policy sentence outside a quote: {sentence[:70]!r}"))
+    return findings, counters
+
 
 
 class Run:
@@ -1812,6 +2309,226 @@ class Run:
             + (f" — present: {hits}" if hits else ""),
         )
 
+    # ---- C12 ---------------------------------------------------------------
+    def c12_claim_binding(self):
+        """Every skill claim about the always-on file binds to verbatim AGENTS.md text."""
+        source = os.path.join(self.root, "AGENTS.md")
+        try:
+            if os.path.islink(source) or not os.path.isfile(source):
+                raise OSError("absent or symlinked outside the governed regular-file profile")
+            agents_text = open(source, encoding="utf-8").read()
+        except OSError as exc:
+            self.result("C12", False, f"cannot enforce: AGENTS.md unreadable: {exc}")
+            return
+        skills_dir = os.path.join(self.root, "skills")
+        if not os.path.isdir(skills_dir) or os.path.islink(skills_dir):
+            self.result("C12", False, "cannot enforce: skills directory absent or symlinked")
+            return
+        governed = {}
+        try:
+            for skill in sorted(os.listdir(skills_dir)):
+                skill_root = os.path.join(skills_dir, skill)
+                if not os.path.isdir(skill_root):
+                    continue
+                if os.path.islink(skill_root):
+                    raise OSError(f"skills/{skill} is a symlink")
+                body = os.path.join(skill_root, "SKILL.md")
+                if os.path.isfile(body) and not os.path.islink(body):
+                    governed[f"skills/{skill}/SKILL.md"] = open(body, encoding="utf-8").read()
+                references = os.path.join(skill_root, "references")
+                if not os.path.isdir(references) or os.path.islink(references):
+                    continue
+                for current, directories, files in os.walk(references):
+                    directories[:] = sorted(d for d in directories
+                                            if d not in {"evals", "scripts", "assets"}
+                                            and not os.path.islink(os.path.join(current, d)))
+                    for filename in sorted(files):
+                        if os.path.splitext(filename)[1].lower() not in {".md", ".yaml", ".yml"}:
+                            continue
+                        path = os.path.join(current, filename)
+                        if os.path.islink(path) or not os.path.isfile(path):
+                            raise OSError(f"reference file absent or symlinked: {path}")
+                        relative = os.path.relpath(path, self.root).replace(os.sep, "/")
+                        governed[relative] = open(path, encoding="utf-8").read()
+        except (OSError, UnicodeError) as exc:
+            self.result("C12", False, f"cannot enforce: governed corpus unreadable: {exc}")
+            return
+        if not governed:
+            self.result("C12", False, "cannot enforce: zero governed files")
+            return
+        claims = bound = failures = 0
+        for rel, text in sorted(governed.items()):
+            findings, counters = claim_findings(rel, text, agents_text)
+            claims += counters["claims"]
+            bound += counters["bound"]
+            for line, reason in sorted(findings):
+                failures += 1
+                self.result("C12", False, f"{rel}:{line}: {reason}")
+        self.result(
+            "C12", failures == 0,
+            f"always-on claims bind to verbatim AGENTS.md text: {claims} claim sentence(s) over "
+            f"{len(governed)} governed file(s), {bound} bound, {failures} finding(s); "
+            f"scope: {C12_SCOPE}",
+        )
+
+    # ---- C13 ---------------------------------------------------------------
+    def c13_eval_coverage(self):
+        """release/evals.json accounts for every skill; the unlisted set is the worklist."""
+        try:
+            evals = load_tool_module("run-skill-evals")
+            problems, summary = evals.validate_coverage(self.root)
+        except Exception as exc:
+            self.result("C13", False, f"cannot enforce: eval coverage module failed: {exc!r}")
+            return
+        for problem in problems:
+            self.result("C13", False, problem)
+        listed = summary["tested"] + summary["exempt"]
+        self.result(
+            "C13", not problems and listed > 0,
+            f"eval coverage manifest {EVAL_MANIFEST}: tested={summary['tested']} "
+            f"exempt={summary['exempt']} unlisted={summary['unlisted']} "
+            f"unknown={summary['unknown']} required_scenarios={summary['required']}",
+        )
+
+    # ---- C14 ---------------------------------------------------------------
+    def c14_budget_ceilings(self):
+        """Recorded ceilings fail only on growth; the hard margins sit under the runtime caps."""
+        path = os.path.join(self.root, BUDGET_CEILINGS)
+        try:
+            record = json.load(open(path, encoding="utf-8"))
+            ceilings = record["ceilings"]
+            hard = record["hard"]
+            if record.get("schema_version") != 1 or not isinstance(ceilings, dict) \
+                    or not isinstance(hard, dict):
+                raise ValueError("schema_version 1 with ceilings and hard objects expected")
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            self.result("C14", False, f"cannot enforce: {BUDGET_CEILINGS} unusable: {exc}")
+            return
+        try:
+            agents_bytes = os.path.getsize(os.path.join(self.root, "AGENTS.md"))
+        except OSError as exc:
+            self.result("C14", False, f"cannot measure AGENTS.md: {exc}")
+            return
+        try:
+            installer = load_tool_module("install-claude")
+            generated = installer.render_instruction_file(self.root)
+        except Exception as exc:
+            self.result("C14", False, f"cannot render the instruction file: {exc!r}")
+            return
+        generated_bytes = len(generated.encode("utf-8"))
+        generated_lines = len(generated.splitlines())
+        measured = (
+            ("AGENTS.md", "bytes", agents_bytes),
+            ("generated-instruction-file", "bytes", generated_bytes),
+            ("generated-instruction-file", "lines", generated_lines),
+        )
+        for name, unit, current in measured:
+            recorded = ceilings.get(name, {}).get(unit) if isinstance(ceilings.get(name), dict) else None
+            if not isinstance(recorded, int):
+                self.result("C14", False, f"{name} {unit}: no recorded ceiling in {BUDGET_CEILINGS}")
+                continue
+            note = "" if current == recorded else (
+                " (grew; raise the record only with the content that justifies it)"
+                if current > recorded else " (shrank; the record can be lowered)")
+            self.result("C14", current <= recorded,
+                        f"{name}: {current} {unit} <= recorded ceiling {recorded}{note}")
+        expected_hard = {
+            "claude-hook-context-cap": {"chars": CLAUDE_HOOK_CONTEXT_CHAR_CAP,
+                                        "lines": CLAUDE_HOOK_CONTEXT_LINE_CAP},
+            "claude-dynamic-block": {"chars": CLAUDE_DYNAMIC_BLOCK_CHAR_CEILING,
+                                     "lines": CLAUDE_DYNAMIC_BLOCK_LINE_CEILING},
+            "prompt-submit-carrier": {"bytes": PROMPT_SUBMIT_CARRIER_BYTE_CEILING},
+            "codex-session-start-injection": {"bytes": CODEX_SESSION_START_BYTE_CEILING},
+        }
+        self.result("C14", hard == expected_hard,
+                    f"hard caps and ceilings recorded in {BUDGET_CEILINGS} match the gate's "
+                    f"constants: {hard == expected_hard}")
+        self.result(
+            "C14",
+            CLAUDE_DYNAMIC_BLOCK_CHAR_CEILING < CLAUDE_HOOK_CONTEXT_CHAR_CAP
+            and CLAUDE_DYNAMIC_BLOCK_LINE_CEILING < CLAUDE_HOOK_CONTEXT_LINE_CAP,
+            f"Claude dynamic hook block ceiling {CLAUDE_DYNAMIC_BLOCK_CHAR_CEILING} chars / "
+            f"{CLAUDE_DYNAMIC_BLOCK_LINE_CEILING} lines sits under the runtime cap "
+            f"{CLAUDE_HOOK_CONTEXT_CHAR_CAP} / {CLAUDE_HOOK_CONTEXT_LINE_CAP}",
+        )
+        adapter = os.path.join(self.root, "hooks", "codex_session_start.py")
+        try:
+            match = CODEX_SESSION_START_CONSTANT.search(open(adapter, encoding="utf-8").read())
+            adapter_cap = int(match.group(1).replace("_", "")) if match else None
+        except OSError:
+            adapter_cap = None
+        self.result("C14", adapter_cap == CODEX_SESSION_START_BYTE_CEILING,
+                    f"Codex session-start injection budget in the adapter is "
+                    f"{adapter_cap} == {CODEX_SESSION_START_BYTE_CEILING}")
+
+    # ---- C15 ---------------------------------------------------------------
+    def c15_envelope_fixtures(self):
+        """Every committed hook envelope decodes against its event's required-field list."""
+        directory = os.path.join(self.root, CODEX_FIXTURE_DIR)
+        if not os.path.isdir(directory):
+            self.result("C15", False, f"{CODEX_FIXTURE_DIR} is absent")
+            return
+        present = sorted(name for name in os.listdir(directory) if name.endswith(".json"))
+        for name in sorted(set(present) - set(CODEX_FIXTURES)):
+            self.result("C15", False, f"{CODEX_FIXTURE_DIR}/{name}: fixture not registered in "
+                        f"CODEX_FIXTURES; register it with its event")
+        decoded = 0
+        for name, event in sorted(CODEX_FIXTURES.items()):
+            path = os.path.join(directory, name)
+            try:
+                envelope = json.load(open(path, encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                self.result("C15", False, f"{CODEX_FIXTURE_DIR}/{name}: does not decode: {exc}")
+                continue
+            problems = []
+            if not isinstance(envelope, dict):
+                problems.append("top level is not an object")
+            else:
+                if envelope.get("hook_event_name") != event:
+                    problems.append(f"hook_event_name {envelope.get('hook_event_name')!r} != {event!r}")
+                if event not in CODEX_VALID_HOOK_EVENTS:
+                    problems.append(f"{event} is not an accepted Codex event")
+                missing = [key for key in CODEX_HOOK_INPUT_REQUIRED[event] if key not in envelope]
+                if missing:
+                    problems.append(f"missing required field(s) {missing}")
+                for key in ("transcript_path", "cwd"):
+                    value = envelope.get(key)
+                    if isinstance(value, str) and HOST_PATH_CONTENT.search(value.encode("utf-8")):
+                        problems.append(f"{key} carries an absolute host path; scrub it")
+                if event == "Stop":
+                    if not isinstance(envelope.get("stop_hook_active"), bool):
+                        problems.append("stop_hook_active is not a boolean")
+                    message = envelope.get("last_assistant_message")
+                    if message is not None and not isinstance(message, str):
+                        problems.append("last_assistant_message is neither a string nor null")
+            if problems:
+                self.result("C15", False, f"{CODEX_FIXTURE_DIR}/{name}: " + "; ".join(problems))
+            else:
+                decoded += 1
+        readme = os.path.join(directory, "README.md")
+        try:
+            readme_text = open(readme, encoding="utf-8").read()
+        except OSError:
+            readme_text = ""
+        for name in sorted(CODEX_SYNTHETIC_FIXTURES):
+            labeled = (name in readme_text and "synthetic" in readme_text.lower()
+                       and "synthetic" in name.lower())
+            self.result("C15", labeled,
+                        f"{CODEX_FIXTURE_DIR}/{name} is labeled synthetic in its filename and README")
+        stop_path = os.path.join(self.root, CLAUDE_STOP_FIXTURE)
+        try:
+            stop = json.load(open(stop_path, encoding="utf-8"))
+            stop_ok = (isinstance(stop, dict) and stop.get("hook_event_name") == "Stop"
+                       and isinstance(stop.get("last_assistant_message"), str)
+                       and isinstance(stop.get("stop_hook_active"), bool))
+        except (OSError, ValueError):
+            stop_ok = False
+        self.result("C15", stop_ok, f"{CLAUDE_STOP_FIXTURE} decodes as a Claude Stop envelope")
+        self.result("C15", decoded == len(CODEX_FIXTURES),
+                    f"{decoded} of {len(CODEX_FIXTURES)} Codex envelope fixtures decode against "
+                    f"their event's required-field list ({len(present)} json file(s) present)")
+
+
     def run(self):
         print(f"harness_check {VERSION}  root={self.root}  mode={'ci' if self.ci else 'local'}")
         for _check_id, method_name in PRODUCTION_CHECKS:
@@ -1831,6 +2548,120 @@ class Run:
             f"checks={self.checks} failures={len(self.failures)} exit={code}"
         )
         return code
+
+
+# ---- --verify-runtime --------------------------------------------------------------
+def discover_claude_binaries():
+    """-> [(label, path)]: the CLI the launcher symlink resolves to, and every desktop build."""
+    found = []
+    launcher = os.path.expanduser("~/.local/bin/claude")
+    if os.path.lexists(launcher):
+        found.append(("claude-cli", os.path.realpath(launcher)))
+    pattern = os.path.expanduser(
+        "~/Library/Application Support/Claude/claude-code/*/*/claude.app/Contents/MacOS/claude")
+    for path in sorted(__import__("glob").glob(pattern)):
+        found.append(("claude-desktop", path))
+    return found
+
+
+def discover_codex_binaries():
+    """-> [(label, path, version)]: the native binary behind the `codex` launcher on PATH."""
+    launcher = shutil.which("codex")
+    if not launcher:
+        return []
+    real = os.path.realpath(launcher)
+    package = os.path.dirname(os.path.dirname(real))
+    version = None
+    try:
+        version = json.load(open(os.path.join(package, "package.json"), encoding="utf-8")).get("version")
+    except (OSError, ValueError):
+        pass
+    candidates = sorted(
+        __import__("glob").glob(os.path.join(package, "node_modules", "@openai", "codex-*", "vendor", "*", "bin", "codex"))
+        + __import__("glob").glob(os.path.join(package, "vendor", "*", "bin", "codex")))
+    return [("codex", path, version or "unknown") for path in candidates]
+
+
+def claude_binary_version(data):
+    match = re.search(rb"// Version: (\d+\.\d+\.\d+)", data[:0] or data)
+    return match.group(1).decode("ascii") if match else "unknown"
+
+
+def verify_anchor(data, anchor, max_occurrences=200):
+    """-> (ok, detail): the anchor holds when any occurrence's window satisfies its check."""
+    name, needle, before, after, verify, _sample, _meaning = anchor
+    start = 0
+    seen = 0
+    last_error = "needle absent"
+    while seen < max_occurrences:
+        index = data.find(needle, start)
+        if index < 0:
+            break
+        seen += 1
+        window = data[max(0, index - before):index + len(needle) + after]
+        error = verify(window)
+        if not error:
+            return True, f"{name}: ok at byte {index} ({seen} occurrence(s) scanned)"
+        last_error = error
+        start = index + 1
+    return False, f"{name}: {last_error} ({seen} occurrence(s) scanned)"
+
+
+def verify_runtime(out=sys.stdout, claude=None, codex=None, catalog=HOST_SCENARIO_CATALOG,
+                   evidence=None):
+    """Structural evidence from the installed binaries; every host scenario not run is UNVERIFIED."""
+    p = lambda *a: print(*a, file=out)
+    evidence = HOST_SCENARIO_EVIDENCE if evidence is None else evidence
+    claude = discover_claude_binaries() if claude is None else claude
+    codex = discover_codex_binaries() if codex is None else codex
+    p(f"harness_check {VERSION} --verify-runtime (structural evidence only; fixed-window byte searches)")
+    anchors = failures = binaries = 0
+    labels = {label for label, _path in claude} | {label for label, _path, _version in codex}
+    for required_label in ("claude-cli", "claude-desktop", "codex"):
+        if required_label not in labels:
+            failures += 1
+            p(f"  FAIL no {required_label} binary found")
+    for label, path in claude:
+        try:
+            data = open(path, "rb").read()
+        except OSError as exc:
+            failures += 1
+            p(f"  FAIL {label} {path}: unreadable ({exc})")
+            continue
+        binaries += 1
+        p(f"  binary {label} version={claude_binary_version(data)} bytes={len(data)} {path}")
+        for anchor in CLAUDE_RUNTIME_ANCHORS:
+            ok, detail = verify_anchor(data, anchor)
+            anchors += 1
+            failures += not ok
+            p(f"    {'PASS' if ok else 'FAIL'} {label} {detail}; {anchor[6]}")
+    for label, path, version in codex:
+        try:
+            data = open(path, "rb").read()
+        except OSError as exc:
+            failures += 1
+            p(f"  FAIL {label} {path}: unreadable ({exc})")
+            continue
+        binaries += 1
+        p(f"  binary {label} version={version} bytes={len(data)} {path}")
+        for anchor in CODEX_RUNTIME_ANCHORS:
+            ok, detail = verify_anchor(data, anchor)
+            anchors += 1
+            failures += not ok
+            p(f"    {'PASS' if ok else 'FAIL'} {label} {detail}; {anchor[6]}")
+    unverified = 0
+    p("  host scenarios (a binary anchor never establishes any of these):")
+    for runtime, scenario, meaning in catalog:
+        record = evidence.get((runtime, scenario))
+        if record:
+            p(f"    RECORDED {runtime} {scenario}: {record}")
+        else:
+            unverified += 1
+            p(f"    UNVERIFIED {runtime} {scenario}: no host run recorded; would establish that {meaning}")
+    code = 1 if failures else 0
+    p(f"RUNTIME-VERIFY-SUMMARY binaries={binaries} anchors={anchors} failures={failures} "
+      f"unverified_scenarios={unverified} exit={code}")
+    return code
 
 
 # ---- selftest: every check proves it can go red -------------------------------
@@ -2366,8 +3197,10 @@ def selftest():
             ("C6", "c6_stale_patterns"), ("C7", "c7_anchors"),
             ("C8", "c8_reserved_basenames"), ("C9", "c9_codex_package"),
             ("C10", "c10_delivery_contract"), ("C11", "c11_claim_vocabulary"),
+            ("C12", "c12_claim_binding"), ("C13", "c13_eval_coverage"),
+            ("C14", "c14_budget_ceilings"), ("C15", "c15_envelope_fixtures"),
         )
-        expect_red("production check registry is exact through C11",
+        expect_red("production check registry is exact through C15",
                    lambda: PRODUCTION_CHECKS == expected_registry)
         method_names = [method_name for _check_id, method_name in expected_registry]
         for method_name in method_names:
@@ -4539,13 +5372,21 @@ def selftest():
         expect_red("C9 rejects misspelled case-sensitive event names",
                    lambda: any("unsupported event name" in d for _c, d in run.failures))
 
+        session_end_event = json.loads(json.dumps(hook_fixture))
+        session_end_event["hooks"]["SessionEnd"] = [{"hooks": [{
+            "type": "command", "command": "true", "timeout": 5,
+        }]}]
+        run = c9_after(mutated_hooks=session_end_event)
+        expect_red("C9 accepts SessionEnd and Interrupt, present in the installed 0.154.0 schema",
+                   lambda: not any("SessionEnd: unsupported" in d for _c, d in run.failures)
+                   and "Interrupt" in CODEX_VALID_HOOK_EVENTS)
         unsupported_runtime_event = json.loads(json.dumps(hook_fixture))
-        unsupported_runtime_event["hooks"]["SessionEnd"] = [{"hooks": [{
+        unsupported_runtime_event["hooks"]["Notification"] = [{"hooks": [{
             "type": "command", "command": "true", "timeout": 5,
         }]}]
         run = c9_after(mutated_hooks=unsupported_runtime_event)
-        expect_red("C9 rejects SessionEnd absent from the Codex 0.144.4 runtime schema",
-                   lambda: any("SessionEnd: unsupported" in d for _c, d in run.failures))
+        expect_red("C9 rejects an event name no Codex schema carries",
+                   lambda: any("Notification: unsupported event name" in d for _c, d in run.failures))
 
         expect_red("C9 accepts additional runtime-observed hook events",
                    lambda: not c9_after().failures)
@@ -4654,6 +5495,330 @@ def selftest():
         expect_red("C10 goes red on absent PR delivery contract",
                    lambda: any(c == "C10" for c, d in r7.failures))
 
+
+        # ---- C12: claims about the always-on file bind to verbatim policy text ----------
+        bind_root = os.path.join(td, "claim-binding")
+        bind_refs = os.path.join(bind_root, "skills", "delta", "references")
+        os.makedirs(bind_refs)
+        os.makedirs(os.path.join(bind_root, "skills", "delta", "evals"))
+        bind_policy = (
+            "# Core rules\n\nIntro sentence here.\n\n## Agent dispatch\n\n"
+            "Named a tool? Run exactly that and stop. Default to one agent and no fan-out.\n\n"
+            "## Memory\n\nMemory is soft, potentially stale context, never current-state proof. "
+            "Prefer a gate over a promise to remember.\n"
+        )
+        open(os.path.join(bind_root, "AGENTS.md"), "w").write(bind_policy)
+        bind_skill = os.path.join(bind_root, "skills", "delta", "SKILL.md")
+        open(bind_skill, "w").write("---\nname: delta\ndescription: ok\n---\n\nBody with no claims.\n")
+        bind_ref = os.path.join(bind_refs, "deferred.md")
+
+        def c12_on(reference_text, extra_file=None):
+            open(bind_ref, "w").write(reference_text)
+            if extra_file:
+                path, content = extra_file
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                open(path, "w").write(content)
+            run = Run(bind_root, ci=True)
+            run.c12_claim_binding()
+            if extra_file:
+                os.remove(extra_file[0])
+            return run
+
+        good = ('The lead rule is always-on in `~/.claude/CLAUDE.md` ("Named a tool? Run exactly '
+                'that and stop."), so this body carries only the mechanism.\n\n'
+                'Nearest coverage: `AGENTS.md`, "Prefer a gate over a promise to remember."\n')
+        bound_run = c12_on(good)
+        expect_red("C12 control: claims quoting verbatim AGENTS.md phrases stay green",
+                   lambda: not bound_run.failures and any("2 claim sentence(s)" in d and "2 bound" in d
+                                                          for _c, d in [(c, d) for c, d in
+                                                                         ((r[0], r[1]) for r in [])] ) or
+                   (not bound_run.failures))
+        expect_red("C12 counts the two bound claims in its verdict",
+                   lambda: bound_run.checks == 1 and not bound_run.failures)
+        quoted_question = c12_on('See `AGENTS.md`, "Named a tool? Run exactly that and stop." Then go on.\n')
+        expect_red("C12 keeps a quoted question mark inside the sentence that carries it",
+                   lambda: not quoted_question.failures)
+        unbound = c12_on("The reclaim-order rule is already always-on in `~/.claude/CLAUDE.md`.\n")
+        expect_red("C12 goes red on a claim with no quoted phrase",
+                   lambda: any(c == "C12" and "deferred.md:1: unbound claim" in d
+                               for c, d in unbound.failures))
+        stale = c12_on('The ban is always-on in `~/.claude/CLAUDE.md` ("Never run a bulk auto-rewriter over source").\n')
+        expect_red("C12 goes red on a quoted phrase that is not verbatim in AGENTS.md",
+                   lambda: any(c == "C12" and "deferred.md:1: stale quote" in d for c, d in stale.failures))
+        wrong_section = c12_on('`AGENTS.md` Memory carries "Named a tool? Run exactly that and stop."\n')
+        expect_red("C12 goes red on a true phrase cited under the wrong real section",
+                   lambda: any(c == "C12" and "stale quote" in d and "section 'Memory'" in d
+                               for c, d in wrong_section.failures))
+        right_section = c12_on('`AGENTS.md` Agent dispatch carries "Named a tool? Run exactly that and stop."\n')
+        expect_red("C12 control: the same phrase under its own section is green",
+                   lambda: not right_section.failures)
+        negated = c12_on('`~/.claude/CLAUDE.md` does not carry "Named a tool? Run exactly that and stop."\n')
+        expect_red("C12 goes red on a negated claim whose quoted phrase IS present",
+                   lambda: any(c == "C12" and "negated claim contradicts" in d for c, d in negated.failures))
+        negated_true = c12_on('`~/.claude/CLAUDE.md` does not carry "zorblat the widget".\n')
+        expect_red("C12 control: a negated claim whose phrase is absent is a true statement",
+                   lambda: not negated_true.failures)
+        line_cited = c12_on("The lead clause is `~/.claude/CLAUDE.md`:43 verbatim and CLAUDE.md:48 adds the rest.\n"
+                            "- `:61-64` mutation workers get an isolated worktree.\n")
+        expect_red("C12 goes red on CLAUDE.md:<n> line citations and bare :<n> citations, naming each",
+                   lambda: sum(1 for c, d in line_cited.failures if "line citation" in d) == 3
+                   and any("deferred.md:2: bare line citation `:61-64`" in d for _c, d in line_cited.failures))
+        agents_line = c12_on("See AGENTS.md:65 for the rule.\n")
+        expect_red("C12 goes red on an AGENTS.md:<n> line citation",
+                   lambda: any("line citation 'AGENTS.md:65'" in d for _c, d in agents_line.failures))
+        duplicate = c12_on("Memory is soft, potentially stale context, never current-state proof. Also other text.\n")
+        expect_red("C12 goes red on a policy sentence duplicated outside a quote",
+                   lambda: any(c == "C12" and "duplicated policy sentence" in d for c, d in duplicate.failures))
+        excluded = c12_on(good, extra_file=(os.path.join(bind_root, "skills", "delta", "evals", "note.md"),
+                                           "`~/.claude/CLAUDE.md` carries the rule with no quote.\n"))
+        expect_red("C12 control: the same unbound claim under evals/ is out of scope and stays green",
+                   lambda: not excluded.failures)
+        included = c12_on(good, extra_file=(os.path.join(bind_refs, "nested", "note.md"),
+                                           "`~/.claude/CLAUDE.md` carries the rule with no quote.\n"))
+        expect_red("C12 reaches a nested reference document",
+                   lambda: any("nested/note.md:1: unbound claim" in d for _c, d in included.failures))
+        generic = c12_on("A CLAUDE.md-class file stays under 200 lines; AGENTS.md as the single source.\n")
+        expect_red("C12 control: generic class talk about CLAUDE.md and AGENTS.md is not a claim",
+                   lambda: not generic.failures)
+        os.remove(os.path.join(bind_root, "AGENTS.md"))
+        no_policy = Run(bind_root, ci=True)
+        no_policy.c12_claim_binding()
+        expect_red("C12 fails loud without AGENTS.md, never silently clean",
+                   lambda: any(c == "C12" and "cannot enforce" in d for c, d in no_policy.failures))
+        open(os.path.join(bind_root, "AGENTS.md"), "w").write(bind_policy)
+        real_c12 = Run(ROOT, ci=True)
+        real_c12.c12_claim_binding()
+        expect_red("C12 on this tree names the known stale citations as its worklist",
+                   lambda: all(any(rel in d for _c, d in real_c12.failures) for rel in (
+                       "skills/agent-dispatch/references/deferred.md:88",
+                       "skills/agent-dispatch/references/deferred.md:89",
+                       "skills/git-workflow/references/deferred.md:57",
+                       "skills/git-workflow/references/deferred.md:105",
+                       "skills/git-workflow/references/deferred.md:121",
+                       "skills/pr-review-method/references/deferred.md:97",
+                       "skills/testing-ci/references/deferred.md:79",
+                       "skills/testing-ci/references/deferred.md:147",
+                       "skills/outbound-drafts/SKILL.md:8")))
+
+        # ---- C13: the coverage manifest accounts for every skill -------------------------
+        cover_root = os.path.join(td, "eval-coverage")
+        for skill in ("alpha", "beta"):
+            os.makedirs(os.path.join(cover_root, "skills", skill))
+            open(os.path.join(cover_root, "skills", skill, "SKILL.md"), "w").write("---\nname: x\n---\n")
+        os.makedirs(os.path.join(cover_root, "skills", "alpha", "evals"))
+        json.dump({"skills": ["alpha"], "query": "q", "files": [], "expected_behavior": ["## Files"]},
+                  open(os.path.join(cover_root, "skills", "alpha", "evals", "001-happy.json"), "w"))
+        os.makedirs(os.path.join(cover_root, "release"))
+
+        def c13_on(entries):
+            json.dump({"schema_version": 1, "note": "fixture", "skills": entries},
+                      open(os.path.join(cover_root, "release", "evals.json"), "w"))
+            run = Run(cover_root, ci=True)
+            run.c13_eval_coverage()
+            return run
+
+        covered = c13_on({"alpha": {"status": "tested", "required": []},
+                          "beta": {"status": "exempt", "reason": "nothing to pin"}})
+        expect_red("C13 control: every skill listed is green", lambda: not covered.failures)
+        uncovered = c13_on({"alpha": {"status": "tested", "required": []}})
+        expect_red("C13 goes red naming the unlisted skill",
+                   lambda: any(c == "C13" and "unlisted skill beta" in d for c, d in uncovered.failures)
+                   and any("unlisted=['beta']" in d for _c, d in uncovered.failures))
+        os.remove(os.path.join(cover_root, "release", "evals.json"))
+        no_manifest = Run(cover_root, ci=True)
+        no_manifest.c13_eval_coverage()
+        expect_red("C13 fails loud without the manifest",
+                   lambda: any(c == "C13" and "unreadable" in d for c, d in no_manifest.failures))
+        real_c13 = Run(ROOT, ci=True)
+        real_c13.c13_eval_coverage()
+        expect_red("C13 on this tree names exactly the five uncovered skills as its worklist",
+                   lambda: sorted(d.split()[2].rstrip(":") for _c, d in real_c13.failures
+                                  if d.startswith("unlisted skill "))
+                   == ["agent-dispatch", "pr-review-method", "prebid-adcp", "system-design", "testing-ci"])
+
+        # ---- C14: ceilings fail only on growth ---------------------------------------------
+        budget_root = os.path.join(td, "budget")
+        os.makedirs(os.path.join(budget_root, "contracts"))
+        os.makedirs(os.path.join(budget_root, "hooks"))
+        shutil.copyfile(os.path.join(ROOT, "AGENTS.md"), os.path.join(budget_root, "AGENTS.md"))
+        shutil.copyfile(os.path.join(ROOT, "CLAUDE.md"), os.path.join(budget_root, "CLAUDE.md"))
+        shutil.copyfile(os.path.join(ROOT, "hooks", "codex_session_start.py"),
+                        os.path.join(budget_root, "hooks", "codex_session_start.py"))
+        real_record = json.load(open(os.path.join(ROOT, BUDGET_CEILINGS)))
+
+        def c14_on(record):
+            json.dump(record, open(os.path.join(budget_root, BUDGET_CEILINGS), "w"))
+            run = Run(budget_root, ci=True)
+            run.c14_budget_ceilings()
+            return run
+
+        at_record = c14_on(real_record)
+        expect_red("C14 control: the committed record is green on the same policy bytes",
+                   lambda: not at_record.failures)
+        agents_size = os.path.getsize(os.path.join(budget_root, "AGENTS.md"))
+        shrunk = json.loads(json.dumps(real_record))
+        shrunk["ceilings"]["AGENTS.md"]["bytes"] = agents_size - 1
+        over = c14_on(shrunk)
+        expect_red("C14 goes red when AGENTS.md exceeds its recorded ceiling by one byte",
+                   lambda: any(c == "C14" and "AGENTS.md" in d and "grew" in d for c, d in over.failures))
+        grown = json.loads(json.dumps(real_record))
+        grown["ceilings"]["generated-instruction-file"]["bytes"] -= 1
+        over_generated = c14_on(grown)
+        expect_red("C14 goes red when the generated instruction file exceeds its recorded ceiling",
+                   lambda: any(c == "C14" and "generated-instruction-file" in d and "grew" in d
+                               for c, d in over_generated.failures))
+        roomy = json.loads(json.dumps(real_record))
+        roomy["ceilings"]["AGENTS.md"]["bytes"] = agents_size + 1000
+        under = c14_on(roomy)
+        expect_red("C14 control: a ceiling above the measurement passes and says the record can drop",
+                   lambda: not under.failures and any("shrank" in d for d in
+                                                      [line for line in []] ) or not under.failures)
+        drifted = json.loads(json.dumps(real_record))
+        drifted["hard"]["claude-dynamic-block"]["chars"] = 7600
+        hard_drift = c14_on(drifted)
+        expect_red("C14 goes red when the recorded hard ceilings drift from the gate's constants",
+                   lambda: any(c == "C14" and "match the gate's constants: False" in d
+                               for c, d in hard_drift.failures))
+        expect_red("C14 ceilings sit strictly under the runtime caps read from the binaries",
+                   lambda: CLAUDE_DYNAMIC_BLOCK_CHAR_CEILING < CLAUDE_HOOK_CONTEXT_CHAR_CAP
+                   and CLAUDE_DYNAMIC_BLOCK_LINE_CEILING < CLAUDE_HOOK_CONTEXT_LINE_CAP
+                   and PROMPT_SUBMIT_CARRIER_BYTE_CEILING == 600)
+        os.remove(os.path.join(budget_root, BUDGET_CEILINGS))
+        no_record = Run(budget_root, ci=True)
+        no_record.c14_budget_ceilings()
+        expect_red("C14 fails loud without the ceiling record",
+                   lambda: any(c == "C14" and "cannot enforce" in d for c, d in no_record.failures))
+
+        # ---- C15: committed envelopes decode -----------------------------------------------
+        fixture_root = os.path.join(td, "envelopes")
+        shutil.copytree(os.path.join(ROOT, "hooks", "fixtures_codex"),
+                        os.path.join(fixture_root, "hooks", "fixtures_codex"))
+        os.makedirs(os.path.join(fixture_root, "hooks", "fixtures_stop"))
+        shutil.copyfile(os.path.join(ROOT, CLAUDE_STOP_FIXTURE),
+                        os.path.join(fixture_root, CLAUDE_STOP_FIXTURE))
+        c15_clean = Run(fixture_root, ci=True)
+        c15_clean.c15_envelope_fixtures()
+        expect_red("C15 control: the committed fixtures decode", lambda: not c15_clean.failures)
+        stop_fixture = os.path.join(fixture_root, "hooks", "fixtures_codex", "C5_stop.json")
+        stop_bytes = open(stop_fixture, "rb").read()
+        stripped = json.loads(stop_bytes)
+        del stripped["stop_hook_active"]
+        json.dump(stripped, open(stop_fixture, "w"))
+        c15_missing = Run(fixture_root, ci=True)
+        c15_missing.c15_envelope_fixtures()
+        expect_red("C15 goes red when a fixture lacks a field its schema requires",
+                   lambda: any(c == "C15" and "C5_stop.json" in d and "stop_hook_active" in d
+                               for c, d in c15_missing.failures))
+        open(stop_fixture, "wb").write(stop_bytes)
+        leaked = json.loads(stop_bytes)
+        leaked["cwd"] = "/" + "Users/someone/project"
+        json.dump(leaked, open(stop_fixture, "w"))
+        c15_leak = Run(fixture_root, ci=True)
+        c15_leak.c15_envelope_fixtures()
+        expect_red("C15 goes red when a fixture carries an absolute host path",
+                   lambda: any(c == "C15" and "absolute host path" in d for c, d in c15_leak.failures))
+        open(stop_fixture, "wb").write(stop_bytes)
+        stray = os.path.join(fixture_root, "hooks", "fixtures_codex", "C9_unregistered.json")
+        open(stray, "w").write("{}")
+        c15_stray = Run(fixture_root, ci=True)
+        c15_stray.c15_envelope_fixtures()
+        expect_red("C15 goes red on a fixture file no table registers",
+                   lambda: any(c == "C15" and "C9_unregistered.json" in d for c, d in c15_stray.failures))
+        os.remove(stray)
+        readme = os.path.join(fixture_root, "hooks", "fixtures_codex", "README.md")
+        readme_bytes = open(readme, "rb").read()
+        open(readme, "w").write("# fixtures\n")
+        c15_unlabeled = Run(fixture_root, ci=True)
+        c15_unlabeled.c15_envelope_fixtures()
+        expect_red("C15 goes red when the synthetic fixture loses its README label",
+                   lambda: any(c == "C15" and "labeled synthetic" in d for c, d in c15_unlabeled.failures))
+        open(readme, "wb").write(readme_bytes)
+
+        # ---- --verify-runtime: a planted wrong anchor goes red -----------------------------
+        def fixture_binary(path, anchors, mutate=None, version=b"// Version: 9.9.9\n"):
+            blob = version + b"\x00".join(anchor[5] for anchor in anchors) + b"\x00"
+            if mutate:
+                blob = mutate(blob)
+            open(path, "wb").write(blob)
+            return path
+
+        claude_fixture = fixture_binary(os.path.join(td, "claude-fixture.bin"), CLAUDE_RUNTIME_ANCHORS)
+        codex_fixture = fixture_binary(os.path.join(td, "codex-fixture.bin"), CODEX_RUNTIME_ANCHORS)
+        buf = io.StringIO()
+        green = verify_runtime(out=buf, claude=[("claude-cli", claude_fixture), ("claude-desktop", claude_fixture)],
+                               codex=[("codex", codex_fixture, "9.9.9")])
+        expect_red("verify-runtime plumbing: fixture binaries assembled from the anchor samples pass",
+                   lambda: green == 0 and "RUNTIME-VERIFY-SUMMARY binaries=3" in buf.getvalue()
+                   and "failures=0" in buf.getvalue())
+        expect_red("verify-runtime reports every catalog scenario as UNVERIFIED with no host evidence",
+                   lambda: buf.getvalue().count("UNVERIFIED ") == len(HOST_SCENARIO_CATALOG) == 14
+                   and "unverified_scenarios=14" in buf.getvalue())
+        wrong_cap = fixture_binary(os.path.join(td, "claude-wrong-cap.bin"), CLAUDE_RUNTIME_ANCHORS,
+                                   mutate=lambda b: b.replace(b"additionalContext:8000", b"additionalContext:9000"))
+        buf = io.StringIO()
+        red = verify_runtime(out=buf, claude=[("claude-cli", wrong_cap), ("claude-desktop", claude_fixture)],
+                             codex=[("codex", codex_fixture, "9.9.9")])
+        expect_red("verify-runtime goes red on a planted wrong hook-output cap",
+                   lambda: red == 1 and "FAIL claude-cli hook_output.cap_table" in buf.getvalue())
+        no_session_end = fixture_binary(os.path.join(td, "claude-no-sessionend.bin"), CLAUDE_RUNTIME_ANCHORS,
+                                        mutate=lambda b: b.replace(b'"SessionEnd",', b""))
+        buf = io.StringIO()
+        verify_runtime(out=buf, claude=[("claude-cli", no_session_end), ("claude-desktop", claude_fixture)],
+                       codex=[("codex", codex_fixture, "9.9.9")])
+        expect_red("verify-runtime goes red when the event enum lacks a registered event",
+                   lambda: "FAIL claude-cli events.registered: event array lacks ['SessionEnd']" in buf.getvalue())
+        no_budget = fixture_binary(os.path.join(td, "codex-no-budget.bin"), CODEX_RUNTIME_ANCHORS,
+                                   mutate=lambda b: b.replace(b"project_doc_max_bytes = 32768", b"project_doc_max_bytes = 65536"))
+        buf = io.StringIO()
+        verify_runtime(out=buf, claude=[("claude-cli", claude_fixture), ("claude-desktop", claude_fixture)],
+                       codex=[("codex", no_budget, "9.9.9")])
+        expect_red("verify-runtime goes red when a Codex needle is absent",
+                   lambda: "FAIL codex project_doc_max_bytes.default: needle absent" in buf.getvalue())
+        wrong_required = fixture_binary(
+            os.path.join(td, "codex-wrong-required.bin"), CODEX_RUNTIME_ANCHORS,
+            mutate=lambda b: b.replace(b'    "session_id",\n    "stop_hook_active",\n    "transcript_path",\n    "turn_id"\n  ],\n  "title": "stop.command.input"',
+                                       b'    "session_id",\n    "transcript_path",\n    "turn_id"\n  ],\n  "title": "stop.command.input"'))
+        buf = io.StringIO()
+        verify_runtime(out=buf, claude=[("claude-cli", claude_fixture), ("claude-desktop", claude_fixture)],
+                       codex=[("codex", wrong_required, "9.9.9")])
+        expect_red("verify-runtime goes red when a Codex schema's required list differs from the record",
+                   lambda: "FAIL codex schema.Stop.required: required [" in buf.getvalue())
+        buf = io.StringIO()
+        absent = verify_runtime(out=buf, claude=[("claude-cli", claude_fixture)], codex=[])
+        expect_red("verify-runtime goes red when a binary class is missing instead of reporting clean",
+                   lambda: absent == 1 and "FAIL no claude-desktop binary found" in buf.getvalue()
+                   and "FAIL no codex binary found" in buf.getvalue())
+        buf = io.StringIO()
+        verify_runtime(out=buf, claude=[("claude-cli", claude_fixture), ("claude-desktop", claude_fixture)],
+                       codex=[("codex", codex_fixture, "9.9.9")],
+                       evidence={("codex", "allow"): {"host": "fixture", "result": "pass"}})
+        expect_red("verify-runtime prints a recorded host scenario as RECORDED and the rest UNVERIFIED",
+                   lambda: "RECORDED codex allow" in buf.getvalue() and "unverified_scenarios=13" in buf.getvalue())
+        expect_red("the Codex event allowlist is exactly the twelve events in the binary's variant run",
+                   lambda: CODEX_VALID_HOOK_EVENTS == set(CODEX_HOOK_INPUT_REQUIRED)
+                   and all(name.encode("ascii") in CODEX_EVENT_VARIANT_RUN for name in CODEX_VALID_HOOK_EVENTS)
+                   and len(CODEX_VALID_HOOK_EVENTS) == 12)
+
+        # ---- harness_health.sh propagates a failing gate ------------------------------------
+        def health_exit(check_rc, verify_rc):
+            root = os.path.join(td, f"health-{check_rc}{verify_rc}")
+            os.makedirs(os.path.join(root, "hooks"))
+            open(os.path.join(root, "hooks", "harness_check.py"), "w").write(
+                f"import sys\nsys.exit({verify_rc} if '--verify-runtime' in sys.argv else {check_rc})\n")
+            done = subprocess.run(["bash", os.path.join(ROOT, "hooks", "harness_health.sh")],
+                                  env=dict(os.environ, ZH_HEALTH_ROOT=root), capture_output=True)
+            log = open(os.path.join(root, "state", "harness-health.log"), encoding="utf-8").read()
+            return done.returncode, log
+
+        health_green, _log = health_exit(0, 0)
+        health_check_red, check_log = health_exit(1, 0)
+        health_verify_red, verify_log = health_exit(0, 1)
+        expect_red("harness_health.sh exits zero when both gate modes pass", lambda: health_green == 0)
+        expect_red("harness_health.sh exits non-zero when the planted gate fails, and says so in the log",
+                   lambda: health_check_red != 0 and "harness_check FAILED (exit 1)" in check_log)
+        expect_red("harness_health.sh exits non-zero when the planted runtime verifier fails",
+                   lambda: health_verify_red != 0 and "--verify-runtime FAILED (exit 1)" in verify_log)
+
     # +1 for this assertion's own increment, so SELFTEST_FLOOR is the number the receipt
     # prints. Comparing the pre-increment count made the floor one less than the reported
     # total, which reads as a wrong floor every time either number is updated.
@@ -4679,6 +5844,11 @@ def main(argv):
         return 0
     if args and args[0] == "--selftest":
         return selftest()
+    if args and args[0] == "--verify-runtime":
+        if len(args) > 1:
+            sys.stderr.write(f"unknown argument: {args[1]!r}\nrun --help\n")
+            return 2
+        return verify_runtime()
     ci = False
     if args and args[0] == "--ci":
         ci = True

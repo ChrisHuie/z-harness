@@ -521,22 +521,26 @@ def hook_import_problems(tree, receipt):
         except (OSError, SyntaxError, UnicodeDecodeError) as exc:
             problems.append(f"{relative} cannot be parsed: {exc}")
             continue
-        # A searched directory comes from an executable `sys.path.insert(...)` call whose
-        # argument names it; a comment or an unrelated string never counts.
-        searched = [os.path.dirname(relative)]
-        inserted = set()
+        # A searched directory comes from an executable `sys.path.insert(...)` call, resolved
+        # the way the hooks write it: the string segments of its path argument joined onto
+        # the script's own directory (`Path(__file__).parent / "guards"`,
+        # `os.path.join(os.path.dirname(__file__), "..", "tools")`). A comment, an unrelated
+        # string, or a segment that lands somewhere else authorises nothing.
+        script_dir = os.path.dirname(relative)
+        searched = [script_dir]
         for node in ast.walk(module_ast):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                     and node.func.attr == "insert" and isinstance(node.func.value, ast.Attribute)
                     and node.func.value.attr == "path" and isinstance(node.func.value.value, ast.Name)
-                    and node.func.value.value.id == "sys"):
-                for inner in node.args:
-                    inserted.update(c.value for c in ast.walk(inner)
-                                    if isinstance(c, ast.Constant) and isinstance(c.value, str))
-        if "guards" in inserted:
-            searched.append("hooks/guards")
-        if "tools" in inserted:
-            searched.append("tools")
+                    and node.func.value.value.id == "sys" and len(node.args) == 2):
+                segments = [c.value for c in ast.walk(node.args[1])
+                            if isinstance(c, ast.Constant) and isinstance(c.value, str)]
+                target = os.path.normpath(os.path.join(script_dir, *segments)) if segments else script_dir
+                if target == "." or target.startswith(".."):
+                    problems.append(f"{relative} inserts a sys.path entry outside the tree "
+                                    f"({'/'.join(segments)})")
+                elif target not in searched:
+                    searched.append(target)
         names = set()
         for node in ast.walk(module_ast):
             if isinstance(node, ast.Import):
@@ -1939,6 +1943,24 @@ def selftest():
         chk("imports are followed transitively: only a.py is owned, and lib.py's missing import is named",
             hook_import_problems(transitive_root, only_a)
             == ["hooks/lib.py imports deeper, which is neither standard library nor in the receipt's files under hooks"])
+        chk("an insert is resolved onto the script's directory: \"tools\" under hooks/ is not the tree's tools/",
+            import_check(["hooks/a.py", "tools/lib.py"], {"hooks/a.py": 'import os, sys\nsys.path.insert(0, os.path.join(os.path.dirname(__file__), "tools"))\nimport lib\n',
+                                                          "tools/lib.py": "X = 1\n"})
+            == ["hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks, hooks/tools"]
+            and import_check(["hooks/a.py", "hooks/tools/lib.py"], {"hooks/a.py": 'import os, sys\nsys.path.insert(0, os.path.join(os.path.dirname(__file__), "tools"))\nimport lib\n',
+                                                                    "hooks/tools/lib.py": "X = 1\n"}) == [])
+        chk("an insert that lands outside the tree is reported",
+            import_check(["hooks/a.py"], {"hooks/a.py": 'import os, sys\nsys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "elsewhere"))\n'})
+            == ["hooks/a.py inserts a sys.path entry outside the tree (../../elsewhere)"])
+        chk("only a call to sys.path.insert authorises a directory: other receivers, attributes and methods do not",
+            all(import_check(["hooks/a.py", "tools/lib.py"], {"hooks/a.py": f'import os, sys\n{call}(0, os.path.join(os.path.dirname(__file__), "..", "tools"))\nimport lib\n',
+                                                              "tools/lib.py": "X = 1\n"})
+                == ["hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks"]
+                for call in ("other.path.insert", "sys.other.insert", "sys.path.append"))
+            and import_check(["hooks/a.py", "tools/lib.py", "hooks/guards/g.py"], {
+                "hooks/a.py": 'import os, sys\nDIRECTORY = "tools"\nsys.path.insert(0, os.path.join(os.path.dirname(__file__), "guards"))\nimport lib\n',
+                "tools/lib.py": "X = 1\n", "hooks/guards/g.py": "X = 1\n"})
+            == ["hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks, hooks/guards"])
         chk("a commented-out sys.path.insert, or a string naming the directory, authorises nothing",
             import_check(["hooks/a.py", "tools/lib.py"], {"hooks/a.py": 'import os, sys\n# sys.path.insert(0, "tools")\nimport lib\n',
                                                           "tools/lib.py": "X = 1\n"})

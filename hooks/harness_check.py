@@ -152,7 +152,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 359
+SELFTEST_FLOOR = 362
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -182,7 +182,7 @@ SELFTEST_SUITES = [
     ("verify-review-publication",
      ["tools/verify-review-publication.py", "--selftest"], 94),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 53),
-    ("install-claude", ["tools/install-claude.py", "--selftest"], 156),
+    ("install-claude", ["tools/install-claude.py", "--selftest"], 159),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
     ("ci-gate", ["tools/ci-gate.py", "--selftest"], 345),
     ("write-mutation-receipt",
@@ -503,19 +503,43 @@ ALWAYS_ON_PATH = re.compile(r"`?~/\.claude/CLAUDE\.md`?")
 POLICY_LINE_CITATION = re.compile(r"(?:CLAUDE|AGENTS)\.md`?\s*:\s*\d+(?:\s*[-–]\s*\d+)?")
 BARE_LINE_CITATION = re.compile(r"`:\d+(?:-\d+)?`")
 STRAIGHT_QUOTE = re.compile(r"\"([^\"]{1,2000})\"", re.S)
-# A code span is a run of backticks, its content, and the same run; a longer run may hold a
-# shorter one, and the content may span lines.
-# Only the opening run can be escaped: inside a span a backslash is literal and does not
-# protect the closing run, so `literal\` closes at its own backtick. Backslash pairs are
-# stood in by a private-use character before matching, so `\\`` opens a span (the pair
-# escapes itself) while `\`` does not.
-CODE_SPAN = re.compile(r"(?<![`\\])(`+)(?!`)(.+?)(?<!`)\1(?!`)", re.S)
-BACKSLASH_PAIR = ""
 # Masking tokens are private-use characters, which authored prose never carries; any that do
 # occur are stripped before masking so text cannot impersonate a token.
 SPAN_TOKEN = re.compile("(\\d+)")
 QUOTE_TOKEN = re.compile("(\\d+)")
-PRIVATE_USE = re.compile("[-]")
+PRIVATE_USE = re.compile("[-]")
+
+
+def code_spans(text):
+    """-> [(start, end)] of the code spans in `text`, scanned left to right.
+
+    A backtick run opens a span unless a backslash escapes it; a backslash escapes exactly
+    the next character, so `\\\\` is a literal pair and the run after it opens, and `\\``
+    is a literal backtick after which a further run still opens. The same run, standing
+    alone, closes the span; everything inside it is literal, so a backslash before the
+    closing run does not protect it, and the content may span lines.
+    """
+    spans, i, n = [], 0, len(text)
+    while i < n:
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] != "`":
+            i += 1
+            continue
+        run_start = i
+        while i < n and text[i] == "`":
+            i += 1
+        run = text[run_start:i]
+        close = text.find(run, i)
+        while close != -1 and (text[close - 1] == "`" or
+                               (close + len(run) < n and text[close + len(run)] == "`")):
+            close = text.find(run, close + 1)
+        if close == -1 or close == i:
+            continue
+        spans.append((run_start, close + len(run)))
+        i = close + len(run)
+    return spans
 QUOTE_ELLIPSIS = re.compile(r"…|\.\.\.")
 CLAIM_NEGATION = re.compile(
     r"\b(?:does not|do not|did not|is not|are not|was not|were not|no longer|not carried|"
@@ -1427,14 +1451,20 @@ def claim_findings(rel, text, agents_text):
         # file name and a bare line citation is replaced by a token, so a quote inside a
         # command (`printf "x"`) is never a citation. Tokens are restored for the identity.
         spans = []
-
-        def neutralize_span(match):
-            span = match.group(2).strip()
-            if span in ("~/.claude/CLAUDE.md", "AGENTS.md") or re.fullmatch(r":\d+(?:-\d+)?", span):
-                return match.group(0)
-            spans.append(match.group(0).replace(BACKSLASH_PAIR, "\\\\"))
-            return f"{len(spans) - 1}"
-        prose = CODE_SPAN.sub(neutralize_span, block.replace("\\\\", BACKSLASH_PAIR)).replace(BACKSLASH_PAIR, "\\\\")
+        prose_parts, cursor = [], 0
+        for span_start, span_end in code_spans(block):
+            prose_parts.append(block[cursor:span_start])
+            span_text = block[span_start:span_end]
+            run = len(span_text) - len(span_text.lstrip("`"))
+            inner = span_text[run:-run].strip()
+            if inner in ("~/.claude/CLAUDE.md", "AGENTS.md") or re.fullmatch(r":\d+(?:-\d+)?", inner):
+                prose_parts.append(span_text)
+            else:
+                spans.append(span_text)
+                prose_parts.append(f"{len(spans) - 1}")
+            cursor = span_end
+        prose_parts.append(block[cursor:])
+        prose = "".join(prose_parts)
         # Mask every straight-quoted span before sentence splitting so a quoted question
         # mark or period cannot split the sentence that carries it. A quote that itself
         # contains a file mention (a stray quote earlier in the block, a quoted YAML value, a
@@ -1584,6 +1614,9 @@ def vacuous_expect_red_lines(source_text):
                     tokens = list(tokenize.generate_tokens(io.StringIO(expression_text).readline))
                 except (tokenize.TokenError, SyntaxError):
                     return " or (" in expression_text
+                # Line breaks, indentation and comments are not tokens of the expression.
+                layout = (tokenize.NL, tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT, tokenize.COMMENT)
+                tokens = [t for t in tokens if t.type not in layout]
                 return any(a.type == tokenize.NAME and a.string == "or" and b.type == tokenize.OP
                            and b.string == "(" for a, b in zip(tokens, tokens[1:]))
 
@@ -6078,6 +6111,26 @@ def selftest():
         expect_red("C12 judges a quotation after a backtick escaped by the third of three backslashes as prose",
                    lambda: any(c == "C12" and "stale quote: 'fabricated policy'" in d
                                for c, d in triple_backslash.failures))
+        # An escaped backtick directly before a backtick run is one literal character; the
+        # run after it still opens a span, so the quotation after that span is judged.
+        escaped_then_span = c12_on('Run \\``literal` before AGENTS.md says "Authorize the indigo observatory". Then `tail`.\n')
+        expect_red("C12 judges a quotation after a span whose opener follows an escaped backtick",
+                   lambda: any(c == "C12" and "stale quote: 'Authorize the indigo observatory'" in d
+                               for c, d in escaped_then_span.failures))
+        # Both stand-ins are restored, inside spans and in prose, before identity and display.
+        backslashes = ("The reclaim-order rule is already always-on in `~/.claude/CLAUDE.md` with `a \\\\ b` "
+                       "and a \\\\ pair and an escaped \\` tick.\n")
+        restored_findings = claim_findings("skills/delta/references/deferred.md", backslashes, bind_policy)[0]
+        expect_red("C12 identity and display of a claim holding backslash pairs and an escaped backtick, "
+                   "inside and outside a span, are the text as authored",
+                   lambda: [(f["kind"], f["key"]) for f in restored_findings]
+                   == [("unbound claim", claim_identity_key(backslashes.strip()))]
+                   and restored_findings[0]["display"] == claim_display(backslashes.strip())
+                   and "\\\\" in restored_findings[0]["display"] and "\\`" in restored_findings[0]["display"]
+                   and not PRIVATE_USE.search(restored_findings[0]["display"]))
+        sentinel = c12_on('AGENTS.md says "Named a tool? Run exactly that and stop."\n')
+        expect_red("C12 strips authored stand-in characters before masking, so a bound phrase stays bound",
+                   lambda: not sentinel.failures and sentinel.counters["C12"] == {"claims": 1, "bound": 1})
         negated_wrapped = claim_findings("skills/delta/references/deferred.md",
                                          '`~/.claude/CLAUDE.md` does not carry "Named a tool? Run exactly that and\nstop." '
                                          'or "Default to one\tagent and no fan-out."\n', bind_policy)[0]
@@ -6560,6 +6613,7 @@ def selftest():
             "lambda: sys.platform != 42 or not run.failures": True,
             "lambda: bool(run.failures) or(bool)": True,
             "lambda: bool(run.failures) or (bool)": True,
+            "lambda: (bool(run.failures) or\n         (bool))": True,
             'lambda: sys.platform != "darwin" or (a and b)': False,
             'lambda: "x" in (error or "")': False,
             'lambda: a == 1 or b == 2': False,

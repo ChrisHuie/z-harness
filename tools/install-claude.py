@@ -103,8 +103,11 @@ RECEIPT_SCHEMA_VERSION = 2
 RECEIPT_SCHEMA_VERSIONS = (1, 2)
 # A flag token is an option or a bare word; a shell operator such as `||` or `;` is not a
 # flag, so a wrapped or masked command never matches and is refused as unowned.
-OWNED_COMMAND = re.compile(
-    r"^python3 ~/\.claude/hooks/([A-Za-z0-9_./-]+\.py)((?: --?[A-Za-z0-9][A-Za-z0-9_-]*)*)$")
+# A script path is plain segments under hooks/: no `.` or `..` segment, no absolute path, so a
+# command cannot name a script outside the tree it claims to run from.
+SCRIPT_PATH = r"[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*\.py"
+FLAGS = r"((?: --?[A-Za-z0-9][A-Za-z0-9_-]*)*)"
+OWNED_COMMAND = re.compile(r"^python3 ~/\.claude/hooks/(" + SCRIPT_PATH + r")" + FLAGS + r"$")
 # An entry's identity is the whole registration: the same command under another event or
 # matcher is a different entry, and a user's.
 HANDLER_IDENTITY_KEYS = ("event", "matcher", "type", "command", "timeout")
@@ -368,32 +371,47 @@ def load_json(path):
         return json.loads(fh.read().decode("utf-8"))
 
 
-def _plain(value):
-    """A receipt field value that can be compared and hashed: str, int or None, never bool."""
-    return value is None or (isinstance(value, (str, int)) and not isinstance(value, bool))
+def _int(value):
+    return type(value) is int
+
+
+def _contained(rel):
+    """A relative path inside the tree: no absolute or home prefix, no `.` or `..` segment."""
+    return (isinstance(rel, str) and rel and not rel.startswith(("/", "~"))
+            and all(part not in ("", ".", "..") for part in rel.split("/")))
 
 
 def receipt_problems(receipt):
     """-> [problem] for a receipt this installer must not trust; [] for a usable one.
 
     Every field the installer later reads is checked here, so a receipt that loads is one
-    whose files can be verified and whose owned entries can be removed and compared.
+    whose files can be verified, whose owned entries can be removed and compared, and whose
+    owned hook scripts are in the files it accounts for.
     """
     if not isinstance(receipt, dict):
         return ["not an object"]
     version = receipt.get("schema_version")
-    if isinstance(version, bool) or version not in RECEIPT_SCHEMA_VERSIONS:
-        return [f"schema_version {version!r} is not one of {RECEIPT_SCHEMA_VERSIONS}"]
+    if not _int(version) or version not in RECEIPT_SCHEMA_VERSIONS:
+        return [f"schema_version {version!r} is not an integer in {RECEIPT_SCHEMA_VERSIONS}"]
     problems = []
     for key in ("version", "tree"):
         if not isinstance(receipt.get(key), str) or not receipt[key].strip():
             problems.append(f"{key} must be a non-empty string")
+    if isinstance(receipt.get("version"), str) and not VERSION_ID.fullmatch(receipt["version"]):
+        problems.append(f"version {receipt['version']!r} is not a safe version id")
+    if isinstance(receipt.get("version"), str) and isinstance(receipt.get("tree"), str) \
+            and receipt["tree"] != tree_display(receipt["version"]):
+        problems.append(f"tree {receipt['tree']!r} is not the display path of version {receipt['version']!r}")
     files = receipt.get("files")
-    if not isinstance(files, dict) or not all(
-            isinstance(rel, str) and rel and isinstance(rec, dict)
-            and isinstance(rec.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", rec["sha256"])
-            for rel, rec in files.items()):
-        problems.append("files must map each relative path to an object with a 64-hex sha256")
+    if not isinstance(files, dict) or not files:
+        problems.append("files must be a non-empty map")
+        files = {}
+    for rel, rec in files.items():
+        if not _contained(rel):
+            problems.append(f"files key {rel!r} is not a contained relative path")
+        if not (isinstance(rec, dict) and isinstance(rec.get("sha256"), str)
+                and re.fullmatch(r"[0-9a-f]{64}", rec["sha256"])):
+            problems.append(f"files[{rel!r}] must be an object with a 64-hex sha256")
     owned = receipt.get("owned_hooks")
     if not isinstance(owned, list):
         problems.append("owned_hooks must be a list")
@@ -403,12 +421,28 @@ def receipt_problems(receipt):
         if not isinstance(h, dict) or not all(key in h for key in HANDLER_IDENTITY_KEYS):
             problems.append(f"owned_hooks[{index}] must carry {', '.join(HANDLER_IDENTITY_KEYS)}")
             continue
-        if not all(_plain(h[key]) for key in HANDLER_IDENTITY_KEYS):
-            problems.append(f"owned_hooks[{index}] fields must be strings, integers or null")
+        if not isinstance(h["event"], str) or not h["event"]:
+            problems.append(f"owned_hooks[{index}] event must be a non-empty string")
+        if h["matcher"] is not None and not isinstance(h["matcher"], str):
+            problems.append(f"owned_hooks[{index}] matcher must be a string or null")
+        if h["type"] != "command":
+            problems.append(f"owned_hooks[{index}] type must be \"command\"")
+        if h["timeout"] is not None and not _int(h["timeout"]):
+            problems.append(f"owned_hooks[{index}] timeout must be an integer or null")
+        command = h["command"]
+        if not isinstance(command, str) or not command:
+            problems.append(f"owned_hooks[{index}] command must be a non-empty string")
             continue
-        if not isinstance(h["event"], str) or not h["event"] or h["type"] != "command" \
-                or not isinstance(h["command"], str) or not h["command"]:
-            problems.append(f"owned_hooks[{index}] must be a command handler with an event and a command")
+        pointed = HARNESS_COMMAND.match(command)
+        if pointed is None:
+            problems.append(f"owned_hooks[{index}] command {command!r} is not a harness hook command")
+        else:
+            if isinstance(receipt.get("version"), str) and pointed.group(1) != receipt["version"]:
+                problems.append(f"owned_hooks[{index}] command points into version {pointed.group(1)!r}, "
+                                f"not {receipt['version']!r}")
+            if f"hooks/{pointed.group(2)}" not in files:
+                problems.append(f"owned_hooks[{index}] script hooks/{pointed.group(2)} is not in files")
+        if problems and problems[-1].startswith(f"owned_hooks[{index}]"):
             continue
         identity = owned_identity(h)
         if identity in seen:
@@ -435,17 +469,19 @@ def marker_problems(marker):
         return ["not an object"]
     problems = []
     version = marker.get("schema_version")
-    if isinstance(version, bool) or version != PENDING_SCHEMA_VERSION:
-        problems.append(f"schema_version {version!r} is not {PENDING_SCHEMA_VERSION}")
-    if not isinstance(marker.get("to"), str) or not marker["to"].strip():
-        problems.append("to must be a non-empty version")
-    if marker.get("from") is not None and (not isinstance(marker["from"], str) or not marker["from"].strip()):
-        problems.append("from must be a version or null")
+    if not _int(version) or version != PENDING_SCHEMA_VERSION:
+        problems.append(f"schema_version {version!r} is not the integer {PENDING_SCHEMA_VERSION}")
+    if not isinstance(marker.get("to"), str) or not VERSION_ID.fullmatch(marker["to"]):
+        problems.append("to must be a version id")
+    if marker.get("from") is not None and (not isinstance(marker["from"], str)
+                                           or not VERSION_ID.fullmatch(marker["from"])):
+        problems.append("from must be a version id or null")
     digest = marker.get("merged_sha256")
     if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
         problems.append("merged_sha256 must be 64 hex characters")
-    if not isinstance(marker.get("started_at"), str) or not marker["started_at"].strip():
-        problems.append("started_at must be a timestamp string")
+    if not isinstance(marker.get("started_at"), str) or not re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", marker["started_at"]):
+        problems.append("started_at must be a UTC timestamp like 2026-01-01T00:00:00Z")
     return problems
 
 
@@ -528,8 +564,9 @@ PENDING_SCHEMA_VERSION = 1
 # hooks/, flags); a command that merely mentions such a path is a user entry.
 HARNESS_TREE_PREFIX = "~/.claude/harness/"
 HARNESS_COMMAND = re.compile(
-    r"^python3 ~/\.claude/harness/([^/\s]+)/hooks/[A-Za-z0-9_./-]+\.py"
-    r"((?: --?[A-Za-z0-9][A-Za-z0-9_-]*)*)$")
+    r"^python3 ~/\.claude/harness/([A-Za-z0-9][A-Za-z0-9+._-]*)/hooks/(" + SCRIPT_PATH + r")" + FLAGS + r"$")
+VERSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9+._-]*")
+STAGING_MARK = ".staging-"
 # The Claude Code runtime processes that write $HOME/.claude/settings.json: the desktop
 # app's embedded runtime (claude-code/<version>/.../claude.app/Contents/MacOS/claude), the
 # CLI binary (claude/versions/<version>, usually run through a `claude` symlink, so the
@@ -543,20 +580,28 @@ RESIDUAL_SENTENCE = ("a settings.json write by one of them between the installer
                      "its rename would be overwritten and cannot be detected afterwards")
 
 
+def script_operand(comm, args):
+    """-> the script an interpreter process executes: the first non-flag argument after
+    the executable, which ps reports in `comm` so a path with spaces is removed whole."""
+    rest = args[len(comm):] if args.startswith(comm) else args.split(" ", 1)[1] if " " in args else ""
+    for token in rest.split():
+        if not token.startswith("-"):
+            return token
+    return ""
+
+
 def is_claude_code_process(comm, args):
     """True for the runtime's own executable or an interpreter running its entry point.
 
     The executable's basename `claude` covers the desktop app's embedded runtime and the
     CLI run through its symlink; the versioned path covers the CLI binary run directly. The
-    npm entry point counts only as the script an interpreter executes, so a `grep` over a
-    log that names it is not a Claude Code process.
+    npm entry point counts only as the script operand of an interpreter, so a `grep` over a
+    log that names it, or another script that takes the path as an argument, is not one.
     """
     base = os.path.basename(comm)
     if base == CLAUDE_CODE_EXECUTABLE or CLAUDE_CODE_VERSIONED_PATH in comm:
         return True
-    tokens = args.split()
-    return bool(tokens) and os.path.basename(tokens[0]) in SCRIPT_RUNTIMES and any(
-        CLAUDE_CODE_ENTRY_POINT in token for token in tokens[1:])
+    return base in SCRIPT_RUNTIMES and CLAUDE_CODE_ENTRY_POINT in script_operand(comm, args)
 
 
 def claude_processes(ps_rows=None):
@@ -648,10 +693,21 @@ def installation_state(home, source_root=None):
             path = os.path.join(root, name, RECEIPT_NAME)
             if not os.path.isfile(path):
                 continue
+            # A directory left by an interrupted --stage carries a receipt for a version
+            # whose tree does not exist; it is never a staged tree.
+            if STAGING_MARK in name or not VERSION_ID.fullmatch(name):
+                state["broken_trees"][name] = "not a staged tree: an interrupted staging directory"
+                continue
             try:
-                state["trees"][name] = load_receipt(path)
+                receipt = load_receipt(path)
             except InstallError as exc:
                 state["broken_trees"][name] = str(exc)
+                continue
+            if receipt["version"] != name:
+                state["broken_trees"][name] = (f"receipt names version {receipt['version']!r} but the "
+                                               f"directory is {name!r}")
+                continue
+            state["trees"][name] = receipt
     active_path = active_receipt_path(home)
     if os.path.isfile(active_path):
         try:
@@ -660,12 +716,16 @@ def installation_state(home, source_root=None):
             verdicts.append(f"active receipt unreadable: {exc}; run --activate <version> to rewrite it")
     marker_path = pending_marker_path(home)
     if os.path.isfile(marker_path):
+        decoded = False
         try:
             pending = load_json(marker_path)
+            decoded = True
         except (OSError, ValueError) as exc:
             pending = None
             verdicts.append(f"pending marker unreadable: {exc}; run --activate <version> to replace it")
-        if pending is not None:
+        if decoded:
+            # Whatever decoded is validated, including JSON null: a marker file that is
+            # present is never read as absent.
             problems = marker_problems(pending)
             if problems:
                 verdicts.append(f"pending marker malformed ({'; '.join(problems)}); run --activate "
@@ -830,8 +890,12 @@ def activate(home, version_id, fault=None, between_read_and_replace=None, after_
         if require_quiescent:
             raise InstallError(f"refusing to activate (--require-quiescent): {process_report(running)}")
         log(process_report(running))
+    if STAGING_MARK in version_id or not VERSION_ID.fullmatch(version_id):
+        raise InstallError(f"{version_id!r} is not a staged version id")
     tree = tree_path(home, version_id)
     receipt = load_receipt(os.path.join(tree, RECEIPT_NAME))
+    if receipt["version"] != version_id:
+        raise InstallError(f"receipt under {tree} names version {receipt['version']!r}, not {version_id!r}")
     owned = receipt["owned_hooks"]
     if not owned:
         raise InstallError("receipt owns no hook entries")
@@ -1395,22 +1459,22 @@ def selftest():
         good_receipt = load_receipt(os.path.join(tree, RECEIPT_NAME))
         for label, broken, needle in (
                 ("no files map", {k: v for k, v in good_receipt.items() if k != "files"},
-                 "files must map each relative path"),
+                 "files must be a non-empty map"),
                 ("a file record without a digest", dict(good_receipt, files={"hooks/x.py": {}}),
-                 "files must map each relative path"),
+                 "must be an object with a 64-hex sha256"),
                 ("no version", {k: v for k, v in good_receipt.items() if k != "version"},
                  "version must be a non-empty string"),
                 ("a boolean schema version", dict(good_receipt, schema_version=True),
-                 "schema_version True is not one of"),
+                 "schema_version True is not an integer in"),
                 ("an owned entry whose timeout is a list", dict(good_receipt, owned_hooks=[
                     dict(good_receipt["owned_hooks"][0], timeout=[])]),
-                 "owned_hooks[0] fields must be strings, integers or null"),
+                 "owned_hooks[0] timeout must be an integer or null"),
                 ("a repeated owned entry", dict(good_receipt, owned_hooks=good_receipt["owned_hooks"]
                                                  + good_receipt["owned_hooks"][:1]),
                  "owned_hooks[2] repeats"),
                 ("an owned entry that is not a command", dict(good_receipt, owned_hooks=[
                     dict(good_receipt["owned_hooks"][0], type="prompt")]),
-                 "must be a command handler")):
+                 'type must be "command"')):
             json.dump(broken, open(legacy_path, "w"))
             chk(f"a receipt with {label} is refused at load, never acted on",
                 raises(lambda: load_receipt(legacy_path), needle))
@@ -1420,7 +1484,7 @@ def selftest():
         buf = io.StringIO()
         chk("--check with an active receipt that lost its files map is red, not files=0 drift=0",
             check(home, source, out=buf) == 1 and "active receipt unreadable" in buf.getvalue()
-            and "files must map" in buf.getvalue())
+            and "files must be a non-empty map" in buf.getvalue())
         activate(home, "v1")
 
         # --- the active receipt is the staged receipt plus activation fields: an edit to
@@ -1442,12 +1506,13 @@ def selftest():
         buf = io.StringIO()
         chk("--activate restores the dropped entry and the receipt, and --check is clean",
             wired(home) == {"v1": 2, "v2": 0} and check(home, source, out=buf) == 0)
-        ghost = dict(load_json(active_receipt_path(home)), version="v-ghost")
-        atomic_write(active_receipt_path(home), (json.dumps(ghost, indent=2) + "\n").encode("utf-8"))
+        activate(home, "v2")
+        shutil.rmtree(tree_path(home, "v2"))
         buf = io.StringIO()
-        chk("--check names an active receipt whose version is not staged",
+        chk("--check names an active receipt whose version is no longer staged",
             check(home, source, out=buf) == 1
-            and "active receipt names version v-ghost, which is not staged" in buf.getvalue())
+            and "active receipt names version v2, which is not staged" in buf.getvalue())
+        stage(source, home, version_id="v2")
         activate(home, "v1")
 
         # --- only a command of the installer's own shape points into a tree: a user command
@@ -1541,6 +1606,135 @@ def selftest():
         strict = real_activate(home, "v1", processes=lambda: [], require_quiescent=True)
         chk("--require-quiescent activates when the process list is empty",
             strict["version"] == "v1" and wired(home) == {"v1": 2, "v2": 0})
+
+        # --- each validation branch alone: every fixture is otherwise valid, so the named
+        # branch is the only one that can refuse it
+        good_receipt = load_receipt(os.path.join(tree, RECEIPT_NAME))
+        hook0 = good_receipt["owned_hooks"][0]
+        script0 = HARNESS_COMMAND.match(hook0["command"]).group(2)
+        for label, broken, needle in (
+                ("an empty files map", dict(good_receipt, files={}), "files must be a non-empty map"),
+                ("an absolute files key", dict(good_receipt, files=dict(good_receipt["files"], **{
+                    "/etc/passwd": {"sha256": "0" * 64}})), "'/etc/passwd' is not a contained relative path"),
+                ("a traversing files key", dict(good_receipt, files=dict(good_receipt["files"], **{
+                    "hooks/../x.py": {"sha256": "0" * 64}})), "is not a contained relative path"),
+                ("an owned script missing from files", dict(good_receipt, files={
+                    k: v for k, v in good_receipt["files"].items() if k != f"hooks/{script0}"}),
+                 f"script hooks/{script0} is not in files"),
+                ("a float schema version", dict(good_receipt, schema_version=2.0),
+                 "schema_version 2.0 is not an integer in"),
+                ("an empty tree", dict(good_receipt, tree=""), "tree must be a non-empty string"),
+                ("a tree that is not the version's display path", dict(good_receipt, tree="~/.claude/harness/v9"),
+                 "is not the display path of version"),
+                ("a non-hex digest", dict(good_receipt, files=dict(good_receipt["files"], **{
+                    f"hooks/{script0}": {"sha256": "zz" * 32}})), "must be an object with a 64-hex sha256"),
+                ("a boolean timeout", dict(good_receipt, owned_hooks=[dict(hook0, timeout=True)]
+                                           + good_receipt["owned_hooks"][1:]), "timeout must be an integer or null"),
+                ("a float timeout", dict(good_receipt, owned_hooks=[dict(hook0, timeout=1.5)]
+                                         + good_receipt["owned_hooks"][1:]), "timeout must be an integer or null"),
+                ("a numeric matcher", dict(good_receipt, owned_hooks=[dict(hook0, matcher=123)]
+                                           + good_receipt["owned_hooks"][1:]), "matcher must be a string or null"),
+                ("a command into another version", dict(good_receipt, owned_hooks=[
+                    dict(hook0, command=hook0["command"].replace("/v1/", "/v2/"))] + good_receipt["owned_hooks"][1:]),
+                 "points into version 'v2', not 'v1'"),
+                ("a command that is not a harness hook command", dict(good_receipt, owned_hooks=[
+                    dict(hook0, command="python3 ~/.claude/hooks/x.py")] + good_receipt["owned_hooks"][1:]),
+                 "is not a harness hook command")):
+            json.dump(broken, open(legacy_path, "w"))
+            chk(f"a receipt with {label} is refused at load",
+                raises(lambda: load_receipt(legacy_path), needle))
+        good_marker = {"schema_version": 1, "from": "v1", "to": "v2", "merged_sha256": "0" * 64,
+                       "started_at": "2026-01-01T00:00:00Z"}
+        chk("marker control: the well-formed marker has no problems", marker_problems(good_marker) == [])
+        for label, change, needle in (
+                ("a float schema version", {"schema_version": 1.0}, "not the integer 1"),
+                ("a numeric from", {"from": 1}, "from must be a version id or null"),
+                ("a short digest", {"merged_sha256": "abc"}, "64 hex characters"),
+                ("a non-timestamp started_at", {"started_at": "yesterday"}, "UTC timestamp"),
+                ("a target that is not a version id", {"to": "../x"}, "to must be a version id")):
+            problems = marker_problems(dict(good_marker, **change))
+            chk(f"a marker with {label} is refused by that branch alone",
+                len(problems) == 1 and needle in problems[0])
+        chk("a null marker is not an object", marker_problems(None) == ["not an object"])
+        atomic_write(marker_path, b"null\n")
+        buf = io.StringIO()
+        chk("--check names a marker file holding JSON null as malformed, never as absent",
+            check(home, source, out=buf) == 1
+            and "pending marker malformed (not an object)" in buf.getvalue())
+        activate(home, "v1")
+        edited = load_json(active_receipt_path(home))
+        edited["files"] = dict(edited["files"], **{f"hooks/{script0}": {"sha256": "0" * 64}})
+        atomic_write(active_receipt_path(home), (json.dumps(edited, indent=2) + "\n").encode("utf-8"))
+        buf = io.StringIO()
+        chk("--check reconciles the files map alone against the staged receipt",
+            check(home, source, out=buf) == 1
+            and "active receipt differs from the staged receipt of v1" in buf.getvalue())
+        activate(home, "v1")
+
+        # --- a directory left by an interrupted --stage is never a staged tree
+        leftover = tree_path(home, "v2.staging-1")
+        shutil.copytree(tree_path(home, "v2"), leftover)
+        buf = io.StringIO()
+        chk("--check names an interrupted staging directory and never lists it as a tree",
+            check(home, source, out=buf) == 1
+            and "staged tree v2.staging-1: not a staged tree: an interrupted staging directory" in buf.getvalue()
+            and "v2.staging-1" not in installation_state(home)["trees"])
+        chk("--activate refuses an interrupted staging directory by name",
+            raises(lambda: activate(home, "v2.staging-1"), "is not a staged version id"))
+        shutil.rmtree(leftover)
+        renamed = tree_path(home, "v3")
+        shutil.copytree(tree_path(home, "v2"), renamed)
+        buf = io.StringIO()
+        chk("--check names a tree directory whose receipt belongs to another version",
+            check(home, source, out=buf) == 1
+            and "receipt names version 'v2' but the directory is 'v3'" in buf.getvalue())
+        chk("--activate refuses a directory whose receipt names another version",
+            raises(lambda: activate(home, "v3"), "names version 'v2', not 'v3'"))
+        shutil.rmtree(renamed)
+        buf = io.StringIO()
+        chk("--check is clean again", check(home, source, out=buf) == 0)
+
+        # --- the command shape cannot reach outside the tree
+        chk("a command whose script path traverses out of hooks/ is not a harness hook command",
+            harness_version_of("python3 ~/.claude/harness/old/hooks/../../../../user.py") is None
+            and harness_version_of("python3 ~/.claude/harness/v1/hooks/guards/x_guard.py --flag") == "v1"
+            and OWNED_COMMAND.match("python3 ~/.claude/hooks/../x.py") is None
+            and OWNED_COMMAND.match("python3 ~/.claude/hooks/guards/x_guard.py --flag") is not None)
+        current = load_json(settings_path)
+        traversal = {"type": "command", "timeout": 5,
+                     "command": "python3 ~/.claude/harness/old/hooks/../../../../user.py"}
+        current["hooks"]["Stop"].append({"hooks": [dict(traversal)]})
+        atomic_write(settings_path, (json.dumps(current, indent=2) + "\n").encode("utf-8"))
+        activate(home, "v1", remove_orphans=True)
+        chk("a traversing user command is foreign and survives --remove-orphans",
+            any(h == traversal for _e, _m, h in registered_handlers(load_json(settings_path))))
+        current = load_json(settings_path)
+        current["hooks"]["Stop"] = [e for e in current["hooks"]["Stop"]
+                                    if not any(h == traversal for h in e.get("hooks", []))]
+        atomic_write(settings_path, (json.dumps(current, indent=2) + "\n").encode("utf-8"))
+
+        # --- the interpreter's script operand, not any argument, names the entry point
+        chk("an interpreter counts only when its script operand is the entry point; a path with "
+            "spaces is removed whole; flags before the script are skipped",
+            not is_claude_code_process("/usr/local/bin/node",
+                                       "node other.js /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js")
+            and is_claude_code_process("/opt/Node Runtime/bin/node",
+                                       "/opt/Node Runtime/bin/node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js")
+            and is_claude_code_process("/usr/local/bin/node",
+                                       "node --inspect /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js")
+            and script_operand("/opt/Node Runtime/bin/node", "/opt/Node Runtime/bin/node a.js b.js") == "a.js")
+
+        def fake_ps_node(argv, **_kw):
+            table = {"pid=,comm=": " 101 /usr/local/bin/node\n 102 /usr/bin/python3\n",
+                     "pid=,args=": " 101 node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js\n"
+                                   " 102 python3 tools/x.py\n"}
+            return PsResult(table[argv[2]])
+
+        with patch.object(subprocess, "run", fake_ps_node):
+            live = claude_processes()
+        chk("the default acquisition reads the arguments column: an interpreter process is found "
+            "only through it",
+            live == [(101, "node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js")])
 
         chk("review reproduction 4294811755: a switch killed after its settings replace rolls back "
             "to exactly v1's entries",

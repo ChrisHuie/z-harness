@@ -22,13 +22,16 @@ Two modes, deliberately separated by cost:
                exists, each scenario has >=1 expected behavior, each skill has the
                doctrine's three shapes (happy / failure / near-miss), and the coverage
                manifest lists every skill. Safe for CI.
-  --run        SPENDS API BUDGET. Executes each scenario headless (`claude -p` in a temp
-               cwd with the scenario's files materialized) and greps the result for the
+  --run        SPENDS API BUDGET. Validates the manifest and corpus first and executes
+               nothing when that fails. Then runs each scenario headless (`claude -p` in a
+               temp cwd with the scenario's files materialized) and greps the result for the
                MECHANICAL markers only (contract section headers). Everything beyond a
                header grep is judgment: those rows print CHECK-MANUALLY with the expected
-               behavior, never PASS. A scenario the manifest marks `required` must grade
-               every expected behavior mechanically; any CHECK-MANUALLY on it, or a run that
-               produced no text, makes --run exit non-zero. Manual, never scheduled.
+               behavior, never PASS. A scenario grades only when its child exited 0 and
+               every marker is present. A scenario the manifest marks `required` must grade;
+               any CHECK-MANUALLY on it, a failed child, or a required scenario the runner
+               did not complete (reconciled after the loop) makes --run exit non-zero, as
+               does a runner error on any scenario. Manual, never scheduled.
 
 Known measurement bound (recorded in the harness record, report-trigger Part 3): isolated
 single-prompt runs score description ROUTING in a regime that does not predict embedded
@@ -46,6 +49,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import types
 
 VERSION = "1.3.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -396,23 +400,41 @@ def grade(expected_behavior, text):
     return rows
 
 
-def run(root, budget_note=True, runner=None, out=sys.stdout):
-    """-> 0 when every required scenario graded; 1 when any required scenario is ungraded.
+RUN_RECEIPT = ("EVAL-RUN-SUMMARY scenarios={scenarios} graded={graded} "
+               "ungraded_required={ungraded_required} ungraded_optional={ungraded_optional} "
+               "missing_required={missing_required} errors={errors} exit={code}")
 
-    `runner(query, cwd) -> (returncode, text)` is injectable so the grading rule can be
-    proven without the CLI or its budget.
+
+def run(root, budget_note=True, runner=None, out=sys.stdout):
+    """-> 0 when the tree validates and every required scenario executed and graded; else 1.
+
+    Validation runs first, to the same output, and a failure ends the run before the runner
+    is invoked, so a missing manifest or an absent required scenario is a failure, never an
+    empty required set. A scenario grades only when its child exited 0 and every
+    expectation's marker is present. After the loop the manifest's required set is
+    reconciled against the scenarios that executed: a required scenario the runner did not
+    complete is printed as MISSING REQUIRED and counted as ungraded. A runner that raises is
+    an error and makes the run red whatever the scenario's status. `runner(query, cwd) ->
+    (returncode, text)` is injectable so these rules can be proven without the CLI.
     """
     p = lambda *a: print(*a, file=out)
     runner = headless_claude if runner is None else runner
+    if validate(root, out=out) != 0:
+        p("\n  validation failed: nothing executed")
+        p(RUN_RECEIPT.format(scenarios=0, graded=0, ungraded_required=0, ungraded_optional=0,
+                             missing_required=0, errors=0, code=1) + " reason=invalid-corpus")
+        return 1
     corpus = load_corpus(root)
     required = required_scenarios(root)
     if budget_note:
         p("NOTE: --run spends API budget (one headless session per scenario).")
-    scenarios_run = graded_scenarios = ungraded_required = ungraded_optional = 0
+    scenarios_run = graded_scenarios = ungraded_required = ungraded_optional = errors = 0
+    executed = set()
     for skill, scenarios in sorted(corpus.items()):
         for path, s in scenarios:
             rel = os.path.relpath(path, root)
-            is_required = os.path.basename(path) in required.get(skill, set())
+            name = os.path.basename(path)
+            is_required = name in required.get(skill, set())
             scenarios_run += 1
             with tempfile.TemporaryDirectory() as td:
                 for f in s.get("files", []):
@@ -420,17 +442,25 @@ def run(root, budget_note=True, runner=None, out=sys.stdout):
                     os.makedirs(os.path.dirname(fp) or td, exist_ok=True)
                     open(fp, "w").write(f["content"])
                 p(f"\n=== {rel}{'  [required]' if is_required else ''}")
-                code, text = runner(s["query"], td)
+                try:
+                    code, text = runner(s["query"], td)
+                except Exception as exc:
+                    errors += 1
+                    p(f"  ERROR: runner raised {exc!r}; not executed")
+                    continue
+            executed.add((skill, name))
             if code is None:
                 p("  FAIL: `claude` binary not on PATH")
                 rows = [(False, eb) for eb in s["expected_behavior"]]
             else:
                 headers = SECTION_RX.findall(text)
                 p(f"  exit={code}  contract-section headers found: {len(headers)}")
+                if code != 0:
+                    p(f"  child exit {code}: not graded")
                 rows = grade(s["expected_behavior"], text)
             for ok, eb in rows:
                 p(f"  {'PASS (header grep)' if ok else 'CHECK-MANUALLY    '} {eb[:90]}")
-            fully_graded = bool(rows) and all(ok for ok, _ in rows)
+            fully_graded = code == 0 and bool(rows) and all(ok for ok, _ in rows)
             graded_scenarios += fully_graded
             if not fully_graded:
                 if is_required:
@@ -438,9 +468,16 @@ def run(root, budget_note=True, runner=None, out=sys.stdout):
                     p("  UNGRADED REQUIRED: this scenario must grade every expectation mechanically")
                 else:
                     ungraded_optional += 1
-    code = 1 if ungraded_required else 0
-    p(f"\nEVAL-RUN-SUMMARY scenarios={scenarios_run} graded={graded_scenarios} "
-      f"ungraded_required={ungraded_required} ungraded_optional={ungraded_optional} exit={code}")
+    missing = sorted((skill, name) for skill, names in required.items() for name in names
+                     if (skill, name) not in executed)
+    for skill, name in missing:
+        ungraded_required += 1
+        p(f"\n  MISSING REQUIRED skills/{skill}/evals/{name}: named by {MANIFEST}, not executed")
+    code = 1 if (ungraded_required or errors) else 0
+    p("\n" + RUN_RECEIPT.format(scenarios=scenarios_run, graded=graded_scenarios,
+                                ungraded_required=ungraded_required,
+                                ungraded_optional=ungraded_optional,
+                                missing_required=len(missing), errors=errors, code=code))
     return code
 
 
@@ -453,6 +490,13 @@ def selftest():
         checks += 1
         bad += (not ok)
         print(f"  {'PASS' if ok else 'FAIL'} {label}")
+
+    def reproduction(thread_id, expected_line):
+        """Run a reviewer's reproduction script verbatim; it exits 0 only at the expected outcome."""
+        path = os.path.join(ROOT, "instruments", "reproductions", "pr-36", f"{thread_id}.py")
+        done = subprocess.run([sys.executable, path], cwd=ROOT, capture_output=True, text=True,
+                              timeout=600, env=dict(os.environ, ZH_REVIEW_REPRODUCTIONS="nested"))
+        return done.returncode == 0 and expected_line in done.stdout
 
     import io
     corpus = load_corpus(ROOT)
@@ -663,6 +707,104 @@ def selftest():
             run(root, budget_note=False, runner=absent, out=io.StringIO()) == 1)
         chk("grade passes only a header the result actually contains",
             grade(["emits ## Files", "emits ## Gone"], "## Files\n") == [(True, "emits ## Files"), (False, "emits ## Gone")])
+
+        # --- --run validates first, grades only after a child exit of 0, and reconciles the
+        # required set against what executed
+        happy = os.path.join(evals, "001-happy.json")
+        failure = os.path.join(evals, "002-failure.json")
+        json.dump(dict(scenario, query="the required thing"), open(happy, "w"))
+        json.dump(dict(scenario, query="the optional thing"), open(failure, "w"))
+        buf = io.StringIO()
+        chk("--run control: the required scenario is present, every child exits 0 with every marker, "
+            "exit 0",
+            run(root, budget_note=False, runner=graded, out=buf) == 0
+            and "EVAL-RUN-SUMMARY scenarios=3 graded=3 ungraded_required=0 ungraded_optional=0 "
+                "missing_required=0 errors=0 exit=0" in buf.getvalue())
+        calls = []
+
+        def counting(query, _cwd):
+            calls.append(query)
+            return 0, "## Files\nx\n## Validation\ny\n"
+
+        os.remove(happy)
+        buf = io.StringIO()
+        rc = run(root, budget_note=False, runner=counting, out=buf)
+        chk("--run refuses a tree whose required scenario is absent before invoking the runner",
+            rc == 1 and not calls and "exit=1 reason=invalid-corpus" in buf.getvalue()
+            and "001-happy.json" in buf.getvalue())
+        json.dump(dict(scenario, query="the required thing"), open(happy, "w"))
+        os.remove(manifest_path)
+        buf = io.StringIO()
+        rc = run(root, budget_note=False, runner=counting, out=buf)
+        chk("--run with no manifest is a validation failure with the runner never invoked, not an "
+            "empty required set",
+            rc == 1 and not calls and "exit=1 reason=invalid-corpus" in buf.getvalue()
+            and "unreadable" in buf.getvalue())
+        write_manifest(good)
+
+        def failing_child(query, _cwd):
+            return (1 if query == "the required thing" else 0), "## Files\nx\n## Validation\ny\n"
+
+        buf = io.StringIO()
+        rc = run(root, budget_note=False, runner=failing_child, out=buf)
+        chk("--run does not grade a required scenario whose child exited 1, even with every marker "
+            "present",
+            rc == 1 and "child exit 1: not graded" in buf.getvalue()
+            and "scenarios=3 graded=2 ungraded_required=1 ungraded_optional=0 missing_required=0 "
+                "errors=0 exit=1" in buf.getvalue())
+
+        def raising(query, _cwd):
+            if query == "the required thing":
+                raise RuntimeError("transport down")
+            return 0, "## Files\nx\n## Validation\ny\n"
+
+        buf = io.StringIO()
+        rc = run(root, budget_note=False, runner=raising, out=buf)
+        chk("--run reconciles the required set against executed scenarios: one the runner did not "
+            "complete is MISSING REQUIRED and counted as ungraded",
+            rc == 1 and "MISSING REQUIRED skills/alpha/evals/001-happy.json" in buf.getvalue()
+            and "scenarios=3 graded=2 ungraded_required=1 ungraded_optional=0 missing_required=1 "
+                "errors=1 exit=1" in buf.getvalue())
+
+        def raising_optional(query, _cwd):
+            if query == "the optional thing":
+                raise RuntimeError("transport down")
+            return 0, "## Files\nx\n## Validation\ny\n"
+
+        buf = io.StringIO()
+        rc = run(root, budget_note=False, runner=raising_optional, out=buf)
+        chk("--run is red on a runner error for an optional scenario: an error is not a pass",
+            rc == 1 and "missing_required=0 errors=1 exit=1" in buf.getvalue())
+        json.dump(scenario, open(happy, "w"))
+        json.dump(scenario, open(failure, "w"))
+
+        # --- mutation proof on a private copy of this module: without the child-exit term, a
+        # failed child with every marker grades, which the proof above rejects
+        def private_copy(old, new):
+            source_text = open(__file__, encoding="utf-8").read()
+            if source_text.count(old) != 1:
+                raise AssertionError(f"mutation site occurs {source_text.count(old)} time(s)")
+            module = types.ModuleType("run_skill_evals_mutant")
+            module.__file__ = __file__
+            exec(compile(source_text.replace(old, new), __file__, "exec"), module.__dict__)
+            return module
+
+        mutant = private_copy("            fully_graded = code == 0 and bool(rows) and all(ok for ok, _ in rows)\n",
+                              "            fully_graded = bool(rows) and all(ok for ok, _ in rows)\n")
+        json.dump(dict(scenario, query="the required thing"), open(happy, "w"))
+        buf = io.StringIO()
+        chk("mutation: without the child-exit term a failed child with every marker grades (exit 0), "
+            "the verdict the child-exit proof rejects",
+            mutant.run(root, budget_note=False, runner=failing_child, out=buf) == 0
+            and "graded=3 ungraded_required=0" in buf.getvalue())
+        json.dump(scenario, open(happy, "w"))
+
+        chk("review reproduction 4294811785: a required scenario absent from the corpus makes --run red",
+            reproduction(4294811785, "validate_exit= 1 run_exit= 1"))
+        chk("review reproduction 4294811795: the three child controls exit 0, 1, 1",
+            reproduction(4294811795, "child_exit= 1 EVAL-RUN-SUMMARY scenarios=3 graded=0 "
+                                     "ungraded_required=1 ungraded_optional=2 missing_required=0 "
+                                     "errors=0 exit=1"))
 
     print(f"\n  selftest: {bad} failure(s)")
     print(f"SELFTEST-SUMMARY suite=run-skill-evals checks={checks} failures={bad}")

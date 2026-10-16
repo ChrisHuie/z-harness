@@ -152,7 +152,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 380
+SELFTEST_FLOOR = 391
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -182,7 +182,7 @@ SELFTEST_SUITES = [
     ("verify-review-publication",
      ["tools/verify-review-publication.py", "--selftest"], 94),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 53),
-    ("install-claude", ["tools/install-claude.py", "--selftest"], 220),
+    ("install-claude", ["tools/install-claude.py", "--selftest"], 245),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
     ("ci-gate", ["tools/ci-gate.py", "--selftest"], 345),
     ("write-mutation-receipt",
@@ -275,7 +275,7 @@ SELFTEST_TIMEOUTS = {
     "ci-gate": 120,
     "fuzz-judge-diff": 25,
     # Stages and activates several temporary trees, runs three reviewer reproductions as
-    # subprocesses and thirty-two fixture hooks in fresh interpreters; measured 16.7s at 220 proofs.
+    # subprocesses and forty-two fixture hooks in fresh interpreters; measured 17.2s at 245 proofs.
     "install-claude": 60,
 }
 DEFAULT_SELFTEST_TIMEOUT = 15
@@ -1331,6 +1331,8 @@ HTML_BLOCK_TAGS = frozenset(
     "dialog dir div dl dt fieldset figcaption figure footer form frame frameset h1 h2 h3 h4 h5 h6 "
     "head header hr html iframe legend li link main menu menuitem nav noframes ol optgroup option "
     "p param search section summary table tbody td tfoot th thead title tr track ul".split())
+RAW_HTML_TAGS = ("pre", "script", "style", "textarea")
+THEMATIC_BREAK = re.compile(r" {0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})")
 HTML_TAG_LINE = re.compile(
     r"(<[a-z][a-z0-9-]*(\s+[a-z_:][a-z0-9_.:-]*(\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s\"'=<>`]+))?)*\s*/?>"
     r"|</[a-z][a-z0-9-]*\s*>)\s*")
@@ -1340,19 +1342,21 @@ def html_block_end(stripped, in_paragraph):
     """-> the predicate on later lines that ends the HTML block `stripped` opens, or None.
 
     The seven start conditions of CommonMark 4.6: a pre, script, style or textarea tag
-    (ended by its closing tag), a comment (`-->`), a processing instruction (`?>`), a
-    declaration (`>`), CDATA (`]]>`), a known block-level tag and, outside a paragraph, any
-    complete tag standing alone (both ended by a blank line).
+    (ended by any of those four closing tags), a comment (`-->`), a processing instruction
+    (`?>`), a declaration (`>`), `<![CDATA[` in that case (`]]>`), a known block-level tag
+    and, outside a paragraph, any complete tag standing alone (both ended by a blank line).
+    A block of the first five kinds may end on its opening line.
     """
     lower = stripped.lower()
     raw = re.match(r"<(pre|script|style|textarea)(?=[ \t>]|$)", lower)
     if raw:
-        return lambda line: f"</{raw.group(1)}>" in line.lower()
+        # Any of the four closing tags ends a raw block, not only the opener's.
+        return lambda line: any(f"</{tag}>" in line.lower() for tag in RAW_HTML_TAGS)
     if lower.startswith("<!--"):
         return lambda line: "-->" in line
     if lower.startswith("<?"):
         return lambda line: "?>" in line
-    if lower.startswith("<![cdata["):
+    if stripped.startswith("<![CDATA["):
         return lambda line: "]]>" in line
     if re.match(r"<![a-z]", lower):
         return lambda line: ">" in line
@@ -1382,7 +1386,7 @@ def claim_blocks(text):
     terminator, so a quoted phrase in one row and a file mention in another would otherwise
     read as one sentence.
     """
-    blocks, current, start, fence, html_end = [], [], 0, None, None
+    blocks, current, start, fence, html_end, paragraph_open = [], [], 0, None, None, False
     for number, line in enumerate(text.splitlines(), 1):
         expanded = line.expandtabs(4)
         indent = len(expanded) - len(expanded.lstrip(" "))
@@ -1393,13 +1397,22 @@ def claim_blocks(text):
                     and not stripped[run.end():].strip(" \t")):
                 fence = None
             continue
+        html_line = html_end is not None
         if html_end is not None:
             if html_end(line):
                 html_end = None
         else:
-            html_end = html_block_end(stripped, bool(current)) if stripped.startswith("<") else None
-            if html_end is None and run and not (run.group()[0] == "`" and "`" in stripped[run.end():]):
+            # Paragraph state is tracked on its own: lines of an HTML block, a heading, a
+            # thematic break or a table row open no paragraph, so a tag standing alone after
+            # them starts a block.
+            html_end = html_block_end(stripped, paragraph_open) if stripped.startswith("<") else None
+            if html_end is not None:
+                html_line = True
+                if html_end(line):  # a block of the first five kinds may end on its opening line
+                    html_end = None
+            elif run and not (run.group()[0] == "`" and "`" in stripped[run.end():]):
                 fence = (run.group()[0], len(run.group()))
+                paragraph_open = False
                 if current:
                     blocks.append((start, "\n".join(current)))
                     current = []
@@ -1407,6 +1420,7 @@ def claim_blocks(text):
         item = re.match(r"\s*(?:(?:[-*+]|\d+\.)\s|\|)", line) is not None
         heading = line.startswith("#")
         if not line.strip():
+            paragraph_open = False
             if current:
                 blocks.append((start, "\n".join(current)))
                 current = []
@@ -1420,6 +1434,7 @@ def claim_blocks(text):
         if heading:
             blocks.append((start, "\n".join(current)))
             current = []
+        paragraph_open = not (heading or html_line or THEMATIC_BREAK.fullmatch(line) or line.lstrip().startswith("|"))
     if current:
         blocks.append((start, "\n".join(current)))
     return blocks
@@ -6012,6 +6027,29 @@ def selftest():
                    and claims_in("```\n\t```\n" + fence_claim) == fence_base
                    and claims_in("   ```\n" + fence_claim + "\n   ```\n") == fence_base
                    and claims_in("- item\n  ```\n  " + fence_claim + "  ```\n") == fence_base)
+        expect_red("C12 recognises an HTML block after a closed HTML block or a thematic break, where no "
+                   "paragraph is open, so a run inside it does not open a fence",
+                   lambda: claims_in("<pre>\n```\n</pre>\n<custom>\n```\n</custom>\n\n" + fence_claim) == fence_base + 1
+                   and claims_in("---\n<custom>\n```\n</custom>\n\n" + fence_claim) == fence_base + 1
+                   and claims_in("para\n<custom>\n```\n" + fence_claim) == fence_base)
+        # The samples below leave the run unclosed: a closed pair inside one prose block would be
+        # masked as an inline code span and hide the claim by another route.
+        expect_red("C12 ends an HTML block of the first five kinds on its opening line when the end condition "
+                   "is met there",
+                   lambda: claims_in("<pre></pre>\n```\n" + fence_claim) == fence_base
+                   and claims_in("<!--ok-->\n```\n" + fence_claim) == fence_base)
+        expect_red("C12 ends a raw HTML block on any of the four closing tags, not only the opener's",
+                   lambda: claims_in("<pre>\n```\n</style>\n\n```\n" + fence_claim) == fence_base)
+        expect_red("C12 reads <![CDATA[ in its own case only: the lowercase spelling opens no block",
+                   lambda: claims_in("<![CDATA[\n```\n" + fence_claim) == fence_base + 1
+                   and claims_in("<![cdata[\n```\n" + fence_claim) == fence_base)
+        expect_red("C12 recognises each HTML start condition: script, style, textarea, a processing instruction, "
+                   "a declaration, CDATA, and a known tag interrupting a paragraph",
+                   lambda: all(claims_in(opener + "\n```\n" + closer + "\n\n" + fence_claim) == fence_base + 1
+                               for opener, closer in (("<script>", "</script>"), ("<style>", "</style>"),
+                                                      ("<textarea>", "</textarea>"), ("<?x", "?>"), ("<!X", ">"),
+                                                      ("<![CDATA[", "]]>")))
+                   and claims_in("para\n<div>\n```\n" + fence_claim) == fence_base + 1)
         expect_red("C12 does not open a fence on a run inside an HTML block (pre, comment, div), and the "
                    "block's lines stay prose",
                    lambda: claims_in("<pre>\n```\n</pre>\n\n" + fence_claim) == fence_base + 1
@@ -6815,8 +6853,41 @@ def selftest():
         expect_red("mutation: unrestricted indentation lets a four-space run open a fence and hide the claim "
                    "(the indentation proof goes red)",
                    lambda: claims_in("    ```\n" + fence_claim + "\n    ```\n", any_indent) == fence_base)
-        no_html = private_copy('            html_end = html_block_end(stripped, bool(current)) if stripped.startswith("<") ' + 'else None\n',
+        no_html = private_copy('            html_end = html_block_end(stripped, paragraph_' + 'open) if stripped.startswith("<") else None\n',
                                '            html_end = None\n')
+        prose_as_paragraph = private_copy("html_block_end(stripped, " + "paragraph_open)", "html_block_end(stripped, bool(current))")
+        expect_red("mutation: accumulated prose taken as an open paragraph hides the claim after a closed HTML block "
+                   "(the paragraph-state proof goes red)",
+                   lambda: claims_in("<pre>\n```\n</pre>\n<custom>\n```\n</custom>\n\n" + fence_claim, prose_as_paragraph)
+                   == fence_base)
+        no_same_line_end = private_copy("                if html_end(line):  # a block of the first five kinds may end on its " + "opening line\n",
+                                        "                if False:\n")
+        expect_red("mutation: an HTML block kept open past its one-line end swallows the fence that follows "
+                   "(the opening-line proof goes red)",
+                   lambda: claims_in("<pre></pre>\n```\n" + fence_claim, no_same_line_end) == fence_base + 1)
+        opener_tag_only = private_copy('        return lambda line: any(f"</{tag}>" in line.lower() for tag in ' + 'RAW_HTML_TAGS)\n',
+                                       '        return lambda line: f"</{raw.group(1)}>" in line.lower()\n')
+        expect_red("mutation: a raw block ended only by its opener's tag keeps </style> content as prose "
+                   "(the closing-tag proof goes red)",
+                   lambda: claims_in("<pre>\n```\n</style>\n\n```\n" + fence_claim, opener_tag_only) == fence_base + 1)
+        cdata_lowercase = private_copy('    if stripped.startswith("<![CDATA[' + '"):\n', '    if lower.startswith("<![cdata["):\n')
+        expect_red("mutation: a case-blind CDATA test makes the lowercase spelling an HTML block "
+                   "(the CDATA proof goes red)",
+                   lambda: claims_in("<![cdata[\n```\n" + fence_claim, cdata_lowercase) == fence_base + 1)
+        raw_off = private_copy('    raw = re.match(r"<(pre|script|style|' + 'textarea)', '    raw = None and re.match(r"<(pre|script|style|textarea)')
+        expect_red("mutation: without the raw-block condition a <script> body is not a block, so its run opens a "
+                   "fence (the start-condition proof goes red)",
+                   lambda: claims_in("<script>\n```\n" + fence_claim + "</script>\n", raw_off) == fence_base)
+        processing_off = private_copy('    if lower.startswith("<?' + '"):\n', '    if False:\n')
+        declaration_off = private_copy('    if re.match(r"<![a-z]", ' + 'lower):\n', '    if False:\n')
+        cdata_off = private_copy('    if stripped.startswith("<![CDATA[' + '"):\n', '    if False:\n')
+        known_tags_off = private_copy('    if tag and tag.group(1) in ' + 'HTML_BLOCK_TAGS:\n', '    if False:\n')
+        expect_red("mutation: dropping the processing-instruction, declaration, CDATA or known-tag condition lets "
+                   "the run inside each open a fence (the start-condition proof goes red)",
+                   lambda: claims_in("<?x\n```\n?>\n\n" + fence_claim, processing_off) == fence_base
+                   and claims_in("<!X\n```\n>\n\n" + fence_claim, declaration_off) == fence_base
+                   and claims_in("<![CDATA[\n```\n]]>\n\n" + fence_claim, cdata_off) == fence_base
+                   and claims_in("para\n<div>\n```\n" + fence_claim, known_tags_off) == fence_base)
         expect_red("mutation: ignoring HTML blocks lets a run inside <pre> open a fence and hide the claim "
                    "(the HTML-block proof goes red)",
                    lambda: claims_in("<pre>\n```\n</pre>\n\n" + fence_claim, no_html) == fence_base)

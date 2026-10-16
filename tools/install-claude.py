@@ -15,11 +15,22 @@ Layout. One immutable tree per source version, activated by a settings-file swit
   $HOME/.claude/CLAUDE.md                    the generated instruction file, installed after
                                              the settings switch
   $HOME/.claude/state/install-receipt.json   the receipt of the ACTIVE tree
+  $HOME/.claude/state/install-pending.json   present only while an activation is in flight:
+                                             from, to, the digest of the merged settings
+                                             document, started_at
 
 Why the switch is the settings file and not a directory rename: a directory cannot be renamed
 over an existing non-empty directory, so a two-rename swap leaves a window with no hook script
 at the registered path. Each version keeps its own tree and the registered commands point at
 it; rollback is the same replace pointing back.
+
+Why activation is a logged transaction: the switch is three writes (settings.json, CLAUDE.md,
+the active receipt), and a process can stop between any two. The pending marker is written
+before the settings replace and removed after the receipt write, so --check can name the stage
+an interrupted activation reached; the removal set of every activation is the union of the
+owned entries of every staged tree's receipt plus the active receipt's, so --activate of any
+version from any interrupted state ends with exactly one version's entries registered. One
+derivation, installation_state(), feeds both --check and --activate.
 
 Why read-merge-replace-verify: the desktop app writes settings.json itself (app-managed keys),
 so the file is read immediately before writing, only receipt-owned entries are replaced in that
@@ -40,7 +51,7 @@ is stable for the budget ceiling; the installer renders it with the real values.
 
   install-claude.py --render [--source DIR] [--tree PATH] [--commit SHA]
   install-claude.py --stage [--home DIR] [--source DIR] [--version-id ID] [--allow-dirty]
-  install-claude.py --activate ID [--home DIR]
+  install-claude.py --activate ID [--home DIR] [--remove-orphans]
   install-claude.py --check [--home DIR] [--source DIR]
   install-claude.py --selftest
 
@@ -62,8 +73,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import types
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TEMPLATE_TREE = "~/.claude/harness/<version>"
 TEMPLATE_COMMIT = "<commit>"
@@ -437,6 +449,186 @@ def stage(source_root, home, version_id=None, allow_dirty=False, now=None):
     return receipt
 
 
+# ---- installation state ------------------------------------------------------------
+PENDING_NAME = "install-pending.json"
+PENDING_SCHEMA_VERSION = 1
+# Registered commands name a tree in display form; one under this prefix that no staged
+# receipt owns is an orphan, never a user entry.
+HARNESS_TREE_PREFIX = "~/.claude/harness/"
+
+
+def pending_marker_path(home):
+    return os.path.join(claude_home(home), "state", PENDING_NAME)
+
+
+def harness_version_of(command):
+    """-> the tree version a registered command points into, or None."""
+    found = re.search(re.escape(HARNESS_TREE_PREFIX) + r"([^/\s]+)/", str(command))
+    return found.group(1) if found else None
+
+
+def instruction_file_provenance(text):
+    """-> {"tree", "commit"} named by an installed instruction file's provenance paragraph."""
+    found = re.search(r"`AGENTS\.md` and `CLAUDE\.md` at (\S+)\. .*?the active tree is `([^`]+)`",
+                      text or "", re.S)
+    return {"tree": found.group(2), "commit": found.group(1)} if found else None
+
+
+def _owned_set(receipt):
+    return {owned_identity(h) for h in receipt["owned_hooks"]}
+
+
+def installation_state(home, source_root=None):
+    """-> one structured view of the installation; --check and --activate both consume it.
+
+    trees            {version: receipt} for every readable staged receipt
+    broken_trees     {version: reason} for a receipt that could not be loaded
+    active           the active receipt, or None
+    pending          the pending-activation marker, or None
+    handlers         every registered handler, classified exactly once: owned (by the tree
+                     whose receipt lists its five-tuple identity), orphan (the command points
+                     into a harness tree version that has no receipt, so nothing can own or
+                     remove it), or foreign (a user entry, including an owned command
+                     re-registered under another event or matcher; read for classification
+                     only)
+    wired_versions   the tree versions that owned handlers point at
+    instruction_file the tree and commit named by the installed CLAUDE.md, or None
+    verdicts         inconsistencies, each with its repair instruction
+    drift            the active tree's file digests and generated-copy comparisons
+    """
+    state = {"trees": {}, "broken_trees": {}, "active": None, "pending": None, "handlers": [],
+             "wired_versions": set(), "instruction_file": None, "verdicts": [], "drift": [],
+             "settings_error": None}
+    verdicts = state["verdicts"]
+    root = os.path.join(claude_home(home), "harness")
+    if os.path.isdir(root):
+        for name in sorted(os.listdir(root)):
+            path = os.path.join(root, name, RECEIPT_NAME)
+            if not os.path.isfile(path):
+                continue
+            try:
+                state["trees"][name] = load_receipt(path)
+            except InstallError as exc:
+                state["broken_trees"][name] = str(exc)
+    active_path = active_receipt_path(home)
+    if os.path.isfile(active_path):
+        try:
+            state["active"] = load_receipt(active_path)
+        except InstallError as exc:
+            verdicts.append(f"active receipt unreadable: {exc}; run --activate <version> to rewrite it")
+    marker_path = pending_marker_path(home)
+    if os.path.isfile(marker_path):
+        try:
+            pending = load_json(marker_path)
+            if not isinstance(pending, dict) or not isinstance(pending.get("to"), str):
+                raise ValueError("not an object naming a target version")
+            state["pending"] = pending
+        except (OSError, ValueError) as exc:
+            verdicts.append(f"pending marker unreadable: {exc}; run --activate <version> to replace it")
+    settings_path = os.path.join(claude_home(home), "settings.json")
+    settings = {}
+    if os.path.isfile(settings_path):
+        try:
+            settings = load_json(settings_path)
+        except ValueError as exc:
+            state["settings_error"] = f"settings.json is not valid JSON: {exc}"
+            verdicts.append(state["settings_error"])
+    owned_by = {}
+    for version, receipt in state["trees"].items():
+        for identity in _owned_set(receipt):
+            owned_by.setdefault(identity, version)
+    for event, matcher, handler in registered_handlers(settings):
+        identity = handler_identity(event, matcher, handler)
+        pointed = harness_version_of(handler.get("command"))
+        if identity in owned_by:
+            kind, version = "owned", owned_by[identity]
+            state["wired_versions"].add(version)
+        elif pointed is not None and pointed not in state["trees"] and pointed not in state["broken_trees"]:
+            # The command points into a tree version that has no receipt: nothing can own
+            # or remove it. A command into a staged tree under an event or matcher its
+            # receipt does not list is a user entry and stays.
+            kind, version = "orphan", pointed
+        else:
+            kind, version = "foreign", None
+        state["handlers"].append({"event": event, "matcher": matcher, "handler": handler,
+                                  "identity": identity, "kind": kind, "version": version})
+    installed_md = os.path.join(claude_home(home), "CLAUDE.md")
+    try:
+        installed_text = read_text(installed_md)
+    except OSError:
+        installed_text = None
+    state["instruction_file"] = instruction_file_provenance(installed_text)
+    active = state["active"]
+    active_version = active["version"] if active else None
+    wired = state["wired_versions"]
+    pending = state["pending"]
+    if pending:
+        to, frm = pending.get("to"), pending.get("from")
+        to_receipt = state["trees"].get(to)
+        wired_identities = {h["identity"] for h in state["handlers"] if h["kind"] == "owned"}
+        if active_version == to:
+            stage = "before the marker was cleared"
+        elif state["instruction_file"] and state["instruction_file"]["tree"] == tree_display(to):
+            stage = "after the instruction file"
+        elif to_receipt and _owned_set(to_receipt) and _owned_set(to_receipt) <= wired_identities:
+            stage = "after the switch"
+        else:
+            stage = "before the switch"
+        verdicts.append(f"activation of {to} interrupted {stage}; run --activate {to} to finish"
+                        + (f" or --activate {frm} to roll back" if frm else ""))
+    if active is not None and wired != {active_version}:
+        verdicts.append(f"settings wire {sorted(wired) or 'no tree'} but the active receipt is "
+                        f"{active_version}; run --activate {active_version}")
+    elif active is None and wired:
+        verdicts.append(f"settings wire {sorted(wired)} but no receipt is active; run --activate "
+                        f"{sorted(wired)[0]}")
+    if active is not None:
+        named = state["instruction_file"]
+        if named is None:
+            verdicts.append(f"CLAUDE.md is absent or carries no provenance paragraph; active is "
+                            f"{active['tree']}; run --activate {active_version}")
+        elif named["tree"] != active["tree"]:
+            verdicts.append(f"CLAUDE.md was generated for {named['tree']}, active is "
+                            f"{active['tree']}; run --activate {active_version}")
+    for h in state["handlers"]:
+        if h["kind"] == "orphan":
+            verdicts.append(f"orphaned harness handler {h['event']} {h['handler'].get('command')!r}: "
+                            f"no staged tree owns it; re-stage that version or run --activate "
+                            f"with --remove-orphans")
+    for version, reason in state["broken_trees"].items():
+        verdicts.append(f"staged tree {version}: {reason}; remove or re-stage it")
+    if active is not None:
+        counts = {}
+        for h in state["handlers"]:
+            counts[h["identity"]] = counts.get(h["identity"], 0) + 1
+        for h in active["owned_hooks"]:
+            hits = counts.get(owned_identity(h), 0)
+            if hits != 1:
+                verdicts.append(f"owned hook {h['event']} {h['command']!r}: {hits} match(es); "
+                                f"run --activate {active_version}")
+        tree = expand_display(home, active["tree"])
+        for relative, record in sorted(active.get("files", {}).items()):
+            full = os.path.join(tree, relative)
+            if not os.path.isfile(full):
+                state["drift"].append(f"missing {relative}")
+            elif sha256_file(full) != record["sha256"]:
+                state["drift"].append(f"changed {relative}")
+        try:
+            tree_copy = read_text(os.path.join(tree, "CLAUDE.generated.md"))
+        except OSError as exc:
+            tree_copy = None
+            state["drift"].append(f"instruction file unreadable: {exc}")
+        if tree_copy is not None and installed_text != tree_copy:
+            state["drift"].append("CLAUDE.md differs from the active tree's generated copy")
+        if source_root is not None and tree_copy is not None:
+            expected = render_instruction_file(source_root, tree=active["tree"],
+                                               commit=active.get("source_commit") or TEMPLATE_COMMIT)
+            if expected != tree_copy:
+                state["drift"].append("generator output from the current source differs from the "
+                                      "active tree; the source moved since this tree was staged")
+    return state
+
+
 # ---- activate ------------------------------------------------------------------
 def _settings_state(path):
     try:
@@ -447,28 +639,59 @@ def _settings_state(path):
 
 
 def activate(home, version_id, fault=None, between_read_and_replace=None, after_replace=None,
-             attempts=5):
-    """Switch $HOME/.claude/settings.json to the tree's owned hooks in one atomic replace.
+             attempts=5, remove_orphans=False, log=None):
+    """Switch $HOME/.claude/settings.json to the tree's owned hooks as a logged transaction.
 
-    `fault="before-replace"` abandons the activation after the merged file is written beside
-    settings.json and before the replace, which is the window an interrupted upgrade leaves;
-    the previous tree must stay active. `between_read_and_replace` and `after_replace` are
-    selftest seams for a concurrent writer and for a post-write mismatch.
+    In order: derive the installation state and refuse on an unreadable staged receipt or
+    an orphaned harness handler (unless `remove_orphans`); build the removal set from every
+    staged receipt plus the active receipt; write the pending marker; read-merge-replace
+    settings.json under the stat guard with retries; verify the written file; install
+    CLAUDE.md; write the active receipt; clear the marker. A stop anywhere after the marker
+    is written leaves it in place, --check names the stage, and the next --activate of any
+    version completes a consistent switch because the removal set covers every version.
+
+    `fault` plants a stop: "before-replace" (the merged file is written beside settings.json,
+    the replace never happens), "after-instruction-file", or "after-receipt".
+    `between_read_and_replace` and `after_replace` are selftest seams for a concurrent
+    writer and for a stop after the replace. `log` receives one line per notable event.
     """
+    log = log or (lambda line: None)
     tree = tree_path(home, version_id)
-    receipt_path = os.path.join(tree, RECEIPT_NAME)
-    receipt = load_receipt(receipt_path)
+    receipt = load_receipt(os.path.join(tree, RECEIPT_NAME))
     owned = receipt["owned_hooks"]
     if not owned:
         raise InstallError("receipt owns no hook entries")
-    previous = {}
-    previous_path = active_receipt_path(home)
-    if os.path.isfile(previous_path):
-        previous = load_receipt(previous_path)
+    state = installation_state(home)
+    if state["broken_trees"]:
+        raise InstallError("refusing to activate with unreadable staged receipt(s): "
+                           + "; ".join(f"{v}: {why}" for v, why in state["broken_trees"].items()))
+    orphans = [h for h in state["handlers"] if h["kind"] == "orphan"]
+    if orphans and not remove_orphans:
+        raise InstallError("refusing to activate: orphaned harness handler(s) no staged tree owns: "
+                           + "; ".join(f"{h['event']} {h['handler'].get('command')!r}" for h in orphans)
+                           + "; re-stage that version or pass --remove-orphans")
+    active = state["active"]
+    active_version = active["version"] if active else None
     target = {owned_identity(h) for h in owned}
-    remove = {owned_identity(h) for h in previous.get("owned_hooks", [])} | target
+    remove = set(target)
+    for staged in state["trees"].values():
+        remove |= _owned_set(staged)
+    if active is not None:
+        remove |= _owned_set(active)
+    if orphans:
+        remove |= {h["identity"] for h in orphans}
+        log(f"removing {len(orphans)} orphaned harness handler(s) (--remove-orphans)")
+    leftover = sorted({h["version"] for h in state["handlers"]
+                       if h["kind"] == "owned" and h["version"] not in (version_id, active_version)})
+    pending = state["pending"]
+    if pending or leftover:
+        log("completing an interrupted switch: "
+            + (f"marker from {pending.get('from')} to {pending.get('to')}; " if pending else "")
+            + (f"settings wire {leftover} while the active receipt is {active_version or 'absent'}"
+               if leftover else "every version's entries are removed before this one's are added"))
     settings_path = os.path.join(claude_home(home), "settings.json")
     os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+    marker_path = pending_marker_path(home)
     for attempt in range(attempts):
         before = _settings_state(settings_path)
         if before is None:
@@ -497,6 +720,15 @@ def activate(home, version_id, fault=None, between_read_and_replace=None, after_
             if fault == "before-replace":
                 os.remove(tmp)
                 raise InstallError("planted fault: activation abandoned before the settings replace")
+            marker = {
+                "schema_version": PENDING_SCHEMA_VERSION,
+                "from": active_version,
+                "to": version_id,
+                "merged_sha256": hashlib.sha256(data).hexdigest(),
+                "started_at": datetime.datetime.now(datetime.timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"),
+            }
+            atomic_write(marker_path, (json.dumps(marker, indent=2, sort_keys=True) + "\n").encode("utf-8"))
             os.replace(tmp, settings_path)
         except BaseException:
             with contextlib.suppress(OSError):
@@ -521,16 +753,22 @@ def activate(home, version_id, fault=None, between_read_and_replace=None, after_
     stale = remove - target
     for event, matcher, handler in found:
         if handler_identity(event, matcher, handler) in stale:
-            problems.append(f"{event} {handler.get('command')!r}: previous owned entry still present")
+            problems.append(f"{event} {handler.get('command')!r}: removed entry still present")
     if problems:
         raise InstallError("post-write verification failed: " + "; ".join(problems))
     with open(os.path.join(tree, "CLAUDE.generated.md"), "rb") as fh:
         atomic_write(os.path.join(claude_home(home), "CLAUDE.md"), fh.read())
-    active = dict(receipt)
-    active["activated_at"] = datetime.datetime.now(datetime.timezone.utc).strftime(
+    if fault == "after-instruction-file":
+        raise InstallError("planted fault: stopped after the instruction file was installed")
+    activated = dict(receipt)
+    activated["activated_at"] = datetime.datetime.now(datetime.timezone.utc).strftime(
         "%Y-%m-%dT%H:%M:%SZ")
-    atomic_write(previous_path, (json.dumps(active, indent=2, sort_keys=True) + "\n").encode("utf-8"))
-    return active
+    atomic_write(active_receipt_path(home),
+                 (json.dumps(activated, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+    if fault == "after-receipt":
+        raise InstallError("planted fault: stopped after the active receipt was written")
+    os.remove(marker_path)
+    return activated
 
 
 # ---- check ---------------------------------------------------------------------
@@ -543,19 +781,13 @@ def harness_scripts(source_root):
 
 
 def check(home, source_root, out=sys.stdout):
-    """-> 0 when the active install matches its receipt and the generator; 1 on any drift."""
+    """-> 0 when the active install is consistent, matches its receipt and the generator; else 1."""
     p = lambda *a: print(*a, file=out)
-    drift = []
-    settings_path = os.path.join(claude_home(home), "settings.json")
-    installed_md = os.path.join(claude_home(home), "CLAUDE.md")
-    try:
-        settings = load_json(settings_path)
-    except (OSError, ValueError):
-        settings = {}
+    state = installation_state(home, source_root)
     scripts = harness_scripts(source_root)
-    receipt_path = active_receipt_path(home)
-    if not os.path.isfile(receipt_path):
-        p(f"  no install receipt at {receipt_path}: hand-made install, nothing is owned")
+    installed_md = os.path.join(claude_home(home), "CLAUDE.md")
+    if state["active"] is None and state["pending"] is None and not state["wired_versions"]:
+        p(f"  no install receipt at {active_receipt_path(home)}: hand-made install, nothing is owned")
         sha, _dirty = source_commit(source_root)
         expected = render_instruction_file(source_root, tree="~/.claude", commit=sha or TEMPLATE_COMMIT)
         try:
@@ -571,59 +803,36 @@ def check(home, source_root, out=sys.stdout):
                 if line[:1] in "+-" and line[:3] not in ("+++", "---"))
             p(f"  CLAUDE.md: {'equals' if actual == expected else 'differs from'} the generator's "
               f"output for the legacy ~/.claude layout ({differing} added or removed line(s))")
-        for event, _matcher, handler in registered_handlers(settings):
-            command = handler.get("command", "")
-            if any(f"/hooks/{name}" in command for name in scripts):
-                p(f"  unowned harness handler: {event} {command!r}")
-        drift.append("no receipt")
-        p(f"INSTALL-CHECK-SUMMARY receipt=absent drift={len(drift)} exit=1")
+        for h in state["handlers"]:
+            command = h["handler"].get("command", "")
+            if h["kind"] == "orphan" or any(f"/hooks/{name}" in command for name in scripts):
+                p(f"  unowned harness handler: {h['event']} {command!r}")
+        for verdict in state["verdicts"]:
+            p(f"  INCONSISTENT {verdict}")
+        p(f"INSTALL-CHECK-SUMMARY receipt=absent files=0 inconsistencies={len(state['verdicts']) + 1} "
+          f"drift=0 exit=1")
         return 1
-    try:
-        receipt = load_receipt(receipt_path)
-    except InstallError as exc:
-        p(f"  DRIFT {exc}")
-        p("INSTALL-CHECK-SUMMARY receipt=unreadable files=0 drift=1 exit=1")
-        return 1
-    tree = expand_display(home, receipt["tree"])
-    p(f"  active tree {receipt['tree']} version={receipt['version']} "
-      f"source_commit={receipt.get('source_commit')}")
-    for relative, record in sorted(receipt.get("files", {}).items()):
-        full = os.path.join(tree, relative)
-        if not os.path.isfile(full):
-            drift.append(f"missing {relative}")
-        elif sha256_file(full) != record["sha256"]:
-            drift.append(f"changed {relative}")
-    generated = os.path.join(tree, "CLAUDE.generated.md")
-    try:
-        tree_copy = read_text(generated)
-        installed = read_text(installed_md)
-    except OSError as exc:
-        tree_copy, installed = None, None
-        drift.append(f"instruction file unreadable: {exc}")
-    if tree_copy is not None and installed != tree_copy:
-        drift.append("CLAUDE.md differs from the active tree's generated copy")
-    expected = render_instruction_file(source_root, tree=receipt["tree"],
-                                       commit=receipt.get("source_commit") or TEMPLATE_COMMIT)
-    if tree_copy is not None and expected != tree_copy:
-        drift.append("generator output from the current source differs from the active tree; "
-                     "the source moved since this tree was staged")
-    found = registered_handlers(settings)
-    for h in receipt["owned_hooks"]:
-        hits = [1 for event, matcher, handler in found
-                if handler_identity(event, matcher, handler) == owned_identity(h)]
-        if len(hits) != 1:
-            drift.append(f"owned hook {h['event']} {h['command']!r}: {len(hits)} match(es)")
-    owned_identities = {owned_identity(h) for h in receipt["owned_hooks"]}
-    for event, matcher, handler in found:
-        command = handler.get("command", "")
-        if handler_identity(event, matcher, handler) not in owned_identities and any(
-                f"/hooks/{name}" in command for name in scripts):
-            p(f"  unowned harness handler: {event} {command!r}")
-    for item in drift:
+    active = state["active"]
+    if active is not None:
+        p(f"  active tree {active['tree']} version={active['version']} "
+          f"source_commit={active.get('source_commit')}")
+    else:
+        p("  no active receipt")
+    if state["pending"]:
+        p(f"  pending marker: from={state['pending'].get('from')} to={state['pending'].get('to')} "
+          f"started_at={state['pending'].get('started_at')}")
+    for h in state["handlers"]:
+        command = h["handler"].get("command", "")
+        if h["kind"] == "foreign" and any(f"/hooks/{name}" in command for name in scripts):
+            p(f"  unowned harness handler: {h['event']} {command!r}")
+    for verdict in state["verdicts"]:
+        p(f"  INCONSISTENT {verdict}")
+    for item in state["drift"]:
         p(f"  DRIFT {item}")
-    code = 1 if drift else 0
-    p(f"INSTALL-CHECK-SUMMARY receipt=present files={len(receipt.get('files', {}))} "
-      f"drift={len(drift)} exit={code}")
+    code = 1 if state["verdicts"] or state["drift"] else 0
+    files = len(active.get("files", {})) if active else 0
+    p(f"INSTALL-CHECK-SUMMARY receipt={'present' if active else 'absent'} files={files} "
+      f"inconsistencies={len(state['verdicts'])} drift={len(state['drift'])} exit={code}")
     return code
 
 
@@ -858,7 +1067,8 @@ def selftest():
         check(home, source, out=buf)
         chk("--check reports those user entries as unowned, not as drift",
             buf.getvalue().count("unowned harness handler") == 2
-            and "INSTALL-CHECK-SUMMARY receipt=present files=6 drift=0 exit=0" in buf.getvalue())
+            and "INSTALL-CHECK-SUMMARY receipt=present files=6 inconsistencies=0 drift=0 exit=0"
+            in buf.getvalue())
         current = load_json(settings_path)
         current["hooks"]["PreToolUse"] = [e for e in current["hooks"]["PreToolUse"]
                                           if e.get("matcher") != "Bash|Shell"]
@@ -867,6 +1077,144 @@ def selftest():
         chk("review reproduction 4294811762: both user entries that reuse the command are retained",
             reproduction(4294811762, "user entries retained: [('PostToolUse', 'Bash'), "
                                      "('PreToolUse', 'Bash|Shell')]"))
+
+        # --- activation is a logged transaction: a stop at any point after the marker is
+        # written leaves --check red with the stage named, and the next --activate of either
+        # version restores exactly one version's entries
+        def wired(home_dir):
+            commands = [h.get("command") for _e, _m, h in registered_handlers(
+                load_json(os.path.join(home_dir, ".claude", "settings.json")))]
+            return {v: sum(f"/harness/{v}/" in c for c in commands) for v in ("v1", "v2")}
+
+        marker_path = pending_marker_path(home)
+        activate(home, "v1")
+        chk("a completed activation leaves no pending marker", not os.path.exists(marker_path))
+
+        class Stopped(Exception):
+            pass
+
+        def stop():
+            raise Stopped()
+
+        for label, seams, expected_stage in (
+                ("after the replace", {"after_replace": stop}, "after the switch"),
+                ("after the instruction file", {"fault": "after-instruction-file"},
+                 "after the instruction file"),
+                ("after the receipt", {"fault": "after-receipt"}, "before the marker was cleared")):
+            activate(home, "v1")
+            try:
+                activate(home, "v2", **seams)
+            except (Stopped, InstallError):
+                pass
+            buf = io.StringIO()
+            code = check(home, source, out=buf)
+            marker = load_json(marker_path) if os.path.isfile(marker_path) else None
+            chk(f"stopped {label}: the marker names the switch and --check exits 1 naming the stage "
+                f"'{expected_stage}'",
+                code == 1 and marker is not None and marker["from"] == "v1" and marker["to"] == "v2"
+                and f"activation of v2 interrupted {expected_stage}" in buf.getvalue())
+            lines = []
+            activate(home, "v1", log=lines.append)
+            buf = io.StringIO()
+            chk(f"stopped {label}: --activate v1 restores exactly v1's entries, clears the marker, "
+                f"and --check is clean",
+                wired(home) == {"v1": 2, "v2": 0} and not os.path.exists(marker_path)
+                and check(home, source, out=buf) == 0
+                and any("completing an interrupted switch" in line for line in lines))
+            try:
+                activate(home, "v2", **seams)
+            except (Stopped, InstallError):
+                pass
+            activate(home, "v2")
+            buf = io.StringIO()
+            chk(f"stopped {label}: --activate v2 finishes the switch to exactly v2's entries and "
+                f"--check is clean",
+                wired(home) == {"v1": 0, "v2": 2} and not os.path.exists(marker_path)
+                and check(home, source, out=buf) == 0)
+            activate(home, "v1")
+        atomic_write(marker_path, json.dumps({"schema_version": 1, "from": "v1", "to": "v2",
+                                              "merged_sha256": "0" * 64,
+                                              "started_at": "2026-01-01T00:00:00Z"}).encode("utf-8"))
+        buf = io.StringIO()
+        chk("a marker with no switch behind it reads as interrupted before the switch",
+            check(home, source, out=buf) == 1
+            and "activation of v2 interrupted before the switch" in buf.getvalue())
+        activate(home, "v1")
+        chk("--activate clears a stale marker", not os.path.exists(marker_path))
+        twice = activate(home, "v1")
+        buf = io.StringIO()
+        chk("re-activating the active version is idempotent: same entries, no marker, --check clean",
+            wired(home) == {"v1": 2, "v2": 0} and twice["version"] == "v1"
+            and not os.path.exists(marker_path) and check(home, source, out=buf) == 0)
+
+        # --- an orphaned harness handler: a command into the harness directory that no
+        # staged receipt owns is refused, never adopted or silently dropped
+        current = load_json(settings_path)
+        current["hooks"]["Stop"].append({"hooks": [{
+            "type": "command", "command": "python3 ~/.claude/harness/v9/hooks/stop_guard.py",
+            "timeout": 5}]})
+        atomic_write(settings_path, (json.dumps(current, indent=2) + "\n").encode("utf-8"))
+        buf = io.StringIO()
+        chk("--check names a handler pointing into a harness tree no receipt owns as orphaned",
+            check(home, source, out=buf) == 1 and "INCONSISTENT orphaned harness handler Stop "
+            "'python3 ~/.claude/harness/v9/hooks/stop_guard.py'" in buf.getvalue())
+        chk("--activate refuses while an orphaned harness handler is registered, naming it",
+            raises(lambda: activate(home, "v1"), "orphaned harness handler(s) no staged tree owns: "
+                                                "Stop 'python3 ~/.claude/harness/v9/hooks/stop_guard.py'"))
+        lines = []
+        activate(home, "v1", remove_orphans=True, log=lines.append)
+        buf = io.StringIO()
+        chk("--activate --remove-orphans removes it, says so, and --check is clean",
+            not any("harness/v9/" in h.get("command", "")
+                    for _e, _m, h in registered_handlers(load_json(settings_path)))
+            and check(home, source, out=buf) == 0
+            and any("removing 1 orphaned harness handler" in line for line in lines))
+
+        # --- a staged tree whose receipt cannot be read: its entries could not be removed
+        broken_tree = tree_path(home, "v-corrupt")
+        os.makedirs(broken_tree)
+        open(os.path.join(broken_tree, RECEIPT_NAME), "w").write("{not json")
+        buf = io.StringIO()
+        chk("--check names a staged tree whose receipt cannot be read",
+            check(home, source, out=buf) == 1 and "INCONSISTENT staged tree v-corrupt" in buf.getvalue())
+        chk("--activate refuses with an unreadable staged receipt",
+            raises(lambda: activate(home, "v1"), "unreadable staged receipt(s): v-corrupt"))
+        shutil.rmtree(broken_tree)
+        buf = io.StringIO()
+        chk("--check is clean again once the broken tree is gone", check(home, source, out=buf) == 0)
+
+        chk("review reproduction 4294811755: a switch killed after its settings replace rolls back "
+            "to exactly v1's entries",
+            reproduction(4294811755, "hooks= {'v1': 4, 'v2': 0}"))
+
+        # --- mutation proof on a private copy of this module: with the removal set built from
+        # the active receipt only, the post-switch stop leaves both versions wired, the state
+        # the rollback proof above rejects
+        def private_copy(old, new):
+            source_text = read_text(__file__)
+            if source_text.count(old) != 1:
+                raise AssertionError(f"mutation site occurs {source_text.count(old)} time(s)")
+            module = types.ModuleType("install_claude_mutant")
+            module.__file__ = __file__
+            exec(compile(source_text.replace(old, new), __file__, "exec"), module.__dict__)
+            return module
+
+        mutant = private_copy('    for staged in state["trees"].values():\n'
+                              '        remove |= _owned_set(staged)\n', "")
+        mutant_home = os.path.join(td, "mutant-home")
+        os.makedirs(os.path.join(mutant_home, ".claude"))
+        json.dump(user_settings, open(os.path.join(mutant_home, ".claude", "settings.json"), "w"))
+        mutant.stage(source, mutant_home, version_id="v1")
+        mutant.stage(source, mutant_home, version_id="v2")
+        mutant.activate(mutant_home, "v1")
+        try:
+            mutant.activate(mutant_home, "v2", after_replace=stop)
+        except Stopped:
+            pass
+        mutant.activate(mutant_home, "v1")
+        chk("mutation: removal from the active receipt only leaves both versions wired after a "
+            "post-switch stop, which the rollback proof rejects",
+            wired(mutant_home) == {"v1": 2, "v2": 2})
 
         # --- a concurrent writer between the read and the replace
         seen = []
@@ -963,7 +1311,7 @@ def main(argv):
         return selftest()
     options = {"--home": os.path.expanduser("~"), "--source": ROOT, "--tree": TEMPLATE_TREE,
                "--commit": TEMPLATE_COMMIT, "--version-id": None}
-    flags = {"--allow-dirty": False}
+    flags = {"--allow-dirty": False, "--remove-orphans": False}
     positional = []
     while args:
         item = args.pop(0)
@@ -994,7 +1342,8 @@ def main(argv):
             if len(positional) != 1:
                 sys.stderr.write("--activate takes exactly one version id\n")
                 return 2
-            active = activate(options["--home"], positional[0])
+            active = activate(options["--home"], positional[0],
+                              remove_orphans=flags["--remove-orphans"], log=print)
             print(f"activated {active['tree']} at {active['activated_at']}")
             return 0
         if mode == "--check":

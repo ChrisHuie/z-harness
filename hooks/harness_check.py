@@ -152,7 +152,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 391
+SELFTEST_FLOOR = 401
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -182,7 +182,7 @@ SELFTEST_SUITES = [
     ("verify-review-publication",
      ["tools/verify-review-publication.py", "--selftest"], 94),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 53),
-    ("install-claude", ["tools/install-claude.py", "--selftest"], 245),
+    ("install-claude", ["tools/install-claude.py", "--selftest"], 265),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
     ("ci-gate", ["tools/ci-gate.py", "--selftest"], 345),
     ("write-mutation-receipt",
@@ -275,7 +275,7 @@ SELFTEST_TIMEOUTS = {
     "ci-gate": 120,
     "fuzz-judge-diff": 25,
     # Stages and activates several temporary trees, runs three reviewer reproductions as
-    # subprocesses and forty-two fixture hooks in fresh interpreters; measured 17.2s at 245 proofs.
+    # subprocesses and sixty-two fixture hooks in fresh interpreters; measured 18.3s at 265 proofs.
     "install-claude": 60,
 }
 DEFAULT_SELFTEST_TIMEOUT = 15
@@ -1333,6 +1333,8 @@ HTML_BLOCK_TAGS = frozenset(
     "p param search section summary table tbody td tfoot th thead title tr track ul".split())
 RAW_HTML_TAGS = ("pre", "script", "style", "textarea")
 THEMATIC_BREAK = re.compile(r" {0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})")
+ATX_HEADING = re.compile(r" {0,3}#{1,6}(?:[ \t]|$)")
+SETEXT_UNDERLINE = re.compile(r" {0,3}(?:=+|-+)[ \t]*")
 HTML_TAG_LINE = re.compile(
     r"(<[a-z][a-z0-9-]*(\s+[a-z_:][a-z0-9_.:-]*(\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s\"'=<>`]+))?)*\s*/?>"
     r"|</[a-z][a-z0-9-]*\s*>)\s*")
@@ -1380,23 +1382,45 @@ def claim_blocks(text):
     spaces or tabs, closes it; an unclosed fence runs to the end of the file. A run indented
     further is content, never a fence, so what follows it stays prose. A run on a line of an
     HTML block (CommonMark 4.6) is literal too, and the block's lines stay prose, since the
-    file is read as text. There is no container model: a fence inside a block quote
-    (`> ```) is not seen, so its content counts as prose rather than being hidden. Lines are
+    file is read as text. List items are modelled only as far as fences need: a line that
+    starts with a list marker opens an item whose content offset is the marker's width, a run
+    may open a fence directly after the marker, and a fence opened inside an item closes on
+    the first non-blank line indented less than the item's offset, where the item ends (a
+    closer indented up to three columns past the offset still closes it first). Block
+    quotes are not modelled: a fence inside one (`> ```)
+    is not seen, so its content counts as prose rather than being hidden. Lines are
     `str.splitlines()` lines. A table row is its own block: rows carry no sentence
     terminator, so a quoted phrase in one row and a file mention in another would otherwise
     read as one sentence.
     """
     blocks, current, start, fence, html_end, paragraph_open = [], [], 0, None, None, False
+    item_offset = None
     for number, line in enumerate(text.splitlines(), 1):
         expanded = line.expandtabs(4)
         indent = len(expanded) - len(expanded.lstrip(" "))
-        stripped = expanded.lstrip(" ") if indent <= 3 else ""
-        run = re.match(r"`{3,}|~{3,}", stripped)
         if fence is not None:
-            if (run and run.group()[0] == fence[0] and len(run.group()) >= fence[1]
-                    and not stripped[run.end():].strip(" \t")):
+            char, length, k = fence
+            closer = re.match(r"`{3,}|~{3,}", expanded.lstrip(" "))
+            if (closer and closer.group()[0] == char and len(closer.group()) >= length
+                    and indent <= k + 3 and not expanded.lstrip(" ")[closer.end():].strip(" \t")):
                 fence = None
-            continue
+                continue
+            if k and line.strip() and indent < k:
+                fence = None  # the item the fence opened in has ended; the line is read afresh
+            else:
+                continue
+        marker = re.match(r" {0,3}(?:[-*+]|\d{1,9}[.)]) {1,4}(?=\S)", expanded)
+        if marker:
+            item_offset = marker.end()
+        elif line.strip() and item_offset is not None and indent < item_offset:
+            item_offset = None
+        stripped = expanded.lstrip(" ") if indent <= 3 else ""
+        opener_indent = item_offset if item_offset is not None and indent >= item_offset else 0
+        if marker and re.match(r"`{3,}|~{3,}", expanded[marker.end():]):
+            opener_indent, stripped = marker.end(), expanded[marker.end():]
+        elif item_offset is not None and indent >= item_offset and indent - item_offset <= 3:
+            stripped = expanded.lstrip(" ")
+        run = re.match(r"`{3,}|~{3,}", stripped)
         html_line = html_end is not None
         if html_end is not None:
             if html_end(line):
@@ -1411,14 +1435,17 @@ def claim_blocks(text):
                 if html_end(line):  # a block of the first five kinds may end on its opening line
                     html_end = None
             elif run and not (run.group()[0] == "`" and "`" in stripped[run.end():]):
-                fence = (run.group()[0], len(run.group()))
+                fence = (run.group()[0], len(run.group()), opener_indent)
                 paragraph_open = False
                 if current:
                     blocks.append((start, "\n".join(current)))
                     current = []
                 continue
         item = re.match(r"\s*(?:(?:[-*+]|\d+\.)\s|\|)", line) is not None
-        heading = line.startswith("#")
+        # An ATX heading is one to six `#` after up to three spaces, followed by a space, a tab
+        # or the end of the line; a setext underline under an open paragraph ends it too.
+        heading = ATX_HEADING.match(line) is not None
+        setext = paragraph_open and SETEXT_UNDERLINE.fullmatch(line) is not None
         if not line.strip():
             paragraph_open = False
             if current:
@@ -1434,7 +1461,8 @@ def claim_blocks(text):
         if heading:
             blocks.append((start, "\n".join(current)))
             current = []
-        paragraph_open = not (heading or html_line or THEMATIC_BREAK.fullmatch(line) or line.lstrip().startswith("|"))
+        paragraph_open = not (heading or setext or html_line or THEMATIC_BREAK.fullmatch(line)
+                              or line.lstrip().startswith("|"))
     if current:
         blocks.append((start, "\n".join(current)))
     return blocks
@@ -6027,6 +6055,13 @@ def selftest():
                    and claims_in("```\n\t```\n" + fence_claim) == fence_base
                    and claims_in("   ```\n" + fence_claim + "\n   ```\n") == fence_base
                    and claims_in("- item\n  ```\n  " + fence_claim + "  ```\n") == fence_base)
+        expect_red("C12 closes a fence opened in a list item when the item ends, and keeps its content "
+                   "hidden while the item lasts; a run directly after a list marker opens a fence",
+                   lambda: claims_in("- item\n  ```\n  code\n\n" + fence_claim) == fence_base + 1
+                   and claims_in("- item\n  ```\n  " + fence_claim + "  ```\n\n" + fence_claim) == fence_base + 1
+                   and claims_in("- ```\n  " + fence_claim + "  ```\n") == fence_base
+                   and claims_in("1. ```\n   " + fence_claim + "   ```\n") == fence_base
+                   and claims_in("  ```\n" + fence_claim + "```\n\n" + fence_claim) == fence_base + 1)
         expect_red("C12 recognises an HTML block after a closed HTML block or a thematic break, where no "
                    "paragraph is open, so a run inside it does not open a fence",
                    lambda: claims_in("<pre>\n```\n</pre>\n<custom>\n```\n</custom>\n\n" + fence_claim) == fence_base + 1
@@ -6034,6 +6069,18 @@ def selftest():
                    and claims_in("para\n<custom>\n```\n" + fence_claim) == fence_base)
         # The samples below leave the run unclosed: a closed pair inside one prose block would be
         # masked as an inline code span and hide the claim by another route.
+        expect_red("C12 reads a heading as CommonMark does: up to three spaces, then one to six `#` and a "
+                   "separator; a setext underline ends the paragraph; `###notheading` is prose",
+                   lambda: all(claims_in(head + "\n<custom>\n```\n</custom>\n\n" + fence_claim) == fence_base + 1
+                               for head in ("# H", " # H", "   # H", "###### H", "para\n===", "para\n---"))
+                   and claims_in("###notheading\n<custom>\n```\n" + fence_claim) == fence_base)
+        expect_red("C12 opens no paragraph after a blank line or a table row, so a tag standing alone after either "
+                   "starts a block",
+                   lambda: claims_in("para\n\n<custom>\n```\n</custom>\n\n" + fence_claim) == fence_base + 1
+                   and claims_in("| a | b |\n|---|---|\n| 1 | 2 |\n<custom>\n```\n</custom>\n\n" + fence_claim) == fence_base + 1)
+        expect_red("C12 ends a raw block on </script> and </textarea> as well as </style>",
+                   lambda: claims_in("<pre>\n```\n</script>\n\n```\n" + fence_claim) == fence_base
+                   and claims_in("<pre>\n```\n</textarea>\n\n```\n" + fence_claim) == fence_base)
         expect_red("C12 ends an HTML block of the first five kinds on its opening line when the end condition "
                    "is met there",
                    lambda: claims_in("<pre></pre>\n```\n" + fence_claim) == fence_base
@@ -6828,14 +6875,15 @@ def selftest():
 
         # --- fence mutants, each failing one shape proof above by name; search strings are
         # assembled so this block adds no occurrence of the site it mutates
-        any_run_closes = private_copy("            if (run and run.group()[0] == fence[0] and len(run.group()) >= "
-                                      + "fence[1]\n                    and not stripped[run.end():].strip(\" \\t\")):\n",
-                                      "            if run and not stripped[run.end():].strip(\" \\t\"):\n")
+        any_run_closes = private_copy("            if (closer and closer.group()[0] == char and len(closer.group()) >= "
+                                      + "length\n                    and indent <= k + 3 and not expanded.lstrip(\" \")"
+                                      "[closer.end():].strip(\" \\t\")):\n",
+                                      "            if closer and not expanded.lstrip(\" \")[closer.end():].strip(\" \\t\"):\n")
         expect_red("mutation: a fence closed by any run swallows the claim after a tilde fence holding "
                    "a backtick run (the mixed-fence proof goes red)",
                    lambda: claims_in("~~~text\n```\n~~~\n\n" + fence_claim, any_run_closes) == fence_base)
-        length_ignored = private_copy("[0] == fence[0] and len(run.group()) >= " + "fence[1]",
-                                      "[0] == fence[0]")
+        length_ignored = private_copy("[0] == char and len(closer.group()) >= " + "length",
+                                      "[0] == char")
         expect_red("mutation: a fence closed by a shorter run swallows the claim after a four-backtick "
                    "fence holding three (the shorter-fence proof goes red)",
                    lambda: claims_in("````text\n```\n````\n\n" + fence_claim, length_ignored) == fence_base)
@@ -6843,8 +6891,7 @@ def selftest():
         expect_red("mutation: a backtick run followed by a backtick opening a fence swallows the claim "
                    "after an inline span (the inline-span proof goes red)",
                    lambda: claims_in("```AGENTS.md``` is a filename.\n\n" + fence_claim, info_ignored) == fence_base)
-        any_whitespace = private_copy("                    and not stripped[run.end():].strip(" + '" \\t")):\n',
-                                      "                    and not stripped[run.end():].strip()):\n")
+        any_whitespace = private_copy("[closer.end():].strip(" + '" \\t")):\n', "[closer.end():].strip()):\n")
         expect_red("mutation: stripping any whitespace after a closer makes a no-break space close the fence "
                    "(the no-break-space proof goes red)",
                    lambda: claims_in("```\n```\u00a0\n" + fence_claim + "```\n", any_whitespace) == fence_base + 1)
@@ -6855,6 +6902,40 @@ def selftest():
                    lambda: claims_in("    ```\n" + fence_claim + "\n    ```\n", any_indent) == fence_base)
         no_html = private_copy('            html_end = html_block_end(stripped, paragraph_' + 'open) if stripped.startswith("<") else None\n',
                                '            html_end = None\n')
+        no_container_end = private_copy("            if k and line.strip() and indent < " + "k:\n", "            if False:\n")
+        expect_red("mutation: a fence that outlives its list item hides the claim after the list "
+                   "(the list-item proof goes red)",
+                   lambda: claims_in("- item\n  ```\n  code\n\n" + fence_claim, no_container_end) == fence_base)
+        no_marker_opener = private_copy("        if marker and re.match(r\"`{3,}|~{3,}\", " + "expanded[marker.end():]):\n",
+                                        "        if False:\n")
+        expect_red("mutation: ignoring a run after a list marker counts the item's fenced content as prose "
+                   "(the list-item proof goes red)",
+                   lambda: claims_in("- ```\n  " + fence_claim + "  ```\n", no_marker_opener) == fence_base + 1)
+        any_hash_heading = private_copy("        heading = ATX_HEADING.match(line) " + "is not None\n",
+                                        '        heading = line.startswith("#")\n')
+        expect_red("mutation: any `#` line taken as a heading opens no paragraph before `###notheading` and loses "
+                   "the indented-heading cases (the heading proof goes red)",
+                   lambda: claims_in("###notheading\n<custom>\n```\n" + fence_claim, any_hash_heading) == fence_base + 1
+                   or claims_in(" # H\n<custom>\n```\n</custom>\n\n" + fence_claim, any_hash_heading) == fence_base)
+        no_setext = private_copy("        setext = paragraph_open and SETEXT_UNDERLINE.fullmatch(line) " + "is not None\n",
+                                 "        setext = False\n")
+        expect_red("mutation: ignoring a setext underline keeps the paragraph open and hides the claim after the "
+                   "next HTML block (the heading proof goes red)",
+                   lambda: claims_in("para\n===\n<custom>\n```\n</custom>\n\n" + fence_claim, no_setext) == fence_base)
+        blank_keeps_paragraph = private_copy("        if not line.strip():\n            paragraph_open = " + "False\n",
+                                             "        if not line.strip():\n            pass\n")
+        table_keeps_paragraph = private_copy("                              or line.lstrip().startswith(" + '"|"))\n', "                              )\n")
+        expect_red("mutation: a blank line or a table row that leaves the paragraph open hides the claim after the "
+                   "next HTML block (the paragraph proof goes red)",
+                   lambda: claims_in("para\n\n<custom>\n```\n</custom>\n\n" + fence_claim, blank_keeps_paragraph) == fence_base
+                   and claims_in("| a | b |\n|---|---|\n| 1 | 2 |\n<custom>\n```\n</custom>\n\n" + fence_claim,
+                                 table_keeps_paragraph) == fence_base)
+        script_closer_off = private_copy('RAW_HTML_TAGS = ("pre", "script", ' + '"style", "textarea")', 'RAW_HTML_TAGS = ("pre", "style", "textarea")')
+        textarea_closer_off = private_copy('RAW_HTML_TAGS = ("pre", "script", "style", ' + '"textarea")', 'RAW_HTML_TAGS = ("pre", "script", "style")')
+        expect_red("mutation: dropping </script> or </textarea> as a raw closer keeps the block open past it "
+                   "(the raw-closer proof goes red)",
+                   lambda: claims_in("<pre>\n```\n</script>\n\n```\n" + fence_claim, script_closer_off) == fence_base + 1
+                   and claims_in("<pre>\n```\n</textarea>\n\n```\n" + fence_claim, textarea_closer_off) == fence_base + 1)
         prose_as_paragraph = private_copy("html_block_end(stripped, " + "paragraph_open)", "html_block_end(stripped, bool(current))")
         expect_red("mutation: accumulated prose taken as an open paragraph hides the claim after a closed HTML block "
                    "(the paragraph-state proof goes red)",

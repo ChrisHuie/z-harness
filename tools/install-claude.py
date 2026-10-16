@@ -368,22 +368,85 @@ def load_json(path):
         return json.loads(fh.read().decode("utf-8"))
 
 
+def _plain(value):
+    """A receipt field value that can be compared and hashed: str, int or None, never bool."""
+    return value is None or (isinstance(value, (str, int)) and not isinstance(value, bool))
+
+
+def receipt_problems(receipt):
+    """-> [problem] for a receipt this installer must not trust; [] for a usable one.
+
+    Every field the installer later reads is checked here, so a receipt that loads is one
+    whose files can be verified and whose owned entries can be removed and compared.
+    """
+    if not isinstance(receipt, dict):
+        return ["not an object"]
+    version = receipt.get("schema_version")
+    if isinstance(version, bool) or version not in RECEIPT_SCHEMA_VERSIONS:
+        return [f"schema_version {version!r} is not one of {RECEIPT_SCHEMA_VERSIONS}"]
+    problems = []
+    for key in ("version", "tree"):
+        if not isinstance(receipt.get(key), str) or not receipt[key].strip():
+            problems.append(f"{key} must be a non-empty string")
+    files = receipt.get("files")
+    if not isinstance(files, dict) or not all(
+            isinstance(rel, str) and rel and isinstance(rec, dict)
+            and isinstance(rec.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", rec["sha256"])
+            for rel, rec in files.items()):
+        problems.append("files must map each relative path to an object with a 64-hex sha256")
+    owned = receipt.get("owned_hooks")
+    if not isinstance(owned, list):
+        problems.append("owned_hooks must be a list")
+        return problems
+    seen = set()
+    for index, h in enumerate(owned):
+        if not isinstance(h, dict) or not all(key in h for key in HANDLER_IDENTITY_KEYS):
+            problems.append(f"owned_hooks[{index}] must carry {', '.join(HANDLER_IDENTITY_KEYS)}")
+            continue
+        if not all(_plain(h[key]) for key in HANDLER_IDENTITY_KEYS):
+            problems.append(f"owned_hooks[{index}] fields must be strings, integers or null")
+            continue
+        if not isinstance(h["event"], str) or not h["event"] or h["type"] != "command" \
+                or not isinstance(h["command"], str) or not h["command"]:
+            problems.append(f"owned_hooks[{index}] must be a command handler with an event and a command")
+            continue
+        identity = owned_identity(h)
+        if identity in seen:
+            problems.append(f"owned_hooks[{index}] repeats {identity!r}")
+        seen.add(identity)
+    return problems
+
+
 def load_receipt(path):
-    """-> a receipt whose schema version this installer understands; InstallError otherwise."""
+    """-> a receipt whose shape this installer can act on; InstallError otherwise."""
     try:
         receipt = load_json(path)
     except (OSError, ValueError) as exc:
         raise InstallError(f"receipt unreadable at {path}: {exc}")
-    if not isinstance(receipt, dict) or receipt.get("schema_version") not in RECEIPT_SCHEMA_VERSIONS:
-        raise InstallError(f"receipt at {path} has schema_version "
-                           f"{receipt.get('schema_version') if isinstance(receipt, dict) else None!r}, "
-                           f"not one of {RECEIPT_SCHEMA_VERSIONS}")
-    if not isinstance(receipt.get("owned_hooks"), list) or not all(
-            isinstance(h, dict) and all(key in h for key in HANDLER_IDENTITY_KEYS)
-            for h in receipt["owned_hooks"]):
-        raise InstallError(f"receipt at {path}: owned_hooks must list entries with "
-                           f"{', '.join(HANDLER_IDENTITY_KEYS)}")
+    problems = receipt_problems(receipt)
+    if problems:
+        raise InstallError(f"receipt at {path}: " + "; ".join(problems))
     return receipt
+
+
+def marker_problems(marker):
+    """-> [problem] for a pending marker this installer must not read as a transaction."""
+    if not isinstance(marker, dict):
+        return ["not an object"]
+    problems = []
+    version = marker.get("schema_version")
+    if isinstance(version, bool) or version != PENDING_SCHEMA_VERSION:
+        problems.append(f"schema_version {version!r} is not {PENDING_SCHEMA_VERSION}")
+    if not isinstance(marker.get("to"), str) or not marker["to"].strip():
+        problems.append("to must be a non-empty version")
+    if marker.get("from") is not None and (not isinstance(marker["from"], str) or not marker["from"].strip()):
+        problems.append("from must be a version or null")
+    digest = marker.get("merged_sha256")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        problems.append("merged_sha256 must be 64 hex characters")
+    if not isinstance(marker.get("started_at"), str) or not marker["started_at"].strip():
+        problems.append("started_at must be a timestamp string")
+    return problems
 
 
 # ---- stage ---------------------------------------------------------------------
@@ -460,18 +523,40 @@ def stage(source_root, home, version_id=None, allow_dirty=False, now=None):
 # ---- installation state ------------------------------------------------------------
 PENDING_NAME = "install-pending.json"
 PENDING_SCHEMA_VERSION = 1
-# Registered commands name a tree in display form; one under this prefix that no staged
-# receipt owns is an orphan, never a user entry.
+# Registered commands name a tree in display form. A command points into a tree only when
+# it has the shape the installer itself registers (python3, a script under that tree's
+# hooks/, flags); a command that merely mentions such a path is a user entry.
 HARNESS_TREE_PREFIX = "~/.claude/harness/"
+HARNESS_COMMAND = re.compile(
+    r"^python3 ~/\.claude/harness/([^/\s]+)/hooks/[A-Za-z0-9_./-]+\.py"
+    r"((?: --?[A-Za-z0-9][A-Za-z0-9_-]*)*)$")
 # The Claude Code runtime processes that write $HOME/.claude/settings.json: the desktop
 # app's embedded runtime (claude-code/<version>/.../claude.app/Contents/MacOS/claude), the
 # CLI binary (claude/versions/<version>, usually run through a `claude` symlink, so the
 # executable's basename is what both share), and the npm entry point. The Electron shell
 # `Claude`, its `Claude Helper` processes and `disclaimer` are not the runtime.
 CLAUDE_CODE_EXECUTABLE = "claude"
-CLAUDE_CODE_ENTRY_POINT = "@anthropic-ai/claude-code"
+CLAUDE_CODE_VERSIONED_PATH = "/claude/versions/"
+CLAUDE_CODE_ENTRY_POINT = "@anthropic-ai/claude-code/"
+SCRIPT_RUNTIMES = ("node", "nodejs", "bun")
 RESIDUAL_SENTENCE = ("a settings.json write by one of them between the installer's final stat and "
                      "its rename would be overwritten and cannot be detected afterwards")
+
+
+def is_claude_code_process(comm, args):
+    """True for the runtime's own executable or an interpreter running its entry point.
+
+    The executable's basename `claude` covers the desktop app's embedded runtime and the
+    CLI run through its symlink; the versioned path covers the CLI binary run directly. The
+    npm entry point counts only as the script an interpreter executes, so a `grep` over a
+    log that names it is not a Claude Code process.
+    """
+    base = os.path.basename(comm)
+    if base == CLAUDE_CODE_EXECUTABLE or CLAUDE_CODE_VERSIONED_PATH in comm:
+        return True
+    tokens = args.split()
+    return bool(tokens) and os.path.basename(tokens[0]) in SCRIPT_RUNTIMES and any(
+        CLAUDE_CODE_ENTRY_POINT in token for token in tokens[1:])
 
 
 def claude_processes(ps_rows=None):
@@ -500,8 +585,9 @@ def claude_processes(ps_rows=None):
                 ps_rows.append((int(pid), comm.strip(), args_by_pid.get(int(pid), "")))
     found = []
     for pid, comm, args in ps_rows:
-        if os.path.basename(comm) == CLAUDE_CODE_EXECUTABLE or CLAUDE_CODE_ENTRY_POINT in args:
-            found.append((int(pid), comm if os.path.basename(comm) == CLAUDE_CODE_EXECUTABLE else args))
+        if is_claude_code_process(comm, args):
+            found.append((int(pid), comm if os.path.basename(comm) == CLAUDE_CODE_EXECUTABLE
+                          or CLAUDE_CODE_VERSIONED_PATH in comm else args))
     return found
 
 
@@ -518,8 +604,8 @@ def pending_marker_path(home):
 
 
 def harness_version_of(command):
-    """-> the tree version a registered command points into, or None."""
-    found = re.search(re.escape(HARNESS_TREE_PREFIX) + r"([^/\s]+)/", str(command))
+    """-> the tree version a registered command executes a hook from, or None."""
+    found = HARNESS_COMMAND.match(command) if isinstance(command, str) else None
     return found.group(1) if found else None
 
 
@@ -576,11 +662,16 @@ def installation_state(home, source_root=None):
     if os.path.isfile(marker_path):
         try:
             pending = load_json(marker_path)
-            if not isinstance(pending, dict) or not isinstance(pending.get("to"), str):
-                raise ValueError("not an object naming a target version")
-            state["pending"] = pending
         except (OSError, ValueError) as exc:
+            pending = None
             verdicts.append(f"pending marker unreadable: {exc}; run --activate <version> to replace it")
+        if pending is not None:
+            problems = marker_problems(pending)
+            if problems:
+                verdicts.append(f"pending marker malformed ({'; '.join(problems)}); run --activate "
+                                f"<version> to replace it")
+            else:
+                state["pending"] = pending
     settings_path = os.path.join(claude_home(home), "settings.json")
     settings = {}
     if os.path.isfile(settings_path):
@@ -638,6 +729,18 @@ def installation_state(home, source_root=None):
     elif active is None and wired:
         verdicts.append(f"settings wire {sorted(wired)} but no receipt is active; run --activate "
                         f"{sorted(wired)[0]}")
+    if active is not None:
+        # The active receipt is the staged receipt of its version plus activation fields; a
+        # difference means one of them was edited, and the owned entries can no longer be
+        # trusted to describe what the tree registered.
+        staged_copy = state["trees"].get(active_version)
+        if staged_copy is None and active_version not in state["broken_trees"]:
+            verdicts.append(f"active receipt names version {active_version}, which is not staged; "
+                            f"re-stage it or run --activate <another version>")
+        elif staged_copy is not None and any(
+                staged_copy.get(key) != active.get(key) for key in ("tree", "files", "owned_hooks")):
+            verdicts.append(f"active receipt differs from the staged receipt of {active_version} "
+                            f"(tree, files or owned entries); run --activate {active_version}")
     if active is not None:
         named = state["instruction_file"]
         if named is None:
@@ -709,7 +812,8 @@ def activate(home, version_id, fault=None, between_read_and_replace=None, after_
     consistent switch because the removal set covers every version.
 
     `fault` plants a stop: "before-replace" (the merged file is written beside settings.json,
-    the replace never happens), "after-instruction-file", or "after-receipt".
+    the replace never happens), "after-marker" (the marker is written, the replace never
+    happens), "after-instruction-file", or "after-receipt".
     `between_read_and_replace` and `after_replace` are selftest seams for a concurrent
     writer and for a stop after the replace; `processes` is the seam for the process list.
     `log` receives one line per notable event.
@@ -799,6 +903,9 @@ def activate(home, version_id, fault=None, between_read_and_replace=None, after_
                     "%Y-%m-%dT%H:%M:%SZ"),
             }
             atomic_write(marker_path, (json.dumps(marker, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+            if fault == "after-marker":
+                os.remove(tmp)
+                raise InstallError("planted fault: stopped after the marker, before the replace")
             os.replace(tmp, settings_path)
         except BaseException:
             with contextlib.suppress(OSError):
@@ -837,7 +944,9 @@ def activate(home, version_id, fault=None, between_read_and_replace=None, after_
                  (json.dumps(activated, indent=2, sort_keys=True) + "\n").encode("utf-8"))
     if fault == "after-receipt":
         raise InstallError("planted fault: stopped after the active receipt was written")
-    os.remove(marker_path)
+    # Every durable write is done; an already-absent marker is not an inconsistency.
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(marker_path)
     return activated
 
 
@@ -939,6 +1048,16 @@ def selftest():
     def activate(home, version_id, **seams):
         seams.setdefault("processes", lambda: [])
         return real_activate(home, version_id, **seams)
+
+    def private_copy(old, new):
+        """-> a private copy of this module with one planted defect, executed in memory."""
+        source_text = read_text(__file__)
+        if source_text.count(old) != 1:
+            raise AssertionError(f"mutation site occurs {source_text.count(old)} time(s)")
+        module = types.ModuleType("install_claude_mutant")
+        module.__file__ = __file__
+        exec(compile(source_text.replace(old, new), __file__, "exec"), module.__dict__)
+        return module
 
     def reproduction(thread_id, expected_line):
         """Run a reviewer's reproduction script verbatim; it exits 0 only at the expected outcome."""
@@ -1047,7 +1166,7 @@ def selftest():
         json.dump(dict(receipt, owned_hooks=[{"type": "command", "command": "x", "timeout": 1}]),
                   open(legacy_path, "w"))
         chk("a receipt whose owned entry lacks event or matcher is refused",
-            raises(lambda: load_receipt(legacy_path), "owned_hooks must list entries with"))
+            raises(lambda: load_receipt(legacy_path), "owned_hooks[0] must carry event, matcher"))
         chk("the generated file in the tree is templated with the tree's own path",
             "~/.claude/harness/v1/hooks/" in read_text(os.path.join(tree, "CLAUDE.generated.md")))
         chk("a staged tree is immutable: staging the same version again is refused",
@@ -1270,6 +1389,159 @@ def selftest():
         buf = io.StringIO()
         chk("--check is clean again once the broken tree is gone", check(home, source, out=buf) == 0)
 
+        # --- a receipt that loads is one the installer can act on: every field it reads later
+        # is checked at load, so a thin or mistyped receipt never produces a verdict it cannot
+        # back or a crash in place of one
+        good_receipt = load_receipt(os.path.join(tree, RECEIPT_NAME))
+        for label, broken, needle in (
+                ("no files map", {k: v for k, v in good_receipt.items() if k != "files"},
+                 "files must map each relative path"),
+                ("a file record without a digest", dict(good_receipt, files={"hooks/x.py": {}}),
+                 "files must map each relative path"),
+                ("no version", {k: v for k, v in good_receipt.items() if k != "version"},
+                 "version must be a non-empty string"),
+                ("a boolean schema version", dict(good_receipt, schema_version=True),
+                 "schema_version True is not one of"),
+                ("an owned entry whose timeout is a list", dict(good_receipt, owned_hooks=[
+                    dict(good_receipt["owned_hooks"][0], timeout=[])]),
+                 "owned_hooks[0] fields must be strings, integers or null"),
+                ("a repeated owned entry", dict(good_receipt, owned_hooks=good_receipt["owned_hooks"]
+                                                 + good_receipt["owned_hooks"][:1]),
+                 "owned_hooks[2] repeats"),
+                ("an owned entry that is not a command", dict(good_receipt, owned_hooks=[
+                    dict(good_receipt["owned_hooks"][0], type="prompt")]),
+                 "must be a command handler")):
+            json.dump(broken, open(legacy_path, "w"))
+            chk(f"a receipt with {label} is refused at load, never acted on",
+                raises(lambda: load_receipt(legacy_path), needle))
+        thin = dict(good_receipt)
+        del thin["files"]
+        atomic_write(active_receipt_path(home), (json.dumps(thin, indent=2) + "\n").encode("utf-8"))
+        buf = io.StringIO()
+        chk("--check with an active receipt that lost its files map is red, not files=0 drift=0",
+            check(home, source, out=buf) == 1 and "active receipt unreadable" in buf.getvalue()
+            and "files must map" in buf.getvalue())
+        activate(home, "v1")
+
+        # --- the active receipt is the staged receipt plus activation fields: an edit to
+        # either is an inconsistency, so a hook dropped from both the active receipt and
+        # settings is still found through the staged receipt
+        edited = load_json(active_receipt_path(home))
+        dropped = edited["owned_hooks"].pop(0)
+        atomic_write(active_receipt_path(home), (json.dumps(edited, indent=2) + "\n").encode("utf-8"))
+        current = load_json(settings_path)
+        current["hooks"][dropped["event"]] = [
+            entry for entry in current["hooks"][dropped["event"]]
+            if not any(h.get("command") == dropped["command"] for h in entry.get("hooks", []))]
+        atomic_write(settings_path, (json.dumps(current, indent=2) + "\n").encode("utf-8"))
+        buf = io.StringIO()
+        chk("--check reconciles the active receipt against the staged receipt of its version",
+            check(home, source, out=buf) == 1
+            and "active receipt differs from the staged receipt of v1" in buf.getvalue())
+        activate(home, "v1")
+        buf = io.StringIO()
+        chk("--activate restores the dropped entry and the receipt, and --check is clean",
+            wired(home) == {"v1": 2, "v2": 0} and check(home, source, out=buf) == 0)
+        ghost = dict(load_json(active_receipt_path(home)), version="v-ghost")
+        atomic_write(active_receipt_path(home), (json.dumps(ghost, indent=2) + "\n").encode("utf-8"))
+        buf = io.StringIO()
+        chk("--check names an active receipt whose version is not staged",
+            check(home, source, out=buf) == 1
+            and "active receipt names version v-ghost, which is not staged" in buf.getvalue())
+        activate(home, "v1")
+
+        # --- only a command of the installer's own shape points into a tree: a user command
+        # that merely prints such a path is a user entry and survives --remove-orphans
+        current = load_json(settings_path)
+        mention = {"type": "command", "timeout": 5,
+                   "command": "printf '%s\\n' '~/.claude/harness/old/hooks/example.py'"}
+        current["hooks"]["Stop"].append({"hooks": [dict(mention)]})
+        atomic_write(settings_path, (json.dumps(current, indent=2) + "\n").encode("utf-8"))
+        state = installation_state(home, source)
+        chk("a user command that only mentions a harness path is foreign, not an orphan",
+            [h["kind"] for h in state["handlers"] if h["handler"] == mention] == ["foreign"]
+            and harness_version_of(mention["command"]) is None
+            and harness_version_of("python3 ~/.claude/harness/v9/hooks/stop_guard.py --x") == "v9")
+        activate(home, "v1", remove_orphans=True)
+        buf = io.StringIO()
+        chk("--activate --remove-orphans keeps that user command and --check stays clean",
+            any(h == mention for _e, _m, h in registered_handlers(load_json(settings_path)))
+            and check(home, source, out=buf) == 0)
+        current = load_json(settings_path)
+        current["hooks"]["Stop"] = [e for e in current["hooks"]["Stop"]
+                                    if not any(h == mention for h in e.get("hooks", []))]
+        atomic_write(settings_path, (json.dumps(current, indent=2) + "\n").encode("utf-8"))
+
+        # --- a pending marker is trusted only in its own shape
+        for label, bad_marker in (("only a target", {"to": "v2"}),
+                                  ("a foreign schema", {"schema_version": 999, "from": 1, "to": "v2",
+                                                        "merged_sha256": "x", "started_at": 1}),
+                                  ("an empty target", {"schema_version": 1, "from": "v1", "to": "",
+                                                       "merged_sha256": "0" * 64,
+                                                       "started_at": "2026-01-01T00:00:00Z"})):
+            atomic_write(marker_path, json.dumps(bad_marker).encode("utf-8"))
+            buf = io.StringIO()
+            chk(f"--check names a pending marker with {label} as malformed, never as a transaction",
+                check(home, source, out=buf) == 1 and "pending marker malformed" in buf.getvalue()
+                and "activation of" not in buf.getvalue())
+        activate(home, "v1")
+        chk("--activate replaces a malformed marker and leaves none", not os.path.exists(marker_path))
+
+        # --- the marker precedes the replace: a stop between them leaves the marker, the stage
+        # 'before the switch', and settings untouched
+        before_bytes = open(settings_path, "rb").read()
+        chk("a stop after the marker and before the replace is reported as a failed activation",
+            raises(lambda: activate(home, "v2", fault="after-marker"), "after the marker"))
+        buf = io.StringIO()
+        chk("after that stop the marker exists, --check names 'before the switch', and settings.json "
+            "is byte-identical",
+            os.path.isfile(marker_path) and check(home, source, out=buf) == 1
+            and "activation of v2 interrupted before the switch" in buf.getvalue()
+            and open(settings_path, "rb").read() == before_bytes)
+        activate(home, "v1")
+        no_marker = private_copy('            atomic_write(marker_path, (json.dumps(marker, indent=2, sort_keys=True) + "\\n").encode("utf-8"))\n', "")
+        no_marker_home = os.path.join(td, "no-marker-home")
+        os.makedirs(os.path.join(no_marker_home, ".claude"))
+        json.dump(user_settings, open(os.path.join(no_marker_home, ".claude", "settings.json"), "w"))
+        no_marker.stage(source, no_marker_home, version_id="v1")
+        no_marker.stage(source, no_marker_home, version_id="v2")
+        no_marker.activate(no_marker_home, "v1", processes=lambda: [])
+        try:
+            no_marker.activate(no_marker_home, "v2", after_replace=stop, processes=lambda: [])
+        except Stopped:
+            pass
+        chk("mutation: without the marker write, a post-replace stop leaves no marker, the state the "
+            "stage-naming proofs reject",
+            not os.path.exists(no_marker.pending_marker_path(no_marker_home)))
+
+        # --- the default process acquisition reads both ps columns and pairs them by pid, and a
+        # quiescent list under the strict flag activates
+        from unittest.mock import patch
+
+        class PsResult:
+            def __init__(self, stdout):
+                self.stdout = stdout
+
+        def fake_ps(argv, **_kw):
+            table = {"pid=,comm=": " 101 /x/claude.app/Contents/MacOS/claude\n 102 /usr/bin/python3\n",
+                     "pid=,args=": " 101 /x/claude.app/Contents/MacOS/claude --output-format stream-json\n"
+                                   " 102 python3 tools/x.py\n"}
+            return PsResult(table[argv[2]])
+
+        with patch.object(subprocess, "run", fake_ps):
+            live = claude_processes()
+        chk("claude_processes reads both ps columns by default and pairs them by pid",
+            live == [(101, "/x/claude.app/Contents/MacOS/claude")])
+        chk("a grep over a log that names the npm entry point is not a Claude Code process, a "
+            "versioned CLI binary is",
+            not is_claude_code_process("/usr/bin/grep", "grep @anthropic-ai/claude-code/ /tmp/log")
+            and is_claude_code_process("/opt/claude/versions/2.1.301", "claude")
+            and is_claude_code_process("/usr/local/bin/node",
+                                       "node /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js"))
+        strict = real_activate(home, "v1", processes=lambda: [], require_quiescent=True)
+        chk("--require-quiescent activates when the process list is empty",
+            strict["version"] == "v1" and wired(home) == {"v1": 2, "v2": 0})
+
         chk("review reproduction 4294811755: a switch killed after its settings replace rolls back "
             "to exactly v1's entries",
             reproduction(4294811755, "hooks= {'v1': 4, 'v2': 0}"))
@@ -1277,15 +1549,6 @@ def selftest():
         # --- mutation proof on a private copy of this module: with the removal set built from
         # the active receipt only, the post-switch stop leaves both versions wired, the state
         # the rollback proof above rejects
-        def private_copy(old, new):
-            source_text = read_text(__file__)
-            if source_text.count(old) != 1:
-                raise AssertionError(f"mutation site occurs {source_text.count(old)} time(s)")
-            module = types.ModuleType("install_claude_mutant")
-            module.__file__ = __file__
-            exec(compile(source_text.replace(old, new), __file__, "exec"), module.__dict__)
-            return module
-
         mutant = private_copy('    for staged in state["trees"].values():\n'
                               '        remove |= _owned_set(staged)\n', "")
         mutant_home = os.path.join(td, "mutant-home")
@@ -1318,9 +1581,9 @@ def selftest():
             (17, "/usr/local/bin/node", "node /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js"),
             (18, "/usr/bin/python3", "python3 tools/install-claude.py --activate v1"),
         ]
-        chk("claude_processes names the desktop runtime, the CLI and the npm entry point, and not "
-            "the Electron shell, its helpers or the disclaimer wrapper",
-            [pid for pid, _exe in claude_processes(ps_rows=rows)] == [15, 17]
+        chk("claude_processes names the desktop runtime, the versioned CLI binary, the symlinked CLI and "
+            "the npm entry point, and not the Electron shell, its helpers or the disclaimer wrapper",
+            [pid for pid, _exe in claude_processes(ps_rows=rows)] == [15, 16, 17]
             and claude_processes(ps_rows=[(16, "/opt/homebrew/bin/claude", "claude")]) == [
                 (16, "/opt/homebrew/bin/claude")])
         chk("claude_processes on an empty table is an empty list, not unknown",

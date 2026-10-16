@@ -593,6 +593,10 @@ def selftest():
         write_manifest(dict(good, beta={"status": "exempt"}))
         chk("coverage rejects an exempt entry without a reason",
             any("exempt without a reason" in p for p in coverage()[0]))
+        buf = io.StringIO()
+        chk("--validate exits red on a hard coverage defect the ratchet never carries",
+            validate(root, out=buf) == 1 and "coverage FAIL" in buf.getvalue()
+            and "exempt without a reason" in buf.getvalue())
 
         write_manifest(dict(good, beta={"status": "exempt", "reason": ""}))
         chk("coverage rejects a blank reason",

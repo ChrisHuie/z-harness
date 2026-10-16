@@ -148,7 +148,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 299
+SELFTEST_FLOOR = 306
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -177,7 +177,7 @@ SELFTEST_SUITES = [
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 25),
     ("verify-review-publication",
      ["tools/verify-review-publication.py", "--selftest"], 94),
-    ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 39),
+    ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 40),
     ("install-claude", ["tools/install-claude.py", "--selftest"], 41),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
     ("ci-gate", ["tools/ci-gate.py", "--selftest"], 345),
@@ -496,12 +496,11 @@ DELIVERY_CONTRACT = {
 ALWAYS_ON_PATH = re.compile(r"`?~/\.claude/CLAUDE\.md`?")
 POLICY_LINE_CITATION = re.compile(r"(?:CLAUDE|AGENTS)\.md`?\s*:\s*\d+(?:\s*[-–]\s*\d+)?")
 BARE_LINE_CITATION = re.compile(r"`:\d+(?:-\d+)?`")
-AGENTS_QUOTE_MENTION = re.compile(r"`?AGENTS\.md`?[^\"\n]{0,40}\"")
 STRAIGHT_QUOTE = re.compile(r"\"([^\"]{3,400})\"", re.S)
 QUOTE_ELLIPSIS = re.compile(r"…|\.\.\.")
 CLAIM_NEGATION = re.compile(
     r"\b(?:does not|do not|did not|is not|are not|was not|were not|no longer|not carried|"
-    r"not carry|absent from|nowhere in)\b", re.I)
+    r"not carry|never carr(?:y|ies|ied)|never had|absent from|nowhere in)\b", re.I)
 SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+")
 DUPLICATE_MIN_WORDS = 8
 C12_SCOPE = ("sentences naming ~/.claude/CLAUDE.md, or AGENTS.md with a section heading, a "
@@ -1281,9 +1280,20 @@ def agents_sections(agents_text):
 
 
 def claim_blocks(text):
-    """-> [(first line number, block text)]: paragraphs, list items and headings."""
-    blocks, current, start = [], [], 0
+    """-> [(first line number, block text)]: paragraphs, list items and headings.
+
+    Lines inside a fenced code block (``` or ~~~) are examples, not prose, and are skipped.
+    """
+    blocks, current, start, fenced = [], [], 0, False
     for number, line in enumerate(text.splitlines(), 1):
+        if line.lstrip().startswith(("```", "~~~")):
+            fenced = not fenced
+            if current:
+                blocks.append((start, "\n".join(current)))
+                current = []
+            continue
+        if fenced:
+            continue
         item = re.match(r"\s*(?:[-*+]|\d+\.)\s", line) is not None
         heading = line.startswith("#")
         if not line.strip():
@@ -1333,12 +1343,11 @@ def claim_findings(rel, text, agents_text):
     by_heading = {h: normalize_policy_text(body) for h, body in sections if h}
     headings = sorted(by_heading, key=len, reverse=True)
     section_mention = re.compile(
-        r"`?AGENTS\.md`?\s*(?:§|section)?\s*,?\s*(" + "|".join(re.escape(h) for h in headings) + r")\b"
+        r"`?AGENTS\.md`?\s*(?:§|section)?\s*,?\s*(" + "|".join(re.escape(h) for h in headings)
+        + r")(?![A-Za-z0-9-])"
     ) if headings else None
     sentences_seen = set()
     for start, block in claim_blocks(text):
-        block_lines = block.splitlines()
-
         def line_of(offset):
             return start + block.count("\n", 0, offset)
 
@@ -1355,14 +1364,29 @@ def claim_findings(rel, text, agents_text):
                              "reason": f"bare line citation {match.group(0)}: cite a verbatim "
                                        f"phrase, never a line number"})
             cited = True
+        # A code span that carries the path beside other text (`cat ~/.claude/CLAUDE.md`) is a
+        # command example, not a claim; only the bare path or file name in a span is a mention.
+        def neutralize_span(match):
+            span = match.group(1)
+            if span in ("~/.claude/CLAUDE.md", "AGENTS.md"):
+                return match.group(0)
+            if "CLAUDE.md" in span or "AGENTS.md" in span:
+                return "`code`"
+            return match.group(0)
+        prose = re.sub(r"`([^`\n]+)`", neutralize_span, block)
         # Mask straight-quoted spans before sentence splitting so a quoted question mark or
-        # period cannot split the sentence that carries it.
+        # period cannot split the sentence that carries it. A span that swallows a file
+        # mention (a stray quote earlier in the block, or a quoted YAML value) is not a
+        # citation and is left in place, so the mention stays visible.
         quotes = []
 
         def mask(match):
-            quotes.append(match.group(1))
+            inner = match.group(1)
+            if ALWAYS_ON_PATH.search(inner) or "AGENTS.md" in inner:
+                return match.group(0)
+            quotes.append(inner)
             return f" QUOTE{len(quotes) - 1}Q "
-        masked = STRAIGHT_QUOTE.sub(mask, block)
+        masked = STRAIGHT_QUOTE.sub(mask, prose)
         offset = 0
         for sentence in SENTENCE_BREAK.split(masked):
             position = masked.find(sentence, offset)
@@ -1390,23 +1414,27 @@ def claim_findings(rel, text, agents_text):
             scope = by_heading[section.group(1)] if section else whole
             where = f"AGENTS.md section {section.group(1)!r}" if section else "AGENTS.md"
             bound = [q for q in quoted if quote_binds(q, scope)]
+            unbound = [q for q in quoted if not quote_binds(q, scope)]
             if not quoted:
                 findings.append({"line": line, "kind": "unbound claim",
                                  "key": claim_identity_key(sentence),
                                  "reason": "unbound claim about the always-on file: quote a verbatim "
-                                           "AGENTS.md phrase in straight double quotes, or drop the claim"})
+                                           "AGENTS.md phrase in straight double quotes in the same "
+                                           "sentence, or drop the claim"})
             elif negated and bound:
                 findings.append({"line": line, "kind": "negated claim",
                                  "key": claim_identity_key(bound[0]),
                                  "reason": f"negated claim contradicts {where}: {bound[0][:60]!r} is present"})
             elif negated:
                 counters["bound"] += 1
-            elif bound:
-                counters["bound"] += 1
-            else:
+            elif unbound:
+                # Every quote in a positive claim must bind: one verbatim phrase beside a
+                # stale one would otherwise carry the stale one through.
                 findings.append({"line": line, "kind": "stale quote",
-                                 "key": claim_identity_key(quoted[0]),
-                                 "reason": f"stale quote: {quoted[0][:70]!r} is not verbatim in {where}"})
+                                 "key": claim_identity_key(unbound[0]),
+                                 "reason": f"stale quote: {unbound[0][:70]!r} is not verbatim in {where}"})
+            else:
+                counters["bound"] += 1
     # Duplication: a policy sentence restated outside a quote is a second copy on the same
     # dispatch, which the routing rule forbids; a quoted citation is the sanctioned form.
     unquoted = normalize_policy_text(STRAIGHT_QUOTE.sub(" ", text))
@@ -1416,8 +1444,9 @@ def claim_findings(rel, text, agents_text):
             continue
         needle = normalize_policy_text(sentence)
         if needle and needle in unquoted:
-            index = unquoted.find(needle)
-            line = text.count("\n", 0, max(0, int(index * len(text) / max(1, len(unquoted))))) + 1
+            words = [re.escape(w) for w in needle.split()[:6]]
+            located = re.search(r"\s+".join(r"[`*]*" + w + r"[`*]*" for w in words), text, re.I)
+            line = text.count("\n", 0, located.start()) + 1 if located else 1
             findings.append({"line": line, "kind": "duplicated policy sentence",
                              "key": claim_identity_key(sentence),
                              "reason": f"duplicated policy sentence outside a quote: {sentence[:70]!r}"})
@@ -2658,7 +2687,7 @@ def discover_codex_binaries():
 
 
 def claude_binary_version(data):
-    match = re.search(rb"// Version: (\d+\.\d+\.\d+)", data[:0] or data)
+    match = re.search(rb"// Version: (\d+\.\d+\.\d+)", data)
     return match.group(1).decode("ascii") if match else "unknown"
 
 
@@ -5649,9 +5678,30 @@ def selftest():
         agents_line = c12_on("See AGENTS.md:65 for the rule.\n")
         expect_red("C12 goes red on an AGENTS.md:<n> line citation",
                    lambda: any("line citation 'AGENTS.md:65'" in d for _c, d in agents_line.failures))
-        duplicate = c12_on("Memory is soft, potentially stale context, never current-state proof. Also other text.\n")
-        expect_red("C12 goes red on a policy sentence duplicated outside a quote",
-                   lambda: any(c == "C12" and "duplicated policy sentence" in d for c, d in duplicate.failures))
+        duplicate = c12_on("Intro.\n\nMore.\n\nMemory is soft, potentially stale context, never current-state proof. Also other text.\n")
+        expect_red("C12 goes red on a policy sentence duplicated outside a quote, at its real line",
+                   lambda: any(c == "C12" and "deferred.md:5: duplicated policy sentence" in d
+                               for c, d in duplicate.failures))
+        fenced = c12_on("```\n`~/.claude/CLAUDE.md` carries the rule shown here\n```\n")
+        expect_red("C12 control: a mention inside a fenced code block is an example, not a claim",
+                   lambda: not fenced.failures)
+        code_span = c12_on("Run `cat ~/.claude/CLAUDE.md` to read the installed file.\n")
+        expect_red("C12 control: a command example carrying the path in a code span is not a claim",
+                   lambda: not code_span.failures)
+        swallowed = c12_on('A "stray quote. The rule is always-on in `~/.claude/CLAUDE.md` '
+                           '("Named a tool? Run exactly that and stop."), as "noted.\n')
+        expect_red("C12 still reports a claim that a stray earlier quote would otherwise swallow",
+                   lambda: any(c == "C12" and "deferred.md:1:" in d for c, d in swallowed.failures))
+        yaml_claim = c12_on(good, extra_file=(os.path.join(bind_refs, "policy.yaml"),
+                                              'note: "`~/.claude/CLAUDE.md` carries the rule"\n'))
+        expect_red("C12 reaches a claim quoted as a YAML value",
+                   lambda: any("policy.yaml:1: unbound claim" in d for _c, d in yaml_claim.failures))
+        never_carries = c12_on('`~/.claude/CLAUDE.md` never carries "Named a tool? Run exactly that and stop."\n')
+        expect_red("C12 reads 'never carries' as a negation and reddens when the phrase is present",
+                   lambda: any(c == "C12" and "negated claim contradicts" in d for c, d in never_carries.failures))
+        mixed = c12_on('`~/.claude/CLAUDE.md` carries "zorblat" and "Named a tool? Run exactly that and stop."\n')
+        expect_red("C12 requires every quote in a positive claim to bind, naming the stale one",
+                   lambda: any(c == "C12" and "stale quote: 'zorblat'" in d for c, d in mixed.failures))
         excluded = c12_on(good, extra_file=(os.path.join(bind_root, "skills", "delta", "evals", "note.md"),
                                            "`~/.claude/CLAUDE.md` carries the rule with no quote.\n"))
         expect_red("C12 control: the same unbound claim under evals/ is out of scope and stays green",
@@ -5883,16 +5933,31 @@ def selftest():
         c15_clean = Run(fixture_root, ci=True)
         c15_clean.c15_envelope_fixtures()
         expect_red("C15 control: the committed fixtures decode", lambda: not c15_clean.failures)
-        stop_fixture = os.path.join(fixture_root, "hooks", "fixtures_codex", "C5_stop.json")
-        stop_bytes = open(stop_fixture, "rb").read()
-        stripped = json.loads(stop_bytes)
-        del stripped["stop_hook_active"]
-        json.dump(stripped, open(stop_fixture, "w"))
+        # Drop a field that ONLY the required-field list catches. Dropping stop_hook_active
+        # was also caught by the Stop-specific boolean check, so deleting the required-field
+        # clause left this proof green for the neighbour's reason.
+        pre_fixture = os.path.join(fixture_root, "hooks", "fixtures_codex", "C3_pre_tool_use.json")
+        pre_bytes = open(pre_fixture, "rb").read()
+        stripped = json.loads(pre_bytes)
+        del stripped["session_id"]
+        json.dump(stripped, open(pre_fixture, "w"))
         c15_missing = Run(fixture_root, ci=True)
         c15_missing.c15_envelope_fixtures()
-        expect_red("C15 goes red when a fixture lacks a field its schema requires",
-                   lambda: any(c == "C15" and "C5_stop.json" in d and "stop_hook_active" in d
+        expect_red("C15 goes red when a fixture lacks a field only its schema's required list names",
+                   lambda: any(c == "C15" and "C3_pre_tool_use.json" in d
+                               and "missing required field(s) ['session_id']" in d
                                for c, d in c15_missing.failures))
+        open(pre_fixture, "wb").write(pre_bytes)
+        stop_fixture = os.path.join(fixture_root, "hooks", "fixtures_codex", "C5_stop.json")
+        stop_bytes = open(stop_fixture, "rb").read()
+        typed = json.loads(stop_bytes)
+        typed["stop_hook_active"] = "false"
+        json.dump(typed, open(stop_fixture, "w"))
+        c15_typed = Run(fixture_root, ci=True)
+        c15_typed.c15_envelope_fixtures()
+        expect_red("C15 goes red when stop_hook_active is present but not a boolean",
+                   lambda: any(c == "C15" and "C5_stop.json" in d and "not a boolean" in d
+                               for c, d in c15_typed.failures))
         open(stop_fixture, "wb").write(stop_bytes)
         leaked = json.loads(stop_bytes)
         leaked["cwd"] = "/" + "Users/someone/project"

@@ -28,9 +28,10 @@ between the read and the replace discards the merge and retries), and the result
 mismatch after the write is a failed activation, never an assumed success.
 
 Ownership is by exact identity: an entry is owned when its (event, matcher, type, command,
-timeout) tuple is listed in a receipt. User-added hooks, even ones stored under
-$HOME/.claude/hooks/, `permissions.defaultMode`, and every other key are never touched.
-A hand-made install (no receipt) is reported by --check, not adopted.
+timeout) tuple is listed in a receipt; the same command registered under another event or
+matcher is a user entry. User-added hooks, even ones stored under $HOME/.claude/hooks/,
+`permissions.defaultMode`, and every other key are never touched. A hand-made install (no
+receipt) is reported by --check, not adopted.
 
 The generated instruction file is the shared policy (AGENTS.md) followed by the Claude adapter
 section of CLAUDE.md, with the adapter's `~/.claude/hooks/` and `~/.claude/tools/` paths
@@ -76,12 +77,18 @@ PATH_SUBSTITUTIONS = ("~/.claude/hooks/", "~/.claude/tools/")
 COPIED_DIRECTORIES = ("hooks", "tools")
 COPY_IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", "*events*.jsonl")
 RECEIPT_NAME = "install-receipt.json"
-RECEIPT_SCHEMA_VERSION = 1
+# Schema 2 differs from 1 only in what an owned entry's identity means: all five fields,
+# never the three handler fields alone. The fields are the same, so both versions load.
+RECEIPT_SCHEMA_VERSION = 2
+RECEIPT_SCHEMA_VERSIONS = (1, 2)
 # A flag token is an option or a bare word; a shell operator such as `||` or `;` is not a
 # flag, so a wrapped or masked command never matches and is refused as unowned.
 OWNED_COMMAND = re.compile(
     r"^python3 ~/\.claude/hooks/([A-Za-z0-9_./-]+\.py)((?: --?[A-Za-z0-9][A-Za-z0-9_-]*)*)$")
-HANDLER_IDENTITY_KEYS = ("type", "command", "timeout")
+# An entry's identity is the whole registration: the same command under another event or
+# matcher is a different entry, and a user's.
+HANDLER_IDENTITY_KEYS = ("event", "matcher", "type", "command", "timeout")
+HANDLER_KEYS = ("type", "command", "timeout")
 
 
 class InstallError(Exception):
@@ -205,16 +212,22 @@ def owned_hook_entries(source_settings, tree):
     return owned
 
 
-def handler_identity(handler):
-    return tuple(handler.get(key) for key in HANDLER_IDENTITY_KEYS)
+def handler_identity(event, matcher, handler):
+    """-> (event, matcher, type, command, timeout) for a registered handler."""
+    return (event, matcher) + tuple(handler.get(key) for key in HANDLER_KEYS)
+
+
+def owned_identity(owned):
+    """-> the identity of a receipt's owned entry, which carries all five fields itself."""
+    return handler_identity(owned.get("event"), owned.get("matcher"), owned)
 
 
 def merge_hooks(settings, remove, add):
     """-> a deep copy of `settings` with `remove` identities dropped and `add` handlers present.
 
-    `remove` is a set of (type, command, timeout) identities; `add` is the owned list. Entries
-    left with no handlers are dropped; a new handler joins the entry with the same matcher or
-    opens one. Nothing outside the hooks block is read or written.
+    `remove` is a set of (event, matcher, type, command, timeout) identities; `add` is the
+    owned list. Entries left with no handlers are dropped; a new handler joins the entry with
+    the same matcher or opens one. Nothing outside the hooks block is read or written.
     """
     merged = copy.deepcopy(settings)
     hooks = merged.get("hooks")
@@ -232,7 +245,8 @@ def merge_hooks(settings, remove, add):
                 continue
             entry["hooks"] = [
                 handler for handler in entry["hooks"]
-                if not (isinstance(handler, dict) and handler_identity(handler) in remove)
+                if not (isinstance(handler, dict)
+                        and handler_identity(event, entry.get("matcher"), handler) in remove)
             ]
             if entry["hooks"]:
                 kept_entries.append(entry)
@@ -241,7 +255,7 @@ def merge_hooks(settings, remove, add):
         else:
             del hooks[event]
     for owned in add:
-        handler = {key: owned[key] for key in HANDLER_IDENTITY_KEYS}
+        handler = {key: owned[key] for key in HANDLER_KEYS}
         entries = hooks.setdefault(owned["event"], [])
         for entry in entries:
             if isinstance(entry, dict) and entry.get("matcher") == owned["matcher"] \
@@ -332,6 +346,24 @@ def active_receipt_path(home):
 def load_json(path):
     with open(path, "rb") as fh:
         return json.loads(fh.read().decode("utf-8"))
+
+
+def load_receipt(path):
+    """-> a receipt whose schema version this installer understands; InstallError otherwise."""
+    try:
+        receipt = load_json(path)
+    except (OSError, ValueError) as exc:
+        raise InstallError(f"receipt unreadable at {path}: {exc}")
+    if not isinstance(receipt, dict) or receipt.get("schema_version") not in RECEIPT_SCHEMA_VERSIONS:
+        raise InstallError(f"receipt at {path} has schema_version "
+                           f"{receipt.get('schema_version') if isinstance(receipt, dict) else None!r}, "
+                           f"not one of {RECEIPT_SCHEMA_VERSIONS}")
+    if not isinstance(receipt.get("owned_hooks"), list) or not all(
+            isinstance(h, dict) and all(key in h for key in HANDLER_IDENTITY_KEYS)
+            for h in receipt["owned_hooks"]):
+        raise InstallError(f"receipt at {path}: owned_hooks must list entries with "
+                           f"{', '.join(HANDLER_IDENTITY_KEYS)}")
+    return receipt
 
 
 # ---- stage ---------------------------------------------------------------------
@@ -425,22 +457,16 @@ def activate(home, version_id, fault=None, between_read_and_replace=None, after_
     """
     tree = tree_path(home, version_id)
     receipt_path = os.path.join(tree, RECEIPT_NAME)
-    try:
-        receipt = load_json(receipt_path)
-    except (OSError, ValueError) as exc:
-        raise InstallError(f"no usable receipt at {receipt_path}: {exc}")
-    owned = receipt.get("owned_hooks")
-    if not isinstance(owned, list) or not owned:
+    receipt = load_receipt(receipt_path)
+    owned = receipt["owned_hooks"]
+    if not owned:
         raise InstallError("receipt owns no hook entries")
     previous = {}
     previous_path = active_receipt_path(home)
     if os.path.isfile(previous_path):
-        try:
-            previous = load_json(previous_path)
-        except (OSError, ValueError) as exc:
-            raise InstallError(f"active receipt unreadable: {exc}")
-    remove = {handler_identity(h) for h in previous.get("owned_hooks", []) if isinstance(h, dict)}
-    remove |= {handler_identity(h) for h in owned}
+        previous = load_receipt(previous_path)
+    target = {owned_identity(h) for h in owned}
+    remove = {owned_identity(h) for h in previous.get("owned_hooks", [])} | target
     settings_path = os.path.join(claude_home(home), "settings.json")
     os.makedirs(os.path.dirname(settings_path), exist_ok=True)
     for attempt in range(attempts):
@@ -489,13 +515,12 @@ def activate(home, version_id, fault=None, between_read_and_replace=None, after_
     problems = []
     for h in owned:
         hits = [1 for event, matcher, handler in found
-                if event == h["event"] and matcher == h["matcher"]
-                and handler_identity(handler) == handler_identity(h)]
+                if handler_identity(event, matcher, handler) == owned_identity(h)]
         if len(hits) != 1:
             problems.append(f"{h['event']} {h['command']!r}: {len(hits)} match(es), expected 1")
-    stale = remove - {handler_identity(h) for h in owned}
-    for event, _matcher, handler in found:
-        if handler_identity(handler) in stale:
+    stale = remove - target
+    for event, matcher, handler in found:
+        if handler_identity(event, matcher, handler) in stale:
             problems.append(f"{event} {handler.get('command')!r}: previous owned entry still present")
     if problems:
         raise InstallError("post-write verification failed: " + "; ".join(problems))
@@ -553,7 +578,12 @@ def check(home, source_root, out=sys.stdout):
         drift.append("no receipt")
         p(f"INSTALL-CHECK-SUMMARY receipt=absent drift={len(drift)} exit=1")
         return 1
-    receipt = load_json(receipt_path)
+    try:
+        receipt = load_receipt(receipt_path)
+    except InstallError as exc:
+        p(f"  DRIFT {exc}")
+        p("INSTALL-CHECK-SUMMARY receipt=unreadable files=0 drift=1 exit=1")
+        return 1
     tree = expand_display(home, receipt["tree"])
     p(f"  active tree {receipt['tree']} version={receipt['version']} "
       f"source_commit={receipt.get('source_commit')}")
@@ -578,16 +608,15 @@ def check(home, source_root, out=sys.stdout):
         drift.append("generator output from the current source differs from the active tree; "
                      "the source moved since this tree was staged")
     found = registered_handlers(settings)
-    for h in receipt.get("owned_hooks", []):
+    for h in receipt["owned_hooks"]:
         hits = [1 for event, matcher, handler in found
-                if event == h["event"] and matcher == h["matcher"]
-                and handler_identity(handler) == handler_identity(h)]
+                if handler_identity(event, matcher, handler) == owned_identity(h)]
         if len(hits) != 1:
             drift.append(f"owned hook {h['event']} {h['command']!r}: {len(hits)} match(es)")
-    owned_identities = {handler_identity(h) for h in receipt.get("owned_hooks", [])}
-    for event, _matcher, handler in found:
+    owned_identities = {owned_identity(h) for h in receipt["owned_hooks"]}
+    for event, matcher, handler in found:
         command = handler.get("command", "")
-        if handler_identity(handler) not in owned_identities and any(
+        if handler_identity(event, matcher, handler) not in owned_identities and any(
                 f"/hooks/{name}" in command for name in scripts):
             p(f"  unowned harness handler: {event} {command!r}")
     for item in drift:
@@ -614,6 +643,13 @@ def selftest():
         except InstallError as exc:
             return needle in str(exc)
         return False
+
+    def reproduction(thread_id, expected_line):
+        """Run a reviewer's reproduction script verbatim; it exits 0 only at the expected outcome."""
+        path = os.path.join(ROOT, "instruments", "reproductions", "pr-36", f"{thread_id}.py")
+        done = subprocess.run([sys.executable, path], cwd=ROOT, capture_output=True, text=True,
+                              timeout=600, env=dict(os.environ, ZH_REVIEW_REPRODUCTIONS="nested"))
+        return done.returncode == 0 and expected_line in done.stdout
 
     # --- the generator against the real repository (read-only)
     rendered = render_instruction_file(ROOT)
@@ -701,6 +737,21 @@ def selftest():
         chk("the receipt records owned entries, version, tree, and the compileall check",
             receipt["version"] == "v1" and receipt["tree"] == "~/.claude/harness/v1"
             and receipt["checks"] == {"compileall": "ok"} and len(receipt["owned_hooks"]) == 2)
+        chk("the receipt is schema 2 and every owned entry carries all five identity fields",
+            receipt["schema_version"] == 2 and all(
+                all(key in h for key in HANDLER_IDENTITY_KEYS) for h in receipt["owned_hooks"]))
+        legacy = dict(receipt, schema_version=1)
+        legacy_path = os.path.join(td, "legacy-receipt.json")
+        json.dump(legacy, open(legacy_path, "w"))
+        chk("a schema 1 receipt still loads: the fields are the same, only identity semantics changed",
+            load_receipt(legacy_path)["version"] == "v1")
+        json.dump(dict(receipt, schema_version=3), open(legacy_path, "w"))
+        chk("a receipt of an unknown schema version is refused, never read as empty",
+            raises(lambda: load_receipt(legacy_path), "schema_version 3"))
+        json.dump(dict(receipt, owned_hooks=[{"type": "command", "command": "x", "timeout": 1}]),
+                  open(legacy_path, "w"))
+        chk("a receipt whose owned entry lacks event or matcher is refused",
+            raises(lambda: load_receipt(legacy_path), "owned_hooks must list entries with"))
         chk("the generated file in the tree is templated with the tree's own path",
             "~/.claude/harness/v1/hooks/" in read_text(os.path.join(tree, "CLAUDE.generated.md")))
         chk("a staged tree is immutable: staging the same version again is refused",
@@ -778,6 +829,44 @@ def selftest():
         chk("rollback to v1 is the same switch pointing back",
             not any("harness/v2/" in c for c in commands)
             and commands.count("python3 ~/.claude/harness/v1/hooks/stub_guard.py --require-scratch") == 1)
+
+        # --- identity carries event and matcher: a user entry that reuses an owned command
+        # under another event or matcher is not owned and survives a switch either way
+        owned_bash = next(h for h in active["owned_hooks"] if h["matcher"] == "Bash")
+        reused = {key: owned_bash[key] for key in HANDLER_KEYS}
+        current = load_json(settings_path)
+        current["hooks"]["PreToolUse"].append({"matcher": "Bash|Shell", "hooks": [dict(reused)]})
+        current["hooks"]["PostToolUse"] = [{"matcher": "Bash", "hooks": [dict(reused)]}]
+        atomic_write(settings_path, (json.dumps(current, indent=2) + "\n").encode("utf-8"))
+        activate(home, "v2")
+        kept = sorted((event, matcher) for event, matcher, h in registered_handlers(load_json(settings_path))
+                      if h == reused)
+        chk("same event, different matcher: the user entry survives activating v2",
+            ("PreToolUse", "Bash|Shell") in kept)
+        chk("different event, same matcher: the user entry survives activating v2",
+            ("PostToolUse", "Bash") in kept)
+        chk("activating v2 removed the owned entry itself and kept nothing else of v1",
+            kept == [("PostToolUse", "Bash"), ("PreToolUse", "Bash|Shell")]
+            and not any("harness/v1/" in h.get("command", "") for e, m, h in
+                        registered_handlers(load_json(settings_path)) if (e, m) == ("PreToolUse", "Bash")))
+        activate(home, "v1")
+        after = registered_handlers(load_json(settings_path))
+        chk("rolling back to v1 keeps both user entries and registers the owned one exactly once",
+            sorted((event, matcher) for event, matcher, h in after if h == reused)
+            == [("PostToolUse", "Bash"), ("PreToolUse", "Bash"), ("PreToolUse", "Bash|Shell")])
+        buf = io.StringIO()
+        check(home, source, out=buf)
+        chk("--check reports those user entries as unowned, not as drift",
+            buf.getvalue().count("unowned harness handler") == 2
+            and "INSTALL-CHECK-SUMMARY receipt=present files=6 drift=0 exit=0" in buf.getvalue())
+        current = load_json(settings_path)
+        current["hooks"]["PreToolUse"] = [e for e in current["hooks"]["PreToolUse"]
+                                          if e.get("matcher") != "Bash|Shell"]
+        del current["hooks"]["PostToolUse"]
+        atomic_write(settings_path, (json.dumps(current, indent=2) + "\n").encode("utf-8"))
+        chk("review reproduction 4294811762: both user entries that reuse the command are retained",
+            reproduction(4294811762, "user entries retained: [('PostToolUse', 'Bash'), "
+                                     "('PreToolUse', 'Bash|Shell')]"))
 
         # --- a concurrent writer between the read and the replace
         seen = []

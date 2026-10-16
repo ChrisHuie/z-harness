@@ -1961,6 +1961,13 @@ def selftest():
                 "hooks/a.py": 'import os, sys\nDIRECTORY = "tools"\nsys.path.insert(0, os.path.join(os.path.dirname(__file__), "guards"))\nimport lib\n',
                 "tools/lib.py": "X = 1\n", "hooks/guards/g.py": "X = 1\n"})
             == ["hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks, hooks/guards"])
+        chk("an insert with the wrong arity, or whose directory string sits in the index argument, authorises nothing",
+            import_check(["hooks/a.py", "tools/lib.py"], {"hooks/a.py": 'import os, sys\nsys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"), 99)\nimport lib\n',
+                                                          "tools/lib.py": "X = 1\n"})
+            == ["hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks"]
+            and import_check(["hooks/a.py", "tools/lib.py"], {"hooks/a.py": 'import os, sys\nsys.path.insert("../tools", os.path.dirname(__file__))\nimport lib\n',
+                                                              "tools/lib.py": "X = 1\n"})
+            == ["hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks"])
         chk("a commented-out sys.path.insert, or a string naming the directory, authorises nothing",
             import_check(["hooks/a.py", "tools/lib.py"], {"hooks/a.py": 'import os, sys\n# sys.path.insert(0, "tools")\nimport lib\n',
                                                           "tools/lib.py": "X = 1\n"})

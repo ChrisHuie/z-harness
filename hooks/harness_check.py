@@ -152,7 +152,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 362
+SELFTEST_FLOOR = 363
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -182,7 +182,7 @@ SELFTEST_SUITES = [
     ("verify-review-publication",
      ["tools/verify-review-publication.py", "--selftest"], 94),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 53),
-    ("install-claude", ["tools/install-claude.py", "--selftest"], 159),
+    ("install-claude", ["tools/install-claude.py", "--selftest"], 160),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
     ("ci-gate", ["tools/ci-gate.py", "--selftest"], 345),
     ("write-mutation-receipt",
@@ -6128,6 +6128,10 @@ def selftest():
                    and restored_findings[0]["display"] == claim_display(backslashes.strip())
                    and "\\\\" in restored_findings[0]["display"] and "\\`" in restored_findings[0]["display"]
                    and not PRIVATE_USE.search(restored_findings[0]["display"]))
+        expect_red("code_spans: a longer backtick run inside a span neither closes it early nor splits it",
+                   lambda: code_spans("`a``b`") == [(0, 6)]
+                   and code_spans("``a`b``") == [(0, 7)]
+                   and code_spans("`x` and `y`") == [(0, 3), (8, 11)])
         sentinel = c12_on('AGENTS.md says "Named a tool? Run exactly that and stop."\n')
         expect_red("C12 strips authored stand-in characters before masking, so a bound phrase stays bound",
                    lambda: not sentinel.failures and sentinel.counters["C12"] == {"claims": 1, "bound": 1})
@@ -6614,6 +6618,9 @@ def selftest():
             "lambda: bool(run.failures) or(bool)": True,
             "lambda: bool(run.failures) or (bool)": True,
             "lambda: (bool(run.failures) or\n         (bool))": True,
+            "lambda: any([False or\n    (bool)])": True,
+            "lambda: (a or\n    b or\n(bool))": True,
+            "lambda: (False or  # comment\n    (bool))": True,
             'lambda: sys.platform != "darwin" or (a and b)': False,
             'lambda: "x" in (error or "")': False,
             'lambda: a == 1 or b == 2': False,

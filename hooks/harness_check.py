@@ -268,7 +268,10 @@ SELFTEST_TIMEOUTS = {
     "bash_command_guard-perf": 90,
     "git_grep_engine_guard": 60,
     "git_grep_engine_guard-perf": 30,
-    "announced_work_guard": 60,
+    # Measured 41.6s on the macos-15 runner in the ci-gate pass at 25ccc30, past the 36s
+    # margin of a 60s budget that the same job had met minutes earlier; 90s keeps that
+    # sample at 46%.
+    "announced_work_guard": 90,
     "ci-gate": 120,
     "fuzz-judge-diff": 25,
     # Stages and activates several temporary trees per run; measured 9.1s at 156 proofs.
@@ -3236,8 +3239,8 @@ def selftest():
             subprocess.run = original_subprocess_run
         expect_red(
             "C1 gives the process-level announced-work suite measured timeout headroom",
-            lambda: SELFTEST_TIMEOUTS["announced_work_guard"] == 60
-            and announced_timeouts == [60] and not c1_announced_timeout.failures,
+            lambda: SELFTEST_TIMEOUTS["announced_work_guard"] == 90
+            and announced_timeouts == [90] and not c1_announced_timeout.failures,
         )
 
         slow_timeouts = []

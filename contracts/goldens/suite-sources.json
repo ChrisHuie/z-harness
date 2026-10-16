@@ -16,7 +16,7 @@
     "fuzz-judge-diff": "69c1877f874e7172810cacb691034fe3e452d392132895bc05b0f259976aa671",
     "git_grep_engine_guard": "b65f9ea5d995e77b6e484f4e412e9d9b70fe1a115aa9164f8c141f55e16623a3",
     "git_grep_engine_guard-perf": "b65f9ea5d995e77b6e484f4e412e9d9b70fe1a115aa9164f8c141f55e16623a3",
-    "harness_check": "d0980f949154b540084784b2d92baf67422a585d5ee835a98d844c76adc556c5",
+    "harness_check": "723e6d3753a4ea2dfda0b60e3fa342ef5ccb4988c5379f621cc31da6bf7b740b",
     "harness_report": "574f45c23e091d7d0a7807bce27a79a9f4a20657f735cdc4b105eba1755eb96a",
     "install-claude": "72d56f6805b92d242fbecbe7c389ded68c18240e816911e22b6fd12e2d2dedf1",
     "portable-conformance": "8eb48510971d0e4f7371cd7a4d16c41850e8e1324a739b70b71d3b85c5823606",

@@ -124,7 +124,7 @@ same shared policy at both user and project scope.
 | `hooks/harness_health.sh` | Claude | weekly health run; exits non-zero when the gate or the runtime verifier fails |
 | `hooks/harness_report.py` | Claude | transcript evidence for Claude skill firing/reference reads; capture is a per-context intersection, timestamps are UTC |
 | `hooks/fixtures_codex/` | Codex | six hook envelopes captured from codex-cli 0.154.0 plus one labeled synthetic Stop with a null message |
-| `tools/install-claude.py` | Claude | generates the user-level instruction file from `AGENTS.md` plus the adapter section; stages a versioned tree under `~/.claude/harness/<version>/`, activates it by one atomic settings replace of receipt-owned hook entries, and reports drift with `--check` |
+| `tools/install-claude.py` | Claude | generates the user-level instruction file from `AGENTS.md` plus the adapter section; stages a versioned tree under `~/.claude/harness/<version>/`; activates it as a logged transaction (pending marker, one atomic settings replace of entries owned by event, matcher, type, command and timeout, removal of every staged version's entries) so an interrupted switch is named by `--check` and completed by the next `--activate`; prints the Claude Code processes that could write `settings.json` meanwhile and refuses only with `--require-quiescent`; reports inconsistencies and drift with `--check` |
 | `release/evals.json` | shared | eval coverage manifest: every skill listed as tested or exempt with a reason; `required` scenarios must grade mechanically under `--run` |
 | `contracts/budget-ceilings.json` | shared | recorded size ceilings for `AGENTS.md` and the generated instruction file, plus the hard caps the gate's constants pin |
 | `tools/cc-cost.py` | Claude | Claude request-deduplicated token accounting |
@@ -335,8 +335,13 @@ non-zero when either fails.
 
 Skill contract eval validation is free and offline and includes the coverage manifest.
 `tools/run-skill-evals.py --run` executes headless model scenarios and spends API budget, so it
-remains manual; it exits non-zero when a scenario the manifest marks `required` does not grade every
-expectation mechanically.
+remains manual; it validates the manifest and corpus before executing anything, grades a scenario
+only after a child exit of 0 with every marker present, reconciles the manifest's `required` set
+against the scenarios that executed, and exits non-zero when a required scenario does not grade or
+did not execute, or when the runner raised.
+
+The nine reviewer reproductions for pull request 36 live under `instruments/reproductions/pr-36/`
+and run verbatim as acceptance cases of the suites they exercise.
 
 Document quote/citation scans are also manual because they require the target document, artifact
 root, and session transcript. Their detector selftest is blocking through C1.

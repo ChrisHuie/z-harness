@@ -50,6 +50,7 @@ import compileall
 import contextlib
 import copy
 import datetime
+import difflib
 import hashlib
 import io
 import json
@@ -539,10 +540,12 @@ def check(home, source_root, out=sys.stdout):
         if actual is None:
             p("  CLAUDE.md: absent")
         else:
-            differing = sum(1 for a, b in zip(actual.splitlines(), expected.splitlines()) if a != b)
-            differing += abs(len(actual.splitlines()) - len(expected.splitlines()))
+            differing = sum(
+                1 for line in difflib.unified_diff(
+                    expected.splitlines(), actual.splitlines(), lineterm="", n=0)
+                if line[:1] in "+-" and line[:3] not in ("+++", "---"))
             p(f"  CLAUDE.md: {'equals' if actual == expected else 'differs from'} the generator's "
-              f"output for the legacy ~/.claude layout ({differing} differing line(s))")
+              f"output for the legacy ~/.claude layout ({differing} added or removed line(s))")
         for event, _matcher, handler in registered_handlers(settings):
             command = handler.get("command", "")
             if any(f"/hooks/{name}" in command for name in scripts):

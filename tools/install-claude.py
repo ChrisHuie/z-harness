@@ -559,6 +559,25 @@ def hook_import_problems(tree, receipt):
     return problems
 
 
+def tree_problems(tree, receipt):
+    """-> (file problems, hook problems) for one staged tree against its receipt.
+
+    File problems are "missing <path>" and "changed <path>" over the receipt's files map in
+    path order; hook problems are those of `hook_import_problems`. --check applies this to
+    the active tree and reports each line; --activate applies it to the target at the commit
+    fence, before the pending marker and the settings replace, so a tree that no longer
+    matches what was staged is refused before anything durable is written.
+    """
+    files = []
+    for relative, record in sorted(receipt.get("files", {}).items()):
+        full = os.path.join(tree, relative)
+        if not os.path.isfile(full):
+            files.append(f"missing {relative}")
+        elif sha256_file(full) != record["sha256"]:
+            files.append(f"changed {relative}")
+    return files, hook_import_problems(tree, receipt)
+
+
 # ---- stage ---------------------------------------------------------------------
 def tree_file_digests(tree):
     digests = {}
@@ -917,13 +936,9 @@ def installation_state(home, source_root=None):
                 verdicts.append(f"owned hook {h['event']} {h['command']!r}: {hits} match(es); "
                                 f"run --activate {active_version}")
         tree = expand_display(home, active["tree"])
-        for relative, record in sorted(active.get("files", {}).items()):
-            full = os.path.join(tree, relative)
-            if not os.path.isfile(full):
-                state["drift"].append(f"missing {relative}")
-            elif sha256_file(full) != record["sha256"]:
-                state["drift"].append(f"changed {relative}")
-        for problem in hook_import_problems(tree, active):
+        drifted, unloadable = tree_problems(tree, active)
+        state["drift"].extend(drifted)
+        for problem in unloadable:
             verdicts.append(f"owned hook {problem}; re-stage {active_version}")
         try:
             tree_copy = read_text(os.path.join(tree, "CLAUDE.generated.md"))
@@ -958,9 +973,9 @@ def activate(home, version_id, fault=None, between_read_and_replace=None, after_
     (refuse when `require_quiescent` and any is running, or the list cannot be read); derive
     the installation state and refuse on an unreadable staged receipt or an orphaned harness
     handler (unless `remove_orphans`); build the removal set from every staged receipt plus
-    the active receipt; write the pending marker; read-merge-replace settings.json under the
-    stat guard with retries; verify the written file; install CLAUDE.md; write the active
-    receipt; clear the marker. A stop anywhere after the marker is written leaves it in
+    the active receipt; verify the target tree against its receipt at the fence; write the
+    pending marker; read-merge-replace settings.json under the stat guard with retries; verify
+    the written file; install CLAUDE.md; write the active receipt; clear the marker. A stop anywhere after the marker is written leaves it in
     place, --check names the stage, and the next --activate of any version completes a
     consistent switch because the removal set covers every version.
 
@@ -992,10 +1007,6 @@ def activate(home, version_id, fault=None, between_read_and_replace=None, after_
     owned = receipt["owned_hooks"]
     if not owned:
         raise InstallError("receipt owns no hook entries")
-    import_problems = hook_import_problems(tree, receipt)
-    if import_problems:
-        raise InstallError("refusing to activate a tree whose hooks cannot load: "
-                           + "; ".join(import_problems))
     state = installation_state(home)
     if state["broken_trees"]:
         raise InstallError("refusing to activate with unreadable staged receipt(s): "
@@ -1024,6 +1035,17 @@ def activate(home, version_id, fault=None, between_read_and_replace=None, after_
             + (f"marker from {pending.get('from')} to {pending.get('to')}; " if pending else "")
             + (f"settings wire {leftover} while the active receipt is {active_version or 'absent'}"
                if leftover else "every version's entries are removed before this one's are added"))
+    def refuse_unverified_target():
+        # Judged at the commit fence, on every attempt: nothing durable precedes the verdict,
+        # and a target edited after staging is refused with its files named.
+        drifted, unloadable = tree_problems(tree, receipt)
+        if drifted:
+            raise InstallError(f"refusing to activate {version_id}: the staged tree does not match "
+                               f"its receipt: " + "; ".join(drifted))
+        if unloadable:
+            raise InstallError("refusing to activate a tree whose hooks cannot load: "
+                               + "; ".join(unloadable))
+
     settings_path = os.path.join(claude_home(home), "settings.json")
     os.makedirs(os.path.dirname(settings_path), exist_ok=True)
     marker_path = pending_marker_path(home)
@@ -1055,6 +1077,7 @@ def activate(home, version_id, fault=None, between_read_and_replace=None, after_
             if fault == "before-replace":
                 os.remove(tmp)
                 raise InstallError("planted fault: activation abandoned before the settings replace")
+            refuse_unverified_target()
             marker = {
                 "schema_version": PENDING_SCHEMA_VERSION,
                 "from": active_version,
@@ -1094,8 +1117,13 @@ def activate(home, version_id, fault=None, between_read_and_replace=None, after_
             problems.append(f"{event} {handler.get('command')!r}: removed entry still present")
     if problems:
         raise InstallError("post-write verification failed: " + "; ".join(problems))
-    with open(os.path.join(tree, "CLAUDE.generated.md"), "rb") as fh:
-        atomic_write(os.path.join(claude_home(home), "CLAUDE.md"), fh.read())
+    try:
+        with open(os.path.join(tree, "CLAUDE.generated.md"), "rb") as fh:
+            generated = fh.read()
+    except OSError as exc:
+        raise InstallError(f"stopped after the switch: the instruction file of {version_id} is "
+                           f"unreadable: {exc}; run --activate {version_id} again")
+    atomic_write(os.path.join(claude_home(home), "CLAUDE.md"), generated)
     if fault == "after-instruction-file":
         raise InstallError("planted fault: stopped after the instruction file was installed")
     activated = dict(receipt)
@@ -1202,6 +1230,14 @@ def selftest():
             return needle in str(exc)
         return False
 
+    def mutant_raises(mutant, call, needle):
+        """`raises` for a private copy, whose InstallError is its own class."""
+        try:
+            call()
+        except mutant.InstallError as exc:
+            return needle in str(exc)
+        return False
+
     # Every activation below runs with an empty process list so this host's own sessions
     # cannot change a verdict; the residual proofs pass their own lists to the real function.
     real_activate = globals()["activate"]
@@ -1210,14 +1246,19 @@ def selftest():
         seams.setdefault("processes", lambda: [])
         return real_activate(home, version_id, **seams)
 
-    def private_copy(old, new):
-        """-> a private copy of this module with one planted defect, executed in memory."""
-        source_text = read_text(__file__)
-        if source_text.count(old) != 1:
-            raise AssertionError(f"mutation site occurs {source_text.count(old)} time(s)")
+    def private_copy(old, new, more=()):
+        """-> a private copy of this module with one planted defect, executed in memory.
+
+        `more` holds further (old, new) pairs for a defect that moves code between two sites.
+        """
+        mutated = read_text(__file__)
+        for site, replacement in ((old, new), *more):
+            if mutated.count(site) != 1:
+                raise AssertionError(f"mutation site occurs {mutated.count(site)} time(s)")
+            mutated = mutated.replace(site, replacement)
         module = types.ModuleType("install_claude_mutant")
         module.__file__ = __file__
-        exec(compile(source_text.replace(old, new), __file__, "exec"), module.__dict__)
+        exec(compile(mutated, __file__, "exec"), module.__dict__)
         return module
 
     def reproduction(thread_id, expected_line):
@@ -2161,6 +2202,115 @@ def selftest():
             check(legacy_home, source, out=buf) == 1 and "hand-made install" in buf.getvalue()
             and "unowned harness handler: Stop" in buf.getvalue()
             and "differs from the generator" in buf.getvalue())
+
+    # --- the target tree is verified at the commit fence (review thread 4298561334): a staged
+    # tree edited after staging, or missing its instruction file, is refused before any write;
+    # a damaged ACTIVE tree never blocks switching to a healthy target
+    with tempfile.TemporaryDirectory() as td:
+        source = os.path.join(td, "source")
+        os.makedirs(os.path.join(source, "hooks"))
+        os.makedirs(os.path.join(source, "tools"))
+        for name in ("AGENTS.md", "CLAUDE.md"):
+            shutil.copyfile(os.path.join(ROOT, name), os.path.join(source, name))
+        open(os.path.join(source, "hooks", "a.py"), "w").write("print('ok')\n")
+        json.dump({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
+            {"type": "command", "command": "python3 ~/.claude/hooks/a.py", "timeout": 5}]}]}},
+                  open(os.path.join(source, "settings.json"), "w"))
+        home = os.path.join(td, "home")
+        os.makedirs(os.path.join(home, ".claude"))
+        for version in ("v1", "v2"):
+            stage(source, home, version_id=version)
+        activate(home, "v1")
+        settings_path = os.path.join(home, ".claude", "settings.json")
+        marker_path = pending_marker_path(home)
+        target = tree_path(home, "v2")
+        damaged = os.path.join(target, "hooks", "a.py")
+        pristine = read_text(damaged)
+        generated = os.path.join(target, "CLAUDE.generated.md")
+        generated_bytes = open(generated, "rb").read()
+        receipt_v2 = load_receipt(os.path.join(target, RECEIPT_NAME))
+        chk("tree_problems on a staged tree that matches its receipt reports nothing",
+            tree_problems(target, receipt_v2) == ([], []))
+        open(damaged, "w").write('raise RuntimeError("damaged staged hook")\n')
+        before = open(settings_path, "rb").read()
+        chk("tree_problems names a changed file of a staged tree against its receipt",
+            tree_problems(target, receipt_v2) == (["changed hooks/a.py"], []))
+        chk("--activate refuses a target whose file no longer matches its receipt, naming the file",
+            raises(lambda: activate(home, "v2"),
+                   "refusing to activate v2: the staged tree does not match its receipt: "
+                   "changed hooks/a.py"))
+        chk("the refused switch wrote nothing: settings unchanged, no marker, --check 0 on v1",
+            open(settings_path, "rb").read() == before and not os.path.exists(marker_path)
+            and check(home, source, out=io.StringIO()) == 0)
+        open(damaged, "w").write(pristine)
+        os.remove(generated)
+        chk("--activate refuses a target whose instruction file is missing, before any write",
+            raises(lambda: activate(home, "v2"), "does not match its receipt: missing CLAUDE.generated.md")
+            and open(settings_path, "rb").read() == before and not os.path.exists(marker_path)
+            and installation_state(home)["wired_versions"] == {"v1"}
+            and installation_state(home)["pending"] is None)
+        open(generated, "wb").write(generated_bytes)
+        activate(home, "v2")
+        chk("the repaired target activates", installation_state(home)["active"]["version"] == "v2")
+        open(damaged, "w").write('raise RuntimeError("damaged active hook")\n')
+        buf = io.StringIO()
+        chk("--check names the damaged active tree's file as DRIFT through the same validator",
+            check(home, source, out=buf) == 1 and "DRIFT changed hooks/a.py" in buf.getvalue())
+        activate(home, "v1")
+        chk("a damaged active tree does not block switching to a healthy target; --check is then 0",
+            installation_state(home)["active"]["version"] == "v1" and check(home, source, out=io.StringIO()) == 0)
+        open(damaged, "w").write(pristine)
+        chk("an instruction file that vanishes after the switch is an InstallError naming the stage",
+            raises(lambda: activate(home, "v2", after_replace=lambda: os.remove(generated)),
+                   "stopped after the switch"))
+        buf = io.StringIO()
+        check(home, source, out=buf)
+        chk("--check then names the activation interrupted after the switch, marker in place",
+            os.path.exists(marker_path) and "activation of v2 interrupted after the switch" in buf.getvalue())
+        open(generated, "wb").write(generated_bytes)
+        activate(home, "v2")
+        chk("the interrupted switch completes once the instruction file is back",
+            not os.path.exists(marker_path) and check(home, source, out=io.StringIO()) == 0)
+        chk("review reproduction 4298561334: a changed or missing target file is refused before any write",
+            reproduction(4298561334, "damaged target: activation_exit= 1 check_exit= 0 hook_exit= 1 "
+                                     "settings_changed= False"))
+
+        # --- mutation proofs on private copies, each failing one of the cases above by name
+        def fresh_home(name):
+            mh = os.path.join(td, name)
+            os.makedirs(os.path.join(mh, ".claude"))
+            for version in ("v1", "v2"):
+                stage(source, mh, version_id=version)
+            activate(mh, "v1")
+            return mh
+
+        fence_call = "        drifted, unloadable = tree_problems(tree, receipt)\n"
+        unchecked = private_copy(fence_call, "        drifted, unloadable = [], []\n")
+        mh = fresh_home("unchecked")
+        open(os.path.join(tree_path(mh, "v2"), "hooks", "a.py"), "w").write("raise RuntimeError\n")
+        chk("mutation proof: without the fence check, the damaged target activates (the refusal above goes green)",
+            not mutant_raises(unchecked, lambda: unchecked.activate(mh, "v2", processes=lambda: []), "does not match"))
+        wrong_tree = private_copy(fence_call, "        drifted, unloadable = tree_problems(expand_display(home, "
+                                              "active['tree']), active) if active else ([], [])\n")
+        mh = fresh_home("wrong-tree")
+        wrong_tree.activate(mh, "v2", processes=lambda: [])
+        open(os.path.join(tree_path(mh, "v2"), "hooks", "a.py"), "w").write("raise RuntimeError\n")
+        chk("mutation proof: validating the active tree instead of the target blocks the switch away from a "
+            "damaged active version (the recovery control above goes red)",
+            mutant_raises(wrong_tree, lambda: wrong_tree.activate(mh, "v1", processes=lambda: []), "does not match"))
+        late = private_copy("            refuse_unverified_target()\n            marker = {\n",
+                            "            marker = {\n",
+                            more=[("            os.replace(tmp, settings_path)\n",
+                                   "            os.replace(tmp, settings_path)\n"
+                                   "            refuse_unverified_target()\n")])
+        mh = fresh_home("late")
+        open(os.path.join(tree_path(mh, "v2"), "hooks", "a.py"), "w").write("raise RuntimeError\n")
+        before = open(os.path.join(mh, ".claude", "settings.json"), "rb").read()
+        chk("mutation proof: a check after the replace still refuses but has already switched settings and "
+            "left the marker (the wrote-nothing proof above goes red)",
+            mutant_raises(late, lambda: late.activate(mh, "v2", processes=lambda: []), "does not match")
+            and open(os.path.join(mh, ".claude", "settings.json"), "rb").read() != before
+            and os.path.exists(pending_marker_path(mh)))
 
     print(f"\n  selftest: {bad} failure(s)")
     print(f"SELFTEST-SUMMARY suite=install-claude checks={checks} failures={bad}")

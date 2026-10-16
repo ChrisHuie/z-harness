@@ -16,6 +16,7 @@ the expected observation line.
 | 4294811820 | the worklist identity is the whole claim text | `hooks/harness_check.py --selftest` |
 | 4294811833 | an elided quote binds only in source order | `hooks/harness_check.py --selftest` |
 | 4294811841 | a disabled bound counter fails a named proof | `hooks/harness_check.py --selftest` |
+| 4298561334 | a staged target that no longer matches its receipt is refused before any write | `tools/install-claude.py --selftest` |
 
 Each script loads the tool from its repository path and works in temporary directories or
 in-memory copies; run from the repository root. The scripts define no selftest of their own and

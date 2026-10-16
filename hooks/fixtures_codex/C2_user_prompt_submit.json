@@ -1,0 +1,10 @@
+{
+  "session_id": "01a14246-b55c-71c1-8a7b-2baf7ed7b7a2",
+  "turn_id": "01a14246-b5a8-7ff1-ac9b-a51ee890e1de",
+  "transcript_path": "/PATH/TO/CODEX_HOME/sessions/2026/10/15/rollout-2026-10-15T19-14-52-01a14246-b55c-71c1-8a7b-2baf7ed7b7a2.jsonl",
+  "cwd": "/PATH/TO/CWD",
+  "hook_event_name": "UserPromptSubmit",
+  "model": "gpt-6-astra",
+  "permission_mode": "bypassPermissions",
+  "prompt": "Run the shell command: echo capture-probe-ok   Then reply with exactly one line containing the word DONE followed by every token of the form ZH-XXX-NNNN that you can see anywhere in your context, each verbatim."
+}

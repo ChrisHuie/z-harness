@@ -84,4 +84,4 @@ editing: `pulls/N/reviews` · `pulls/N/comments` · `issues/N/comments` · Graph
 
 **Read `references/deferred.md` before writing the finding if it turns on derivative
 depth, scope of an expansion, an undercounted sweep, an inert declaration, a scan-set
-escape, review tooling, a dep bump, a dormant grader, or port norms.**
+escape, review tooling, a dep bump, a dormant grader, port norms, or a second pass.**

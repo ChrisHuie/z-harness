@@ -21,9 +21,9 @@ rather than restating it:
 ```
 
 A measurement of one head is not such a file. Committing it into the head it measures creates the
-same self-reference as a tracked handoff, so mutation evidence is cited by its exact-head
-`mutation-proof` run, whose aggregate holds the measurement against the reviewed
-`contracts/mutation-policy.json` and states the verdict in its step summary.
+same self-reference as a tracked handoff, so mutation evidence is cited by the output of a sweep run
+by hand with `tools/write-mutation-receipt.py`, whose aggregate holds the measurement against the
+reviewed `contracts/mutation-policy.json`; no workflow runs the sweep.
 
 `tools/ci-gate.py` checks every live include block under this directory against its source and
 enforces the registered relative-path inventory: `README.md` and one

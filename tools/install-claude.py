@@ -661,7 +661,7 @@ def hook_import_problems(tree, receipt):
                 top, *rest = statement.module.split(".")
                 if top in stdlib:
                     return "stdlib"
-                source = locate(top)
+                source = loaded.get(top) or locate(top)
             else:
                 package = os.path.dirname(module_file)
                 for _ in range(statement.level - 1):
@@ -978,9 +978,14 @@ def hook_import_problems(tree, receipt):
                     speculative(lambda branch=branch: scan(relative, branch))
                 return
             if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+                # The first iterable is evaluated at once; per iteration come the first
+                # target, its filters, each later generator's iterable, target and filters,
+                # and last the result expression (a dict's key, then its value).
                 scan(relative, node.generators[0].iter)
-                later = ([getattr(node, f) for f in ("elt", "key", "value") if hasattr(node, f)]
-                         + list(node.generators[0].ifs) + list(node.generators[1:]))
+                later = [node.generators[0].target] + list(node.generators[0].ifs)
+                for generator in node.generators[1:]:
+                    later += [generator.iter, generator.target] + list(generator.ifs)
+                later += [getattr(node, f) for f in ("elt", "key", "value") if hasattr(node, f)]
                 speculative(lambda: [scan(relative, part) for part in later])
                 return
             bodies = []
@@ -2719,10 +2724,52 @@ def selftest():
                                                   "hooks/pkg/a.py": "from . import helper\nX = helper.X\n", "hooks/pkg/helper.py": "X = 1\n"}, (True, True)),
             "unpacking_targets_bind": ({"hooks/a.py": "from pkg import b, rest\n", "hooks/pkg/__init__.py": "(a, b) = 1, 2\n*rest, = [3]\n"}, (True, True)),
             "positional_overflow": ({"hooks/a.py": '__import__("os", {}, {}, [], 0, 7)\n'}, (False, False)),
+            "later_operand_checked": ({"hooks/a.py": 'x = True and __import__("nope")\n'}, (False, False)),
+            "else_branch_checked": ({"hooks/a.py": 'x = 1 if False else __import__("nope")\n'}, (False, False)),
+            "test_effect_kept": ({"hooks/a.py": 'x = 1 if __import__("boot") else 2\nimport lib\nprint(lib.VALUE)\n', "hooks/boot.py": "BOOT",
+                                  "hooks/g/lib.py": "VALUE = 42\n"}, (True, True)),
+            "first_iterable_effect_kept": ({"hooks/a.py": 'x = [i for i in __import__("boot").__dict__]\nimport lib\nprint(lib.VALUE)\n',
+                                            "hooks/boot.py": "BOOT", "hooks/g/lib.py": "VALUE = 42\n"}, (True, True)),
+            "first_operand_effect_kept": ({"hooks/a.py": 'x = __import__("boot") and 1\nimport lib\nprint(lib.VALUE)\n', "hooks/boot.py": "BOOT",
+                                           "hooks/g/lib.py": "VALUE = 42\n"}, (True, True)),
+            "lambda_default_effect_kept": ({"hooks/a.py": 'f = lambda x=__import__("boot"): x\nimport lib\nprint(lib.VALUE)\n', "hooks/boot.py": "BOOT",
+                                            "hooks/g/lib.py": "VALUE = 42\n"}, (True, True)),
+            "lambda_body_checked": ({"hooks/a.py": 'f = lambda: __import__("nope")\nf()\n'}, (False, False)),
+            "if_body_checked": ({"hooks/a.py": 'x = __import__("nope") if True else 1\n'}, (False, False)),
+            "comp_target_checked": ({"hooks/a.py": 'box = {}\n[0 for box[__import__("nope")] in [1]]\n'}, (False, False)),
+            "comp_filter_before_elt": ({"hooks/a.py": '[__import__("boot") for _ in [1] if __import__("lib")]\n', "hooks/boot.py": "BOOT",
+                                        "hooks/g/lib.py": "VALUE = 42\n"}, (False, False)),
+            "comp_filter_checked": ({"hooks/a.py": '[1 for _ in [1] if __import__("nope")]\n'}, (False, False)),
+            "comp_later_generator_checked": ({"hooks/a.py": '[1 for _ in [1] for __ in __import__("nope").items]\n'}, (False, False)),
+            "comp_dict_key_checked": ({"hooks/a.py": '{__import__("nope"): 1 for _ in [1]}\n'}, (False, False)),
+            "comp_dict_value_checked": ({"hooks/a.py": '{1: __import__("nope") for _ in [1]}\n'}, (False, False)),
+            "comp_elt_after_boot_iterable": ({"hooks/a.py": '[__import__("lib") for _ in __import__("boot").__dict__]\n', "hooks/boot.py": "BOOT",
+                                              "hooks/g/lib.py": "VALUE = 42\n"}, (True, True)),
+            "starred_positional": ({"hooks/a.py": '__import__(*["os"])\n'}, (False, True)),
+            "cached_source_binding": ({"hooks/a.py": 'import sys\nfrom pathlib import Path\nimport dep\n'
+                                                     'sys.path.insert(0, str(Path(__file__).parent / "shadow"))\nfrom pkg import x\n',
+                                       "hooks/dep.py": "x = 1\n", "hooks/shadow/dep.py": "y = 1\n", "hooks/pkg/__init__.py": "from dep import x\n"}, (True, True)),
+            "decorator_effect_before_body": ({"hooks/a.py": '@__import__("boot").deco\ndef f():\n    import lib\n', "hooks/boot.py": "BOOT\ndeco = lambda f: f\n",
+                                              "hooks/g/lib.py": "VALUE = 42\n"}, (True, True)),
+            "subpackage_init_relative": ({"hooks/a.py": "import pkg.a\n", "hooks/pkg/__init__.py": "", "hooks/pkg/helper.py": "X = 1\n",
+                                          "hooks/pkg/a/__init__.py": "from .. import helper\n"}, (True, True)),
+            "from_import_subpackage_relative": ({"hooks/a.py": "import pkg\n", "hooks/pkg/__init__.py": "from . import sub\nfrom . import mod\n",
+                                                 "hooks/pkg/helper.py": "X = 1\n", "hooks/pkg/sub/__init__.py": "from .. import helper\n",
+                                                 "hooks/pkg/mod.py": "from . import helper\n"}, (True, True)),
+            "helper_climbs_beyond": ({"hooks/a.py": "import pkg.a.b\n", "hooks/pkg/__init__.py": "", "hooks/pkg/a/__init__.py": "",
+                                      "hooks/pkg/a/b.py": "from .. import helper\n", "hooks/pkg/helper.py": "from .. import x\n"}, (False, False)),
+            "reexport_chains": ({"hooks/a.py": "from pkg import x, m, z\n", "hooks/pkg/__init__.py": "from .mod import x\nfrom . import mod as m\nfrom .deep.inner import z\n",
+                                 "hooks/pkg/mod.py": "x = 1\n", "hooks/pkg/deep/__init__.py": "", "hooks/pkg/deep/inner.py": "z = 1\n"}, (True, True)),
+            "reexport_absolute": ({"hooks/a.py": "from pkg import x\n", "hooks/pkg/__init__.py": "from mod import x\n", "hooks/mod.py": "x = 1\n"}, (True, True)),
+            "reexport_parent_climb": ({"hooks/a.py": "from pkg.a import x\n", "hooks/pkg/__init__.py": "x = 1\n", "hooks/pkg/a/__init__.py": "from .. import x\n"}, (True, True)),
+            "cycle_guard_by_name": ({"hooks/a.py": "from pkg import x\n", "hooks/pkg/__init__.py": "z = 1\nfrom .mod import y as x\n",
+                                     "hooks/pkg/mod.py": "from . import z as y\n"}, (True, True)),
+            "triple_dirname_root_lib": ({"hooks/a.py": 'import os, sys\nsys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))\nimport lib\n',
+                                         "lib.py": "X = 1\n"}, (False, False)),
         }
         for name, (files, _) in shapes.items():
-            if files.get("hooks/boot.py") == "BOOT":
-                files["hooks/boot.py"] = BOOT_INSERTS_G
+            if files.get("hooks/boot.py", "").startswith("BOOT"):
+                files["hooks/boot.py"] = BOOT_INSERTS_G + files["hooks/boot.py"][len("BOOT"):].lstrip("\n")
         outcomes = {name: differential(files) for name, (files, _) in shapes.items()}
         chk(f"differential: for {len(shapes)} tree shapes the checker's verdict equals a fresh interpreter's "
             "(clear iff the hook exits 0), except the two shapes the model refuses by design: "
@@ -2970,6 +3017,45 @@ def selftest():
                 == ["hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks"]
                 for n in ("lambda_boot", "shortcircuit_boot", "ternary_boot", "empty_comprehension_boot"))
             and import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes["immediate_dynamic_boot"][0], owned=["a.py"]) == [])
+        chk("the later operands of a short-circuit and the else branch of a conditional are still checked; the "
+            "first operand, a conditional's test, a comprehension's first iterable and a lambda's defaults keep "
+            "their effects",
+            all(import_check(["hooks/a.py"], shapes[n][0]) == [
+                    "hooks/a.py imports nope, which is neither standard library nor in the receipt's files under hooks"]
+                for n in ("later_operand_checked", "else_branch_checked"))
+            and all(import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes[n][0], owned=["a.py"]) == []
+                    for n in ("test_effect_kept", "first_iterable_effect_kept", "first_operand_effect_kept",
+                              "lambda_default_effect_kept")))
+        chk("comprehension parts resolve in evaluation order: the first target, filters, later generators and a "
+            "dict's key and value are checked, and a filter runs before the result expression",
+            all(import_check(["hooks/a.py"], shapes[n][0]) == [
+                    "hooks/a.py imports nope, which is neither standard library nor in the receipt's files under hooks"]
+                for n in ("comp_target_checked", "comp_filter_checked", "comp_later_generator_checked", "comp_dict_key_checked",
+                          "comp_dict_value_checked", "lambda_body_checked", "if_body_checked"))
+            and import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes["comp_filter_before_elt"][0], owned=["a.py"])
+            == ["hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks"]
+            and import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes["comp_elt_after_boot_iterable"][0], owned=["a.py"]) == [])
+        chk("a starred positional argument is reported; a binding source already loaded is read from the cache, not "
+            "the path; a decorator's effect precedes the body it decorates",
+            import_check(["hooks/a.py"], shapes["starred_positional"][0])
+            == ["hooks/a.py line 1: dynamic import __import__(*['os']) has arguments the checker does not read"]
+            and import_check(["hooks/a.py", "hooks/dep.py", "hooks/shadow/dep.py", "hooks/pkg/__init__.py"], shapes["cached_source_binding"][0],
+                             owned=["a.py"]) == []
+            and import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes["decorator_effect_before_body"][0], owned=["a.py"]) == [])
+        chk("package depth: a subpackage's __init__ reaches its parent at level two; submodules reached by from-import "
+            "keep their depth; a helper that climbs beyond the top level is reported; re-export chains provide names",
+            import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/pkg/helper.py", "hooks/pkg/a/__init__.py"],
+                         shapes["subpackage_init_relative"][0], owned=["a.py"]) == []
+            and import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/pkg/helper.py", "hooks/pkg/sub/__init__.py", "hooks/pkg/mod.py"],
+                             shapes["from_import_subpackage_relative"][0], owned=["a.py"]) == []
+            and import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/pkg/a/__init__.py", "hooks/pkg/a/b.py", "hooks/pkg/helper.py"],
+                             shapes["helper_climbs_beyond"][0], owned=["a.py"])
+            == ["hooks/pkg/helper.py line 1: relative import from .. import x climbs beyond the top-level package"]
+            and all(import_check(sorted(shapes[n][0]), shapes[n][0], owned=["a.py"]) == []
+                    for n in ("reexport_chains", "reexport_absolute", "reexport_parent_climb", "cycle_guard_by_name"))
+            and import_check(["hooks/a.py", "lib.py"], shapes["triple_dirname_root_lib"][0], owned=["a.py"])
+            == ["hooks/a.py inserts a sys.path entry outside the tree (..)",
+                "hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks"])
         chk("a dynamic import's arguments are evaluated before the call, so an inner import runs first",
             import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes["argument_before_call"][0], owned=["a.py"])
             == ["hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks"]
@@ -3276,13 +3362,108 @@ def selftest():
         chk("mutation proof: a lambda body scanned immediately lets its boot serve the next import",
             import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes["lambda_boot"][0], owned=["a.py"],
                          fn=lambda_immediate.hook_import_problems) == [])
+        later_operands_unchecked = private_copy("                for value in node.values[1:]:\n                    speculative(lambda value=value: scan(relative, " + "value))\n",
+                                               "                pass\n")
+        chk("mutation proof: skipping the later operands of a short-circuit clears the import one of them makes",
+            import_check(["hooks/a.py"], shapes["later_operand_checked"][0], fn=later_operands_unchecked.hook_import_problems) == [])
+        else_unchecked = private_copy("                for branch in (node.body, " + "node.orelse):\n", "                for branch in (node.body,):\n")
+        chk("mutation proof: skipping a conditional's else branch clears the import it makes",
+            import_check(["hooks/a.py"], shapes["else_branch_checked"][0], fn=else_unchecked.hook_import_problems) == [])
+        test_rolled_back = private_copy("            if isinstance(node, ast.IfExp):\n                scan(relative, " + "node.test)\n",
+                                        "            if isinstance(node, ast.IfExp):\n                speculative(lambda: scan(relative, node.test))\n")
+        chk("mutation proof: rolling back a conditional's test rejects the import its boot enables",
+            import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes["test_effect_kept"][0], owned=["a.py"],
+                         fn=test_rolled_back.hook_import_problems) != [])
+        lambda_body_unchecked = private_copy("                speculative(lambda: scan(relative, " + "node.body))\n                return\n            if isinstance(node, ast.BoolOp):\n",
+                                             "                return\n            if isinstance(node, ast.BoolOp):\n")
+        if_body_unchecked = private_copy("                for branch in (node.body, " + "node.orelse):\n", "                for branch in (node.orelse,):\n")
+        comp_later_unchecked = private_copy("                speculative(lambda: [scan(relative, part) for part in " + "later])\n", "                pass\n")
+        comp_target_unchecked = private_copy("                later = [node.generators[0].target] + " + "list(node.generators[0].ifs)\n",
+                                             "                later = list(node.generators[0].ifs)\n")
+        comp_elt_first = private_copy("                later += [getattr(node, f) for f in (\"elt\", \"key\", \"value\") if " + "hasattr(node, f)]\n",
+                                      "                later = [getattr(node, f) for f in (\"elt\", \"key\", \"value\") if hasattr(node, f)] + later\n")
+        chk("mutation proofs: a lambda body, a conditional's body, a comprehension's later parts and its first target "
+            "each have an import the mutant clears; a result expression scanned before the filter clears the boot case",
+            import_check(["hooks/a.py"], shapes["lambda_body_checked"][0], fn=lambda_body_unchecked.hook_import_problems) == []
+            and import_check(["hooks/a.py"], shapes["if_body_checked"][0], fn=if_body_unchecked.hook_import_problems) == []
+            and import_check(["hooks/a.py"], shapes["comp_filter_checked"][0], fn=comp_later_unchecked.hook_import_problems) == []
+            and import_check(["hooks/a.py"], shapes["comp_target_checked"][0], fn=comp_target_unchecked.hook_import_problems) == []
+            and import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes["comp_filter_before_elt"][0], owned=["a.py"],
+                             fn=comp_elt_first.hook_import_problems) == [])
+        first_operand_speculative = private_copy("                scan(relative, " + "node.values[0])\n", "                speculative(lambda: scan(relative, node.values[0]))\n")
+        first_iterable_speculative = private_copy("                scan(relative, " + "node.generators[0].iter)\n", "                speculative(lambda: scan(relative, node.generators[0].iter))\n")
+        lambda_args_speculative = private_copy("                scan(relative, " + "node.args)\n", "                speculative(lambda: scan(relative, node.args))\n")
+        chk("mutation proofs: rolling back a short-circuit's first operand, a comprehension's first iterable or a "
+            "lambda's defaults rejects the import each enables",
+            all(import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes[n][0], owned=["a.py"], fn=m.hook_import_problems) != []
+                for n, m in (("first_operand_effect_kept", first_operand_speculative),
+                             ("first_iterable_effect_kept", first_iterable_speculative),
+                             ("lambda_default_effect_kept", lambda_args_speculative))))
+        starred_allowed = private_copy("                    or any(isinstance(a, ast.Starred) for a in " + "positional)):\n", "                    ):\n")
+        chk("mutation proof: allowing a starred positional argument loses the argument-shape report for that call",
+            "has arguments the checker does not read" not in " ".join(
+                import_check(["hooks/a.py"], shapes["starred_positional"][0], fn=starred_allowed.hook_import_problems)))
+        source_from_path_only = private_copy("                source = loaded.get(top) or " + "locate(top)\n", "                source = locate(top)\n")
+        chk("mutation proof: a binding source read from the path instead of the cache rejects the re-export of a cached module",
+            import_check(["hooks/a.py", "hooks/dep.py", "hooks/shadow/dep.py", "hooks/pkg/__init__.py"], shapes["cached_source_binding"][0],
+                         owned=["a.py"], fn=source_from_path_only.hook_import_problems) != [])
+        bodies_first_isolated = private_copy("            bodies = []\n            for field, value in " + "ast.iter_fields(node):\n",
+                                             "            bodies = []\n            for field, value in ast.iter_fields(node):\n"
+                                             "                if isinstance(value, list) and value and isinstance(value[0], ast.stmt):\n"
+                                             "                    speculative(lambda value=value: run(relative, value, False))\n"
+                                             "            for field, value in ast.iter_fields(node):\n")
+        chk("mutation proof: bodies scanned before the decorators, even isolated, miss the decorator's boot and reject "
+            "the body's import",
+            import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes["decorator_effect_before_body"][0], owned=["a.py"],
+                         fn=bodies_first_isolated.hook_import_problems) != [])
+        absolute_source_none = private_copy("                source = loaded.get(top) or locate(top)\n            " + "else:\n",
+                                            "                source = None\n            else:\n")
+        relative_source_no_climb = private_copy("                for _ in range(statement.level - 1):\n                    package = " + "os.path.dirname(package)\n",
+                                                "                for _ in range(statement.level - 1):\n                    pass\n")
+        source_binding_not_followed = private_copy("            return binds(source, item, visiting | " + "{(source, item)})\n", "            return False\n")
+        source_submodule_not_binding = private_copy('            if source.endswith("/__init__.py") and submodule(source, item) is not ' + 'None:\n                return True\n',
+                                                     "            if False:\n                return True\n")
+        cycle_guard_file_only = private_copy("            if source is None or (source, item) in " + "visiting:\n",
+                                             "            if source is None or any(f == source for f, _ in visiting):\n")
+        chk("mutation proofs: each branch of the binding-source lookup accepts a valid re-export the mutant rejects",
+            import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/mod.py"], shapes["reexport_absolute"][0], owned=["a.py"],
+                         fn=absolute_source_none.hook_import_problems) != []
+            and import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/pkg/a/__init__.py"], shapes["reexport_parent_climb"][0], owned=["a.py"],
+                             fn=relative_source_no_climb.hook_import_problems) != []
+            and import_check(sorted(shapes["reexport_chains"][0]), shapes["reexport_chains"][0], owned=["a.py"],
+                             fn=source_binding_not_followed.hook_import_problems) != []
+            and import_check(sorted(shapes["reexport_chains"][0]), shapes["reexport_chains"][0], owned=["a.py"],
+                             fn=source_submodule_not_binding.hook_import_problems) != []
+            and import_check(sorted(shapes["cycle_guard_by_name"][0]), shapes["cycle_guard_by_name"][0], owned=["a.py"],
+                             fn=cycle_guard_file_only.hook_import_problems) != [])
+        subpackage_depth_one = private_copy('            return dotted.count(".") + 1 if file.endswith("/__init__.py") else ' + 'dotted.count(".")\n',
+                                            '            return 1 if file.endswith("/__init__.py") else dotted.count(".")\n')
+        alias_no_increment = private_copy('                    walk(inner, reached + 1 if inner.endswith("/__init__.py") else ' + 'reached)\n',
+                                          '                    walk(inner, reached)\n')
+        alias_context_off = private_copy('                    walk(inner, reached + 1 if inner.endswith("/__init__.py") ' + 'else reached)\n',
+                                         '                    walk(inner, 0)\n')
+        base_depth_no_climb = private_copy("            base_depth = depth - " + "(node.level - 1)\n", "            base_depth = depth\n")
+        chk("mutation proofs: each depth rule has a shape it decides: a subpackage's depth, a subpackage reached by "
+            "from-import, a module reached by from-import, and the base depth after a climb",
+            import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/pkg/helper.py", "hooks/pkg/a/__init__.py"],
+                         shapes["subpackage_init_relative"][0], owned=["a.py"], fn=subpackage_depth_one.hook_import_problems) != []
+            and import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/pkg/helper.py", "hooks/pkg/sub/__init__.py", "hooks/pkg/mod.py"],
+                             shapes["from_import_subpackage_relative"][0], owned=["a.py"], fn=alias_no_increment.hook_import_problems) != []
+            and import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/pkg/helper.py", "hooks/pkg/sub/__init__.py", "hooks/pkg/mod.py"],
+                             shapes["from_import_subpackage_relative"][0], owned=["a.py"], fn=alias_context_off.hook_import_problems) != []
+            and "climbs beyond the top-level package" not in " ".join(import_check(
+                ["hooks/a.py", "hooks/pkg/__init__.py", "hooks/pkg/a/__init__.py", "hooks/pkg/a/b.py", "hooks/pkg/helper.py"],
+                shapes["helper_climbs_beyond"][0], owned=["a.py"], fn=base_depth_no_climb.hook_import_problems)))
         statement_rollback = private_copy("                else:\n                    scan(relative, " + "statement)\n",
                                           "                else:\n                    speculative(lambda: scan(relative, statement))\n")
         chk("mutation proof: rolling back a top-level dynamic import's effects rejects the import it enables",
             import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes["immediate_dynamic_boot"][0], owned=["a.py"],
                          fn=statement_rollback.hook_import_problems) != [])
         call_before_arguments = private_copy("            if isinstance(node, ast.Call):\n                resolve_dynamic(relative, " + "node)\n            for body in bodies:\n",
-                                             "            for body in bodies:\n")
+                                             "            for body in bodies:\n",
+                                             more=[("            if isinstance(node, ast.Lambda):\n                scan(relative, " + "node.args)\n",
+                                                    "            if isinstance(node, ast.Call):\n                resolve_dynamic(relative, node)\n"
+                                                    "            if isinstance(node, ast.Lambda):\n                scan(relative, node.args)\n")])
         chk("mutation proof: a call resolved before its arguments clears the inner import that fails first",
             import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], {"hooks/a.py": '__import__("boot", __import__("lib").__dict__)\n',
                          "hooks/boot.py": BOOT_INSERTS_G, "hooks/g/lib.py": "VALUE = 42\n"}, owned=["a.py"],

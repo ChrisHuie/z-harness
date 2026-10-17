@@ -152,7 +152,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 412
+SELFTEST_FLOOR = 419
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -182,7 +182,7 @@ SELFTEST_SUITES = [
     ("verify-review-publication",
      ["tools/verify-review-publication.py", "--selftest"], 94),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 53),
-    ("install-claude", ["tools/install-claude.py", "--selftest"], 280),
+    ("install-claude", ["tools/install-claude.py", "--selftest"], 294),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
     ("ci-gate", ["tools/ci-gate.py", "--selftest"], 345),
     ("write-mutation-receipt",
@@ -275,7 +275,7 @@ SELFTEST_TIMEOUTS = {
     "ci-gate": 120,
     "fuzz-judge-diff": 25,
     # Stages and activates several temporary trees, runs three reviewer reproductions as
-    # subprocesses and seventy-nine fixture hooks in fresh interpreters; measured 19.7s at 280 proofs.
+    # subprocesses and 103 fixture hooks in fresh interpreters; measured 21.1s at 294 proofs.
     "install-claude": 60,
 }
 DEFAULT_SELFTEST_TIMEOUT = 15
@@ -1387,7 +1387,8 @@ def claim_blocks(text):
     starts with a list marker opens an item whose content offset is the marker's width, a run
     may open a fence directly after the marker, and a fence opened inside an item closes on
     the first non-blank line indented less than the item's offset, where the item ends (a
-    closer indented up to three columns past the offset still closes it first). Block
+    closer indented up to three columns past the offset still closes it first). A line indented four or more columns past its container with no paragraph
+    open is indented code and opens none (its text still counts as prose). Block
     quotes are not modelled: a fence inside one (`> ```)
     is not seen, so its content counts as prose rather than being hidden. Lines are
     `str.splitlines()` lines. A table row is its own block: rows carry no sentence
@@ -1413,19 +1414,29 @@ def claim_blocks(text):
                 continue
         # A thematic break takes precedence over a list marker (`- - -` opens no item). A
         # non-blank line indented less than the open item's content ends the item, unless a
-        # paragraph is open, in which case it is that paragraph's lazy continuation text.
+        # paragraph is open and the line is paragraph text, in which case it is that
+        # paragraph's lazy continuation; a heading, a thematic break, a fence opener or an
+        # HTML block of the first six kinds interrupts the paragraph and ends the item.
         marker = None if THEMATIC_BREAK.fullmatch(line) else re.match(r" {0,3}(?:[-*+]|\d{1,9}[.)]) {1,4}(?=\S)", expanded)
-        lazy = item_offset is not None and indent < item_offset and bool(line.strip()) and paragraph_open
+        top_stripped = expanded.lstrip(" ") if indent <= 3 else ""
+        top_run = re.match(r"`{3,}|~{3,}", top_stripped)
+        interrupts = bool(ATX_HEADING.match(line) or THEMATIC_BREAK.fullmatch(line)
+                          or (top_run and not (top_run.group()[0] == "`" and "`" in top_stripped[top_run.end():]))
+                          or (top_stripped.startswith("<") and html_block_end(top_stripped, True) is not None))
+        lazy = (item_offset is not None and indent < item_offset and bool(line.strip()) and paragraph_open
+                and not interrupts)
         if marker:
             item_offset = marker.end()
         elif line.strip() and item_offset is not None and indent < item_offset and not lazy:
             item_offset = None
-        stripped = expanded.lstrip(" ") if indent <= 3 else ""
+        stripped = top_stripped
         opener_indent = item_offset if item_offset is not None and indent >= item_offset else 0
         if marker and re.match(r"`{3,}|~{3,}", expanded[marker.end():]):
             opener_indent, stripped = marker.end(), expanded[marker.end():]
         elif item_offset is not None and indent >= item_offset and indent - item_offset <= 3:
             stripped = expanded.lstrip(" ")
+        # Indented code (four or more columns past the container) opens no paragraph.
+        indented_code = line.strip() and not paragraph_open and indent - (item_offset or 0) >= 4
         run = re.match(r"`{3,}|~{3,}", stripped)
         html_line = html_end is not None
         if html_end is not None:
@@ -1468,7 +1479,7 @@ def claim_blocks(text):
         if heading:
             blocks.append((start, "\n".join(current)))
             current = []
-        paragraph_open = not (heading or setext or html_line or THEMATIC_BREAK.fullmatch(line)
+        paragraph_open = not (heading or setext or html_line or indented_code or THEMATIC_BREAK.fullmatch(line)
                               or line.lstrip().startswith("|"))
     if current:
         blocks.append((start, "\n".join(current)))
@@ -6091,7 +6102,22 @@ def selftest():
                    and claims_in("- item\n  ```\n  code\n\n  " + fence_claim + "  ```\n") == fence_base
                    and claims_in("- item\n  ```\n  code\n     ```\n  " + fence_claim) == fence_base + 1
                    and claims_in("1) ```\n   " + fence_claim + "   ```\n") == fence_base
-                   and claims_in("-   ```\n    " + fence_claim) == fence_base)
+                   and claims_in("-   ```\n    " + fence_claim) == fence_base
+                   and claims_in("-    ```\n     " + fence_claim) == fence_base)
+        expect_red("C12 ends an item on an interrupting block even under an open paragraph: a heading, a thematic "
+                   "break, an HTML block or a top-level fence after `- para` ends the item, so an indented run after "
+                   "it is content, not an item's fence",
+                   lambda: all(claims_in("- para\n" + block + "\n    ```\n  " + fence_claim) == fence_base + 1
+                               for block in ("# Heading", "---", "<div>", "<!-- c -->"))
+                   and claims_in("- para\n```\n```\n    ```\n  " + fence_claim) == fence_base + 1
+                   and claims_in("- para\nlazy\n    ```\n  " + fence_claim) == fence_base)
+        expect_red("C12 opens no paragraph after indented code, so a tag standing alone after it starts a block",
+                   lambda: claims_in("    code\n<custom>\n```\n</custom>\n\n" + fence_claim) == fence_base + 1
+                   and claims_in("\t# H\n<custom>\n```\n</custom>\n\n" + fence_claim) == fence_base + 1
+                   and claims_in("para\n    continued\n<custom>\n```\n" + fence_claim) == fence_base)
+        expect_red("C12 reads a fence opener inside an item up to three columns past the item's offset",
+                   lambda: claims_in("- item\n     ```\n     " + fence_claim) == fence_base
+                   and claims_in("- item\n      ```\n     " + fence_claim) == fence_base + 1)
         expect_red("C12 reads `- - -` as a thematic break, not an item, and an underline indented less than an "
                    "open item's content as its paragraph's text, not a heading",
                    lambda: claims_in("- - -\n    ```\n  " + fence_claim) == fence_base + 1
@@ -6921,8 +6947,8 @@ def selftest():
         expect_red("mutation: stripping any whitespace after a closer makes a no-break space close the fence "
                    "(the no-break-space proof goes red)",
                    lambda: claims_in("```\n```\u00a0\n" + fence_claim + "```\n", any_whitespace) == fence_base + 1)
-        any_indent = private_copy('        stripped = expanded.lstrip(" ") if indent <= ' + '3 else ""\n',
-                                  '        stripped = expanded.lstrip(" ")\n')
+        any_indent = private_copy('        top_stripped = expanded.lstrip(" ") if indent <= ' + '3 else ""\n',
+                                  '        top_stripped = expanded.lstrip(" ")\n')
         expect_red("mutation: unrestricted indentation lets a four-space run open a fence and hide the claim "
                    "(the indentation proof goes red)",
                    lambda: claims_in("    ```\n" + fence_claim + "\n    ```\n", any_indent) == fence_base)
@@ -6993,11 +7019,30 @@ def selftest():
                    "(the marker proof goes red)",
                    lambda: claims_in("1) ```\n   " + fence_claim + "   ```\n", ordered_paren_off) == fence_base + 1
                    and claims_in("-   ```\n    " + fence_claim, ordered_paren_off) == fence_base + 1)
+        marker_three_spaces = private_copy('[.)]) {1,4}' + '(?=\\S)", expanded)\n', '[.)]) {1,3}(?=\\S)", expanded)\n')
+        expect_red("mutation: a marker set stopping at three spaces counts a four-space item's fenced content as prose "
+                   "(the marker proof goes red)",
+                   lambda: claims_in("-    ```\n     " + fence_claim, marker_three_spaces) == fence_base + 1)
         closer_offset_off = private_copy("len(closer.group()) >= length\n                        and indent <= k + " + "3 and not",
                                          "len(closer.group()) >= length\n                        and indent <= k and not")
         expect_red("mutation: a closer accepted only at the item's offset leaves the fence open past a closer "
                    "three columns in (the closer-offset proof goes red)",
                    lambda: claims_in("- item\n  ```\n  code\n     ```\n  " + fence_claim, closer_offset_off) == fence_base)
+        lazy_ignores_interrupts = private_copy("        lazy = (item_offset is not None and indent < item_offset and bool(line.strip()) and paragraph_open\n                and not " + "interrupts)\n",
+                                               "        lazy = (item_offset is not None and indent < item_offset and bool(line.strip()) and paragraph_open)\n")
+        expect_red("mutation: a lazy exemption blind to interrupting blocks keeps the item open past a heading "
+                   "(the interruption proof goes red)",
+                   lambda: claims_in("- para\n# Heading\n    ```\n  " + fence_claim, lazy_ignores_interrupts) == fence_base)
+        code_opens_paragraph = private_copy("        indented_code = line.strip() and not paragraph_open and " + "indent - (item_offset or 0) >= 4\n",
+                                            "        indented_code = False\n")
+        expect_red("mutation: indented code opening a paragraph hides the claim after the next HTML block "
+                   "(the indented-code proof goes red)",
+                   lambda: claims_in("    code\n<custom>\n```\n</custom>\n\n" + fence_claim, code_opens_paragraph) == fence_base)
+        continuation_branch_off = private_copy("        elif item_offset is not None and indent >= item_offset and indent - item_offset <= 3:\n            stripped = " + "expanded.lstrip(\" \")\n",
+                                               "        elif False:\n            pass\n")
+        expect_red("mutation: without the continuation branch an opener three columns past the item's offset is "
+                   "prose (the opener-offset proof goes red)",
+                   lambda: claims_in("- item\n     ```\n     " + fence_claim, continuation_branch_off) == fence_base + 1)
         prose_as_paragraph = private_copy("html_block_end(stripped, " + "paragraph_open)", "html_block_end(stripped, bool(current))")
         expect_red("mutation: accumulated prose taken as an open paragraph hides the claim after a closed HTML block "
                    "(the paragraph-state proof goes red)",

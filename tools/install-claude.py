@@ -2866,7 +2866,7 @@ def selftest():
                 files["hooks/boot.py"] = BOOT_INSERTS_G + files["hooks/boot.py"][len("BOOT"):].lstrip("\n")
         outcomes = {name: differential(files) for name, (files, _) in shapes.items()}
         chk(f"differential: for {len(shapes)} tree shapes the checker's verdict equals a fresh interpreter's "
-            "(clear iff the hook exits 0), except the two shapes the model refuses by design: "
+            "(clear iff the hook exits 0), except the three shapes the model refuses by design: "
             + ", ".join(f"{n}={v}" for n, v in outcomes.items()),
             outcomes == {name: expected for name, (_, expected) in shapes.items()})
         chk("search order: an insert at 0 is searched before the script's directory, an insert at 1 after it",

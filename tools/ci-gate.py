@@ -57,10 +57,10 @@ EVAL_SKILL_FLOOR = 7
 SUITE_FLOORS = {
     "harness_check": 405,
     "render-packages": 192,
-    "bash_command_guard": 2084,
+    "bash_command_guard": 2092,
     "credential_reach_guard": 84,
     "mutation_testing_guard": 223,
-    "git_grep_engine_guard": 1527,
+    "git_grep_engine_guard": 1539,
     "zsh_rev_modifier_guard": 513,
 }
 EXPECTED_WORKFLOW = """name: harness-check
@@ -996,6 +996,7 @@ REGISTERED_REVIEW_PATHS = frozenset({
     "pr-36/frozen-publication.json",
     "pr-41/frozen-publication.json",
     "pr-42/frozen-publication.json",
+    "pr-43/frozen-publication.json",
 })
 HANDOFF_DOCTRINE = {
     "AGENTS.md": (

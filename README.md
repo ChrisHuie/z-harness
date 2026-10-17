@@ -223,7 +223,8 @@ regex-engine or rev-path hazard retains `deny` precedence. Prefer a direct liter
 an explicit pattern engine when rewriting a questioned command.
 
 `hooks/guards/mutation_testing_guard.py` runs inside the Bash guard for every caller on both
-runtimes and denies running or installing the tools the `AGENTS.md` verification ban names: at
+runtimes and denies running or installing the tools listed in that module, which enforce the `AGENTS.md`
+verification ban: at
 command position after control keywords, wrappers and launchers; through a package runner, with
 its value options skipped; through an interpreter; as a build-tool goal or task; as a package an
 installer of that ecosystem receives; as a package script, make target, tox environment or nox

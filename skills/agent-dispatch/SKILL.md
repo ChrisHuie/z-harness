@@ -27,7 +27,7 @@ Verify an injection channel against the installed CLI, not memory.
 - **A status-clean check between another agent's edit and its restore still races** —
   "revert then verify clean" *is* the collision path, not the fix. Worst when the target is
   a file every specialist edits.
-- **Demand a baseline assertion before a worker edits** — clean status plus a green exit,
+- **Demand a baseline assertion before a worker edits** — clean status plus the expected exit,
   stop-and-report on mismatch.
 
 ## The prompt

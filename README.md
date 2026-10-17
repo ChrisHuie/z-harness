@@ -282,7 +282,7 @@ and workflow presence.
 Local `harness_check.py` mode adds machine-specific Claude anchors, compares the complete payload
 of repository-owned skills under `~/.claude/skills`, and scans tracked plus authored-untracked
 context files
-without crossing nested Git ownership. `--selftest` plants defects and proves each check family can
+without crossing nested Git ownership. `--selftest` plants defective inputs and proves each check family can
 turn red; a zero-input scan is an error, not a clean verdict. C1 requires
 every direct selftest to be registered with a positive floor and a unique terminal suite receipt;
 `harness_check.py` is the sole recursive meta-suite exemption.

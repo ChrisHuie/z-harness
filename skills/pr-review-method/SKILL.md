@@ -68,7 +68,7 @@ editing: `pulls/N/reviews` · `pulls/N/comments` · `issues/N/comments` · Graph
   happens next) are independent; "non-gating" launders a dropped finding. Every finding
   gets a named action, every deferral a filed owner.
 - **A missing-test observation used as evidence is its own finding**, with its own row and
-  disposition — "folds into X" only if one edit closes both.
+  disposition — "folds into X" only if one edit closes both. Ask for an input, never edited code.
 - **De-dup is not synthesis.** Unify same-concept findings at max member severity, keep
   every site, then diff your working-note citations against the delivered artifact.
 
@@ -76,7 +76,7 @@ editing: `pulls/N/reviews` · `pulls/N/comments` · `issues/N/comments` · Graph
 
 - **Grade the COMPOSITION of landed remedies against the issue's behavioral
   done-contract** — two individually correct fixes to one path can cancel, and a remedy
-  can fix one side of its own mechanism. Mutate the half nobody asked about.
+  can fix one side of its own mechanism. Feed the other half a failing input.
 - **Diff two-dot against current main as well as three-dot.** Already-upstream commits are
   invisible in the merge-base diff.
 - **Pin every subagent to a fetched head SHA**, re-check the live head after the fan-out,

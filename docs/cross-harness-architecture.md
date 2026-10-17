@@ -233,7 +233,7 @@ the portable projection.
 
 The Agent Skills reference implementation labels itself demonstration-only; it is differential
 evidence, not the renderer's authority. The local field allowlist, shared projection implementation,
-fixed byte goldens, and negative mutations remain load-bearing.
+fixed byte goldens, and tampered-artifact rejection fixtures remain load-bearing.
 
 ## Publication, host evidence, and rollback
 

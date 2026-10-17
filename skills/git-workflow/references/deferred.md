@@ -107,7 +107,7 @@ Neither of these is lost; do not re-add them here.
 Verified against the live file on 2026-08-02. Re-adding any of these is an R2 defect: both
 channels load on the same request, so the copy is paid twice.
 
-- `:61-64` — mutation-testing agents get an isolated worktree or an in-memory copy, never a
+- `:61-64` — agents that edit tracked files get an isolated worktree, never a
   shared checkout; commit first so `git checkout --` lands on your commit.
 - `AGENTS.md` Authority boundaries — PR-directed requests grant scoped ordinary-push/PR-creation
   authority; merge, force-push, comments, thread resolution, issues, and unrelated outward

@@ -56,8 +56,8 @@ one of the sections below. All seven headings are name-cited from the body; they
 
 ## Vacuous and self-clearing detectors `[body]`
 
-- **R109** A detector's documented **remedy can clear the detection**. Run the remedy before
-  declaring a mutation survivor, and score raw vs semantic kills separately.
+- **R109** A detector's documented **remedy can clear the detection**: a regenerate step that
+  runs zero checks turns a red pin green. Re-run the checks after any remedy, not just the pin.
 - **R110** A check pinned to a **path goes vacuous when content moves**, with no signal —
   coverage fell 60/60 → 1/60 while the checker reported "clean, 219 items" over a tree with 157
   emptied.
@@ -92,8 +92,8 @@ one of the sections below. All seven headings are name-cited from the body; they
   swaps to a parent class. Assert the externally-visible value, not the type.
 - **R117** A negative/counter assertion whose only check is **set-emptiness passes vacuously**
   on an empty response. Pair it with a non-empty anchor.
-- **R120** The change's stated purpose has a **pin test**: a single-line revert of the
-  production line must redden ≥1 test.
+- **R120** The change's stated purpose has a **pin test**: the head's tests, run against the
+  parent commit's code, must redden ≥1 test, and pass on the head.
 - **R122** Pin externally-visible constants (callback URLs, routes, wire values)
   **byte-immutable** with a test — and note that an oracle pinning an emitted value to the
   constant it is *derived from* moves in lockstep and can never fail.

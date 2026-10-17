@@ -291,7 +291,7 @@ SELFTEST_TIMEOUT_MARGIN = 0.6
 # outside this repository, and the diff is where that claim gets reviewed.
 EXTERNAL_REFERENCE_CITATIONS = {
     "probe.py": "illustrative worker filename in a collision anecdote",
-    "mutate.py": "illustrative worker filename in a collision anecdote",
+    "check.py": "illustrative worker filename in a collision anecdote",
     "base.py": "illustrative worker filename in a collision anecdote",
     "agents/openai.yaml": "Codex configuration in the user environment",
     "AGENTS.override.md": "Codex convention outside this repository",

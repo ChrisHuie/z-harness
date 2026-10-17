@@ -124,7 +124,7 @@ space permits; it cannot evict mandatory policy. If mandatory policy itself cann
 Codex hands a subagent no scratch directory. `~/.codex/tmp/arg0/` holds per-invocation `argv[0]`
 shims and `~/.codex/sessions/` holds date-partitioned rollout transcripts; neither is agent-facing,
 and `cwd` defaults to the project root. A worker with no assigned directory therefore writes into the
-checkout rather than beside it, which is the pressure the shared mutation-worker rule already names.
+checkout rather than beside it, which is the pressure the shared isolated-worktree rule already names.
 The parent assigns one by adding `Scratch: <absolute path>` to the spawn prompt; the PreToolUse hook
 resolves the full Git worktree, rejects a relative, pre-existing, symlink-component, inside, or
 above path, and atomically creates the fresh directory before allowing the spawn. Two calls naming

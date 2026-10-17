@@ -46,12 +46,12 @@ carries `BODY_CHAR_CAP` and the live margin is whatever that check reports, so a
 goes stale the next time the body is edited.*
 
 **R289 — a dispatched worker owns its scratch directory, or the fan-out corrupts its own
-evidence.** Concurrent workers reach for the same obvious filenames — `probe.py`, `mutate.py`,
+evidence.** Concurrent workers reach for the same obvious filenames — `probe.py`, `check.py`,
 `base.py` — in whatever writable directory they share. The lost-file case announces itself; the
 dangerous one does not, because the loser reads the winner's bytes and measures the wrong thing,
 which is a wrong number rather than an error. What a runtime provides differs: one hands every
 subagent the same session scratchpad, another hands none and leaves `cwd` on the repository, which
-turns the same pressure toward the checkout the mutation-worker rule already protects. So the rule
+turns the same pressure toward the checkout the isolated-worktree rule already protects. So the rule
 is a property, not a path — assign an exclusive directory per worker at spawn, use a fresh
 physical absolute path with no symlink components, name it in the prompt as one line reading
 `Scratch: <absolute path>`, and never read a scratch path you did not assign. Observed on a

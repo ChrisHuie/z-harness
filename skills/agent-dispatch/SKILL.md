@@ -26,8 +26,8 @@ Verify an injection channel against the installed CLI, not memory.
   between two dispatched dimensions is owned by neither.
 - **A status-clean check between another agent's edit and its restore still races** —
   "revert then verify clean" *is* the collision path, not the fix. Worst when the target is
-  a guard every specialist mutates.
-- **Demand a baseline assertion before every mutation** — clean status plus a green exit,
+  a file every specialist edits.
+- **Demand a baseline assertion before a worker edits** — clean status plus a green exit,
   stop-and-report on mismatch.
 
 ## The prompt
@@ -57,7 +57,7 @@ Verify an injection channel against the installed CLI, not memory.
 - **Fresh context ≠ fresh gradients** — tendencies are weight-level, so a same-family
   observer shares a common-cause failure. Independence needs a different model *family* —
   a diversity axis, not the pinning axis.
-- **Power-validate the instrument before believing a null** — seed known flaws and require
+- **Power-validate a search agent before believing a null** — seed known flaws and require
   recall ≥2/3 or discard the nulls, freeze the novelty criterion before the run, never let
   the claimant author the acceptance criterion. Strongest claim: "power-validated
   independent search found nothing."

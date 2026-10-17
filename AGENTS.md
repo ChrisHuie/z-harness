@@ -8,7 +8,7 @@ After compaction, a summary that says a skill was loaded is not its body; reload
 |---|---|
 | `git-workflow` | committing, branching, rebasing, `git mv`, or getting a PR through CI |
 | `pr-review-method` | reviewing a PR or judging whether feedback was addressed |
-| `testing-ci` | proving a test, guard, selector, or green check catches a break |
+| `testing-ci` | deciding whether a test, guard, selector, or green check proves anything |
 | `agent-dispatch` | before spawning agents and before trusting their reports |
 | `ground-claims` | grounding claims about external specs, schemas, APIs, configs, or quoted artifacts |
 | `prebid-adcp` | AdCP/Prebid authority, versions, conformance, or registries |
@@ -84,8 +84,8 @@ containment against the complete Git worktree, and atomically reserves the fresh
 0700. This prevents two spawns from claiming one writable directory; it is not an OS sandbox
 because workers share a uid.
 
-Give every worker a Step 0 read list of absolute paths. Mutation workers use isolated worktrees or
-in-memory copies, never a shared checkout. Commit the baseline first so a worker's revert cannot
+Give every worker a Step 0 read list of absolute paths. Workers that edit tracked files use
+isolated worktrees, never a shared checkout. Commit the baseline first so a worker's revert cannot
 discard uncommitted work.
 
 ## Claims and evidence
@@ -130,6 +130,19 @@ and mechanism research never re-litigates a premise he established from the insi
 
 Use the same instrument as the behavior under test, or state that the check is weaker. The bar
 rises after the first surprise; a second skipped gate in one session is the failure signal.
+
+Mutation testing is banned in every project and runtime: no mutation tool, plan, sweep, score, kill
+rate, or survivor list, and no variant of the code under test or of a checker's own source, AST,
+bytecode, or the pattern and lookup tables it decides with, by hand or by a tool, on disk or in
+memory, run to see whether a test, guard, or check catches it. Never request, offer, or recommend
+that evidence; decline a reviewer's request for it in favor of direct evidence. A named tool does
+not lift this; where a repository's own CI already runs one, leave that job in place, keep its
+output out of your evidence, and raise it with Chris. Prove a check directly: positive and negative
+input fixtures, planted-defect inputs, and tampered artifacts fed to the code, including a planted
+entry in a registry the check audits and flaws seeded into what a reviewer agent reads; stubs,
+fakes, and spies asserted on the correct exact result; exact assertions on structured results; the
+head's regression test failing against the parent commit's code; a differential run of two real
+versions; input fuzzing, input-mutating fuzzers included; adversarial review.
 
 Read an entire file when editing a wire, error, transport, hook, or transcript boundary. Use
 `git grep -P` for PCRE atoms such as `\b`; `git grep -E` silently applies a different regex

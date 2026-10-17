@@ -2,8 +2,8 @@
   "schema_version": 1,
   "note": "Size ceilings, not targets. A ceiling fails only on growth: the recorded value is the size at the last cut, and a smaller measurement passes and invites lowering the record. The hard caps are runtime limits read from the installed binaries by `harness_check.py --verify-runtime`; the ceilings under them are the harness's own margins, held as constants in hooks/harness_check.py and pinned here so the two cannot drift apart. The generated instruction file is measured from `tools/install-claude.py --render` with placeholder tree and commit, so the number does not move with a version string.",
   "ceilings": {
-    "AGENTS.md": {"bytes": 11742},
-    "generated-instruction-file": {"bytes": 15928, "lines": 247}
+    "AGENTS.md": {"bytes": 12898},
+    "generated-instruction-file": {"bytes": 17084, "lines": 260}
   },
   "hard": {
     "claude-hook-context-cap": {"chars": 8000, "lines": 200},

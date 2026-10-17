@@ -612,7 +612,8 @@ def hook_import_problems(tree, receipt):
         if isinstance(node, ast.Import):
             return [(alias.name, ()) for alias in node.names]
         if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-            return [(node.module, tuple(alias.name for alias in node.names))]
+            # One entry per alias, so that progress inside the statement can be recorded.
+            return [(node.module, (alias.name,)) for alias in node.names]
         return []
 
     COMPOUND = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.With, ast.AsyncWith, ast.Try, ast.Match)
@@ -703,8 +704,18 @@ def hook_import_problems(tree, receipt):
                 return True
             visiting = visiting | {(module_file, name)}
             # A module still initialising has bound only what its statements executed so
-            # far bound: an import that reaches back into it sees nothing later.
-            statements = module.body[:executed[module_file]] if module_file in executed else module.body
+            # far bound: an import that reaches back into it sees nothing later. The file may
+            # be loading under more than one name at once; the earliest position decides.
+            # Inside an import statement, the aliases already completed count.
+            statements = module.body
+            if module_file in executed:
+                index, aliases = min(executed[module_file])
+                statements = list(module.body[:index])
+                current = module.body[index] if index < len(module.body) else None
+                if aliases and isinstance(current, ast.Import):
+                    statements.append(ast.Import(names=current.names[:aliases]))
+                elif aliases and isinstance(current, ast.ImportFrom):
+                    statements.append(ast.ImportFrom(module=current.module, names=current.names[:aliases], level=current.level))
             def stores(target):
                 # The names a target binds: a plain name, or the names inside an unpacking
                 # target; a name read inside a subscript or attribute target binds nothing.
@@ -832,7 +843,7 @@ def hook_import_problems(tree, receipt):
             for name in from_names:
                 from_name(relative, dotted, current, name)
 
-        def resolve_relative(relative, node):
+        def resolve_relative(relative, node, on_alias=lambda k: None):
             """`from .a.b import c` from `relative`: the importing module's package depth (the
             segments of its __package__, carried from the import that reached it, not read
             from the directories around it) must cover the level; a script run by file name or
@@ -864,7 +875,8 @@ def hook_import_problems(tree, receipt):
                 reached += 1
                 vouch(relative, dotted, current)
                 walk(current, reached if current.endswith("/__init__.py") else reached - 1)
-            for alias in node.names:
+            for k, alias in enumerate(node.names):
+                on_alias(k)
                 inner = None if binds(current, alias.name) or alias.name == "*" else (
                     submodule(current, alias.name) if current.endswith("/__init__.py") else None)
                 if inner is not None:
@@ -949,15 +961,19 @@ def hook_import_problems(tree, receipt):
             other statement (a compound statement's branches and header expressions, a
             function's defaults, decorators and body, a class's bases and body) resolves where
             the statement stands, speculatively."""
-            for index, statement in enumerate(statements):
+            def progress(index, aliases):
                 if top_level:
-                    executed[relative] = index
+                    executed[relative][-1] = (index, aliases)
+
+            for index, statement in enumerate(statements):
+                progress(index, 0)
                 if isinstance(statement, ast.Expr) and sys_path_mutation(statement.value) is not None:
                     (mutate if top_level else unordered)(relative, statement.value)
                 elif isinstance(statement, ast.ImportFrom) and statement.level > 0:
-                    resolve_relative(relative, statement)
+                    resolve_relative(relative, statement, lambda k: progress(index, k))
                 elif isinstance(statement, (ast.Import, ast.ImportFrom)):
-                    for dotted, from_names in import_targets(statement):
+                    for k, (dotted, from_names) in enumerate(import_targets(statement)):
+                        progress(index, k)
                         resolve(relative, dotted, from_names)
                 else:
                     scan(relative, statement)
@@ -1021,10 +1037,14 @@ def hook_import_problems(tree, receipt):
             try:
                 module = module_ast(relative)
                 if module is not None:
-                    executed[relative] = 0
-                    run(relative, module.body, top_level=True)
+                    executed.setdefault(relative, []).append((0, 0))
+                    try:
+                        run(relative, module.body, top_level=True)
+                    finally:
+                        executed[relative].pop()
+                        if not executed[relative]:
+                            del executed[relative]
             finally:
-                executed.pop(relative, None)
                 context.pop()
 
         walk(entry, 0)
@@ -2802,6 +2822,22 @@ def selftest():
                                              "hooks/boot.py": "BOOT", "hooks/g/lib.py": "VALUE = 42\n"}, (True, True)),
             "comp_later_filters_in_order": ({"hooks/a.py": '[1 for _ in [1] for __ in [1] if __import__("boot") if __import__("lib")]\n',
                                              "hooks/boot.py": "BOOT", "hooks/g/lib.py": "VALUE = 42\n"}, (True, True)),
+            "dual_context_partial": ({"hooks/a.py": "import pkg.mod\n", "hooks/pkg/__init__.py": "",
+                                      "hooks/pkg/mod.py": 'import sys\nfrom pathlib import Path\nsys.path.insert(0, str(Path(__file__).parent))\n'
+                                                          'import trigger\nx = 1\n',
+                                      "hooks/pkg/trigger.py": "import mod\nfrom pkg.mod import x\n"}, (False, False)),
+            "alias_completed_visible": ({"hooks/a.py": "import pkg\n", "hooks/pkg/__init__.py": "import dep, helper\n", "hooks/dep.py": "X = 1\n",
+                                         "hooks/helper.py": "from pkg import dep\n"}, (True, True)),
+            "rhs_circular": ({"hooks/a.py": "import pkg\n", "hooks/pkg/__init__.py": 'x = __import__("helper")\n', "hooks/helper.py": "from pkg import x\n"},
+                             (False, False)),
+            "class_body_sees_earlier": ({"hooks/a.py": "import pkg\n", "hooks/pkg/__init__.py": "x = 1\nclass C:\n    import helper\n",
+                                         "hooks/helper.py": "from pkg import x\n"}, (True, True)),
+            "set_comp_iterable_first": ({"hooks/a.py": '{__import__("boot") for _ in __import__("lib").__dict__}\n', "hooks/boot.py": "BOOT",
+                                         "hooks/g/lib.py": "VALUE = 42\n"}, (False, False)),
+            "dict_comp_iterable_first": ({"hooks/a.py": '{__import__("boot"): 1 for _ in __import__("lib").__dict__}\n', "hooks/boot.py": "BOOT",
+                                          "hooks/g/lib.py": "VALUE = 42\n"}, (False, False)),
+            "generator_iterable_first": ({"hooks/a.py": 'list(__import__("boot") for _ in __import__("lib").__dict__)\n', "hooks/boot.py": "BOOT",
+                                          "hooks/g/lib.py": "VALUE = 42\n"}, (False, False)),
             "triple_dirname_root_lib": ({"hooks/a.py": 'import os, sys\nsys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))\nimport lib\n',
                                          "lib.py": "X = 1\n"}, (False, False)),
         }
@@ -3091,6 +3127,18 @@ def selftest():
             and import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/pkg/helper.py", "hooks/dep.py"], shapes["early_binding_partial"][0], owned=["a.py"]) == []
             and import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/pkg/helper.py"], shapes["late_assignment_partial"][0], owned=["a.py"])
             == ["hooks/pkg/helper.py imports x from pkg, which hooks/pkg/__init__.py neither binds nor holds as a submodule"])
+        chk("a file loading under two names keeps each load's position; the aliases already completed inside one "
+            "import statement count; the statement being executed does not; a nested body sees earlier top-level bindings",
+            import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/pkg/mod.py", "hooks/pkg/trigger.py"], shapes["dual_context_partial"][0], owned=["a.py"])
+            == ["hooks/pkg/trigger.py imports x from pkg.mod, which hooks/pkg/mod.py neither binds nor holds as a submodule"]
+            and import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/dep.py", "hooks/helper.py"], shapes["alias_completed_visible"][0], owned=["a.py"]) == []
+            and import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/helper.py"], shapes["rhs_circular"][0], owned=["a.py"])
+            == ["hooks/helper.py imports x from pkg, which hooks/pkg/__init__.py neither binds nor holds as a submodule"]
+            and import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/helper.py"], shapes["class_body_sees_earlier"][0], owned=["a.py"]) == [])
+        chk("set, dict and generator comprehensions evaluate their first iterable before their result expression",
+            all(import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes[n][0], owned=["a.py"])
+                == ["hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks"]
+                for n in ("set_comp_iterable_first", "dict_comp_iterable_first", "generator_iterable_first")))
         chk("comprehension order, continued: a second filter is checked; a later target runs after its iterable and "
             "before its filters; generators and filters run in source order with effects kept between them",
             import_check(["hooks/a.py"], shapes["comp_later_filters_checked_twice"][0])
@@ -3459,8 +3507,8 @@ def selftest():
                              fn=key_after_value.hook_import_problems) != []
             and import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes["comp_target_before_filter"][0], owned=["a.py"],
                              fn=target_after_filter.hook_import_problems) != [])
-        whole_module_binds = private_copy("            statements = module.body[:executed[module_file]] if module_file in " + "executed else module.body\n",
-                                          "            statements = module.body\n")
+        whole_module_binds = private_copy("            if module_file in " + "executed:\n                index, aliases = min(executed[module_file])\n",
+                                          "            if False:\n                index, aliases = min(executed[module_file])\n")
         chk("mutation proof: a binding lookup blind to execution position clears the import that reaches back too early",
             import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/pkg/helper.py", "hooks/dep.py"], shapes["late_binding_partial"][0],
                          owned=["a.py"], fn=whole_module_binds.hook_import_problems) == [])
@@ -3488,6 +3536,36 @@ def selftest():
                              fn=filters_reversed.hook_import_problems) != []
             and import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes["comp_first_filters_in_order"][0], owned=["a.py"],
                              fn=parts_isolated.hook_import_problems) != [])
+        inner_load_erases_outer = private_copy("                        executed[relative].pop()\n                        if not executed[relative]:\n                            del " + "executed[relative]\n",
+                                               "                        executed.pop(relative, None)\n",
+                                               more=[("                    executed[relative][-1] = (index, " + "aliases)\n",
+                                                      "                    executed.setdefault(relative, [(0, 0)])[-1] = (index, aliases)\n")])
+        chk("mutation proof: an inner load that erases the outer load's position clears the dual-context case",
+            import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/pkg/mod.py", "hooks/pkg/trigger.py"], shapes["dual_context_partial"][0],
+                         owned=["a.py"], fn=inner_load_erases_outer.hook_import_problems) == [])
+        aliases_unrecorded = private_copy("                    executed[relative][-1] = (index, " + "aliases)\n", "                    executed[relative][-1] = (index, 0)\n")
+        chk("mutation proof: aliases not recorded inside the statement reject the alias completed before",
+            import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/dep.py", "hooks/helper.py"], shapes["alias_completed_visible"][0],
+                         owned=["a.py"], fn=aliases_unrecorded.hook_import_problems) != [])
+        current_statement_counts = private_copy("                statements = list(module.body[:" + "index])\n", "                statements = list(module.body[:index + 1])\n")
+        chk("mutation proof: counting the statement being executed clears the circular assignment",
+            import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/helper.py"], shapes["rhs_circular"][0], owned=["a.py"],
+                         fn=current_statement_counts.hook_import_problems) == [])
+        nested_bodies_update = private_copy("            def progress(index, aliases):\n                if " + "top_level:\n",
+                                            "            def progress(index, aliases):\n                if True:\n")
+        chk("mutation proof: a nested body updating the position rejects the earlier top-level binding it depends on",
+            import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/helper.py"], shapes["class_body_sees_earlier"][0], owned=["a.py"],
+                         fn=nested_bodies_update.hook_import_problems) != [])
+        set_dispatch_off = private_copy("            if isinstance(node, (ast.ListComp, ast.SetComp, " + "ast.DictComp, ast.GeneratorExp)):\n",
+                                        "            if isinstance(node, (ast.ListComp, ast.DictComp, ast.GeneratorExp)):\n")
+        dict_dispatch_off = private_copy("            if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, " + "ast.GeneratorExp)):\n",
+                                         "            if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):\n")
+        generator_dispatch_off = private_copy("            if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast." + "GeneratorExp)):\n",
+                                              "            if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp)):\n")
+        chk("mutation proofs: dropping a comprehension kind from the ordered walk clears its iterable-first case",
+            all(import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes[n][0], owned=["a.py"], fn=m.hook_import_problems) == []
+                for n, m in (("set_comp_iterable_first", set_dispatch_off), ("dict_comp_iterable_first", dict_dispatch_off),
+                             ("generator_iterable_first", generator_dispatch_off))))
         first_operand_speculative = private_copy("                scan(relative, " + "node.values[0])\n", "                speculative(lambda: scan(relative, node.values[0]))\n")
         first_iterable_speculative = private_copy("                scan(relative, " + "node.generators[0].iter)\n", "                speculative(lambda: scan(relative, node.generators[0].iter))\n")
         lambda_args_speculative = private_copy("                scan(relative, " + "node.args)\n", "                speculative(lambda: scan(relative, node.args))\n")

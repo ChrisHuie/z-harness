@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""bash_command_guard — one Claude/Codex PreToolUse spawn, two proven predicates.
+"""bash_command_guard — one Claude/Codex PreToolUse spawn, three proven predicates.
 
 Merged because each guard costs ~23 ms of cold Python spawn on EVERY Bash call;
 two scripts is ~46 ms for no benefit. The predicates are independent and both work
@@ -15,6 +15,10 @@ Guards, each with its own fixtures and red-proof in guards/:
                             POSIX ERE has no such atoms; the pattern silently matches
                             the wrong thing or nothing. 332 corpus events, 19 followed
                             within 3 records by a shipped absence claim.
+  mutation_testing_guard  — running or installing a tool the AGENTS.md verification
+                            ban names. Denied for every caller on both runtimes, asked
+                            about when the command word or the source cannot be read;
+                            its suite pins the spellings and prints what it does not model.
 
 Precedence: deny > ask > allow. Reasons from every guard that fired are concatenated,
 so a command tripping both is told about both.
@@ -45,17 +49,19 @@ import time
 # The runtime's hook timeout runs from process start, so the decision deadline is anchored
 # here, before the guard modules below are imported, rather than when a decision begins.
 PROCESS_STARTED = time.monotonic()
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 RUNTIMES = {"claude", "codex"}
 sys.path.insert(0, str(pathlib.Path(__file__).parent / "guards"))
 
 import zsh_rev_modifier_guard as zsh_guard      # noqa: E402
 import git_grep_engine_guard as grep_guard      # noqa: E402
 import credential_reach_guard as cred_guard     # noqa: E402
+import mutation_testing_guard as mutation_guard  # noqa: E402
 
 GUARDS = [
     ("zsh_rev_modifier", zsh_guard),
     ("git_grep_engine", grep_guard),
+    ("mutation_testing", mutation_guard),
 ]
 RANK = {"allow": 0, "ask": 1, "deny": 2}
 PROCESS_GREP_COMMAND = "git grep -E 'harness\\b' -- README.md"

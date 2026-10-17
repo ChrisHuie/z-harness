@@ -222,6 +222,19 @@ Claude receives `ask` for uncertainty; the Codex adapter maps it to `deny`. A se
 regex-engine or rev-path hazard retains `deny` precedence. Prefer a direct literal executable and
 an explicit pattern engine when rewriting a questioned command.
 
+`hooks/guards/mutation_testing_guard.py` runs inside the Bash guard for every caller on both
+runtimes and denies running or installing the tools the `AGENTS.md` verification ban names: at
+command position after control keywords, wrappers and launchers; through a package runner, with
+its value options skipped; through an interpreter; as a build-tool goal or task; as a package an
+installer of that ecosystem receives; as a package script, make target, tox environment or nox
+session named for the method; and inside `sh -c`, `eval`, here-strings, substitutions, and
+heredocs fed to a shell. A command word chosen at run time, in a command that names a listed tool,
+and command source the tokenizer cannot read are asked about. A command that contains none of its
+needles is allowed before it is parsed. Its selftest prints what it does not model: a variant
+built by arbitrary code, a tool launched from interpreter code, a renamed tool, an alias or
+function defined in an earlier command, a script whose name does not say what it runs, text piped
+into a shell, a container image's entrypoint, and a requirements file.
+
 ### Verification commands
 
 ```text
@@ -233,6 +246,7 @@ python3 tools/install-claude.py --render
 python3 tools/install-claude.py --check
 python3 hooks/bash_command_guard.py --selftest
 python3 hooks/bash_command_guard.py --perf
+python3 hooks/guards/mutation_testing_guard.py --selftest
 python3 hooks/guards/git_grep_engine_guard.py --perf
 python3 hooks/spawn_preflight_guard.py --selftest
 python3 hooks/codex_session_start.py --selftest

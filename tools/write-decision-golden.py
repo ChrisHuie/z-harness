@@ -25,6 +25,7 @@ SOURCES = (
     "hooks/guards/git_grep_engine_guard.py",
     "hooks/guards/zsh_rev_modifier_guard.py",
     "hooks/bash_command_guard.py",
+    "hooks/guards/mutation_testing_guard.py",
 )
 SCHEMA_VERSION = 1
 GENERATED_BY = "tools/write-decision-golden.py --accept-decision-changes"
@@ -138,6 +139,7 @@ def imported_fixture_commands() -> tuple[set[str], dict[str, dict], dict[str, se
     import git_grep_engine_guard
     import zsh_rev_modifier_guard
     import bash_command_guard
+    import mutation_testing_guard
 
     commands: set[str] = set()
     oversized: dict[str, dict] = {}
@@ -147,6 +149,7 @@ def imported_fixture_commands() -> tuple[set[str], dict[str, dict], dict[str, se
         git_grep_engine_guard.PERF_FIXTURES,
         zsh_rev_modifier_guard.FIXTURES,
         bash_command_guard.DECISION_FIXTURES,
+        mutation_testing_guard.FIXTURES,
     )
     for fixtures in registries:
         for _label, command, outcome in fixtures:

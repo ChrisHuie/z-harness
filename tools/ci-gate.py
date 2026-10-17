@@ -57,8 +57,9 @@ EVAL_SKILL_FLOOR = 7
 SUITE_FLOORS = {
     "harness_check": 387,
     "render-packages": 192,
-    "bash_command_guard": 1874,
+    "bash_command_guard": 2084,
     "credential_reach_guard": 84,
+    "mutation_testing_guard": 223,
     "git_grep_engine_guard": 1527,
     "zsh_rev_modifier_guard": 513,
 }
@@ -642,6 +643,8 @@ def command_specs(render_root: Path) -> List[Tuple[List[str], ReceiptSpec]]:
          selftest_receipt("zsh_rev_modifier_guard", SUITE_FLOORS["zsh_rev_modifier_guard"])),
         ([python, "hooks/guards/credential_reach_guard.py", "--selftest"],
          selftest_receipt("credential_reach_guard", SUITE_FLOORS["credential_reach_guard"])),
+        ([python, "hooks/guards/mutation_testing_guard.py", "--selftest"],
+         selftest_receipt("mutation_testing_guard", SUITE_FLOORS["mutation_testing_guard"])),
         (
             [python, "tools/run-skill-evals.py", "--validate"],
             ReceiptSpec(
@@ -743,8 +746,8 @@ RETAINED_DECISION_COMMANDS = ROOT / "contracts/goldens/retained-guard-commands.j
 SUITE_SOURCE_GOLDEN = ROOT / "contracts/goldens/suite-sources.json"
 HARNESS_SOURCE = ROOT / "hooks/harness_check.py"
 REPOSITORY_OWNERSHIP_SOURCE = ROOT / "tools/repository_ownership.py"
-DECISION_CORPUS_FLOOR = 1475
-DECISION_WRITER_SHA256 = "2d3209ae53b50f897039a100952768b8556c0f8de2fd85888ef0c8651f9b0a9b"
+DECISION_CORPUS_FLOOR = 1685
+DECISION_WRITER_SHA256 = "12a398f57514bb5435533a143ffe618b98563ffcf542b5c9eac74cecd3650abb"
 RETAINED_DECISION_SCHEMA_VERSION = 1
 RETAINED_DECISION_NOTE = (
     "reviewed decision commands retained after their originating fixtures left the "
@@ -3102,6 +3105,8 @@ def selftest() -> int:
             return Result(0, f"SELFTEST-SUMMARY suite=zsh_rev_modifier_guard checks={expected_selftest_checks('zsh_rev_modifier_guard')} failures=0\n")
         if "credential_reach_guard.py" in joined:
             return Result(0, f"SELFTEST-SUMMARY suite=credential_reach_guard checks={SUITE_FLOORS['credential_reach_guard']} failures=0\n")
+        if "mutation_testing_guard.py" in joined:
+            return Result(0, f"SELFTEST-SUMMARY suite=mutation_testing_guard checks={SUITE_FLOORS['mutation_testing_guard']} failures=0\n")
         if "run-skill-evals.py" in joined:
             return Result(0, f"EVAL-VALIDATE-SUMMARY scenarios={EVAL_SCENARIO_FLOOR} "
                           f"skills={EVAL_SKILL_FLOOR} failures=0 scope=shape-and-coverage exit=0\n")
@@ -3113,7 +3118,7 @@ def selftest() -> int:
         "fake runner covers the production command registry",
         gate(fake_runner, emit_child_output=False) == 0,
     )
-    expect("production registry is non-empty", len(fake_calls) == 10)
+    expect("production registry is non-empty", len(fake_calls) == 11)
 
     def timeout_subprocess(argv, **_kwargs):
         if tuple(argv) == tuple(harness_argv):

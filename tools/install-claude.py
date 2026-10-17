@@ -612,8 +612,7 @@ def hook_import_problems(tree, receipt):
         if isinstance(node, ast.Import):
             return [(alias.name, ()) for alias in node.names]
         if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-            # One entry per alias, so that progress inside the statement can be recorded.
-            return [(node.module, (alias.name,)) for alias in node.names]
+            return [(node.module, tuple(alias.name for alias in node.names))]
         return []
 
     COMPOUND = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.With, ast.AsyncWith, ast.Try, ast.Match)
@@ -656,66 +655,76 @@ def hook_import_problems(tree, receipt):
                 problems.append(f"{relative} imports {dotted}, which loads {found}, a file the receipt "
                                 f"does not list")
 
-        def import_source(module_file, statement):
-            """-> the file `from <module> import …` in `module_file` reads from, or None; a
-            standard-library source is "stdlib"."""
+        def import_source(module_file, depth, statement):
+            """-> (the file `from <module> import …` in `module_file` reads from, the package
+            depth it is loaded at), or (None, None); a standard-library source is ("stdlib",
+            None). `depth` is the package depth of the load of `module_file` being read; a
+            relative import needs it to cover the level."""
             if statement.level == 0:
                 top, *rest = statement.module.split(".")
                 if top in stdlib:
-                    return "stdlib"
+                    return "stdlib", None
                 source = loaded.get(top) or locate(top)
+                reached = 1
             else:
+                if statement.level > depth:
+                    return None, None
                 package = os.path.dirname(module_file)
                 for _ in range(statement.level - 1):
                     package = os.path.dirname(package)
                 source = os.path.normpath(os.path.join(package, "__init__.py"))
                 if not present(source):
-                    return None
+                    return None, None
                 rest = statement.module.split(".") if statement.module else []
+                reached = depth - (statement.level - 1)
             for segment in rest:
                 if source is None or not source.endswith("/__init__.py"):
-                    return None
+                    return None, None
                 source = submodule(source, segment)
-            return source
+                reached += 1
+            if source is None:
+                return None, None
+            return source, (reached if source.endswith("/__init__.py") else reached - 1)
 
-        def import_provides(module_file, statement, item, visiting):
+        def import_provides(module_file, depth, statement, item, visiting):
             """`from <module> import item` provides `item` only when the source holds it as a
             submodule or binds it itself; two imports that vouch for each other provide
             nothing (the cycle is broken by `visiting`)."""
-            source = import_source(module_file, statement)
+            source, source_depth = import_source(module_file, depth, statement)
             if source == "stdlib":
                 return True
-            if source is None or (source, item) in visiting:
+            if source is None or (source, source_depth, item) in visiting:
                 return False
             if source.endswith("/__init__.py") and submodule(source, item) is not None:
                 return True
-            return binds(source, item, visiting | {(source, item)})
+            return binds(source, item, source_depth, visiting | {(source, source_depth, item)})
 
-        def binds(module_file, name, visiting=frozenset()):
+        def binds(module_file, name, depth, visiting=frozenset()):
             """A module binds `name` as an attribute when a top-level statement that always
             runs, and has already run if the module is still initialising, stores, defines or
             imports it, and no top-level `del` removes it. A binding
             inside a function, class or compound statement does not count; nor does an
             annotation without a value, a star import, or a from-import whose source does
             not itself provide the name (so the module's own `from . import name`, under any
-            alias, and two self-imports vouching for each other, are no evidence)."""
+            alias, and two self-imports vouching for each other, are no evidence). `depth` is
+            the package depth of the load being read: the same file loading as `pkg.mod` and
+            as `mod` is two modules, each at its own position."""
             module = module_ast(module_file)
             if module is None:
                 return True
-            visiting = visiting | {(module_file, name)}
+            visiting = visiting | {(module_file, depth, name)}
             # A module still initialising has bound only what its statements executed so
-            # far bound: an import that reaches back into it sees nothing later. The file may
-            # be loading under more than one name at once; the earliest position decides.
-            # Inside an import statement, the aliases already completed count.
+            # far bound: an import that reaches back into it sees nothing later. Inside an
+            # `import a, b` the aliases already completed are bound; a `from` import binds
+            # nothing until the whole statement completes, since a submodule it names loads
+            # inside it, before any of its names is stored.
             statements = module.body
-            if module_file in executed:
-                index, aliases = min(executed[module_file])
+            if (module_file, depth) in executed:
+                index, aliases = executed[(module_file, depth)]
                 statements = list(module.body[:index])
                 current = module.body[index] if index < len(module.body) else None
                 if aliases and isinstance(current, ast.Import):
                     statements.append(ast.Import(names=current.names[:aliases]))
-                elif aliases and isinstance(current, ast.ImportFrom):
-                    statements.append(ast.ImportFrom(module=current.module, names=current.names[:aliases], level=current.level))
             def stores(target):
                 # The names a target binds: a plain name, or the names inside an unpacking
                 # target; a name read inside a subscript or attribute target binds nothing.
@@ -743,7 +752,7 @@ def hook_import_problems(tree, receipt):
                     for alias in statement.names:
                         # A star import exports an unknown set and binds nothing here.
                         if alias.name != "*" and (alias.asname or alias.name) == name:
-                            bound = bound or import_provides(module_file, statement, alias.name, visiting)
+                            bound = bound or import_provides(module_file, depth, statement, alias.name, visiting)
                 elif isinstance(statement, (ast.With, ast.AsyncWith)):
                     bound = bound or any(name in stores(item.optional_vars) for item in statement.items
                                          if item.optional_vars is not None)
@@ -769,7 +778,7 @@ def hook_import_problems(tree, receipt):
             """`from <current> import name`: a name the module binds is an attribute and imports
             nothing more; otherwise a submodule of a package is walked; otherwise the
             interpreter raises, so the import is reported."""
-            if name == "*" or binds(current, name):
+            if name == "*" or binds(current, name, depth_of(dotted, current)):
                 return
             inner = submodule(current, name) if current.endswith("/__init__.py") else None
             if inner is not None:
@@ -843,7 +852,7 @@ def hook_import_problems(tree, receipt):
             for name in from_names:
                 from_name(relative, dotted, current, name)
 
-        def resolve_relative(relative, node, on_alias=lambda k: None):
+        def resolve_relative(relative, node):
             """`from .a.b import c` from `relative`: the importing module's package depth (the
             segments of its __package__, carried from the import that reached it, not read
             from the directories around it) must cover the level; a script run by file name or
@@ -875,14 +884,14 @@ def hook_import_problems(tree, receipt):
                 reached += 1
                 vouch(relative, dotted, current)
                 walk(current, reached if current.endswith("/__init__.py") else reached - 1)
-            for k, alias in enumerate(node.names):
-                on_alias(k)
-                inner = None if binds(current, alias.name) or alias.name == "*" else (
-                    submodule(current, alias.name) if current.endswith("/__init__.py") else None)
+            current_depth = reached if current.endswith("/__init__.py") else reached - 1
+            for alias in node.names:
+                bound = alias.name == "*" or binds(current, alias.name, current_depth)
+                inner = None if bound else (submodule(current, alias.name) if current.endswith("/__init__.py") else None)
                 if inner is not None:
                     vouch(relative, f"{dotted}.{alias.name}", inner)
                     walk(inner, reached + 1 if inner.endswith("/__init__.py") else reached)
-                elif not (binds(current, alias.name) or alias.name == "*"):
+                elif not bound:
                     problems.append(f"{relative} imports {alias.name} from {dotted}, which {current} neither "
                                     f"binds nor holds as a submodule")
 
@@ -963,17 +972,18 @@ def hook_import_problems(tree, receipt):
             the statement stands, speculatively."""
             def progress(index, aliases):
                 if top_level:
-                    executed[relative][-1] = (index, aliases)
+                    executed[(relative, context[-1])] = (index, aliases)
 
             for index, statement in enumerate(statements):
                 progress(index, 0)
                 if isinstance(statement, ast.Expr) and sys_path_mutation(statement.value) is not None:
                     (mutate if top_level else unordered)(relative, statement.value)
                 elif isinstance(statement, ast.ImportFrom) and statement.level > 0:
-                    resolve_relative(relative, statement, lambda k: progress(index, k))
+                    resolve_relative(relative, statement)
                 elif isinstance(statement, (ast.Import, ast.ImportFrom)):
                     for k, (dotted, from_names) in enumerate(import_targets(statement)):
-                        progress(index, k)
+                        if isinstance(statement, ast.Import):
+                            progress(index, k)
                         resolve(relative, dotted, from_names)
                 else:
                     scan(relative, statement)
@@ -1029,7 +1039,7 @@ def hook_import_problems(tree, receipt):
         def walk(relative, depth):
             """A file is walked once per load context: reached as a package member it carries
             its package's depth, reached by bare name it carries none, and one file can be
-            loaded both ways."""
+            loaded both ways; each load keeps its own execution position while it runs."""
             if (relative, depth) in walked:
                 return
             walked.add((relative, depth))
@@ -1037,13 +1047,11 @@ def hook_import_problems(tree, receipt):
             try:
                 module = module_ast(relative)
                 if module is not None:
-                    executed.setdefault(relative, []).append((0, 0))
+                    executed[(relative, depth)] = (0, 0)
                     try:
                         run(relative, module.body, top_level=True)
                     finally:
-                        executed[relative].pop()
-                        if not executed[relative]:
-                            del executed[relative]
+                        del executed[(relative, depth)]
             finally:
                 context.pop()
 
@@ -2838,6 +2846,18 @@ def selftest():
                                           "hooks/g/lib.py": "VALUE = 42\n"}, (False, False)),
             "generator_iterable_first": ({"hooks/a.py": 'list(__import__("boot") for _ in __import__("lib").__dict__)\n', "hooks/boot.py": "BOOT",
                                           "hooks/g/lib.py": "VALUE = 42\n"}, (False, False)),
+            "outer_name_paused": ({"hooks/a.py": "import pkg.mod\n", "hooks/pkg/__init__.py": "",
+                                   "hooks/pkg/mod.py": 'import sys\nfrom pathlib import Path\nsys.path.insert(0, str(Path(__file__).parent))\n'
+                                                       'import trigger\nx = 1\nimport probe\n',
+                                   "hooks/pkg/trigger.py": "import mod\n", "hooks/pkg/probe.py": "from pkg.mod import x\n"}, (False, False)),
+            "inner_name_bound": ({"hooks/a.py": "import pkg.mod\n", "hooks/pkg/__init__.py": "",
+                                  "hooks/pkg/mod.py": 'import sys\nfrom pathlib import Path\nsys.path.insert(0, str(Path(__file__).parent))\n'
+                                                      'import trigger\nx = 1\nimport probe\n',
+                                  "hooks/pkg/trigger.py": "import mod\n", "hooks/pkg/probe.py": "from mod import x\n"}, (True, True)),
+            "from_alias_not_yet_bound": ({"hooks/a.py": "import pkg\n", "hooks/pkg/__init__.py": "from dep import x, helper\n",
+                                          "hooks/dep/__init__.py": "x = 1\n", "hooks/dep/helper.py": "from pkg import x\n"}, (False, False)),
+            "relative_from_alias_not_yet_bound": ({"hooks/a.py": "import pkg\n", "hooks/pkg/__init__.py": "from .sub import x, helper\n",
+                                                   "hooks/pkg/sub/__init__.py": "x = 1\n", "hooks/pkg/sub/helper.py": "from pkg import x\n"}, (False, False)),
             "triple_dirname_root_lib": ({"hooks/a.py": 'import os, sys\nsys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))\nimport lib\n',
                                          "lib.py": "X = 1\n"}, (False, False)),
         }
@@ -3128,13 +3148,25 @@ def selftest():
             and import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/pkg/helper.py"], shapes["late_assignment_partial"][0], owned=["a.py"])
             == ["hooks/pkg/helper.py imports x from pkg, which hooks/pkg/__init__.py neither binds nor holds as a submodule"])
         chk("a file loading under two names keeps each load's position; the aliases already completed inside one "
-            "import statement count; the statement being executed does not; a nested body sees earlier top-level bindings",
+            "`import` statement count; the statement being executed does not; a nested body sees earlier top-level bindings",
             import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/pkg/mod.py", "hooks/pkg/trigger.py"], shapes["dual_context_partial"][0], owned=["a.py"])
             == ["hooks/pkg/trigger.py imports x from pkg.mod, which hooks/pkg/mod.py neither binds nor holds as a submodule"]
             and import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/dep.py", "hooks/helper.py"], shapes["alias_completed_visible"][0], owned=["a.py"]) == []
             and import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/helper.py"], shapes["rhs_circular"][0], owned=["a.py"])
             == ["hooks/helper.py imports x from pkg, which hooks/pkg/__init__.py neither binds nor holds as a submodule"]
             and import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/helper.py"], shapes["class_body_sees_earlier"][0], owned=["a.py"]) == [])
+        dual_files = ["hooks/a.py", "hooks/pkg/__init__.py", "hooks/pkg/mod.py", "hooks/pkg/trigger.py", "hooks/pkg/probe.py"]
+        chk("an import reads the position of the load it names: the paused `pkg.mod` has not bound x while the complete "
+            "`mod` has; a `from` import binds none of its names until the whole statement completes, absolute or relative",
+            import_check(dual_files, shapes["outer_name_paused"][0], owned=["a.py"])
+            == ["hooks/pkg/probe.py imports x from pkg.mod, which hooks/pkg/mod.py neither binds nor holds as a submodule"]
+            and import_check(dual_files, shapes["inner_name_bound"][0], owned=["a.py"]) == []
+            and import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/dep/__init__.py", "hooks/dep/helper.py"],
+                             shapes["from_alias_not_yet_bound"][0], owned=["a.py"])
+            == ["hooks/dep/helper.py imports x from pkg, which hooks/pkg/__init__.py neither binds nor holds as a submodule"]
+            and import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/pkg/sub/__init__.py", "hooks/pkg/sub/helper.py"],
+                             shapes["relative_from_alias_not_yet_bound"][0], owned=["a.py"])
+            == ["hooks/pkg/sub/helper.py imports x from pkg, which hooks/pkg/__init__.py neither binds nor holds as a submodule"])
         chk("set, dict and generator comprehensions evaluate their first iterable before their result expression",
             all(import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes[n][0], owned=["a.py"])
                 == ["hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks"]
@@ -3301,7 +3333,7 @@ def selftest():
                          {"hooks/a.py": prefix + "import lib\n", "hooks/b.py": "import lib\n",
                           "hooks/lib.py": "import missing_review_dependency\n", "hooks/guards/lib.py": "X = 1\n"},
                          fn=shared_cache.hook_import_problems, owned=["a.py", "b.py"]) == [])
-        binds_all = private_copy('            if name == "*" or binds(current, ' + 'name):\n', '            if True:\n')
+        binds_all = private_copy('            if name == "*" or binds(current, name, ' + 'depth_of(dotted, current)):\n', '            if True:\n')
         chk("mutation proof: a from-import that never checks the binding clears the missing name",
             import_check(["hooks/a.py", "hooks/mod.py"], {"hooks/a.py": "from mod import missing_name\n",
                                                           "hooks/mod.py": "present = 1\n"}, owned=["a.py"],
@@ -3507,8 +3539,8 @@ def selftest():
                              fn=key_after_value.hook_import_problems) != []
             and import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes["comp_target_before_filter"][0], owned=["a.py"],
                              fn=target_after_filter.hook_import_problems) != [])
-        whole_module_binds = private_copy("            if module_file in " + "executed:\n                index, aliases = min(executed[module_file])\n",
-                                          "            if False:\n                index, aliases = min(executed[module_file])\n")
+        whole_module_binds = private_copy("            if (module_file, depth) in " + "executed:\n                index, aliases = executed[(module_file, depth)]\n",
+                                          "            if False:\n                index, aliases = (0, 0)\n")
         chk("mutation proof: a binding lookup blind to execution position clears the import that reaches back too early",
             import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/pkg/helper.py", "hooks/dep.py"], shapes["late_binding_partial"][0],
                          owned=["a.py"], fn=whole_module_binds.hook_import_problems) == [])
@@ -3536,14 +3568,36 @@ def selftest():
                              fn=filters_reversed.hook_import_problems) != []
             and import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes["comp_first_filters_in_order"][0], owned=["a.py"],
                              fn=parts_isolated.hook_import_problems) != [])
-        inner_load_erases_outer = private_copy("                        executed[relative].pop()\n                        if not executed[relative]:\n                            del " + "executed[relative]\n",
-                                               "                        executed.pop(relative, None)\n",
-                                               more=[("                    executed[relative][-1] = (index, " + "aliases)\n",
-                                                      "                    executed.setdefault(relative, [(0, 0)])[-1] = (index, aliases)\n")])
-        chk("mutation proof: an inner load that erases the outer load's position clears the dual-context case",
+        exit_clears_positions = private_copy("                        del executed[(relative, " + "depth)]\n", "                        executed.clear()\n")
+        chk("mutation proof: a load's exit that erases every position clears the dual-context case",
             import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/pkg/mod.py", "hooks/pkg/trigger.py"], shapes["dual_context_partial"][0],
-                         owned=["a.py"], fn=inner_load_erases_outer.hook_import_problems) == [])
-        aliases_unrecorded = private_copy("                    executed[relative][-1] = (index, " + "aliases)\n", "                    executed[relative][-1] = (index, 0)\n")
+                         owned=["a.py"], fn=exit_clears_positions.hook_import_problems) == [])
+        lookup_newest_load = private_copy("            if (module_file, depth) in " + "executed:\n                index, aliases = executed[(module_file, depth)]\n",
+                                          "            loads = [v for (f, _), v in executed.items() if f == module_file]\n            if loads:\n"
+                                          "                index, aliases = loads[-1]\n")
+        lookup_earliest_load = private_copy("            if (module_file, depth) in " + "executed:\n                index, aliases = executed[(module_file, depth)]\n",
+                                            "            loads = [v for (f, _), v in executed.items() if f == module_file]\n            if loads:\n"
+                                            "                index, aliases = loads[0]\n")
+        chk("mutation proofs: a lookup that reads the newest load of the file clears the paused `pkg.mod`; one that "
+            "reads the earliest rejects the complete `mod`",
+            import_check(dual_files, shapes["outer_name_paused"][0], owned=["a.py"], fn=lookup_newest_load.hook_import_problems) == []
+            and import_check(dual_files, shapes["inner_name_bound"][0], owned=["a.py"], fn=lookup_earliest_load.hook_import_problems) != [])
+        from_aliases_count = private_copy("                    for k, (dotted, from_names) in enumerate(import_targets(statement)):\n"
+                                          "                        if isinstance(statement, " + "ast.Import):\n"
+                                          "                            progress(index, k)\n                        resolve(relative, dotted, from_names)\n",
+                                          "                    for k, (dotted, from_names) in enumerate(import_targets(statement)):\n"
+                                          "                        if isinstance(statement, ast.Import):\n                            progress(index, k)\n"
+                                          "                            resolve(relative, dotted, from_names)\n                        else:\n"
+                                          "                            for k, name in enumerate(from_names):\n                                progress(index, k)\n"
+                                          "                                resolve(relative, dotted, (name,))\n",
+                                          more=[("                if aliases and isinstance(current, " + "ast.Import):\n",
+                                                 "                if aliases and isinstance(current, (ast.Import, ast.ImportFrom)):\n")])
+        chk("mutation proof: counting a `from` import's completed names as bound clears the submodule that reaches back "
+            "for a name the statement has not stored yet",
+            import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/dep/__init__.py", "hooks/dep/helper.py"],
+                         shapes["from_alias_not_yet_bound"][0], owned=["a.py"], fn=from_aliases_count.hook_import_problems) == [])
+        aliases_unrecorded = private_copy("                    executed[(relative, context[-1])] = (index, " + "aliases)\n",
+                                          "                    executed[(relative, context[-1])] = (index, 0)\n")
         chk("mutation proof: aliases not recorded inside the statement reject the alias completed before",
             import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/dep.py", "hooks/helper.py"], shapes["alias_completed_visible"][0],
                          owned=["a.py"], fn=aliases_unrecorded.hook_import_problems) != [])
@@ -3592,15 +3646,16 @@ def selftest():
             "the body's import",
             import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes["decorator_effect_before_body"][0], owned=["a.py"],
                          fn=bodies_first_isolated.hook_import_problems) != [])
-        absolute_source_none = private_copy("                source = loaded.get(top) or locate(top)\n            " + "else:\n",
-                                            "                source = None\n            else:\n")
+        absolute_source_none = private_copy("                source = loaded.get(top) or locate(top)\n                " + "reached = 1\n",
+                                            "                source = None\n                reached = 1\n")
         relative_source_no_climb = private_copy("                for _ in range(statement.level - 1):\n                    package = " + "os.path.dirname(package)\n",
                                                 "                for _ in range(statement.level - 1):\n                    pass\n")
-        source_binding_not_followed = private_copy("            return binds(source, item, visiting | " + "{(source, item)})\n", "            return False\n")
+        source_binding_not_followed = private_copy("            return binds(source, item, source_depth, visiting | " + "{(source, source_depth, item)})\n",
+                                                   "            return False\n")
         source_submodule_not_binding = private_copy('            if source.endswith("/__init__.py") and submodule(source, item) is not ' + 'None:\n                return True\n',
                                                      "            if False:\n                return True\n")
-        cycle_guard_file_only = private_copy("            if source is None or (source, item) in " + "visiting:\n",
-                                             "            if source is None or any(f == source for f, _ in visiting):\n")
+        cycle_guard_file_only = private_copy("            if source is None or (source, source_depth, item) in " + "visiting:\n",
+                                             "            if source is None or any(f == source for f, _, _ in visiting):\n")
         chk("mutation proofs: each branch of the binding-source lookup accepts a valid re-export the mutant rejects",
             import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/mod.py"], shapes["reexport_absolute"][0], owned=["a.py"],
                          fn=absolute_source_none.hook_import_problems) != []

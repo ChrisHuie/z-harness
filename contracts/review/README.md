@@ -6,8 +6,8 @@ prepared only after exact-head verification and posted as a new comment.
 The gate for this directory has a narrow claim: required generated include blocks must be
 present in the registered documents and byte-identical to their sources. Free prose and
 manually typed measurements outside those blocks are not mechanically verified. Source
-digests, guard decisions, suite execution counts, and mutation outcomes have separate
-validators under `contracts/goldens/`; none makes an unregistered GitHub edit verifiable.
+digests, guard decisions, and suite execution counts have separate validators under
+`contracts/goldens/`; none makes an unregistered GitHub edit verifiable.
 
 ## The rule
 
@@ -21,9 +21,8 @@ rather than restating it:
 ```
 
 A measurement of one head is not such a file. Committing it into the head it measures creates the
-same self-reference as a tracked handoff, so mutation evidence is cited by the output of a sweep run
-by hand with `tools/write-mutation-receipt.py`, whose aggregate holds the measurement against the
-reviewed `contracts/mutation-policy.json`; no workflow runs the sweep.
+same self-reference as a tracked handoff, so a measurement is cited from the output of the run that
+produced it and is never committed.
 
 `tools/ci-gate.py` checks every live include block under this directory against its source and
 enforces the registered relative-path inventory: `README.md` and one

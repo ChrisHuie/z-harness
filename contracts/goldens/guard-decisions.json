@@ -19,6 +19,10 @@
     "length": 131082
    },
    {
+    "sha256": "61eba166ff29f69e59e5c9a713c9dfb0ab355e3bc663bb431bf298fa273ac68e",
+    "length": 15360
+   },
+   {
     "sha256": "6ce2ea72974d5c961269d840ff105e8e8b8944335d085d8ea8778c95903d06ae",
     "length": 212990
    },
@@ -72,20 +76,16 @@
    "GREEN LIMIT: a legal source at the byte cap is classified inside the budget",
    "GREEN LIMIT: a subcommand count at the cap is still classified",
    "GREEN LIMIT: a token count at the cap is still classified",
+   "GREEN LIMIT: function declarations at the cap are still classified",
    "GREEN LIMIT: operator-heavy source remains inside the public hook budget",
    "GREEN LIMIT: wrapper nesting at the cap is still unwrapped",
-   "PCRE constructs",
    "RED  AUTHORITY: an alternate Git does not launder the ERE hazard",
    "RED  LIMIT: env -S nesting at the cap still reaches the ERE hazard",
    "RED  LIMIT: shell -c nesting at the cap still reaches the ERE hazard",
    "RED  LIMIT: substitution nesting at the cap still reaches the ERE hazard",
    "RED  REVIEW: line continuation before subcommand",
    "RED PROCESS: public envelope retains the direct grep decision",
-   "backtick-substitution",
-   "installed-git aliases",
-   "log-family grammar",
-   "shell boundary",
-   "short-option table"
+   "backtick-substitution"
   ]
  },
  "decisions": {
@@ -281,6 +281,7 @@
   "PATH=/usr/bin; cat <<'EOF'\n$(=git grep -P 'harness\\b' -- README.md)\nEOF\n": "allow",
   "PATH=/usr/bin; cat <<EOF\n$(=git grep -P 'harness\\b' -- README.md)\nEOF\n": "ask",
   "PATH=/usr/bin; sh 0<<< 'git status --short'": "allow",
+  "PATH=/usr/bin; sh 0<<< 'git submodule status'": "ask",
   "PT=extended git --config-env grep.patternType=PT grep -n 'harness\\b' -- README.md": "deny",
   "PT=extended git --config-env=grep.patternType=PT grep -n 'harness\\b' -- README.md": "deny",
   "PY=python3; SCRIPT=/tmp/x.py; $PY \"$SCRIPT\"": "ask",
@@ -630,10 +631,14 @@
   "env -i sh -c \"git grep -P 'harness\\b' -- README.md\"": "allow",
   "env -i sh -c '/bin/echo safe'": "allow",
   "env -i sh -c 'git status --short'": "allow",
+  "env -i sh -c 'git submodule status'": "ask",
   "env -i sh 0<<< 'git status --short'": "allow",
+  "env -i sh 0<<< 'git submodule status'": "ask",
   "env -i sh <<'EOF'\ngit status --short\nEOF\n": "allow",
+  "env -i sh <<'EOF'\ngit submodule status\nEOF\n": "ask",
   "env -u PATH git status --short": "allow",
   "env -u PATH sh -c 'git status --short'": "allow",
+  "env -u PATH sh -c 'git submodule status'": "ask",
   "env -u UNUSED sh <<'EOF'\ngit grep -E 'harness\\b' -- README.md\nEOF\n": "deny",
   "env /usr/bin/gi[t] grep -E 'harness\\b' -- README.md": "ask",
   "env FOO=1 nohup nice git -c grep.patternType=extended grep -n 'harness\\b' -- README.md": "deny",
@@ -1319,6 +1324,7 @@
   "sh -c 'command source \"$FILE\"'": "ask",
   "sh -c 'echo $PATH'": "allow",
   "sh -c 'git status'": "allow",
+  "sh -c 'git submodule status'": "allow",
   "sh -c 'ls -la $DIR'": "allow",
   "sh -c 'sh -c '\\''sh -c '\\''\\'\\'''\\''sh -c '\\''\\'\\'''\\''\\'\\''\\'\\'''\\'''\\''\\'\\'''\\''git grep -E '\\''\\'\\'''\\''\\'\\''\\'\\'''\\'''\\''\\'\\'''\\''\\'\\''\\'\\'''\\''\\'\\''\\'\\'''\\'''\\''\\'\\'''\\'''\\''\\'\\'''\\''\\'\\''\\'\\'''\\'''\\''\\'\\'''\\''harness\\b'\\''\\'\\'''\\''\\'\\''\\'\\'''\\'''\\''\\'\\'''\\''\\'\\''\\'\\'''\\''\\'\\''\\'\\'''\\'''\\''\\'\\'''\\'''\\''\\'\\'''\\''\\'\\''\\'\\'''\\'''\\''\\'\\'''\\'' -- README.md'\\''\\'\\'''\\''\\'\\''\\'\\'''\\'''\\''\\'\\'''\\'''\\''\\'\\'''\\'''\\'''": "deny",
   "sh -c 'zsh -c \"git show $SHA:src/f.py\"'": "deny",
@@ -1333,6 +1339,7 @@
   "sh 0<<< \"=git grep -E 'harness\\b' -- README.md\"; zsh 0<<< \"=git grep -E 'harness\\b' -- README.md\"": "deny",
   "sh 0<<< \"git grep -E 'harness\\b' -- README.md\"": "deny",
   "sh 0<<< 'SHA=x; =git show $SHA:src/f.py'; zsh 0<<< 'SHA=x; =git show $SHA:src/f.py'": "deny",
+  "sh 0<<< 'git submodule status'": "allow",
   "sh 2>/dev/null 0<<< \"git grep -E 'harness\\b' -- README.md\"": "deny",
   "sh 3< <(/usr/bin/printf '%s\\n' \"git grep -E 'harness\\b' -- README.md\")": "allow",
   "sh 3<<< \"git grep -E 'harness\\b' -- README.md\"": "allow",
@@ -1349,6 +1356,7 @@
   "sh <<'EOF'\nSHA=x; =git show $SHA:src/f.py\nEOF\n": "ask",
   "sh <<'EOF'\ngit grep -E 'harness\\b' -- README.md\nEOF\n": "deny",
   "sh <<'EOF'\ngit grep -nE 'harness\\b' -- README.md\nEOF": "deny",
+  "sh <<'EOF'\ngit submodule status\nEOF\n": "allow",
   "sh <<< \"$BODY\"": "ask",
   "sh <<< \"=git grep -E 'harness\\b' -- README.md\"": "ask",
   "sh <<< \"git grep -E 'harness\\b' -- README.md\"": "deny",
@@ -1389,6 +1397,7 @@
   "sudo =git grep -E 'harness\\b' -- README.md": "deny",
   "sudo git grep -nE 'harness\\b' -- README.md": "deny",
   "sudo sh -c 'git status --short'": "allow",
+  "sudo sh -c 'git submodule status'": "ask",
   "sym=foo; git grep -nE \"def $sym\\b\" -- src/": "ask",
   "time $TOOL grep -E 'harness\\b' -- README.md": "ask",
   "time $TOOL grep -nE 'harness\\b' -- README.md": "ask",

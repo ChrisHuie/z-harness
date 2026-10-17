@@ -249,7 +249,6 @@ python3 tools/run-skill-evals.py --selftest
 python3 tools/run-skill-evals.py --validate
 python3 tools/render-packages.py --selftest
 python3 tools/verify-review-publication.py --selftest
-python3 instruments/enumerate_survivors.py --selftest
 python3 instruments/fuzz_judge_diff.py --selftest
 python3 tools/ci-gate.py --selftest
 python3 tools/ci-gate.py
@@ -257,10 +256,8 @@ python3 tools/ci-gate.py
 
 The Bash and grep guards run their wall-clock checks -- hook processes timed against the 4.5 s cap
 and the at-limit sources decided inside the decision budget -- under `--perf`, which
-`hooks/harness_check.py` runs once per head; the mutation sweep runs each guard's `--selftest` once
-per mutation. `--selftest` still decides commands under the production deadlines, so a slow enough
-host can fail a check there as well, such as the grep guard's "function-declaration limit mutation
-loses bounded-parse ask".
+`hooks/harness_check.py` runs once per head. `--selftest` still decides commands under the
+production deadlines, so a slow enough host can fail a check there as well.
 
 `python3 tools/ci-gate.py` is the offline CI-equivalent entry point. It runs the ordinary gate, its
 meta-selftest, the renderer and guard selftests, eval validation, and a fresh render/verify pair. It
@@ -273,24 +270,14 @@ isolation fails before its claimed receipt is accepted when the declared workflo
 The in-repository workflow files are trust roots: a workflow-only edit can bypass those runners,
 and coordinated edits to both workflows can fabricate both in-repo job classes. Reviewer inspection
 or an externally administered required workflow must govern that boundary. GitHub still manages the
-image contents behind those labels. No workflow runs the mutation sweep. `tools/write-mutation-receipt.py`
-runs it by hand, sharded with `--shard-index` and `--shard-count` and aggregated with `--aggregate`;
-the aggregator rejects missing, duplicate, overlapping, foreign, or stale mutation IDs and shards
-measured under different tool versions, recomputes each raw outcome, and holds that observation
-against the reviewed `contracts/mutation-policy.json`: it exits 0 when the outcomes conform, 1 on a
-survivor or count-only kill the policy does not list or on any site or declared-addition survivor,
-and 2 when the measurement cannot be trusted, such as an `inert` entry being caught. The report is
-never committed. The offline gate validates the policy against the current plan, holds the plan
-against an independent closed inventory, and requires every module a registered hook runs to be
-swept or listed as unswept; it does not run the mutation plan. A separate
+image contents behind those labels. A separate
 declared Ubuntu job runs `tools/portable-conformance.py`. It resolves locked wheel filenames through
 live PyPI metadata, requires the published digest to equal the lock, hash-verifies every downloaded
 artifact, derives the vendored Agent Plugins schema and license URLs from their pinned repository
 revision and paths, and verifies a signed, hash-pinned Claude Code release before validating a fresh render.
 Network failure is red, never skipped. The repository workflow does not itself prove that either job
 is a branch-protection required check. `tools/pr-delivery-state.py` proves generic exact-head check
-and workflow presence; mutation evidence, when a sweep has been run by hand, is its own output and
-is inspected explicitly.
+and workflow presence.
 
 Local `harness_check.py` mode adds machine-specific Claude anchors, compares the complete payload
 of repository-owned skills under `~/.claude/skills`, and scans tracked plus authored-untracked
@@ -336,34 +323,19 @@ only after a child exit of 0 with every marker present, reconciles the manifest'
 against the scenarios that executed, and exits non-zero when a required scenario does not grade or
 did not execute, or when the runner raised.
 
-The nine reviewer reproductions for pull request 36 live under `instruments/reproductions/pr-36/`
+The reviewer reproductions for pull request 36 live under `instruments/reproductions/pr-36/`
 and run verbatim as acceptance cases of the suites they exercise.
 
 Document quote/citation scans are also manual because they require the target document, artifact
 root, and session transcript. Their detector selftest is blocking through C1.
 
-The mutation-development instruments are also bound into C1 by source digest and exact selftest
-count, while their full exploratory runs remain explicit. Keep their JSON outside the checkout:
+The differential fuzzing instrument is also bound into C1 by source digest and exact selftest
+count, while its full exploratory runs remain explicit. Keep its JSON outside the checkout:
 
 ```text
-python3 instruments/enumerate_survivors.py hooks/announced_work_guard.py hooks/fixtures_stop \
-  > /tmp/announced-work-survivors.json
 python3 instruments/fuzz_judge_diff.py /path/to/oracle.py hooks/announced_work_guard.py 17 10000 \
   > /tmp/announced-work-fuzz.json
 ```
-
-`enumerate_survivors.py` first requires one complete green pristine receipt, then mutates each
-top-level function except the selftest and CLI runner. It records target, fixture-tree, plan, and
-instrument hashes. A semantic kill requires the same suite and check count, a positive failure
-count, and assertion-failure exit 1; a timeout, crash, missing receipt, count drift, source drift,
-any other exit, or setup failure exits 2 as an instrument error. Fixture roots and descendants
-containing symlinks are rejected, as are Python bytecode caches. The completed private destination
-is checked against the recorded digest before an isolated interpreter executes it and checked again
-afterward. This binds the starting and ending private snapshots, not transient changes restored by
-the code under test or arbitrary files it reads outside those declared copies. A complete
-measurement exits 0 and reports survivors in JSON rather than treating coverage debt as tool
-failure.
-
 `fuzz_judge_diff.py` captures the instrument, oracle, and candidate bytes once, creates and
 post-verifies a separate private worker snapshot for each guard, and compiles each guard directly
 without import bytecode. Runtime `__file__` reads resolve to that private guard while the original
@@ -374,11 +346,12 @@ message-corpus, and instrument hashes. In comparison mode it exits 1 only when t
 allow, exits 2 on instrument failure -- including a run whose oracle blocked nothing, which could only
 have classified every case as agreement or allow-to-block -- and reports allow-to-block and block-reason changes separately
 without collapsing them into that safety verdict. Its grammar carries near-miss tokens drawn from
-outside the guard's tables. The mandatory prefix pins every one, so a widening that admits
-one of those tokens diverges at the minimum case count rather than needing a large run. That
-guarantee is exercised with actual one-literal private-copy widenings and covers three of the
-guard's collections; a widening elsewhere may still diverge by
-chance, and a clean run over an unpinned collection is not evidence of coverage. The accepted count range runs from the
+outside the guard's tables. The mandatory prefix pins every one, and the selftest asserts that
+each pinned near-miss case blocks under the shipped guard while the same message with an in-table
+token in that position is allowed, so a candidate that admits one of those tokens diverges at the
+minimum case count rather than needing a large run. That guarantee covers three of the guard's
+collections; a widening elsewhere may still diverge by chance, and a clean run over an unpinned
+collection is not evidence of coverage. The accepted count range runs from the
 mandatory-case count to 100,000; the
 mandatory prefix includes every production and renders every supported delimiter spelling. Use
 multiple recorded seeds instead of one unbounded worker allocation. Source symlinks are rejected;

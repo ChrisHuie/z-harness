@@ -570,7 +570,7 @@ def selftest():
                boundary_between(owner, os.path.join(tmp, "elsewhere.md")) is None)
 
         # The escape guard, with a discriminating fixture. The case above is answered by
-        # the walk running out of repositories, so it stayed green with the guard removed.
+        # the walk running out of repositories before the guard is consulted.
         # Here the escaping candidate's own directory IS a proven boundary, so returning
         # None can only come from refusing to leave the root.
         outside_repo = os.path.join(tmp, "outside-repo")
@@ -928,8 +928,8 @@ def selftest():
         expect("an indexed gitlink is an ownership boundary",
                _indexed_gitlink(gitlinked, owner, subprocess.run))
         # ...and that it is the arm is_repository_boundary reaches for a submodule, whose
-        # .git is a FILE. Dropping that arm left this module green because the other two
-        # answered every fixture; only a marker no other arm accepts separates them.
+        # .git is a FILE. The other two arms answered every earlier fixture; only a marker
+        # no other arm accepts separates them.
         submodule = os.path.join(owner, "submodule")
         submodule_admin = os.path.join(tmp, "submodule-admin")
         subprocess.run(

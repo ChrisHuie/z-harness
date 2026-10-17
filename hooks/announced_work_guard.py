@@ -990,8 +990,7 @@ def judge(payload):
     if not text.strip():
         # An early return, not a guard: with it removed the empty string reaches boundary(),
         # matches neither pattern, and judge returns None anyway. Kept because it states the
-        # intent -- nothing read is not evidence of a defect -- and a mutation of it is
-        # correctly unkillable rather than an uncovered branch.
+        # intent -- nothing read is not evidence of a defect.
         return None
     units = boundary(text)
     # Code is excluded here too. Reading it let text inside a fence retract a real
@@ -1021,7 +1020,7 @@ def judge(payload):
 
 def selftest():
     def graded_judge(payload, target=judge):
-        """Keep the terminal receipt when a production mutation raises."""
+        """Keep the terminal receipt when the judge raises."""
         try:
             return "completed", target(payload)
         except EnvelopeDrift as exc:
@@ -1476,7 +1475,7 @@ def selftest():
         # A sentence terminator not followed by whitespace is not a unit break, so the
         # matcher's `[.!?]` alternative is the only thing that can see this one. Without a
         # case for it, per-unit matching gives every other case a start-of-unit anchor and
-        # that alternative can be deleted with the suite still green.
+        # no input reaches that alternative.
         ("a terminator with no space after it still ends a claim",
          {"last_assistant_message": "Two items closed.Starting the IR-38 audit."}, True),
 
@@ -2150,9 +2149,9 @@ def selftest():
          {"last_assistant_message": "Starting the audit.", "stop_hook_active": True}, False),
     ]
 
-    # The cases above compare block-vs-allow, so the RETURNED trigger is unasserted:
-    # returning a bare True or False for it keeps every one of them green while the block
-    # message quotes the wrong text back. The message is the whole output of a block.
+    # The cases above compare block-vs-allow and never read the RETURNED trigger, so a
+    # block that quotes the wrong text back passes every one of them. The message is the
+    # whole output of a block.
     for label, message, trigger in (
         ("the blocked trigger is the announcement, quoted",
          "Right. Starting the IR-38 audit.", "Starting the"),

@@ -3,23 +3,6 @@
 Measurement scripts the PR review handoffs describe, kept so the published figures can be
 regenerated instead of re-derived.
 
-## Single-operand survivor enumeration
-
-    python3 enumerate_survivors.py <module.py> [extra sibling files/dirs to copy]
-
-Over every top-level function except `selftest` and the CLI `main`: each `if`/`elif` test is
-replaced by `False`; each `and`/`or` operand is replaced by its identity; and each
-non-constant `return` is replaced by `True` and by `False` (two mutants, with a site killed
-only when both are killed). The pristine source must first emit one terminal green receipt.
-A mutant is killed only by one terminal red receipt for the same suite and check count
-with assertion-failure exit 1; timeout, crash, missing receipt, count drift, every other
-exit, and setup failure are instrument errors.
-Fixture symlinks and Python bytecode caches are rejected. Each completed private copy is
-checked against its recorded digest before and after execution. The report binds those
-starting and ending snapshots, not transient changes restored by the code under test or
-arbitrary undeclared file reads. JSON is written to stdout, progress to stderr, and the
-checkout is not modified.
-
 ## Corpus delta
 
     python3 corpus_delta.py --base <checkout> --head <checkout> [--transcripts GLOB] [--top N]
@@ -34,7 +17,7 @@ fixed categories; unrecognized diagnostics use `other`, never raw diagnostic tex
 that could contain a command-derived path. Only aggregates are printed: transcripts are private,
 and no command text leaves the process. An
 empty corpus and a checkout without a guard are errors (exit 2), never a clean delta. The
-measurement it exists for: a head whose fixtures, sweep and fuzz were all green answered
+measurement it exists for: a head whose fixtures and fuzz were all green answered
 `ask` on 23.6% of the commands main allowed, and nothing else in the gate could see it.
 
 ## Differential judge fuzz
@@ -66,9 +49,10 @@ that direction -- not merely outside the table each one probes, since a token wi
 sibling table can block for that reason instead and score a control that cannot fail. Each must
 block today and starts allowing the moment a table grows to cover THAT TOKEN. The mandatory
 prefix pins every one of them, so such a widening diverges at the minimum case count. Three
-of the guard's collections are covered that way. The selftest applies every pinned token as an
-actual one-literal widening of a private shipped-guard copy and requires the matching production
-to change from block to allow; merely rendering the token is not sufficient. A widening elsewhere may still diverge --
+of the guard's collections are covered that way. The selftest pairs every pinned near-miss case
+with the same message carrying, in the token's place, one word that table does hold, and requires
+the shipped guard to block the near-miss and allow the sibling; merely rendering the token is not
+sufficient. A widening elsewhere may still diverge --
 whether it does depends on whether a grammar string spells the admitted token into a position
 the guard reads -- so a clean run over an unpinned collection proves nothing. Adding a token to
 a guard table means adding a near-miss beside it, or the next widening is a null result. Source symlinks are rejected. The report binds the two top-level guard

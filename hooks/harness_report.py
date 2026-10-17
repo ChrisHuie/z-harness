@@ -82,7 +82,7 @@ TOPIC = {
     # a git/gh command actually ran
     "git-workflow":     re.compile(_CMD + r'\b(?:git|gh)\b'),
     # a test/CI command actually ran
-    "testing-ci":       re.compile(_CMD + r'\b(?:pytest|tox|jest|vitest|go test|cargo test|make test|run_tests|gh run|coverage|mutmut)\b'),
+    "testing-ci":       re.compile(_CMD + r'\b(?:pytest|tox|jest|vitest|go test|cargo test|make test|run_tests|gh run|coverage)\b'),
     # a PR-review endpoint was actually called
     "pr-review-method": re.compile(_CMD + r'gh (?:pr\b|api [^"]*(?:pulls|reviewThreads))'),
     # an Agent was actually dispatched

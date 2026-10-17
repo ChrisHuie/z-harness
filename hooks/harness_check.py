@@ -28,16 +28,49 @@ Runs from either clone (repo root auto-detected from this file's location). Chec
       and the ban on conflating local commits with the GitHub PR remain present
   C11 claim-vocabulary coherence: the phrases AGENTS.md bans outright appear
       nowhere in the instruction corpus it governs
+  C12 skill claims about the always-on file bind to verbatim AGENTS.md text: every
+      sentence naming `~/.claude/CLAUDE.md`, or `AGENTS.md` with one of its section
+      headings, a straight-quoted phrase, or a line number, must carry a straight-quoted
+      phrase present in AGENTS.md (inside the named section when one is named). A
+      `CLAUDE.md:<n>` or `AGENTS.md:<n>` line citation, a bare `:<n>` citation, an
+      unbound claim, a stale quote, a negated claim whose quote IS present, and an
+      AGENTS.md sentence duplicated outside a quote are findings. The bare noun
+      "always-on" and generic CLAUDE.md/AGENTS.md class talk are out of scope. Findings
+      are a shrink-only worklist against contracts/worklists.json: identities are
+      (file, kind, claim text), never line numbers; green while every live finding is
+      in the baseline, red on a finding the baseline lacks and red on a baseline item
+      that is no longer live, so the baseline shrinks only by a deliberate edit in the
+      change that fixes the item. Every live finding still prints as WORKLIST
+  C13 eval coverage: release/evals.json lists every skill as tested or exempt with a
+      reason; unlisted skills are the same shrink-only worklist against the baseline's
+      C13 list, printed in full; every other manifest defect is a plain failure
+  C14 budget ceilings: AGENTS.md and the generated instruction file never exceed the
+      sizes recorded in contracts/budget-ceilings.json (fail only on growth); the Claude
+      dynamic hook block and the per-turn carrier ceilings sit under the runtime caps and
+      match the record; C4, C5 and C9 stay as they are
+  C15 hook envelope fixtures decode: every Codex envelope under hooks/fixtures_codex/
+      carries every field its event's input schema requires, host paths are scrubbed,
+      the synthetic fixture is labeled, and the Claude Stop fixture decodes
 
 Exit codes: 0 all checks pass · 1 one or more checks failed · 2 usage error or
 zero inputs (an empty scan set is an error, never a clean verdict).
 
-  harness_check.py             run every check (local mode)
-  harness_check.py --ci        skip [local]-tagged checks (no ~/.claude, no
-                               claude binary, no launchd on the runner)
-  harness_check.py --selftest  prove each check can go RED on a planted-defect
-                               tree, then exit
+  harness_check.py                  run every check (local mode)
+  harness_check.py --ci             skip [local]-tagged checks (no ~/.claude, no
+                                    claude binary, no launchd on the runner)
+  harness_check.py --selftest       prove each check can go RED on a planted-defect
+                                    tree, then exit
+  harness_check.py --verify-runtime structural evidence only: read the installed
+                                    Claude binaries (CLI and desktop builds) and the
+                                    installed Codex binary for the anchored contracts
+                                    with fixed-window byte searches, then print the
+                                    host-scenario catalog with every scenario that
+                                    has no recorded host run as UNVERIFIED. Anchor
+                                    presence is version-bound structural evidence; it
+                                    never proves dispatch, enforcement, or delivery
 """
+import ast
+import contextlib
 import fnmatch
 import hashlib
 import importlib.util
@@ -52,8 +85,10 @@ import subprocess
 import sys
 import tempfile
 import time
+import tokenize
+import types
 
-VERSION = "3.3.0"
+VERSION = "3.5.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOLS_DIR = os.path.join(ROOT, "tools")
 if TOOLS_DIR not in sys.path:
@@ -117,7 +152,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 236
+SELFTEST_FLOOR = 427
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -138,7 +173,7 @@ SELFTEST_SUITES = [
      ["hooks/guards/credential_reach_guard.py", "--selftest"], 84),
     ("askq_timeout_guard", ["hooks/askq_timeout_guard.py", "--selftest"], 13),
     ("announced_work_guard", ["hooks/announced_work_guard.py", "--selftest"], 922),
-    ("harness_report", ["hooks/harness_report.py", "--selftest"], 12),
+    ("harness_report", ["hooks/harness_report.py", "--selftest"], 33),
     ("cc-cost", ["tools/cc-cost.py", "--selftest"], 8),
     ("codex-cost", ["tools/codex-cost.py", "--selftest"], 28),
     ("claim-provenance", ["tools/claim-provenance.py", "--selftest"], 83),
@@ -146,7 +181,8 @@ SELFTEST_SUITES = [
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 25),
     ("verify-review-publication",
      ["tools/verify-review-publication.py", "--selftest"], 94),
-    ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 3),
+    ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 53),
+    ("install-claude", ["tools/install-claude.py", "--selftest"], 308),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
     ("ci-gate", ["tools/ci-gate.py", "--selftest"], 345),
     ("write-mutation-receipt",
@@ -232,9 +268,15 @@ SELFTEST_TIMEOUTS = {
     "bash_command_guard-perf": 90,
     "git_grep_engine_guard": 60,
     "git_grep_engine_guard-perf": 30,
-    "announced_work_guard": 60,
+    # Measured 41.6s on the macos-15 runner in the ci-gate pass at 25ccc30, past the 36s
+    # margin of a 60s budget that the same job had met minutes earlier; 90s keeps that
+    # sample at 46%.
+    "announced_work_guard": 90,
     "ci-gate": 120,
     "fuzz-judge-diff": 25,
+    # Stages and activates several temporary trees, runs three reviewer reproductions as
+    # subprocesses and 131 fixture hooks in fresh interpreters; measured 24.8s at 308 proofs.
+    "install-claude": 60,
 }
 DEFAULT_SELFTEST_TIMEOUT = 15
 # A suite may use this much of its registered timeout before C1 says so. Without it the
@@ -287,6 +329,10 @@ PRODUCTION_CHECKS = (
     ("C9", "c9_codex_package"),
     ("C10", "c10_delivery_contract"),
     ("C11", "c11_claim_vocabulary"),
+    ("C12", "c12_claim_binding"),
+    ("C13", "c13_eval_coverage"),
+    ("C14", "c14_budget_ceilings"),
+    ("C15", "c15_envelope_fixtures"),
 )
 
 # C2: basenames shared verbatim across skills. A same-basename file NOT listed in
@@ -410,10 +456,14 @@ REQUIRED_CLAUDE_HANDLERS = [
 
 RESERVED_BASENAMES = {"claude.md", "agents.md", "gemini.md"}
 CODEX_HOOK_TOP_LEVEL_KEYS = {"description", "hooks"}
+# The twelve events whose input schemas are embedded in the installed codex-cli 0.154.0 binary;
+# --verify-runtime re-reads the binary for this list. SessionEnd and Interrupt were absent from
+# the 0.144.4 schema this allowlist once followed; SessionEnd was observed executing on
+# 2026-10-15 and its envelope is committed under hooks/fixtures_codex/.
 CODEX_VALID_HOOK_EVENTS = {
     "PreToolUse", "PermissionRequest", "PostToolUse", "PreCompact", "PostCompact",
-    "SessionStart", "SubagentStart", "SubagentStop",
-    "UserPromptSubmit", "Stop",
+    "SessionStart", "SessionEnd", "UserPromptSubmit", "SubagentStart", "SubagentStop",
+    "Stop", "Interrupt",
 }
 CODEX_REQUIRED_PACKAGE_EVENTS = {"SessionStart", "SubagentStart", "PreToolUse"}
 CODEX_HOOK_ENTRY_KEYS = {"matcher", "hooks", "enabled", "trusted_hash"}
@@ -446,6 +496,353 @@ DELIVERY_CONTRACT = {
         "A failed check leaves authority active for in-scope",
     ],
 }
+
+# ---- C12: skill claims about the always-on file ----------------------------------
+# A claim sentence names the installed always-on file by path, or names AGENTS.md together
+# with one of its section headings, a straight-quoted phrase, or a line number. Every such
+# sentence binds to a straight-quoted phrase present verbatim in AGENTS.md; an edited phrase
+# then fails the citing skill loudly, which is the intended signal. No rule identifiers are
+# added to the policy for this: the quote IS the binding.
+ALWAYS_ON_PATH = re.compile(r"`?~/\.claude/CLAUDE\.md`?")
+POLICY_LINE_CITATION = re.compile(r"(?:CLAUDE|AGENTS)\.md`?\s*:\s*\d+(?:\s*[-–]\s*\d+)?")
+BARE_LINE_CITATION = re.compile(r"`:\d+(?:-\d+)?`")
+STRAIGHT_QUOTE = re.compile(r"\"([^\"]{1,2000})\"", re.S)
+# Masking tokens are private-use characters, which authored prose never carries; any that do
+# occur are stripped before masking so text cannot impersonate a token.
+SPAN_TOKEN = re.compile("(\\d+)")
+QUOTE_TOKEN = re.compile("(\\d+)")
+PRIVATE_USE = re.compile("[-]")
+
+
+def code_spans(text):
+    """-> [(start, end)] of the code spans in `text`, scanned left to right.
+
+    A backtick run opens a span unless a backslash escapes it; a backslash escapes exactly
+    the next character, so `\\\\` is a literal pair and the run after it opens, and `\\``
+    is a literal backtick after which a further run still opens. The same run, standing
+    alone, closes the span; everything inside it is literal, so a backslash before the
+    closing run does not protect it, and the content may span lines.
+    """
+    spans, i, n = [], 0, len(text)
+    while i < n:
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] != "`":
+            i += 1
+            continue
+        run_start = i
+        while i < n and text[i] == "`":
+            i += 1
+        run = text[run_start:i]
+        close = text.find(run, i)
+        while close != -1 and (text[close - 1] == "`" or
+                               (close + len(run) < n and text[close + len(run)] == "`")):
+            close = text.find(run, close + 1)
+        if close == -1 or close == i:
+            continue
+        spans.append((run_start, close + len(run)))
+        i = close + len(run)
+    return spans
+QUOTE_ELLIPSIS = re.compile(r"…|\.\.\.")
+CLAIM_NEGATION = re.compile(
+    r"\b(?:does not|do not|did not|is not|are not|was not|were not|no longer|not carried|"
+    r"not carry|never carr(?:y|ies|ied)|never had|absent from|nowhere in)\b", re.I)
+SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+")
+DUPLICATE_MIN_WORDS = 8
+C12_SCOPE = ("sentences naming ~/.claude/CLAUDE.md, or AGENTS.md with a section heading, a "
+             "straight-quoted phrase, or a line number; the bare noun always-on and generic "
+             "CLAUDE.md/AGENTS.md class talk are out of scope")
+
+# ---- C13 / C14 / C15: manifests and records --------------------------------------
+EVAL_MANIFEST = "release/evals.json"
+BUDGET_CEILINGS = "contracts/budget-ceilings.json"
+# Runtime caps read in-binary (see CLAUDE_RUNTIME_ANCHORS, hook_output.cap_table), and the
+# harness's own ceilings under them. The adapter that will emit the dynamic block asserts
+# CLAUDE_DYNAMIC_BLOCK_* in its selftest; the per-turn carrier asserts the carrier ceiling.
+CLAUDE_HOOK_CONTEXT_CHAR_CAP = 8000
+CLAUDE_HOOK_CONTEXT_LINE_CAP = 200
+CLAUDE_DYNAMIC_BLOCK_CHAR_CEILING = 7500
+CLAUDE_DYNAMIC_BLOCK_LINE_CEILING = 190
+PROMPT_SUBMIT_CARRIER_BYTE_CEILING = 600
+CODEX_SESSION_START_BYTE_CEILING = 30000
+CODEX_SESSION_START_CONSTANT = re.compile(r"^MAX_CONTEXT_BYTES = ([0-9_]+)$", re.M)
+CODEX_FIXTURE_DIR = "hooks/fixtures_codex"
+CODEX_FIXTURES = {
+    "C1_session_start.json": "SessionStart",
+    "C2_user_prompt_submit.json": "UserPromptSubmit",
+    "C3_pre_tool_use.json": "PreToolUse",
+    "C4_post_tool_use.json": "PostToolUse",
+    "C5_stop.json": "Stop",
+    "C6_session_end.json": "SessionEnd",
+    "C7_stop_null_message_synthetic.json": "Stop",
+}
+CODEX_SYNTHETIC_FIXTURES = {"C7_stop_null_message_synthetic.json"}
+CLAUDE_STOP_FIXTURE = "hooks/fixtures_stop/S1_stop_real_envelope.json"
+# Per-event required-field lists read from the input schemas embedded in codex-cli 0.154.0
+# (each schema's own top-level "required" array). C15 decodes the committed fixtures against
+# this table; --verify-runtime compares the table against the installed binary.
+CODEX_HOOK_INPUT_REQUIRED = {
+    "PreToolUse": ("cwd", "hook_event_name", "model", "permission_mode", "session_id",
+                   "tool_input", "tool_name", "tool_use_id", "transcript_path", "turn_id"),
+    "PermissionRequest": ("cwd", "hook_event_name", "model", "permission_mode", "session_id",
+                          "tool_input", "tool_name", "transcript_path", "turn_id"),
+    "PostToolUse": ("cwd", "hook_event_name", "model", "permission_mode", "session_id",
+                    "tool_input", "tool_name", "tool_response", "tool_use_id",
+                    "transcript_path", "turn_id"),
+    "PreCompact": ("cwd", "hook_event_name", "model", "session_id", "transcript_path",
+                   "trigger", "turn_id"),
+    "PostCompact": ("cwd", "hook_event_name", "model", "session_id", "transcript_path",
+                    "trigger", "turn_id"),
+    "SessionStart": ("cwd", "hook_event_name", "model", "permission_mode", "session_id",
+                     "source", "transcript_path"),
+    "SessionEnd": ("cwd", "hook_event_name", "reason", "session_id", "transcript_path"),
+    "UserPromptSubmit": ("cwd", "hook_event_name", "model", "permission_mode", "prompt",
+                         "session_id", "transcript_path", "turn_id"),
+    "SubagentStart": ("agent_id", "agent_type", "cwd", "hook_event_name", "model",
+                      "permission_mode", "session_id", "transcript_path", "turn_id"),
+    "SubagentStop": ("agent_id", "agent_transcript_path", "agent_type", "cwd",
+                     "hook_event_name", "last_assistant_message", "model", "permission_mode",
+                     "session_id", "stop_hook_active", "transcript_path", "turn_id"),
+    "Stop": ("cwd", "hook_event_name", "last_assistant_message", "model", "permission_mode",
+             "session_id", "stop_hook_active", "transcript_path", "turn_id"),
+    "Interrupt": ("cwd", "hook_event_name", "model", "permission_mode", "session_id",
+                  "transcript_path", "turn_id"),
+}
+CODEX_SESSION_START_SOURCES = ("startup", "resume", "clear", "compact")
+CODEX_PERMISSION_MODES = ("default", "acceptEdits", "plan", "dontAsk", "bypassPermissions")
+CODEX_EVENT_KEBAB = {
+    "PreToolUse": "pre-tool-use", "PermissionRequest": "permission-request",
+    "PostToolUse": "post-tool-use", "PreCompact": "pre-compact", "PostCompact": "post-compact",
+    "SessionStart": "session-start", "SessionEnd": "session-end",
+    "UserPromptSubmit": "user-prompt-submit", "SubagentStart": "subagent-start",
+    "SubagentStop": "subagent-stop", "Stop": "stop", "Interrupt": "interrupt",
+}
+CODEX_EVENT_VARIANT_RUN = (
+    b"PreToolUsePermissionRequestPostToolUsePreCompactPostCompactSessionStartSessionEnd"
+    b"UserPromptSubmitSubagentStartSubagentStopStopInterrupt"
+)
+
+# ---- --verify-runtime: anchored contracts and the host-scenario catalog ------------
+# Each anchor is a fixed-window byte search: the needle is located with bytes.find, and a
+# bounded window around it is checked by a small regex or parser. No regex runs over the
+# whole binary. A needle may occur many times; the anchor holds when ANY occurrence's window
+# satisfies the check. `sample` is bytes that satisfy the anchor, used only to assemble the
+# selftest's fixture binary; against a real binary the sample plays no part.
+_IDENT = rb"[A-Za-z0-9_$]+"
+
+
+def _regex_anchor(pattern):
+    compiled = re.compile(pattern)
+
+    def verify(window):
+        return "" if compiled.search(window) else f"window does not match {pattern!r}"
+    return verify
+
+
+def _event_array_anchor(required):
+    def verify(window):
+        end = window.find(b"]")
+        if end < 0:
+            return "no closing bracket in window"
+        try:
+            names = json.loads(window[:end + 1].decode("ascii"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            return f"event array does not parse: {exc}"
+        missing = sorted(set(required) - set(names))
+        return f"event array lacks {missing}" if missing else ""
+    return verify
+
+
+CLAUDE_REQUIRED_EVENTS = ("PreToolUse", "PostToolUse", "UserPromptSubmit", "SessionStart",
+                          "SessionEnd", "Stop", "SubagentStart", "SubagentStop",
+                          "PreCompact", "PermissionRequest")
+CLAUDE_EVENT_ARRAY_SAMPLE = (
+    b'["PreToolUse","PostToolUse","PostToolUseFailure","PostToolBatch","Notification",'
+    b'"UserPromptSubmit","UserPromptExpansion","SessionStart","SessionEnd","Stop","StopFailure",'
+    b'"SubagentStart","SubagentStop","PreCompact","PostCompact","PreModelSwitch",'
+    b'"PostModelSwitch","PermissionRequest","PermissionDenied","Setup"]'
+)
+# (name, needle, bytes before, bytes after, verify, sample, what it establishes)
+CLAUDE_RUNTIME_ANCHORS = (
+    ("stop.input.fields", b'("Stop"),stop_hook_active:', 0, 160,
+     _regex_anchor(rb'\("Stop"\),stop_hook_active:' + _IDENT + rb'\(\),last_assistant_message:'
+                   + _IDENT + rb'\(\)\.optional\(\)'),
+     b'hook_event_name:C("Stop"),stop_hook_active:H(),last_assistant_message:o().optional().describe("Text")',
+     "Stop input: stop_hook_active required, last_assistant_message optional"),
+    ("askq.afkTimeoutMs.optional", b"afkTimeoutMs:", 0, 80,
+     _regex_anchor(rb"afkTimeoutMs:" + _IDENT + rb"\(\)\.int\(\)\.positive\(\)\.optional\(\)"),
+     b"afkTimeoutMs:v().int().positive().optional().describe(\"Set when\")",
+     "AskUserQuestion result: afkTimeoutMs is an optional positive integer"),
+    ("pretooluse.input.tool_input", b'("PreToolUse"),tool_name:', 0, 160,
+     _regex_anchor(rb'\("PreToolUse"\),tool_name:' + _IDENT + rb'\(\),tool_input:' + _IDENT
+                   + rb'\(\),tool_use_id:'),
+     b'hook_event_name:C("PreToolUse"),tool_name:o(),tool_input:oe(),tool_use_id:o()',
+     "PreToolUse input: tool_name, tool_input, tool_use_id"),
+    ("agent.tool_input.prompt", b'"The task for the agent to perform"', 0, 0, lambda w: "",
+     b'oys="The task for the agent to perform"',
+     "Agent tool: the prompt parameter the spawn guard reads is the task text"),
+    ("events.registered", b'["PreToolUse","PostToolUse","PostToolUseFailure","PostToolBatch","Notification","UserPromptSubmit"', 0, 1200,
+     _event_array_anchor(CLAUDE_REQUIRED_EVENTS), CLAUDE_EVENT_ARRAY_SAMPLE,
+     "hook event enum carries every event the harness registers or reads"),
+    ("sessionstart.input.source", b'("SessionStart"),source:', 0, 160,
+     _regex_anchor(rb'\("SessionStart"\),source:' + _IDENT
+                   + rb'\(\["startup","resume","clear","compact","fork"\]\)'),
+     b'hook_event_name:C("SessionStart"),source:U(["startup","resume","clear","compact","fork"]),agent_type:o().optional()',
+     "SessionStart input: source enum startup|resume|clear|compact|fork"),
+    ("userpromptsubmit.input.prompt_source", b'("UserPromptSubmit"),prompt:', 0, 240,
+     _regex_anchor(rb'\("UserPromptSubmit"\),prompt:' + _IDENT + rb'\(\),source:' + _IDENT
+                   + rb'\(\["user","sdk","system","loop_wakeup","schedule_wakeup","poll_event"\]\)\.optional\(\)'),
+     b'hook_event_name:C("UserPromptSubmit"),prompt:o(),source:U(["user","sdk","system","loop_wakeup","schedule_wakeup","poll_event"]).optional().describe("Who")',
+     "UserPromptSubmit input: prompt, and the optional source enum incl. sdk"),
+    ("sessionstart.output.additionalContext", b'("SessionStart"),additionalContext:', 0, 100,
+     _regex_anchor(rb'\("SessionStart"\),additionalContext:' + _IDENT + rb'\(\)\.optional\(\)'),
+     b'hookEventName:C("SessionStart"),additionalContext:o().optional(),initialUserMessage:o().optional()',
+     "SessionStart output accepts hookSpecificOutput.additionalContext"),
+    ("userpromptsubmit.output.additionalContext", b'("UserPromptSubmit"),additionalContext:', 0, 100,
+     _regex_anchor(rb'\("UserPromptSubmit"\),additionalContext:' + _IDENT + rb'\(\)\.optional\(\)'),
+     b'hookEventName:C("UserPromptSubmit"),additionalContext:o().optional(),sessionTitle:o().optional()',
+     "UserPromptSubmit output accepts hookSpecificOutput.additionalContext"),
+    ("hook_output.cap_table", b"additionalContext:8000,permissionDecisionReason:2000}", 90, 140,
+     _regex_anchor(rb"\{reason:2000,stopReason:2000,systemMessage:4000,additionalContext:8000,"
+                   rb"permissionDecisionReason:2000\}," + _IDENT + rb"=200,"),
+     b"var T1={reason:2000,stopReason:2000,systemMessage:4000,additionalContext:8000,permissionDecisionReason:2000},rE=200,v1={reason:20}",
+     "hook output cap table: additionalContext 8000 chars and 200 lines on the capped path"),
+    ("instructionFiles.shape", b"instructionFiles that is not a list of { path, kind, content }", 0, 0,
+     lambda w: "", b"instructionFiles that is not a list of { path, kind, content }",
+     "instructionFiles hook output is a list of { path, kind, content }"),
+    ("instructionFiles.kind_validation", b"an instruction file whose kind is not one of ", 0, 0,
+     lambda w: "", b"an instruction file whose kind is not one of ",
+     "instructionFiles entries are validated by kind"),
+)
+
+
+def _codex_schema_window(window):
+    """The last top-level `"required"` array before the title, as a tuple."""
+    matches = list(re.finditer(rb'\n  "required": \[\n((?:    "[^"]+",?\n)+)  \]', window))
+    if not matches:
+        return None
+    return tuple(item.decode("ascii").strip().strip('",')
+                 for item in matches[-1].group(1).split(b"\n") if item.strip())
+
+
+def _codex_required_anchor(event):
+    expected = CODEX_HOOK_INPUT_REQUIRED[event]
+
+    def verify(window):
+        found = _codex_schema_window(window)
+        if found is None:
+            return "no top-level required array before the title"
+        if found != expected:
+            return f"required {list(found)} != recorded {list(expected)}"
+        return ""
+    return verify
+
+
+def _codex_enum_anchor(prop, expected):
+    pattern = re.compile(
+        rb'"' + prop.encode("ascii") + rb'": \{\n      "enum": \[\n((?:        "[^"]+",?\n)+)      \]')
+
+    def verify(window):
+        matches = list(pattern.finditer(window))
+        if not matches:
+            return f"no {prop} enum in window"
+        found = tuple(item.decode("ascii").strip().strip('",')
+                      for item in matches[-1].group(1).split(b"\n") if item.strip())
+        return "" if found == tuple(expected) else f"{prop} enum {list(found)} != {list(expected)}"
+    return verify
+
+
+def _codex_presence_anchor(present, absent):
+    def verify(window):
+        for needle in present:
+            if needle not in window:
+                return f"missing {needle!r}"
+        for needle in absent:
+            if needle in window:
+                return f"unexpected {needle!r}"
+        return ""
+    return verify
+
+
+def codex_schema_sample(event, required=None, extra_props=""):
+    """A minimal schema text in the binary's layout: `<kebab>.command.input{...}` then title."""
+    kebab = CODEX_EVENT_KEBAB[event]
+    required = CODEX_HOOK_INPUT_REQUIRED[event] if required is None else required
+    props = ''.join(f'    "{name}": {{\n      "type": "string"\n    }},\n' for name in required)
+    body = (f'{kebab}.command.input{{\n  "$schema": "x",\n  "properties": {{\n{props}{extra_props}'
+            f'    "hook_event_name": {{\n      "const": "{event}",\n      "type": "string"\n    }}\n  }},\n'
+            f'  "required": [\n' + "".join(f'    "{name}",\n' for name in required[:-1])
+            + f'    "{required[-1]}"\n  ],\n  "title": "{kebab}.command.input",\n  "type": "object"\n}}')
+    return body.encode("utf-8")
+
+
+def _codex_anchor_table():
+    anchors = [
+        ("events.twelve", CODEX_EVENT_VARIANT_RUN, 0, 0, lambda w: "", CODEX_EVENT_VARIANT_RUN,
+         "the twelve hook event names in one serde variant run"),
+        ("project_doc_max_bytes.default", b"project_doc_max_bytes = 32768", 0, 0, lambda w: "",
+         b"project_doc_max_bytes = 32768", "AGENTS chain budget default 32768 bytes"),
+        ("pretooluse.ask_rejected_at_runtime",
+         b"PreToolUse hook returned unsupported permissionDecision:ask", 0, 0, lambda w: "",
+         b"PreToolUse hook returned unsupported permissionDecision:ask",
+         "permissionDecision ask is parsed but rejected by the dispatcher"),
+    ]
+    for event in CODEX_HOOK_INPUT_REQUIRED:
+        kebab = CODEX_EVENT_KEBAB[event]
+        anchors.append((f"schema.{event}.required", f'"title": "{kebab}.command.input"'.encode("ascii"),
+                        2600, 0, _codex_required_anchor(event), codex_schema_sample(event),
+                        f"{event} input schema required fields"))
+    session_sample = codex_schema_sample(
+        "SessionStart",
+        extra_props='    "source": {\n      "enum": [\n' + "".join(
+            f'        "{s}",\n' for s in CODEX_SESSION_START_SOURCES[:-1])
+        + f'        "{CODEX_SESSION_START_SOURCES[-1]}"\n      ],\n      "type": "string"\n    }},\n')
+    anchors.append(("schema.SessionStart.source_enum", b'"title": "session-start.command.input"',
+                    2600, 0, _codex_enum_anchor("source", CODEX_SESSION_START_SOURCES),
+                    session_sample, "SessionStart source enum has no fork"))
+    pretool_sample = codex_schema_sample(
+        "PreToolUse",
+        extra_props='    "permission_mode": {\n      "enum": [\n' + "".join(
+            f'        "{m}",\n' for m in CODEX_PERMISSION_MODES[:-1])
+        + f'        "{CODEX_PERMISSION_MODES[-1]}"\n      ],\n      "type": "string"\n    }},\n')
+    anchors.append(("schema.PreToolUse.permission_mode_enum", b'"title": "pre-tool-use.command.input"',
+                    2600, 0, _codex_enum_anchor("permission_mode", CODEX_PERMISSION_MODES),
+                    pretool_sample, "permission_mode enum incl. bypassPermissions"))
+    anchors.append(("schema.UserPromptSubmit.no_source", b"user-prompt-submit.command.input{", 0, 2600,
+                    _codex_presence_anchor((b'"prompt": {',), (b'"source": {',)),
+                    codex_schema_sample("UserPromptSubmit"),
+                    "UserPromptSubmit input carries prompt and no source"))
+    stop_sample = codex_schema_sample(
+        "Stop",
+        extra_props='    "last_assistant_message": {\n      "$ref": "#/definitions/NullableString"\n    },\n'
+                    '    "stop_hook_active": {\n      "type": "boolean"\n    },\n')
+    anchors.append(("schema.Stop.nullable_message", b'"title": "stop.command.input"', 2600, 0,
+                    _codex_presence_anchor((b'"last_assistant_message": {\n      "$ref": "#/definitions/NullableString"',
+                                            b'"stop_hook_active": {\n      "type": "boolean"'), ()),
+                    stop_sample, "Stop input: last_assistant_message nullable, stop_hook_active boolean"))
+    return tuple(anchors)
+
+
+CODEX_RUNTIME_ANCHORS = _codex_anchor_table()
+
+# What a host run would have to establish per runtime before any of the above counts as more
+# than structural evidence. A record here is (runtime, scenario) -> {"host": ..., "date": ...,
+# "result": ...}; none exists yet, so every scenario prints as UNVERIFIED.
+HOST_SCENARIO_CATALOG = tuple(
+    (runtime, scenario, meaning)
+    for runtime in ("claude", "codex")
+    for scenario, meaning in (
+        ("allow", "a PreToolUse hook answering allow lets the call run"),
+        ("deny", "a PreToolUse hook answering deny stops the call and the reason reaches the model"),
+        ("malformed output", "a hook printing non-JSON is treated as the documented failure, not as allow"),
+        ("crash", "a hook exiting non-zero without a reason is treated as the documented failure"),
+        ("timeout", "a hook past its registered timeout is treated as the documented failure"),
+        ("untrusted hook", "a changed or untrusted hook definition is skipped and reported"),
+        ("delivered context", "additionalContext from SessionStart and UserPromptSubmit reaches the model"),
+    )
+)
+HOST_SCENARIO_EVIDENCE = {}
 
 
 def body_chars(path):
@@ -899,10 +1296,488 @@ def git_owned_live_paths(root, runner=None):
         "error": "",
     }
 
+def load_tool_module(name):
+    """Import a hyphenated tool script by path; the gate's own tools, never the fixture's."""
+    path = os.path.join(ROOT, "tools", f"{name}.py")
+    spec = importlib.util.spec_from_file_location(f"_harness_check_{name.replace('-', '_')}", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def normalize_policy_text(text):
+    """Collapse markup and whitespace so a quoted phrase and its source compare as prose."""
+    text = text.replace("`", "").replace("*", "").replace("’", "'")
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+def agents_sections(agents_text):
+    """-> [(heading or '', text)] by `## ` heading, preamble first."""
+    sections, heading, lines = [], "", []
+    for line in agents_text.splitlines():
+        if line.startswith("## "):
+            sections.append((heading, "\n".join(lines)))
+            heading, lines = line[3:].strip(), []
+        else:
+            lines.append(line)
+    sections.append((heading, "\n".join(lines)))
+    return sections
+
+
+HTML_BLOCK_TAGS = frozenset(
+    "address article aside base basefont blockquote body caption center col colgroup dd details "
+    "dialog dir div dl dt fieldset figcaption figure footer form frame frameset h1 h2 h3 h4 h5 h6 "
+    "head header hr html iframe legend li link main menu menuitem nav noframes ol optgroup option "
+    "p param search section summary table tbody td tfoot th thead title tr track ul".split())
+RAW_HTML_TAGS = ("pre", "script", "style", "textarea")
+THEMATIC_BREAK = re.compile(r" {0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})")
+ATX_HEADING = re.compile(r" {0,3}#{1,6}(?:[ \t]|$)")
+SETEXT_UNDERLINE = re.compile(r" {0,3}(?:=+|-+)[ \t]*")
+HTML_TAG_LINE = re.compile(
+    r"(<[a-z][a-z0-9-]*(\s+[a-z_:][a-z0-9_.:-]*(\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s\"'=<>`]+))?)*\s*/?>"
+    r"|</[a-z][a-z0-9-]*\s*>)\s*")
+
+
+def html_block_end(stripped, in_paragraph):
+    """-> the predicate on later lines that ends the HTML block `stripped` opens, or None.
+
+    The seven start conditions of CommonMark 4.6: a pre, script, style or textarea tag
+    (ended by any of those four closing tags), a comment (`-->`), a processing instruction
+    (`?>`), a declaration opened by `<!` and an uppercase ASCII letter as the GFM text has
+    it (`>`), `<![CDATA[` in that case (`]]>`), a known block-level tag
+    and, outside a paragraph, any complete tag standing alone (both ended by a blank line).
+    A block of the first five kinds may end on its opening line.
+    """
+    lower = stripped.lower()
+    raw = re.match(r"<(pre|script|style|textarea)(?=[ \t>]|$)", lower)
+    if raw:
+        # Any of the four closing tags ends a raw block, not only the opener's.
+        return lambda line: any(f"</{tag}>" in line.lower() for tag in RAW_HTML_TAGS)
+    if lower.startswith("<!--"):
+        return lambda line: "-->" in line
+    if lower.startswith("<?"):
+        return lambda line: "?>" in line
+    if stripped.startswith("<![CDATA["):
+        return lambda line: "]]>" in line
+    if re.match(r"<![A-Z]", stripped):
+        return lambda line: ">" in line
+    tag = re.match(r"</?([a-z][a-z0-9-]*)(?=[ \t>]|/>|$)", lower)
+    if tag and tag.group(1) in HTML_BLOCK_TAGS:
+        return lambda line: not line.strip()
+    if (not in_paragraph and tag and tag.group(1) not in ("pre", "script", "style", "textarea")
+            and HTML_TAG_LINE.fullmatch(lower)):
+        return lambda line: not line.strip()
+    return None
+
+
+def claim_blocks(text):
+    """-> [(first line number, block text)]: paragraphs, list items, table rows and headings.
+
+    Lines inside a fenced code block are examples, not prose, and are skipped. A fence is
+    tracked the way CommonMark reads it: a run of three or more backticks or tildes,
+    indented at most three columns (a tab counts to the next multiple of four), opens one (a
+    backtick run only when no backtick follows it on the line); only a run of the same
+    character at least as long, indented at most three columns and followed by nothing but
+    spaces or tabs, closes it; an unclosed fence runs to the end of the file. A run indented
+    further is content, never a fence, so what follows it stays prose. A run on a line of an
+    HTML block (CommonMark 4.6) is literal too, and the block's lines stay prose, since the
+    file is read as text. List items are modelled only as far as fences need: a line that
+    starts with a list marker opens an item whose content offset is the marker's width, a run
+    may open a fence directly after the marker, and a fence opened inside an item closes on
+    the first non-blank line indented less than the item's offset, where the item ends (a
+    closer indented up to three columns past the offset still closes it first). A line indented four or more columns past its container with no paragraph
+    open is indented code and opens none (its text still counts as prose). Block
+    quotes are not modelled: a fence inside one (`> ```)
+    is not seen, so its content counts as prose rather than being hidden. Lines are
+    `str.splitlines()` lines. A table row is its own block: rows carry no sentence
+    terminator, so a quoted phrase in one row and a file mention in another would otherwise
+    read as one sentence.
+    """
+    blocks, current, start, fence, html_end, paragraph_open = [], [], 0, None, None, False
+    item_offset = None
+    for number, line in enumerate(text.splitlines(), 1):
+        expanded = line.expandtabs(4)
+        indent = len(expanded) - len(expanded.lstrip(" "))
+        if fence is not None:
+            char, length, k = fence
+            if k and line.strip() and indent < k:
+                # The item the fence opened in has ended before any closer could be read: the
+                # line is read afresh, and a run on it opens a new fence.
+                fence = None
+            else:
+                closer = re.match(r"`{3,}|~{3,}", expanded.lstrip(" "))
+                if (closer and closer.group()[0] == char and len(closer.group()) >= length
+                        and indent <= k + 3 and not expanded.lstrip(" ")[closer.end():].strip(" \t")):
+                    fence = None
+                continue
+        # A thematic break takes precedence over a list marker (`- - -` opens no item). A
+        # non-blank line indented less than the open item's content ends the item, unless a
+        # paragraph is open and the line is paragraph text, in which case it is that
+        # paragraph's lazy continuation; a heading, a thematic break, a fence opener or an
+        # HTML block of the first six kinds interrupts the paragraph and ends the item.
+        marker = None if THEMATIC_BREAK.fullmatch(line) else re.match(r" {0,3}(?:[-*+]|\d{1,9}[.)]) {1,4}(?=\S)", expanded)
+        top_stripped = expanded.lstrip(" ") if indent <= 3 else ""
+        top_run = re.match(r"`{3,}|~{3,}", top_stripped)
+        interrupts = bool(ATX_HEADING.match(line) or THEMATIC_BREAK.fullmatch(line)
+                          or (top_run and not (top_run.group()[0] == "`" and "`" in top_stripped[top_run.end():]))
+                          or (top_stripped.startswith("<") and html_block_end(top_stripped, True) is not None))
+        lazy = (item_offset is not None and indent < item_offset and bool(line.strip()) and paragraph_open
+                and not interrupts)
+        if marker:
+            item_offset = marker.end()
+        elif line.strip() and item_offset is not None and indent < item_offset and not lazy:
+            item_offset = None
+        stripped = top_stripped
+        opener_indent = item_offset if item_offset is not None and indent >= item_offset else 0
+        if marker and re.match(r"`{3,}|~{3,}", expanded[marker.end():]):
+            opener_indent, stripped = marker.end(), expanded[marker.end():]
+        elif item_offset is not None and indent >= item_offset and indent - item_offset <= 3:
+            stripped = expanded.lstrip(" ")
+        # Indented code (four or more columns past the container) opens no paragraph.
+        indented_code = line.strip() and not paragraph_open and indent - (item_offset or 0) >= 4
+        run = re.match(r"`{3,}|~{3,}", stripped)
+        html_line = html_end is not None
+        if html_end is not None:
+            if html_end(line):
+                html_end = None
+        else:
+            # Paragraph state is tracked on its own: lines of an HTML block, a heading, a
+            # thematic break or a table row open no paragraph, so a tag standing alone after
+            # them starts a block.
+            html_end = html_block_end(stripped, paragraph_open) if stripped.startswith("<") else None
+            if html_end is not None:
+                html_line = True
+                if html_end(line):  # a block of the first five kinds may end on its opening line
+                    html_end = None
+            elif run and not (run.group()[0] == "`" and "`" in stripped[run.end():]):
+                fence = (run.group()[0], len(run.group()), opener_indent)
+                paragraph_open = False
+                if current:
+                    blocks.append((start, "\n".join(current)))
+                    current = []
+                continue
+        item = re.match(r"\s*(?:(?:[-*+]|\d+\.)\s|\|)", line) is not None
+        # An ATX heading is one to six `#` after up to three spaces, followed by a space, a tab
+        # or the end of the line; a setext underline under an open paragraph ends it too.
+        heading = ATX_HEADING.match(line) is not None
+        # An underline indented less than the open item's content is lazy continuation text.
+        setext = paragraph_open and SETEXT_UNDERLINE.fullmatch(line) is not None and not lazy
+        if not line.strip():
+            paragraph_open = False
+            if current:
+                blocks.append((start, "\n".join(current)))
+                current = []
+            continue
+        if (item or heading) and current:
+            blocks.append((start, "\n".join(current)))
+            current = []
+        if not current:
+            start = number
+        current.append(line)
+        if heading:
+            blocks.append((start, "\n".join(current)))
+            current = []
+        paragraph_open = not (heading or setext or html_line or indented_code or THEMATIC_BREAK.fullmatch(line)
+                              or line.lstrip().startswith("|"))
+    if current:
+        blocks.append((start, "\n".join(current)))
+    return blocks
+
+
+def quote_binds(quote, policy_normalized):
+    """Every ellipsis-separated fragment of the quote appears verbatim in the policy text, in order.
+
+    An elision keeps the source order: each fragment is searched after the end of the
+    previous match. Leftmost-after-the-previous-end is exact for the existence of an ordered
+    occurrence, so a fragment that occurs twice binds when its later occurrence is in order.
+    """
+    # Punctuation at a fragment's boundary belongs to the citing sentence, not to the claim:
+    # a skill may close its quote with a period where the policy continues with a comma.
+    fragments = [normalize_policy_text(f).strip(" ,;:.!()[]") for f in QUOTE_ELLIPSIS.split(quote)]
+    fragments = [f for f in fragments if f]
+    # A fragment under three characters is a substring of almost any text and cites nothing.
+    if not fragments or any(len(f) < 3 for f in fragments):
+        return False
+    position = 0
+    for fragment in fragments:
+        found = policy_normalized.find(fragment, position)
+        if found < 0:
+            return False
+        position = found + len(fragment)
+    return True
+
+
+CLAIM_DISPLAY_LIMIT = 120
+
+
+def claim_identity_key(text):
+    """-> "sha256:" + the digest of the whitespace-collapsed claim text: the identity across
+    line drift, never truncated, so an edit past any prefix is a new item."""
+    collapsed = re.sub(r"\s+", " ", text).strip()
+    return "sha256:" + hashlib.sha256(collapsed.encode("utf-8")).hexdigest()
+
+
+def quote_list_key(quotes):
+    """-> the identity text of a list of quotes: each whitespace-collapsed, then a JSON list,
+    so a line wrapped inside a quote keeps the identity and two quotes never collide with one
+    quote that holds a delimiter."""
+    return json.dumps([re.sub(r"\s+", " ", q).strip() for q in quotes])
+
+
+def claim_display(text, limit=CLAIM_DISPLAY_LIMIT):
+    """-> the human-readable form of a claim for worklists and receipts; display only."""
+    collapsed = re.sub(r"\s+", " ", text).strip()
+    return collapsed if len(collapsed) <= limit else collapsed[:limit - 1] + "…"
+
+
+def claim_findings(rel, text, agents_text):
+    """-> (findings, counters) for one governed file.
+
+    A finding is {"line", "kind", "key", "display", "reason"}; (rel, kind, key) is its
+    identity in the shrink-only baseline, where key is the digest of the whole claim text,
+    so a claim that moves to another line keeps its identity and a claim whose text changes
+    anywhere is a new item. display is the readable form and carries no identity.
+    """
+
+    def finding(line, kind, text, reason, display=None):
+        return {"line": line, "kind": kind, "key": claim_identity_key(text),
+                "display": claim_display(text if display is None else display), "reason": reason}
+    findings = []
+    counters = {"claims": 0, "bound": 0}
+    sections = agents_sections(agents_text)
+    whole = normalize_policy_text(agents_text)
+    by_heading = {h: normalize_policy_text(body) for h, body in sections if h}
+    headings = sorted(by_heading, key=len, reverse=True)
+    section_mention = re.compile(
+        r"`?AGENTS\.md`?\s*(?:§|section)?\s*,?\s*(" + "|".join(re.escape(h) for h in headings)
+        + r")(?![A-Za-z0-9-])"
+    ) if headings else None
+    sentences_seen = set()
+    for start, block in claim_blocks(text):
+        block = PRIVATE_USE.sub("", block)
+
+        def line_of(offset):
+            return start + block.count("\n", 0, offset)
+
+        cited = False
+        for match in POLICY_LINE_CITATION.finditer(block):
+            citation = match.group(0).strip()
+            findings.append(finding(line_of(match.start()), "line citation", citation,
+                                    f"line citation {citation!r}: cite a verbatim phrase, never a "
+                                    f"line number"))
+            cited = True
+        for match in BARE_LINE_CITATION.finditer(block):
+            findings.append(finding(line_of(match.start()), "bare line citation", match.group(0),
+                                    f"bare line citation {match.group(0)}: cite a verbatim phrase, "
+                                    f"never a line number"))
+            cited = True
+        # A code span is an example, not prose: every span except the bare path, the bare
+        # file name and a bare line citation is replaced by a token, so a quote inside a
+        # command (`printf "x"`) is never a citation. Tokens are restored for the identity.
+        spans = []
+        prose_parts, cursor = [], 0
+        for span_start, span_end in code_spans(block):
+            prose_parts.append(block[cursor:span_start])
+            span_text = block[span_start:span_end]
+            run = len(span_text) - len(span_text.lstrip("`"))
+            inner = span_text[run:-run].strip()
+            if inner in ("~/.claude/CLAUDE.md", "AGENTS.md") or re.fullmatch(r":\d+(?:-\d+)?", inner):
+                prose_parts.append(span_text)
+            else:
+                spans.append(span_text)
+                prose_parts.append(f"{len(spans) - 1}")
+            cursor = span_end
+        prose_parts.append(block[cursor:])
+        prose = "".join(prose_parts)
+        # Mask every straight-quoted span before sentence splitting so a quoted question
+        # mark or period cannot split the sentence that carries it. A quote that itself
+        # contains a file mention (a stray quote earlier in the block, a quoted YAML value, a
+        # fabricated quotation naming the file) still counts as a mention through its text.
+        quotes = []
+
+        def restore_spans(text):
+            return SPAN_TOKEN.sub(lambda m: spans[int(m.group(1))], text)
+
+        def mask(match):
+            # A quote keeps the code spans it contains: `"Use `git grep -P` for PCRE atoms"`
+            # must bind against the policy text, where the backticks are stripped anyway.
+            quotes.append(restore_spans(match.group(1)))
+            return f"{len(quotes) - 1}"
+        masked = STRAIGHT_QUOTE.sub(mask, prose)
+
+        def restored(text):
+            text = QUOTE_TOKEN.sub(lambda m: '"' + quotes[int(m.group(1))] + '"', text)
+            return restore_spans(text)
+
+        def mentions(text):
+            return ALWAYS_ON_PATH.search(text) is not None or "AGENTS.md" in text
+
+        offset = 0
+        for sentence in SENTENCE_BREAK.split(masked):
+            position = masked.find(sentence, offset)
+            offset = position + len(sentence) if position >= 0 else offset
+            tokens = list(QUOTE_TOKEN.finditer(sentence))
+            section = section_mention.search(sentence) if section_mention else None
+            path_mention = ALWAYS_ON_PATH.search(sentence)
+            # A straight-quoted phrase anywhere in a sentence that names AGENTS.md is the
+            # citation: `AGENTS.md says "..."` and `The rule "..." is in AGENTS.md` carry the
+            # same claim as `AGENTS.md "..."`, in either order and with any words between.
+            agents_name = re.search(r"`?AGENTS\.md`?", sentence)
+            quote_mention = agents_name if agents_name and tokens else None
+            inner_mention = next((t for t in tokens if mentions(quotes[int(t.group(1))])), None)
+            mention = path_mention or section or quote_mention or inner_mention
+            if mention is None:
+                continue
+            # Report the line carrying the file mention, not the sentence's first line: a
+            # masked quote or code span before the mention may have spanned lines, so add
+            # those back.
+            prefix = masked[:max(position, 0) + mention.start()]
+            line = start + prefix.count("\n") + sum(
+                quotes[int(n)].count("\n") for n in QUOTE_TOKEN.findall(prefix)) + sum(
+                spans[int(n)].count("\n") for n in SPAN_TOKEN.findall(prefix))
+            key = (line, sentence)
+            if key in sentences_seen:
+                continue
+            sentences_seen.add(key)
+            counters["claims"] += 1
+            original = restored(sentence)
+            # A sentence that cites a line number is already reported above. Without a quote
+            # it is skipped so the citation stands alone; with quotes they are judged, so a
+            # fabricated quotation cannot hide beside a citation.
+            if not tokens and (POLICY_LINE_CITATION.search(original) or BARE_LINE_CITATION.search(original)):
+                continue
+            quoted = [quotes[int(t.group(1))] for t in tokens]
+            negated = CLAIM_NEGATION.search(sentence) is not None
+            scope = by_heading[section.group(1)] if section else whole
+            where = f"AGENTS.md section {section.group(1)!r}" if section else "AGENTS.md"
+            bound = [q for q in quoted if quote_binds(q, scope)]
+            unbound = [q for q in quoted if not quote_binds(q, scope)]
+            if not quoted:
+                findings.append(finding(line, "unbound claim", original,
+                                        "unbound claim about the always-on file: quote a verbatim "
+                                        "AGENTS.md phrase in straight double quotes in the same "
+                                        "sentence, or drop the claim"))
+            elif negated and bound:
+                findings.append(finding(line, "negated claim", quote_list_key(bound),
+                                        f"negated claim contradicts {where}: {bound[0][:60]!r} is present",
+                                        display=" | ".join(bound)))
+            elif negated:
+                counters["bound"] += 1
+            elif unbound:
+                # Every quote in a positive claim must bind, and every stale quote is part of
+                # the identity, serialised as a JSON list so two quotes and one quote holding
+                # a delimiter never collide: one verbatim phrase beside a stale one would
+                # otherwise carry the stale one through, and a second stale quote could change
+                # unnoticed.
+                findings.append(finding(line, "stale quote", quote_list_key(unbound),
+                                        f"stale quote: {unbound[0][:70]!r} is not verbatim in {where}"
+                                        + (f" (+{len(unbound) - 1} more)" if len(unbound) > 1 else ""),
+                                        display=" | ".join(unbound)))
+            else:
+                counters["bound"] += 1
+    # Duplication: a policy sentence restated outside a quote is a second copy on the same
+    # dispatch, which the routing rule forbids; a quoted citation is the sanctioned form.
+    unquoted = normalize_policy_text(STRAIGHT_QUOTE.sub(" ", text))
+    policy_prose = re.sub(r"^#.*$", "", agents_text, flags=re.M)
+    for sentence in SENTENCE_BREAK.split(re.sub(r"\s+", " ", policy_prose)):
+        if len(sentence.split()) < DUPLICATE_MIN_WORDS:
+            continue
+        needle = normalize_policy_text(sentence)
+        if needle and needle in unquoted:
+            words = [re.escape(w) for w in needle.split()[:6]]
+            located = re.search(r"\s+".join(r"[`*]*" + w + r"[`*]*" for w in words), text, re.I)
+            line = text.count("\n", 0, located.start()) + 1 if located else 1
+            findings.append(finding(line, "duplicated policy sentence", sentence,
+                                    f"duplicated policy sentence outside a quote: {sentence[:70]!r}"))
+    return findings, counters
+
+
+
+def vacuous_expect_red_lines(source_text):
+    """-> line numbers of expect_red calls whose lambda cannot fail for the stated reason.
+
+    Rejected: an `or` whose last operand is a parenthesised clause, a truthy constant or a
+    negation (it holds whenever the real condition fails); a comprehension over an empty
+    literal or an empty constructor call; a constant body. A leading platform gate
+    (`sys.platform != "darwin" or ...`) keeps the check count equal across CI platforms and
+    is the one sanctioned leading `or`; everything under it is judged like any other body.
+    `x or ""` coalescing and ordinary disjunctions stay.
+    """
+    vacuous = []
+    for node in ast.walk(ast.parse(source_text)):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "expect_red"):
+            continue
+        for arg in node.args:
+            if not isinstance(arg, ast.Lambda):
+                continue
+            body = arg.body
+
+            def platform_gate(expr):
+                """Exactly `sys.platform != "<name>"`: an attribute compared, with `!=`, to a string."""
+                return (isinstance(expr, ast.Compare) and len(expr.ops) == 1
+                        and isinstance(expr.ops[0], ast.NotEq)
+                        and isinstance(expr.left, ast.Attribute) and expr.left.attr == "platform"
+                        and isinstance(expr.left.value, ast.Name) and expr.left.value.id == "sys"
+                        and isinstance(expr.comparators[0], ast.Constant)
+                        and isinstance(expr.comparators[0].value, str))
+
+            gate = (isinstance(body, ast.BoolOp) and isinstance(body.op, ast.Or)
+                    and len(body.values) == 2 and platform_gate(body.values[0]))
+            judged = body.values[1] if gate else body
+            text = ast.get_source_segment(source_text, judged) or ""
+
+            def fallback(inner):
+                last = inner.values[-1]
+                return (isinstance(last, ast.UnaryOp) and isinstance(last.op, ast.Not)
+                        or isinstance(last, ast.Constant) and bool(last.value))
+
+            def parenthesised_or(expression_text):
+                """`or` followed by `(` as tokens, whatever whitespace sits between them."""
+                try:
+                    tokens = list(tokenize.generate_tokens(io.StringIO(expression_text).readline))
+                except (tokenize.TokenError, SyntaxError):
+                    return " or (" in expression_text
+                # Line breaks, indentation and comments are not tokens of the expression.
+                layout = (tokenize.NL, tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT, tokenize.COMMENT)
+                tokens = [t for t in tokens if t.type not in layout]
+                return any(a.type == tokenize.NAME and a.string == "or" and b.type == tokenize.OP
+                           and b.string == "(" for a, b in zip(tokens, tokens[1:]))
+
+            def empty(iterable):
+                if isinstance(iterable, (ast.List, ast.Tuple, ast.Set)):
+                    return not iterable.elts
+                if isinstance(iterable, ast.Dict):
+                    return not iterable.keys
+                return (isinstance(iterable, ast.Call) and isinstance(iterable.func, ast.Name)
+                        and iterable.func.id in ("list", "tuple", "dict", "set", "frozenset")
+                        and not iterable.args and not iterable.keywords)
+
+            has_fallback = parenthesised_or(text) or any(
+                isinstance(inner, ast.BoolOp) and isinstance(inner.op, ast.Or) and fallback(inner)
+                for inner in ast.walk(judged))
+            empty_iteration = any(isinstance(inner, ast.comprehension) and empty(inner.iter)
+                                  for inner in ast.walk(arg))
+            if has_fallback or empty_iteration or isinstance(judged, ast.Constant):
+                vacuous.append(node.lineno)
+    return vacuous
+
 
 class Run:
     def __init__(self, root, ci):
         self.root, self.ci, self.failures, self.checks = root, ci, [], 0
+        self.worklists = {}
+        # Structured results beside the printed verdicts, so a proof compares exact values
+        # instead of searching a detail string: counters["C12"], ratchets["C12"/"C13"],
+        # ceilings["C14"].
+        self.counters, self.ratchets, self.ceilings = {}, {}, {}
+
+    def worklist(self, check, item):
+        """Print a live, baseline-covered item in full without counting it as a failure."""
+        self.worklists.setdefault(check, []).append(item)
+        print(f"  WORKLIST {check:4s} {item}")
 
     def result(self, check, ok, detail):
         self.checks += 1
@@ -1811,6 +2686,280 @@ class Run:
             + (f" — present: {hits}" if hits else ""),
         )
 
+    # ---- C12 ---------------------------------------------------------------
+    def c12_claim_binding(self):
+        """Every skill claim about the always-on file binds to verbatim AGENTS.md text."""
+        source = os.path.join(self.root, "AGENTS.md")
+        try:
+            if os.path.islink(source) or not os.path.isfile(source):
+                raise OSError("absent or symlinked outside the governed regular-file profile")
+            agents_text = open(source, encoding="utf-8").read()
+        except OSError as exc:
+            self.result("C12", False, f"cannot enforce: AGENTS.md unreadable: {exc}")
+            return
+        skills_dir = os.path.join(self.root, "skills")
+        if not os.path.isdir(skills_dir) or os.path.islink(skills_dir):
+            self.result("C12", False, "cannot enforce: skills directory absent or symlinked")
+            return
+        governed = {}
+        try:
+            for skill in sorted(os.listdir(skills_dir)):
+                skill_root = os.path.join(skills_dir, skill)
+                if not os.path.isdir(skill_root):
+                    continue
+                if os.path.islink(skill_root):
+                    raise OSError(f"skills/{skill} is a symlink")
+                body = os.path.join(skill_root, "SKILL.md")
+                if os.path.isfile(body) and not os.path.islink(body):
+                    governed[f"skills/{skill}/SKILL.md"] = open(body, encoding="utf-8").read()
+                references = os.path.join(skill_root, "references")
+                if not os.path.isdir(references) or os.path.islink(references):
+                    continue
+                for current, directories, files in os.walk(references):
+                    directories[:] = sorted(d for d in directories
+                                            if d not in {"evals", "scripts", "assets"}
+                                            and not os.path.islink(os.path.join(current, d)))
+                    for filename in sorted(files):
+                        if os.path.splitext(filename)[1].lower() not in {".md", ".yaml", ".yml"}:
+                            continue
+                        path = os.path.join(current, filename)
+                        if os.path.islink(path) or not os.path.isfile(path):
+                            raise OSError(f"reference file absent or symlinked: {path}")
+                        relative = os.path.relpath(path, self.root).replace(os.sep, "/")
+                        governed[relative] = open(path, encoding="utf-8").read()
+        except (OSError, UnicodeError) as exc:
+            self.result("C12", False, f"cannot enforce: governed corpus unreadable: {exc}")
+            return
+        if not governed:
+            self.result("C12", False, "cannot enforce: zero governed files")
+            return
+        try:
+            evals = load_tool_module("run-skill-evals")
+            worklists, baseline_error = evals.load_worklists(self.root)
+        except Exception as exc:
+            worklists, baseline_error = None, f"baseline loader failed: {exc!r}"
+        baseline = {(i["file"], i["kind"], i["key"]) for i in worklists["C12"]} if worklists else set()
+        claims = bound = 0
+        live = {}
+        for rel, text in sorted(governed.items()):
+            findings, counters = claim_findings(rel, text, agents_text)
+            claims += counters["claims"]
+            bound += counters["bound"]
+            for finding in sorted(findings, key=lambda f: (f["line"], f["kind"], f["key"])):
+                live.setdefault((rel, finding["kind"], finding["key"]), []).append(finding)
+        new, stale = evals.ratchet(live, baseline) if worklists is not None else (sorted(live), [])
+        # One identity may occur more than once in a file (the same stale quote twice); every
+        # occurrence prints, and the identity leaves the baseline only when none is left.
+        in_baseline = occurrences = 0
+        for identity, found in sorted(live.items(), key=lambda kv: (kv[0][0], kv[1][0]["line"], kv[0][1])):
+            rel = identity[0]
+            in_baseline += identity in baseline
+            for finding in sorted(found, key=lambda f: f["line"]):
+                occurrences += 1
+                item = f"{rel}:{finding['line']}: {finding['reason']}"
+                if identity in baseline:
+                    self.worklist("C12", item)
+                else:
+                    self.result("C12", False, f"{item} (not in baseline {evals.WORKLISTS})")
+        displays = {(i["file"], i["kind"], i["key"]): i.get("display", "") for i in worklists["C12"]} \
+            if worklists else {}
+        for rel, kind, key in stale:
+            self.result("C12", False,
+                        f"stale baseline: {evals.WORKLISTS} C12 lists {rel} {kind} "
+                        f"{displays.get((rel, kind, key), '')[:60]!r} ({key[:19]}…), which is no "
+                        f"longer found; shrink the baseline in the same change")
+        if baseline_error:
+            self.result("C12", False, f"cannot apply the ratchet: {baseline_error}")
+        self.counters["C12"] = {"claims": claims, "bound": bound}
+        self.ratchets["C12"] = {"baseline": len(baseline), "live": len(live), "in_baseline": in_baseline,
+                                "new": len(new), "stale": len(stale), "occurrences": occurrences}
+        self.result(
+            "C12", not new and not stale and not baseline_error,
+            f"always-on claims bind to verbatim AGENTS.md text: {claims} claim sentence(s) over "
+            f"{len(governed)} governed file(s), {bound} bound, {len(live)} finding identity(ies) "
+            f"over {occurrences} occurrence(s): {in_baseline} in the shrink-only baseline, "
+            f"{len(new)} new, {len(stale)} stale; "
+            f"scope: {C12_SCOPE}",
+        )
+
+    # ---- C13 ---------------------------------------------------------------
+    def c13_eval_coverage(self):
+        """release/evals.json accounts for every skill; the unlisted set is the worklist."""
+        try:
+            evals = load_tool_module("run-skill-evals")
+            verdict = evals.coverage_verdict(self.root)
+        except Exception as exc:
+            self.result("C13", False, f"cannot enforce: eval coverage module failed: {exc!r}")
+            return
+        summary = verdict["summary"]
+        for name in verdict["in_baseline"]:
+            self.worklist("C13", f"unlisted skill {name}: add a tested or exempt entry to "
+                                 f"{EVAL_MANIFEST} and remove it from {evals.WORKLISTS}")
+        for problem in verdict["hard"]:
+            self.result("C13", False, problem)
+        for name in verdict["new"]:
+            self.result("C13", False, f"unlisted skill {name}: not in the baseline {evals.WORKLISTS}")
+        for name in verdict["stale"]:
+            self.result("C13", False, f"stale baseline: {evals.WORKLISTS} C13 lists {name}, which is "
+                                      f"no longer unlisted; shrink the baseline in the same change")
+        if verdict["baseline_error"]:
+            self.result("C13", False, f"cannot apply the ratchet: {verdict['baseline_error']}")
+        listed = summary["tested"] + summary["exempt"]
+        red = (verdict["hard"] or verdict["new"] or verdict["stale"] or verdict["baseline_error"])
+        self.ratchets["C13"] = {"baseline": len(verdict["in_baseline"]) + len(verdict["stale"]),
+                                "live": len(verdict["unlisted"]), "in_baseline": len(verdict["in_baseline"]),
+                                "new": len(verdict["new"]), "stale": len(verdict["stale"])}
+        self.result(
+            "C13", not red and listed > 0,
+            f"eval coverage manifest {EVAL_MANIFEST}: tested={summary['tested']} "
+            f"exempt={summary['exempt']} unlisted={verdict['unlisted']} "
+            f"({len(verdict['in_baseline'])} in the shrink-only baseline, {len(verdict['new'])} new, "
+            f"{len(verdict['stale'])} stale) unknown={summary['unknown']} "
+            f"required_scenarios={summary['required']}",
+        )
+
+    # ---- C14 ---------------------------------------------------------------
+    def c14_budget_ceilings(self):
+        """Recorded ceilings fail only on growth; the hard margins sit under the runtime caps."""
+        path = os.path.join(self.root, BUDGET_CEILINGS)
+        try:
+            record = json.load(open(path, encoding="utf-8"))
+            ceilings = record["ceilings"]
+            hard = record["hard"]
+            if record.get("schema_version") != 1 or not isinstance(ceilings, dict) \
+                    or not isinstance(hard, dict):
+                raise ValueError("schema_version 1 with ceilings and hard objects expected")
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            self.result("C14", False, f"cannot enforce: {BUDGET_CEILINGS} unusable: {exc}")
+            return
+        try:
+            agents_bytes = os.path.getsize(os.path.join(self.root, "AGENTS.md"))
+        except OSError as exc:
+            self.result("C14", False, f"cannot measure AGENTS.md: {exc}")
+            return
+        try:
+            installer = load_tool_module("install-claude")
+            generated = installer.render_instruction_file(self.root)
+        except Exception as exc:
+            self.result("C14", False, f"cannot render the instruction file: {exc!r}")
+            return
+        generated_bytes = len(generated.encode("utf-8"))
+        generated_lines = len(generated.splitlines())
+        measured = (
+            ("AGENTS.md", "bytes", agents_bytes),
+            ("generated-instruction-file", "bytes", generated_bytes),
+            ("generated-instruction-file", "lines", generated_lines),
+        )
+        surfaces = self.ceilings.setdefault("C14", {})
+        for name, unit, current in measured:
+            recorded = ceilings.get(name, {}).get(unit) if isinstance(ceilings.get(name), dict) else None
+            if not isinstance(recorded, int):
+                surfaces[f"{name}:{unit}"] = {"measured": current, "recorded": None, "verdict": "unrecorded"}
+                self.result("C14", False, f"{name} {unit}: no recorded ceiling in {BUDGET_CEILINGS}")
+                continue
+            verdict = "equal" if current == recorded else ("grew" if current > recorded else "shrank")
+            surfaces[f"{name}:{unit}"] = {"measured": current, "recorded": recorded, "verdict": verdict}
+            note = {"equal": "", "grew": " (grew; raise the record only with the content that justifies it)",
+                    "shrank": " (shrank; the record can be lowered)"}[verdict]
+            self.result("C14", verdict != "grew",
+                        f"{name}: {current} {unit} <= recorded ceiling {recorded}{note}")
+        expected_hard = {
+            "claude-hook-context-cap": {"chars": CLAUDE_HOOK_CONTEXT_CHAR_CAP,
+                                        "lines": CLAUDE_HOOK_CONTEXT_LINE_CAP},
+            "claude-dynamic-block": {"chars": CLAUDE_DYNAMIC_BLOCK_CHAR_CEILING,
+                                     "lines": CLAUDE_DYNAMIC_BLOCK_LINE_CEILING},
+            "prompt-submit-carrier": {"bytes": PROMPT_SUBMIT_CARRIER_BYTE_CEILING},
+            "codex-session-start-injection": {"bytes": CODEX_SESSION_START_BYTE_CEILING},
+        }
+        self.result("C14", hard == expected_hard,
+                    f"hard caps and ceilings recorded in {BUDGET_CEILINGS} match the gate's "
+                    f"constants: {hard == expected_hard}")
+        self.result(
+            "C14",
+            CLAUDE_DYNAMIC_BLOCK_CHAR_CEILING < CLAUDE_HOOK_CONTEXT_CHAR_CAP
+            and CLAUDE_DYNAMIC_BLOCK_LINE_CEILING < CLAUDE_HOOK_CONTEXT_LINE_CAP,
+            f"Claude dynamic hook block ceiling {CLAUDE_DYNAMIC_BLOCK_CHAR_CEILING} chars / "
+            f"{CLAUDE_DYNAMIC_BLOCK_LINE_CEILING} lines sits under the runtime cap "
+            f"{CLAUDE_HOOK_CONTEXT_CHAR_CAP} / {CLAUDE_HOOK_CONTEXT_LINE_CAP}",
+        )
+        adapter = os.path.join(self.root, "hooks", "codex_session_start.py")
+        try:
+            match = CODEX_SESSION_START_CONSTANT.search(open(adapter, encoding="utf-8").read())
+            adapter_cap = int(match.group(1).replace("_", "")) if match else None
+        except OSError:
+            adapter_cap = None
+        self.result("C14", adapter_cap == CODEX_SESSION_START_BYTE_CEILING,
+                    f"Codex session-start injection budget in the adapter is "
+                    f"{adapter_cap} == {CODEX_SESSION_START_BYTE_CEILING}")
+
+    # ---- C15 ---------------------------------------------------------------
+    def c15_envelope_fixtures(self):
+        """Every committed hook envelope decodes against its event's required-field list."""
+        directory = os.path.join(self.root, CODEX_FIXTURE_DIR)
+        if not os.path.isdir(directory):
+            self.result("C15", False, f"{CODEX_FIXTURE_DIR} is absent")
+            return
+        present = sorted(name for name in os.listdir(directory) if name.endswith(".json"))
+        for name in sorted(set(present) - set(CODEX_FIXTURES)):
+            self.result("C15", False, f"{CODEX_FIXTURE_DIR}/{name}: fixture not registered in "
+                        f"CODEX_FIXTURES; register it with its event")
+        decoded = 0
+        for name, event in sorted(CODEX_FIXTURES.items()):
+            path = os.path.join(directory, name)
+            try:
+                envelope = json.load(open(path, encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                self.result("C15", False, f"{CODEX_FIXTURE_DIR}/{name}: does not decode: {exc}")
+                continue
+            problems = []
+            if not isinstance(envelope, dict):
+                problems.append("top level is not an object")
+            else:
+                if envelope.get("hook_event_name") != event:
+                    problems.append(f"hook_event_name {envelope.get('hook_event_name')!r} != {event!r}")
+                if event not in CODEX_VALID_HOOK_EVENTS:
+                    problems.append(f"{event} is not an accepted Codex event")
+                missing = [key for key in CODEX_HOOK_INPUT_REQUIRED[event] if key not in envelope]
+                if missing:
+                    problems.append(f"missing required field(s) {missing}")
+                for key in ("transcript_path", "cwd"):
+                    value = envelope.get(key)
+                    if isinstance(value, str) and HOST_PATH_CONTENT.search(value.encode("utf-8")):
+                        problems.append(f"{key} carries an absolute host path; scrub it")
+                if event == "Stop":
+                    if not isinstance(envelope.get("stop_hook_active"), bool):
+                        problems.append("stop_hook_active is not a boolean")
+                    message = envelope.get("last_assistant_message")
+                    if message is not None and not isinstance(message, str):
+                        problems.append("last_assistant_message is neither a string nor null")
+            if problems:
+                self.result("C15", False, f"{CODEX_FIXTURE_DIR}/{name}: " + "; ".join(problems))
+            else:
+                decoded += 1
+        readme = os.path.join(directory, "README.md")
+        try:
+            readme_text = open(readme, encoding="utf-8").read()
+        except OSError:
+            readme_text = ""
+        for name in sorted(CODEX_SYNTHETIC_FIXTURES):
+            labeled = (name in readme_text and "synthetic" in readme_text.lower()
+                       and "synthetic" in name.lower())
+            self.result("C15", labeled,
+                        f"{CODEX_FIXTURE_DIR}/{name} is labeled synthetic in its filename and README")
+        stop_path = os.path.join(self.root, CLAUDE_STOP_FIXTURE)
+        try:
+            stop = json.load(open(stop_path, encoding="utf-8"))
+            stop_ok = (isinstance(stop, dict) and stop.get("hook_event_name") == "Stop"
+                       and isinstance(stop.get("last_assistant_message"), str)
+                       and isinstance(stop.get("stop_hook_active"), bool))
+        except (OSError, ValueError):
+            stop_ok = False
+        self.result("C15", stop_ok, f"{CLAUDE_STOP_FIXTURE} decodes as a Claude Stop envelope")
+        self.result("C15", decoded == len(CODEX_FIXTURES),
+                    f"{decoded} of {len(CODEX_FIXTURES)} Codex envelope fixtures decode against "
+                    f"their event's required-field list ({len(present)} json file(s) present)")
+
+
     def run(self):
         print(f"harness_check {VERSION}  root={self.root}  mode={'ci' if self.ci else 'local'}")
         for _check_id, method_name in PRODUCTION_CHECKS:
@@ -1830,6 +2979,120 @@ class Run:
             f"checks={self.checks} failures={len(self.failures)} exit={code}"
         )
         return code
+
+
+# ---- --verify-runtime --------------------------------------------------------------
+def discover_claude_binaries():
+    """-> [(label, path)]: the CLI the launcher symlink resolves to, and every desktop build."""
+    found = []
+    launcher = os.path.expanduser("~/.local/bin/claude")
+    if os.path.lexists(launcher):
+        found.append(("claude-cli", os.path.realpath(launcher)))
+    pattern = os.path.expanduser(
+        "~/Library/Application Support/Claude/claude-code/*/*/claude.app/Contents/MacOS/claude")
+    for path in sorted(__import__("glob").glob(pattern)):
+        found.append(("claude-desktop", path))
+    return found
+
+
+def discover_codex_binaries():
+    """-> [(label, path, version)]: the native binary behind the `codex` launcher on PATH."""
+    launcher = shutil.which("codex")
+    if not launcher:
+        return []
+    real = os.path.realpath(launcher)
+    package = os.path.dirname(os.path.dirname(real))
+    version = None
+    try:
+        version = json.load(open(os.path.join(package, "package.json"), encoding="utf-8")).get("version")
+    except (OSError, ValueError):
+        pass
+    candidates = sorted(
+        __import__("glob").glob(os.path.join(package, "node_modules", "@openai", "codex-*", "vendor", "*", "bin", "codex"))
+        + __import__("glob").glob(os.path.join(package, "vendor", "*", "bin", "codex")))
+    return [("codex", path, version or "unknown") for path in candidates]
+
+
+def claude_binary_version(data):
+    match = re.search(rb"// Version: (\d+\.\d+\.\d+)", data)
+    return match.group(1).decode("ascii") if match else "unknown"
+
+
+def verify_anchor(data, anchor, max_occurrences=200):
+    """-> (ok, detail): the anchor holds when any occurrence's window satisfies its check."""
+    name, needle, before, after, verify, _sample, _meaning = anchor
+    start = 0
+    seen = 0
+    last_error = "needle absent"
+    while seen < max_occurrences:
+        index = data.find(needle, start)
+        if index < 0:
+            break
+        seen += 1
+        window = data[max(0, index - before):index + len(needle) + after]
+        error = verify(window)
+        if not error:
+            return True, f"{name}: ok at byte {index} ({seen} occurrence(s) scanned)"
+        last_error = error
+        start = index + 1
+    return False, f"{name}: {last_error} ({seen} occurrence(s) scanned)"
+
+
+def verify_runtime(out=sys.stdout, claude=None, codex=None, catalog=HOST_SCENARIO_CATALOG,
+                   evidence=None):
+    """Structural evidence from the installed binaries; every host scenario not run is UNVERIFIED."""
+    p = lambda *a: print(*a, file=out)
+    evidence = HOST_SCENARIO_EVIDENCE if evidence is None else evidence
+    claude = discover_claude_binaries() if claude is None else claude
+    codex = discover_codex_binaries() if codex is None else codex
+    p(f"harness_check {VERSION} --verify-runtime (structural evidence only; fixed-window byte searches)")
+    anchors = failures = binaries = 0
+    labels = {label for label, _path in claude} | {label for label, _path, _version in codex}
+    for required_label in ("claude-cli", "claude-desktop", "codex"):
+        if required_label not in labels:
+            failures += 1
+            p(f"  FAIL no {required_label} binary found")
+    for label, path in claude:
+        try:
+            data = open(path, "rb").read()
+        except OSError as exc:
+            failures += 1
+            p(f"  FAIL {label} {path}: unreadable ({exc})")
+            continue
+        binaries += 1
+        p(f"  binary {label} version={claude_binary_version(data)} bytes={len(data)} {path}")
+        for anchor in CLAUDE_RUNTIME_ANCHORS:
+            ok, detail = verify_anchor(data, anchor)
+            anchors += 1
+            failures += not ok
+            p(f"    {'PASS' if ok else 'FAIL'} {label} {detail}; {anchor[6]}")
+    for label, path, version in codex:
+        try:
+            data = open(path, "rb").read()
+        except OSError as exc:
+            failures += 1
+            p(f"  FAIL {label} {path}: unreadable ({exc})")
+            continue
+        binaries += 1
+        p(f"  binary {label} version={version} bytes={len(data)} {path}")
+        for anchor in CODEX_RUNTIME_ANCHORS:
+            ok, detail = verify_anchor(data, anchor)
+            anchors += 1
+            failures += not ok
+            p(f"    {'PASS' if ok else 'FAIL'} {label} {detail}; {anchor[6]}")
+    unverified = 0
+    p("  host scenarios (a binary anchor never establishes any of these):")
+    for runtime, scenario, meaning in catalog:
+        record = evidence.get((runtime, scenario))
+        if record:
+            p(f"    RECORDED {runtime} {scenario}: {record}")
+        else:
+            unverified += 1
+            p(f"    UNVERIFIED {runtime} {scenario}: no host run recorded; would establish that {meaning}")
+    code = 1 if failures else 0
+    p(f"RUNTIME-VERIFY-SUMMARY binaries={binaries} anchors={anchors} failures={failures} "
+      f"unverified_scenarios={unverified} exit={code}")
+    return code
 
 
 # ---- selftest: every check proves it can go red -------------------------------
@@ -2099,8 +3362,8 @@ def selftest():
             subprocess.run = original_subprocess_run
         expect_red(
             "C1 gives the process-level announced-work suite measured timeout headroom",
-            lambda: SELFTEST_TIMEOUTS["announced_work_guard"] == 60
-            and announced_timeouts == [60] and not c1_announced_timeout.failures,
+            lambda: SELFTEST_TIMEOUTS["announced_work_guard"] == 90
+            and announced_timeouts == [90] and not c1_announced_timeout.failures,
         )
 
         slow_timeouts = []
@@ -2365,8 +3628,10 @@ def selftest():
             ("C6", "c6_stale_patterns"), ("C7", "c7_anchors"),
             ("C8", "c8_reserved_basenames"), ("C9", "c9_codex_package"),
             ("C10", "c10_delivery_contract"), ("C11", "c11_claim_vocabulary"),
+            ("C12", "c12_claim_binding"), ("C13", "c13_eval_coverage"),
+            ("C14", "c14_budget_ceilings"), ("C15", "c15_envelope_fixtures"),
         )
-        expect_red("production check registry is exact through C11",
+        expect_red("production check registry is exact through C15",
                    lambda: PRODUCTION_CHECKS == expected_registry)
         method_names = [method_name for _check_id, method_name in expected_registry]
         for method_name in method_names:
@@ -4538,13 +5803,21 @@ def selftest():
         expect_red("C9 rejects misspelled case-sensitive event names",
                    lambda: any("unsupported event name" in d for _c, d in run.failures))
 
+        session_end_event = json.loads(json.dumps(hook_fixture))
+        session_end_event["hooks"]["SessionEnd"] = [{"hooks": [{
+            "type": "command", "command": "true", "timeout": 5,
+        }]}]
+        run = c9_after(mutated_hooks=session_end_event)
+        expect_red("C9 accepts SessionEnd and Interrupt, present in the installed 0.154.0 schema",
+                   lambda: not any("SessionEnd: unsupported" in d for _c, d in run.failures)
+                   and "Interrupt" in CODEX_VALID_HOOK_EVENTS)
         unsupported_runtime_event = json.loads(json.dumps(hook_fixture))
-        unsupported_runtime_event["hooks"]["SessionEnd"] = [{"hooks": [{
+        unsupported_runtime_event["hooks"]["Notification"] = [{"hooks": [{
             "type": "command", "command": "true", "timeout": 5,
         }]}]
         run = c9_after(mutated_hooks=unsupported_runtime_event)
-        expect_red("C9 rejects SessionEnd absent from the Codex 0.144.4 runtime schema",
-                   lambda: any("SessionEnd: unsupported" in d for _c, d in run.failures))
+        expect_red("C9 rejects an event name no Codex schema carries",
+                   lambda: any("Notification: unsupported event name" in d for _c, d in run.failures))
 
         expect_red("C9 accepts additional runtime-observed hook events",
                    lambda: not c9_after().failures)
@@ -4653,6 +5926,1206 @@ def selftest():
         expect_red("C10 goes red on absent PR delivery contract",
                    lambda: any(c == "C10" for c, d in r7.failures))
 
+
+        # ---- C12: claims about the always-on file bind to verbatim policy text ----------
+        bind_root = os.path.join(td, "claim-binding")
+        bind_refs = os.path.join(bind_root, "skills", "delta", "references")
+        os.makedirs(bind_refs)
+        os.makedirs(os.path.join(bind_root, "skills", "delta", "evals"))
+        bind_policy = (
+            "# Core rules\n\nIntro sentence here.\n\n## Agent dispatch\n\n"
+            "Named a tool? Run exactly that and stop. Default to one agent and no fan-out.\n\n"
+            "## Memory\n\nMemory is soft, potentially stale context, never current-state proof. "
+            "Prefer a gate over a promise to remember.\n"
+        )
+        open(os.path.join(bind_root, "AGENTS.md"), "w").write(bind_policy)
+        bind_skill = os.path.join(bind_root, "skills", "delta", "SKILL.md")
+        open(bind_skill, "w").write("---\nname: delta\ndescription: ok\n---\n\nBody with no claims.\n")
+        bind_ref = os.path.join(bind_refs, "deferred.md")
+        os.makedirs(os.path.join(bind_root, "contracts"))
+        bind_baseline = os.path.join(bind_root, "contracts", "worklists.json")
+
+        def write_bind_baseline(c12, c13=()):
+            open(bind_baseline, "w").write(json.dumps(
+                {"schema_version": 2, "note": "fixture", "C12": list(c12), "C13": list(c13)}))
+
+        write_bind_baseline([])
+
+        def c12_on(reference_text, extra_file=None):
+            open(bind_ref, "w").write(reference_text)
+            if extra_file:
+                path, content = extra_file
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                open(path, "w").write(content)
+            run = Run(bind_root, ci=True)
+            run.c12_claim_binding()
+            if extra_file:
+                os.remove(extra_file[0])
+            return run
+
+        good = ('The lead rule is always-on in `~/.claude/CLAUDE.md` ("Named a tool? Run exactly '
+                'that and stop."), so this body carries only the mechanism.\n\n'
+                'Nearest coverage: `AGENTS.md`, "Prefer a gate over a promise to remember."\n')
+        # Controls that a mutation proof below re-runs against a private, mutated copy of this
+        # module: each takes the module so the same assertion judges both.
+        def bound_control(module):
+            run = module.Run(bind_root, ci=True)
+            with contextlib.redirect_stdout(io.StringIO()):
+                run.c12_claim_binding()
+            return not run.failures and run.counters["C12"] == {"claims": 2, "bound": 2}
+
+        bound_run = c12_on(good)
+        expect_red("C12 control: claims quoting verbatim AGENTS.md phrases stay green",
+                   lambda: not bound_run.failures and bound_run.checks == 1)
+        expect_red("C12 control: the bound control reports claims == 2 and bound == 2",
+                   lambda: bound_control(sys.modules[__name__]))
+        expect_red("C12 control: with no finding the ratchet reports an empty live list against an "
+                   "empty baseline",
+                   lambda: bound_run.ratchets["C12"] == {"baseline": 0, "live": 0, "in_baseline": 0,
+                                                         "new": 0, "stale": 0, "occurrences": 0})
+        quoted_question = c12_on('See `AGENTS.md`, "Named a tool? Run exactly that and stop." Then go on.\n')
+        expect_red("C12 keeps a quoted question mark inside the sentence that carries it",
+                   lambda: not quoted_question.failures)
+        unbound = c12_on("The reclaim-order rule is already always-on in `~/.claude/CLAUDE.md`.\n")
+        expect_red("C12 goes red on a claim with no quoted phrase",
+                   lambda: any(c == "C12" and "deferred.md:1: unbound claim" in d
+                               for c, d in unbound.failures))
+        stale = c12_on('The ban is always-on in `~/.claude/CLAUDE.md` ("Never run a bulk auto-rewriter over source").\n')
+        expect_red("C12 goes red on a quoted phrase that is not verbatim in AGENTS.md",
+                   lambda: any(c == "C12" and "deferred.md:1: stale quote" in d for c, d in stale.failures))
+        wrong_section = c12_on('`AGENTS.md` Memory carries "Named a tool? Run exactly that and stop."\n')
+        expect_red("C12 goes red on a true phrase cited under the wrong real section",
+                   lambda: any(c == "C12" and "stale quote" in d and "section 'Memory'" in d
+                               for c, d in wrong_section.failures))
+        right_section = c12_on('`AGENTS.md` Agent dispatch carries "Named a tool? Run exactly that and stop."\n')
+        expect_red("C12 control: the same phrase under its own section is green",
+                   lambda: not right_section.failures)
+        negated = c12_on('`~/.claude/CLAUDE.md` does not carry "Named a tool? Run exactly that and stop."\n')
+        expect_red("C12 goes red on a negated claim whose quoted phrase IS present",
+                   lambda: any(c == "C12" and "negated claim contradicts" in d for c, d in negated.failures))
+        negated_true = c12_on('`~/.claude/CLAUDE.md` does not carry "zorblat the widget".\n')
+        expect_red("C12 control: a negated claim whose phrase is absent is a true statement",
+                   lambda: not negated_true.failures)
+        line_cited = c12_on("The lead clause is `~/.claude/CLAUDE.md`:43 verbatim and CLAUDE.md:48 adds the rest.\n"
+                            "- `:61-64` mutation workers get an isolated worktree.\n")
+        expect_red("C12 goes red on CLAUDE.md:<n> line citations and bare :<n> citations, naming each",
+                   lambda: sum(1 for c, d in line_cited.failures if "line citation" in d) == 3
+                   and any("deferred.md:2: bare line citation `:61-64`" in d for _c, d in line_cited.failures))
+        agents_line = c12_on("See AGENTS.md:65 for the rule.\n")
+        expect_red("C12 goes red on an AGENTS.md:<n> line citation",
+                   lambda: any("line citation 'AGENTS.md:65'" in d for _c, d in agents_line.failures))
+        duplicate = c12_on("Intro.\n\nMore.\n\nMemory is soft, potentially stale context, never current-state proof. Also other text.\n")
+        expect_red("C12 goes red on a policy sentence duplicated outside a quote, at its real line",
+                   lambda: any(c == "C12" and "deferred.md:5: duplicated policy sentence" in d
+                               for c, d in duplicate.failures))
+        fenced = c12_on("```\n`~/.claude/CLAUDE.md` carries the rule shown here\n```\n")
+        expect_red("C12 control: a mention inside a fenced code block is an example, not a claim",
+                   lambda: not fenced.failures)
+        code_span = c12_on("Run `cat ~/.claude/CLAUDE.md` to read the installed file.\n")
+        expect_red("C12 control: a command example carrying the path in a code span is not a claim",
+                   lambda: not code_span.failures)
+
+        # A fence is read as GFM reads it (review thread 4298561325): the delimiter character
+        # and run length decide what closes it, and a backtick run followed by a backtick on
+        # its line is an inline span, not an opener.
+        fence_claim = 'AGENTS.md says "A made-up mandatory policy."\n'
+
+        def claims_in(text, module=None):
+            run = c12_on(text) if module is None else None
+            if module is not None:
+                open(bind_ref, "w").write(text)
+                run = module.Run(bind_root, ci=True)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    run.c12_claim_binding()
+            return run.counters["C12"]["claims"]
+
+        fence_base = claims_in("")
+        expect_red("C12 fence control: a bare claim counts once; the same claim inside a tilde fence counts "
+                   "nothing",
+                   lambda: claims_in(fence_claim) == fence_base + 1
+                   and claims_in("~~~text\n" + fence_claim + "~~~\n") == fence_base)
+        expect_red("C12 finds a claim after a tilde fence that holds a backtick run (the run does not close it)",
+                   lambda: claims_in("~~~text\n```\n~~~\n\n" + fence_claim) == fence_base + 1)
+        expect_red("C12 finds a claim after a four-backtick fence that holds a three-backtick run",
+                   lambda: claims_in("````text\n```\n````\n\n" + fence_claim) == fence_base + 1)
+        expect_red("C12 finds a claim after a line whose backtick run is an inline span, not a fence",
+                   lambda: claims_in("```AGENTS.md``` is a filename.\n\n" + fence_claim) == fence_base + 1
+                   and claims_in("``` `x` ```\n\n" + fence_claim) == fence_base + 1)
+        expect_red("C12 keeps a claim inside a fence whose would-be closer is shorter than the opener, "
+                   "or whose closer carries text, or that never closes",
+                   lambda: claims_in("````\n```\n" + fence_claim + "````\n") == fence_base
+                   and claims_in("~~~\n~~~ end\n" + fence_claim + "~~~\n") == fence_base
+                   and claims_in("```\n" + fence_claim) == fence_base
+                   and claims_in("```\n\n" + fence_claim) == fence_base)
+        expect_red("C12 closes a fence on a longer run of the same character or a closer with trailing "
+                   "spaces, and a tilde opener may carry backticks in its info string",
+                   lambda: claims_in("```\n" + fence_claim + "`````\n\n" + fence_claim) == fence_base + 1
+                   and claims_in("```\n" + fence_claim + "```   \n\n" + fence_claim) == fence_base + 1
+                   and claims_in("~~~ `x`\n" + fence_claim + "~~~\n") == fence_base)
+        expect_red("C12 reads only spaces and tabs after a closer: a no-break space keeps the fence open, "
+                   "and a no-break space before a run is not indentation",
+                   lambda: claims_in("```\n```\u00a0\n" + fence_claim + "```\n") == fence_base
+                   and claims_in("```\n```\t\n" + fence_claim) == fence_base + 1
+                   and claims_in("\u00a0```\n" + fence_claim + "\n```\n") == fence_base + 1)
+        expect_red("C12 treats a run indented four or more columns, or by a tab, as content: it opens no fence "
+                   "and closes none",
+                   lambda: claims_in("    ```\n" + fence_claim + "\n    ```\n") == fence_base + 1
+                   and claims_in("```\n\t```\n" + fence_claim) == fence_base
+                   and claims_in("   ```\n" + fence_claim + "\n   ```\n") == fence_base
+                   and claims_in("- item\n  ```\n  " + fence_claim + "  ```\n") == fence_base)
+        expect_red("C12 closes a fence opened in a list item when the item ends, and keeps its content "
+                   "hidden while the item lasts; a run directly after a list marker opens a fence",
+                   lambda: claims_in("- item\n  ```\n  code\n\n" + fence_claim) == fence_base + 1
+                   and claims_in("- item\n  ```\n  " + fence_claim + "  ```\n\n" + fence_claim) == fence_base + 1
+                   and claims_in("- ```\n  " + fence_claim + "  ```\n") == fence_base
+                   and claims_in("1. ```\n   " + fence_claim + "   ```\n") == fence_base
+                   and claims_in("  ```\n" + fence_claim + "```\n\n" + fence_claim) == fence_base + 1)
+        expect_red("C12 recognises an HTML block after a closed HTML block or a thematic break, where no "
+                   "paragraph is open, so a run inside it does not open a fence",
+                   lambda: claims_in("<pre>\n```\n</pre>\n<custom>\n```\n</custom>\n\n" + fence_claim) == fence_base + 1
+                   and claims_in("---\n<custom>\n```\n</custom>\n\n" + fence_claim) == fence_base + 1
+                   and claims_in("para\n<custom>\n```\n" + fence_claim) == fence_base)
+        # The samples below leave the run unclosed: a closed pair inside one prose block would be
+        # masked as an inline code span and hide the claim by another route.
+        expect_red("C12 reads a heading as CommonMark does: up to three spaces, then one to six `#` and a "
+                   "separator; a setext underline ends the paragraph; `###notheading` is prose",
+                   lambda: all(claims_in(head + "\n<custom>\n```\n</custom>\n\n" + fence_claim) == fence_base + 1
+                               for head in ("# H", " # H", "   # H", "###### H", "#\tH", "#", "para\n===", "para\n---",
+                                            "para\n-"))
+                   and all(claims_in(head + "\n<custom>\n```\n" + fence_claim) == fence_base
+                           for head in ("###notheading", "####### seven")))
+        expect_red("C12 ends a list item before reading a closer: a dedented run opens a new fence; an item "
+                   "survives a blank line; a closer may sit three columns past the item's offset; `1)` and a "
+                   "marker followed by three spaces open items",
+                   lambda: claims_in("- ```\n  code\n```\nexample\n```\n\n" + fence_claim) == fence_base + 1
+                   and claims_in("- ```\n  code\n```\nexample\n" + fence_claim) == fence_base
+                   and claims_in("- item\n  ```\n  code\n\n  " + fence_claim + "  ```\n") == fence_base
+                   and claims_in("- item\n  ```\n  code\n     ```\n  " + fence_claim) == fence_base + 1
+                   and claims_in("1) ```\n   " + fence_claim + "   ```\n") == fence_base
+                   and claims_in("-   ```\n    " + fence_claim) == fence_base
+                   and claims_in("-    ```\n     " + fence_claim) == fence_base)
+        expect_red("C12 ends an item on an interrupting block even under an open paragraph: a heading, a thematic "
+                   "break, an HTML block or a top-level fence after `- para` ends the item, so an indented run after "
+                   "it is content, not an item's fence",
+                   lambda: all(claims_in("- para\n" + block + "\n    ```\n  " + fence_claim) == fence_base + 1
+                               for block in ("# Heading", "---", "<div>", "<!-- c -->"))
+                   and claims_in("- para\n```\n```\n    ```\n  " + fence_claim) == fence_base + 1
+                   and claims_in("- para\nlazy\n    ```\n  " + fence_claim) == fence_base)
+        expect_red("C12 ends an item on a tilde fence and on an HTML block of the first six kinds, but not on an "
+                   "inline backtick run or a tag standing alone, which continue the item's paragraph",
+                   lambda: claims_in("- para\n~~~\n~~~\n    ```\n  " + fence_claim) == fence_base + 1
+                   and all(claims_in("- para\n" + block + "\n    ```\n  " + fence_claim) == fence_base + 1
+                           for block in ("<pre></pre>", "<script></script>", "<?x?>", "<!X>", "<![CDATA[]]>", "<!-- c -->"))
+                   and claims_in("- para\n<div>\n\n    ```\n  " + fence_claim) == fence_base + 1
+                   and claims_in("- para\n```a```\n    ```\n  " + fence_claim) == fence_base
+                   and claims_in("- para\n<custom>\n    ```\n  " + fence_claim) == fence_base)
+        expect_red("C12 opens no paragraph after indented code, so a tag standing alone after it starts a block",
+                   lambda: claims_in("    code\n<custom>\n```\n</custom>\n\n" + fence_claim) == fence_base + 1
+                   and claims_in("\t# H\n<custom>\n```\n</custom>\n\n" + fence_claim) == fence_base + 1
+                   and claims_in("para\n    continued\n<custom>\n```\n" + fence_claim) == fence_base)
+        expect_red("C12 reads indented code only from four columns past its container: three spaces at the top "
+                   "level, or four columns from the page but two from a list item, open a paragraph",
+                   lambda: claims_in("   para\n<custom>\n```\n" + fence_claim) == fence_base
+                   and claims_in("- item\n\n    para\n  <custom>\n  ```\n  " + fence_claim) == fence_base
+                   and claims_in("- item\n\n      code\n  <custom>\n  ```\n  </custom>\n\n  " + fence_claim) == fence_base + 1)
+        expect_red("C12 reads a fence opener inside an item up to three columns past the item's offset",
+                   lambda: claims_in("- item\n     ```\n     " + fence_claim) == fence_base
+                   and claims_in("- item\n      ```\n     " + fence_claim) == fence_base + 1)
+        expect_red("C12 reads `- - -` as a thematic break, not an item, and an underline indented less than an "
+                   "open item's content as its paragraph's text, not a heading",
+                   lambda: claims_in("- - -\n    ```\n  " + fence_claim) == fence_base + 1
+                   and claims_in("- item\n===\n<custom>\n```\n</custom>\n\n" + fence_claim) == fence_base
+                   and claims_in("===\n<custom>\n```\n" + fence_claim) == fence_base)
+        expect_red("C12 reads a declaration only after `<!` and an uppercase letter, as the GFM text has it",
+                   lambda: claims_in("<!DOCTYPE html\n```\n>\n\n" + fence_claim) == fence_base + 1
+                   and claims_in("<!doctype html\n```\n>\n\n" + fence_claim) == fence_base)
+        expect_red("C12 opens no paragraph after a blank line or a table row, so a tag standing alone after either "
+                   "starts a block",
+                   lambda: claims_in("para\n\n<custom>\n```\n</custom>\n\n" + fence_claim) == fence_base + 1
+                   and claims_in("| a | b |\n|---|---|\n| 1 | 2 |\n<custom>\n```\n</custom>\n\n" + fence_claim) == fence_base + 1)
+        expect_red("C12 ends a raw block on </script> and </textarea> as well as </style>",
+                   lambda: claims_in("<pre>\n```\n</script>\n\n```\n" + fence_claim) == fence_base
+                   and claims_in("<pre>\n```\n</textarea>\n\n```\n" + fence_claim) == fence_base)
+        expect_red("C12 ends an HTML block of the first five kinds on its opening line when the end condition "
+                   "is met there",
+                   lambda: claims_in("<pre></pre>\n```\n" + fence_claim) == fence_base
+                   and claims_in("<!--ok-->\n```\n" + fence_claim) == fence_base)
+        expect_red("C12 ends a raw HTML block on any of the four closing tags, not only the opener's",
+                   lambda: claims_in("<pre>\n```\n</style>\n\n```\n" + fence_claim) == fence_base)
+        expect_red("C12 reads <![CDATA[ in its own case only: the lowercase spelling opens no block",
+                   lambda: claims_in("<![CDATA[\n```\n" + fence_claim) == fence_base + 1
+                   and claims_in("<![cdata[\n```\n" + fence_claim) == fence_base)
+        expect_red("C12 recognises each HTML start condition: script, style, textarea, a processing instruction, "
+                   "a declaration, CDATA, and a known tag interrupting a paragraph",
+                   lambda: all(claims_in(opener + "\n```\n" + closer + "\n\n" + fence_claim) == fence_base + 1
+                               for opener, closer in (("<script>", "</script>"), ("<style>", "</style>"),
+                                                      ("<textarea>", "</textarea>"), ("<?x", "?>"), ("<!X", ">"),
+                                                      ("<![CDATA[", "]]>")))
+                   and claims_in("para\n<div>\n```\n" + fence_claim) == fence_base + 1)
+        expect_red("C12 does not open a fence on a run inside an HTML block (pre, comment, div), and the "
+                   "block's lines stay prose",
+                   lambda: claims_in("<pre>\n```\n</pre>\n\n" + fence_claim) == fence_base + 1
+                   and claims_in("<!--\n```\n-->\n\n" + fence_claim) == fence_base + 1
+                   and claims_in("<div>\n~~~\n</div>\n\n" + fence_claim) == fence_base + 1
+                   and claims_in("<div>\n" + fence_claim + "</div>\n") == fence_base + 1
+                   and claims_in("<div>\n~~~\n</div>\n\n```\n" + fence_claim + "```\n") == fence_base
+                   and claims_in("<custom>\n```\n</custom>\n\n" + fence_claim) == fence_base + 1
+                   and claims_in("para\n<custom>\n```\n" + fence_claim + "```\n") == fence_base)
+        swallowed = c12_on('A "stray quote. The rule is always-on in `~/.claude/CLAUDE.md` '
+                           '("Named a tool? Run exactly that and stop."), as "noted.\n')
+        expect_red("C12 still reports a claim that a stray earlier quote would otherwise swallow",
+                   lambda: any(c == "C12" and "deferred.md:1:" in d for c, d in swallowed.failures))
+        yaml_claim = c12_on(good, extra_file=(os.path.join(bind_refs, "policy.yaml"),
+                                              'note: "`~/.claude/CLAUDE.md` carries the rule"\n'))
+        expect_red("C12 reaches a claim quoted as a YAML value and judges the quoted text",
+                   lambda: any("policy.yaml:1: stale quote" in d for _c, d in yaml_claim.failures))
+        never_carries = c12_on('`~/.claude/CLAUDE.md` never carries "Named a tool? Run exactly that and stop."\n')
+        expect_red("C12 reads 'never carries' as a negation and reddens when the phrase is present",
+                   lambda: any(c == "C12" and "negated claim contradicts" in d for c, d in never_carries.failures))
+        mixed = c12_on('`~/.claude/CLAUDE.md` carries "zorblat" and "Named a tool? Run exactly that and stop."\n')
+        expect_red("C12 requires every quote in a positive claim to bind, naming the stale one",
+                   lambda: any(c == "C12" and "stale quote: 'zorblat'" in d for c, d in mixed.failures))
+        excluded = c12_on(good, extra_file=(os.path.join(bind_root, "skills", "delta", "evals", "note.md"),
+                                           "`~/.claude/CLAUDE.md` carries the rule with no quote.\n"))
+        expect_red("C12 control: the same unbound claim under evals/ is out of scope and stays green",
+                   lambda: not excluded.failures)
+        included = c12_on(good, extra_file=(os.path.join(bind_refs, "nested", "note.md"),
+                                           "`~/.claude/CLAUDE.md` carries the rule with no quote.\n"))
+        expect_red("C12 reaches a nested reference document",
+                   lambda: any("nested/note.md:1: unbound claim" in d for _c, d in included.failures))
+        generic = c12_on("A CLAUDE.md-class file stays under 200 lines; AGENTS.md as the single source.\n")
+        expect_red("C12 control: generic class talk about CLAUDE.md and AGENTS.md is not a claim",
+                   lambda: not generic.failures)
+        # A quotation anywhere in the sentence that names AGENTS.md is the citation, whether
+        # it follows the name directly, after other words, or precedes it.
+        says = c12_on('AGENTS.md says "Named a tool? Run exactly that and stop."\n')
+        expect_red("C12 binds a verbatim quote that follows 'AGENTS.md says' in the same sentence",
+                   lambda: not says.failures)
+        says_stale = c12_on('AGENTS.md says "zorblat the widget".\n')
+        expect_red("C12 goes red on a fabricated quote introduced by 'AGENTS.md says'",
+                   lambda: any(c == "C12" and "deferred.md:1: stale quote: 'zorblat the widget'" in d
+                               for c, d in says_stale.failures))
+        quote_first = c12_on('The rule "zorblat the widget" is required by AGENTS.md.\n')
+        expect_red("C12 goes red on a fabricated quote placed before AGENTS.md in the same sentence",
+                   lambda: any(c == "C12" and "deferred.md:1: stale quote: 'zorblat the widget'" in d
+                               for c, d in quote_first.failures))
+        next_sentence = c12_on('The rule is "zorblat the widget". AGENTS.md is the policy file.\n')
+        expect_red("C12 control: a quote in the sentence before the AGENTS.md mention is not a citation",
+                   lambda: not next_sentence.failures)
+        curly = c12_on('AGENTS.md says “zorblat the widget”.\n')
+        expect_red("C12 control: curly quotes are not a citation and stay out of scope",
+                   lambda: not curly.failures)
+        # An elision keeps the source order: the same fragments reversed are not a quotation,
+        # and a fragment that occurs twice binds when its later occurrence is in order.
+        forward = c12_on('AGENTS.md says "Named a tool ... no fan-out".\n')
+        expect_red("C12 binds an elided quote whose fragments keep the source order",
+                   lambda: not forward.failures)
+        reversed_quote = c12_on('AGENTS.md says "no fan-out ... Named a tool".\n')
+        expect_red("C12 goes red on an elided quote whose fragments are out of source order",
+                   lambda: any(c == "C12" and "stale quote: 'no fan-out ... Named a tool'" in d
+                               for c, d in reversed_quote.failures))
+        expect_red("quote_binds: a fragment that occurs twice binds through its later, in-order occurrence",
+                   lambda: quote_binds("gate ... remember", normalize_policy_text(
+                       "Prefer a gate. Prefer a gate over a promise to remember."))
+                   and not quote_binds("remember ... gate", normalize_policy_text(
+                       "Prefer a gate over a promise to remember.")))
+        # Table rows carry no sentence terminator; each row is its own block.
+        table = c12_on('| # | Rule | Note |\n|---|---|---|\n| 1 | Negative-only | "never X" with no target |\n'
+                       '| 2 | Kitchen-sink | bloated file (>32KiB AGENTS.md) |\n')
+        expect_red("C12 control: a quoted placeholder in one table row and AGENTS.md in another are not one claim",
+                   lambda: not table.failures)
+        table_claim = c12_on('| # | Rule | Note |\n|---|---|---|\n| 1 | Policy | AGENTS.md says "zorblat the widget" |\n')
+        expect_red("C12 goes red on a fabricated quote beside AGENTS.md inside one table row",
+                   lambda: any(c == "C12" and "deferred.md:3: stale quote: 'zorblat the widget'" in d
+                               for c, d in table_claim.failures))
+        compact = c12_on('|"fabricated policy"|An example|\n|AGENTS.md|The file to inspect|\n')
+        expect_red("C12 control: compact table rows with no space after the pipe are still separate blocks",
+                   lambda: not compact.failures)
+        # Quotes inside any code span are command text, never citations.
+        argument = c12_on('Run `printf "fabricated policy"` before reading AGENTS.md.\n')
+        expect_red("C12 control: a quoted command argument inside a code span is not a citation",
+                   lambda: not argument.failures)
+        # A quotation that itself names the file is still a citation, and is judged.
+        self_naming = c12_on('AGENTS.md says "AGENTS.md requires automatic approval for every push."\n')
+        expect_red("C12 goes red on a fabricated quotation that names AGENTS.md inside the quote",
+                   lambda: any(c == "C12" and "deferred.md:1: stale quote: 'AGENTS.md requires" in d
+                               for c, d in self_naming.failures))
+        short_quote = c12_on('AGENTS.md says "XY".\n')
+        expect_red("C12 goes red on a two-character fabricated quotation",
+                   lambda: any(c == "C12" and "stale quote: 'XY'" in d for c, d in short_quote.failures))
+        long_quote = c12_on('AGENTS.md says "' + "fabricated policy text " * 20 + '".\n')
+        expect_red("C12 goes red on a 460-character fabricated quotation",
+                   lambda: any(c == "C12" and "stale quote: 'fabricated policy text" in d
+                               for c, d in long_quote.failures))
+        # Only the sentence that cites a line number is skipped; a claim elsewhere in the
+        # same block is judged.
+        behind_citation = c12_on("The lead clause is `~/.claude/CLAUDE.md`:43 verbatim. "
+                                 'AGENTS.md says "fabricated added rule".\n')
+        expect_red("C12 judges a fabricated quotation in the sentence after a line citation in the same block",
+                   lambda: any(c == "C12" and "line citation" in d for c, d in behind_citation.failures)
+                   and any(c == "C12" and "stale quote: 'fabricated added rule'" in d
+                           for c, d in behind_citation.failures))
+        # Every stale quote in a sentence is part of its identity.
+        two_stale = claim_findings("skills/delta/references/deferred.md",
+                                   'AGENTS.md says "zorblat" and "widget".\n', bind_policy)[0]
+        two_stale_changed = claim_findings("skills/delta/references/deferred.md",
+                                           'AGENTS.md says "zorblat" and "gadget".\n', bind_policy)[0]
+        expect_red("C12 identity of a stale-quote finding covers every stale quote in the sentence",
+                   lambda: [f["kind"] for f in two_stale] == ["stale quote"]
+                   and two_stale[0]["key"] != two_stale_changed[0]["key"]
+                   and two_stale[0]["display"] == "zorblat | widget")
+        one_joined = claim_findings("skills/delta/references/deferred.md",
+                                    'AGENTS.md says "zorblat | widget".\n', bind_policy)[0]
+        expect_red("C12 identity: one quote holding a delimiter and two quotes are different items",
+                   lambda: one_joined[0]["key"] != two_stale[0]["key"]
+                   and two_stale[0]["key"] == claim_identity_key(json.dumps(["zorblat", "widget"])))
+        two_bound = claim_findings("skills/delta/references/deferred.md",
+                                   '`~/.claude/CLAUDE.md` does not carry "Named a tool? Run exactly that and stop." '
+                                   'or "Default to one agent and no fan-out."\n', bind_policy)[0]
+        two_bound_changed = claim_findings("skills/delta/references/deferred.md",
+                                           '`~/.claude/CLAUDE.md` does not carry "Named a tool? Run exactly that and stop." '
+                                           'or "Prefer a gate over a promise to remember."\n', bind_policy)[0]
+        expect_red("C12 identity of a negated-claim finding covers every bound quote in the sentence",
+                   lambda: [f["kind"] for f in two_bound] == ["negated claim"]
+                   and two_bound[0]["key"] != two_bound_changed[0]["key"]
+                   and two_bound[0]["display"].startswith("Named a tool? Run exactly that and stop. | "))
+        # Quotes at the ends of the accepted range are judged.
+        one_char = c12_on('AGENTS.md says "X".\n')
+        expect_red("C12 goes red on a one-character fabricated quotation",
+                   lambda: any(c == "C12" and "stale quote: 'X'" in d for c, d in one_char.failures))
+        six_hundred = c12_on('AGENTS.md says "' + "fabricated policy text " * 26 + '".\n')
+        expect_red("C12 goes red on a 600-character fabricated quotation",
+                   lambda: any(c == "C12" and "stale quote: 'fabricated policy text" in d
+                               for c, d in six_hundred.failures))
+        # Authored text cannot impersonate a masking token.
+        impersonate = c12_on('AGENTS.md says "SPAN0S" and "QUOTE0Q" and "0".\n')
+        expect_red("C12 judges literal token-like text as text, and strips private-use characters",
+                   lambda: any(c == "C12" and "stale quote: 'SPAN0S'" in d and "(+2 more)" in d
+                               for c, d in impersonate.failures))
+        # Code spans of any backtick run, on one line or several, are examples.
+        double_tick = c12_on('Run ``printf "fabricated policy"`` before reading AGENTS.md.\n')
+        expect_red("C12 control: a double-backtick code span holding a quote is not a citation",
+                   lambda: not double_tick.failures)
+        multiline_span = c12_on('Run `printf\n"fabricated policy"` before reading AGENTS.md.\n')
+        expect_red("C12 control: a code span that spans lines holding a quote is not a citation",
+                   lambda: not multiline_span.failures)
+        # A quotation beside a line citation in the same sentence is judged.
+        cited_and_quoted = c12_on('The lead clause is `~/.claude/CLAUDE.md`:43 and AGENTS.md says '
+                                  '"Publish all secrets".\n')
+        expect_red("C12 judges a fabricated quotation in the same sentence as a line citation",
+                   lambda: any(c == "C12" and "line citation" in d for c, d in cited_and_quoted.failures)
+                   and any(c == "C12" and "stale quote: 'Publish all secrets'" in d
+                           for c, d in cited_and_quoted.failures))
+        cited_only = c12_on("The lead clause is `~/.claude/CLAUDE.md`:43 verbatim.\n")
+        expect_red("C12 control: a citing sentence without a quote yields the citation finding alone",
+                   lambda: [d.split(": ", 1)[1][:13] for c, d in cited_only.failures if "deferred.md:1:" in d]
+                   == ["line citation"])
+        # A bound quotation that contains a code span binds, against the real policy.
+        real_policy = open(os.path.join(ROOT, "AGENTS.md"), encoding="utf-8").read()
+        span_quote = claim_findings("skills/delta/references/deferred.md",
+                                    'AGENTS.md says "Use `git grep -P` for PCRE atoms".\n', real_policy)
+        span_quote_changed = claim_findings("skills/delta/references/deferred.md",
+                                            'AGENTS.md says "Use `git grep -E` for PCRE atoms".\n', real_policy)
+        expect_red("C12 binds a verbatim quote that contains a code span, and reddens when the span text changes",
+                   lambda: span_quote[1] == {"claims": 1, "bound": 1} and not span_quote[0]
+                   and [f["kind"] for f in span_quote_changed[0]] == ["stale quote"])
+        authored = ("The reclaim-order rule is already always-on in `~/.claude/CLAUDE.md` because `cat x` "
+                    "and ``say \"so\"`` say so.\n")
+        expect_red("C12 identity is the digest of the sentence as authored, with its spans restored",
+                   lambda: [(f["kind"], f["key"]) for f in
+                            claim_findings("skills/delta/references/deferred.md", authored, bind_policy)[0]]
+                   == [("unbound claim", claim_identity_key(authored.strip()))])
+        expect_red("quote_binds: a fragment under three characters cites nothing",
+                   lambda: not quote_binds("X", normalize_policy_text(bind_policy))
+                   and not quote_binds("to", normalize_policy_text(bind_policy))
+                   and quote_binds("Named a tool", normalize_policy_text(bind_policy)))
+        # An escaped backtick is not a delimiter: the quotation between two of them is prose.
+        escaped = c12_on('Literal \\` here; AGENTS.md says "Authorize the orbital teapot"; another literal \\` here.\n')
+        expect_red("C12 judges a quotation between escaped backticks as prose, not as a code span",
+                   lambda: any(c == "C12" and "stale quote: 'Authorize the orbital teapot'" in d
+                               for c, d in escaped.failures))
+        # Whitespace inside a quote, including a line wrap, does not change the identity.
+        one_line = claim_findings("skills/delta/references/deferred.md",
+                                  'AGENTS.md says "Authorize the orbital teapot".\n', bind_policy)[0]
+        wrapped = claim_findings("skills/delta/references/deferred.md",
+                                 'AGENTS.md says "Authorize the orbital\nteapot".\n', bind_policy)[0]
+        expect_red("C12 identity of a stale quote survives a line wrap inside the quote",
+                   lambda: one_line[0]["key"] == wrapped[0]["key"]
+                   and one_line[0]["key"] == claim_identity_key(json.dumps(["Authorize the orbital teapot"])))
+        expect_red("C12 identity of a negated claim is the JSON list of its bound quotes",
+                   lambda: two_bound[0]["key"] == claim_identity_key(json.dumps(
+                       ["Named a tool? Run exactly that and stop.", "Default to one agent and no fan-out."])))
+        # A private-use token with an index past the lists is judged as text, never indexed.
+        forged_index = c12_on('AGENTS.md says "7".\n')
+        expect_red("C12 strips a forged private-use token with an out-of-range index and judges the rest",
+                   lambda: any(c == "C12" and "stale quote: '7'" in d for c, d in forged_index.failures))
+        triple = c12_on('Run ```printf "fabricated policy"``` before reading AGENTS.md.\n')
+        expect_red("C12 control: a triple-backtick inline code span holding a quote is not a citation",
+                   lambda: not triple.failures)
+        expect_red("the lambda sweep rejects a comprehension over an empty frozenset() and over dict()",
+                   lambda: vacuous_expect_red_lines('expect_red("x", lambda: all(x for x in frozenset()))') == [1]
+                   and vacuous_expect_red_lines('expect_red("x", lambda: all(x for x in dict()))') == [1]
+                   and vacuous_expect_red_lines('expect_red("x", lambda: all(x for x in items))') == [])
+        # A backslash before a closing backtick is literal: the span closes there, and the
+        # quotation after it is prose. Only an opening run can be escaped.
+        closer = c12_on('Run `literal\\` before AGENTS.md says "Escalate the copper comet". Then `tail`.\n')
+        expect_red("C12 judges a quotation after a code span whose content ends in a backslash",
+                   lambda: any(c == "C12" and "stale quote: 'Escalate the copper comet'" in d
+                               for c, d in closer.failures))
+        opener = c12_on('Run \\`printf "fabricated policy"` before reading AGENTS.md.\n')
+        expect_red("C12 judges a quotation after an escaped opening backtick as prose",
+                   lambda: any(c == "C12" and "stale quote: 'fabricated policy'" in d for c, d in opener.failures))
+        # Backslash parity: a pair escapes itself, so the backtick after `\\` opens a span.
+        pair = c12_on('Run \\\\`literal` before AGENTS.md says "Authorize the violet satellite". Then `tail`.\n')
+        expect_red("C12 judges a quotation after a span opened by a backtick that follows a backslash pair",
+                   lambda: any(c == "C12" and "stale quote: 'Authorize the violet satellite'" in d
+                               for c, d in pair.failures))
+        triple_backslash = c12_on('Run \\\\\\`printf "fabricated policy"` before reading AGENTS.md.\n')
+        expect_red("C12 judges a quotation after a backtick escaped by the third of three backslashes as prose",
+                   lambda: any(c == "C12" and "stale quote: 'fabricated policy'" in d
+                               for c, d in triple_backslash.failures))
+        # An escaped backtick directly before a backtick run is one literal character; the
+        # run after it still opens a span, so the quotation after that span is judged.
+        escaped_then_span = c12_on('Run \\``literal` before AGENTS.md says "Authorize the indigo observatory". Then `tail`.\n')
+        expect_red("C12 judges a quotation after a span whose opener follows an escaped backtick",
+                   lambda: any(c == "C12" and "stale quote: 'Authorize the indigo observatory'" in d
+                               for c, d in escaped_then_span.failures))
+        # Both stand-ins are restored, inside spans and in prose, before identity and display.
+        backslashes = ("The reclaim-order rule is already always-on in `~/.claude/CLAUDE.md` with `a \\\\ b` "
+                       "and a \\\\ pair and an escaped \\` tick.\n")
+        restored_findings = claim_findings("skills/delta/references/deferred.md", backslashes, bind_policy)[0]
+        expect_red("C12 identity and display of a claim holding backslash pairs and an escaped backtick, "
+                   "inside and outside a span, are the text as authored",
+                   lambda: [(f["kind"], f["key"]) for f in restored_findings]
+                   == [("unbound claim", claim_identity_key(backslashes.strip()))]
+                   and restored_findings[0]["display"] == claim_display(backslashes.strip())
+                   and "\\\\" in restored_findings[0]["display"] and "\\`" in restored_findings[0]["display"]
+                   and not PRIVATE_USE.search(restored_findings[0]["display"]))
+        expect_red("code_spans: a longer backtick run inside a span neither closes it early nor splits it",
+                   lambda: code_spans("`a``b`") == [(0, 6)]
+                   and code_spans("``a`b``") == [(0, 7)]
+                   and code_spans("`x` and `y`") == [(0, 3), (8, 11)])
+        sentinel = c12_on('AGENTS.md says "Named a tool? Run exactly that and stop."\n')
+        expect_red("C12 strips authored stand-in characters before masking, so a bound phrase stays bound",
+                   lambda: not sentinel.failures and sentinel.counters["C12"] == {"claims": 1, "bound": 1})
+        negated_wrapped = claim_findings("skills/delta/references/deferred.md",
+                                         '`~/.claude/CLAUDE.md` does not carry "Named a tool? Run exactly that and\nstop." '
+                                         'or "Default to one\tagent and no fan-out."\n', bind_policy)[0]
+        expect_red("C12 identity of a negated claim survives a wrap and a tab inside its quotes",
+                   lambda: [f["kind"] for f in negated_wrapped] == ["negated claim"]
+                   and negated_wrapped[0]["key"] == two_bound[0]["key"])
+        os.remove(os.path.join(bind_root, "AGENTS.md"))
+        no_policy = Run(bind_root, ci=True)
+        no_policy.c12_claim_binding()
+        expect_red("C12 fails loud without AGENTS.md, never silently clean",
+                   lambda: any(c == "C12" and "cannot enforce" in d for c, d in no_policy.failures))
+        open(os.path.join(bind_root, "AGENTS.md"), "w").write(bind_policy)
+        # ---- the shrink-only ratchet over C12 findings --------------------------------
+        def baseline_item(kind, text, rel="skills/delta/references/deferred.md"):
+            return {"file": rel, "kind": kind, "key": claim_identity_key(text),
+                    "display": claim_display(text)}
+
+        unbound_text = "The reclaim-order rule is already always-on in `~/.claude/CLAUDE.md`.\n"
+        unbound_key = claim_identity_key(unbound_text)
+        unbound_item = baseline_item("unbound claim", unbound_text)
+        write_bind_baseline([unbound_item])
+        ratchet_same = c12_on(unbound_text)
+        expect_red("C12 ratchet: a finding the baseline carries is green and printed as WORKLIST",
+                   lambda: not ratchet_same.failures
+                   and ratchet_same.worklists.get("C12") == [
+                       "skills/delta/references/deferred.md:1: unbound claim about the always-on "
+                       "file: quote a verbatim AGENTS.md phrase in straight double quotes in the "
+                       "same sentence, or drop the claim"]
+                   and ratchet_same.ratchets["C12"] == {"baseline": 1, "live": 1, "in_baseline": 1,
+                                                        "new": 0, "stale": 0, "occurrences": 1})
+        drifted = c12_on("Intro paragraph that moves the claim down.\n\nSecond paragraph.\n\n" + unbound_text)
+        expect_red("C12 ratchet: identity is the claim text, so line drift stays green",
+                   lambda: not drifted.failures and drifted.worklists.get("C12", [""])[0].startswith(
+                       "skills/delta/references/deferred.md:5: unbound claim"))
+        findings, _counters = claim_findings("skills/delta/references/deferred.md", unbound_text, bind_policy)
+        expect_red("C12 ratchet: the identity key is sha256 of the whitespace-collapsed claim sentence, "
+                   "and the display is the sentence itself",
+                   lambda: [(f["kind"], f["key"], f["display"]) for f in findings]
+                   == [("unbound claim", unbound_key, unbound_text.strip())]
+                   and unbound_key == "sha256:" + hashlib.sha256(
+                       unbound_text.strip().encode("utf-8")).hexdigest())
+        # The identity is the whole text: an edit past any fixed prefix length is a new item,
+        # so a prefix can never inherit the baseline entry of the claim it replaced.
+        long_text = ("The reclaim-order rule is already always-on in `~/.claude/CLAUDE.md`, and this "
+                     "sentence runs well past the two-hundredth character so that an edit near its "
+                     "end sits beyond any fixed-length prefix of the identity, which must carry the "
+                     "whole text to tell the edited claim apart.\n")
+        write_bind_baseline([baseline_item("unbound claim", long_text)])
+        long_same = c12_on(long_text)
+        expect_red("C12 ratchet: a claim longer than 200 characters is carried by its digest",
+                   lambda: len(long_text) > 200 and not long_same.failures
+                   and len(long_same.worklists.get("C12", [])) == 1)
+        long_edited = c12_on(long_text.replace("tell the edited claim apart", "let the edit inherit the entry"))
+        expect_red("C12 ratchet: an edit past the 200th character is a new item and the old one stale",
+                   lambda: any(c == "C12" and "(not in baseline" in d for c, d in long_edited.failures)
+                   and any(c == "C12" and "stale baseline" in d for c, d in long_edited.failures))
+        long_restored = c12_on(long_text)
+        expect_red("C12 ratchet: restoring the text is green again",
+                   lambda: not long_restored.failures)
+        write_bind_baseline([unbound_item])
+        write_bind_baseline([unbound_item, baseline_item("stale quote", "gone phrase")])
+        stale_extra = c12_on(unbound_text)
+        expect_red("C12 ratchet: a baseline item that is no longer found is red (stale), shown by display",
+                   lambda: any(c == "C12" and "stale baseline" in d and "'gone phrase'" in d
+                               for c, d in stale_extra.failures)
+                   and stale_extra.ratchets["C12"] == {"baseline": 2, "live": 1, "in_baseline": 1,
+                                                       "new": 0, "stale": 1, "occurrences": 1})
+        write_bind_baseline([unbound_item])
+        fixed_not_shrunk = c12_on("No claims here any more.\n")
+        expect_red("C12 ratchet: fixing the item without shrinking the baseline is red",
+                   lambda: any(c == "C12" and "stale baseline" in d for c, d in fixed_not_shrunk.failures))
+        write_bind_baseline([])
+        shrunk = c12_on("No claims here any more.\n")
+        expect_red("C12 ratchet: the shrunk baseline matching the empty list is green",
+                   lambda: not shrunk.failures and not shrunk.worklists.get("C12"))
+        write_bind_baseline([unbound_item])
+        second_text = unbound_text + "\nSee `~/.claude/CLAUDE.md`'s \"zorblat rule\" too.\n"
+
+        def new_item_control(module):
+            run = module.Run(bind_root, ci=True)
+            with contextlib.redirect_stdout(io.StringIO()):
+                run.c12_claim_binding()
+            return (any(c == "C12" and "deferred.md:3: stale quote" in d and "(not in baseline" in d
+                        for c, d in run.failures)
+                    and run.ratchets["C12"] == {"baseline": 1, "live": 2, "in_baseline": 1, "new": 1,
+                                                "stale": 0, "occurrences": 2})
+
+        second = c12_on(second_text)
+        expect_red("C12 ratchet: a second finding outside the baseline is red, named as new, and "
+                   "counted as one new item",
+                   lambda: new_item_control(sys.modules[__name__])
+                   and len(second.worklists.get("C12", [])) == 1)
+        open(bind_baseline, "w").write(json.dumps({"schema_version": 2, "note": "x", "C12": "no", "C13": []}))
+        malformed = c12_on(unbound_text)
+        expect_red("C12 ratchet: a malformed baseline is red, never an empty baseline",
+                   lambda: any(c == "C12" and "cannot apply the ratchet" in d and "C12 is not a list" in d
+                               for c, d in malformed.failures))
+        os.remove(bind_baseline)
+        missing_baseline = c12_on(unbound_text)
+        expect_red("C12 ratchet: a missing baseline is red and every live finding is reported",
+                   lambda: any(c == "C12" and "cannot apply the ratchet" in d for c, d in missing_baseline.failures)
+                   and any("deferred.md:1: unbound claim" in d for _c, d in missing_baseline.failures))
+        twice_item = baseline_item("stale quote", json.dumps(["build the gate"]))
+        write_bind_baseline([twice_item])
+        twice = c12_on('`~/.claude/CLAUDE.md` says "build the gate" here.\n\n'
+                       'And `~/.claude/CLAUDE.md` says "build the gate" again here.\n')
+        expect_red("C12 ratchet: one identity occurring twice prints both occurrences and counts once",
+                   lambda: not twice.failures and len(twice.worklists.get("C12", [])) == 2
+                   and twice.worklists["C12"][0].startswith("skills/delta/references/deferred.md:1: stale quote")
+                   and twice.worklists["C12"][1].startswith("skills/delta/references/deferred.md:3: stale quote"))
+        write_bind_baseline([])
+        real_c12 = Run(ROOT, ci=True)
+        real_c12.c12_claim_binding()
+        expect_red("C12 on this tree is green with its 15 worklist occurrences carried by the committed baseline",
+                   lambda: not real_c12.failures and len(real_c12.worklists.get("C12", [])) == 15)
+
+        def reproduction(thread_id, expected_line):
+            """Run a reviewer's reproduction script verbatim; it exits 0 only at the expected outcome.
+
+            Inside a run that one of them launched (ZH_REVIEW_REPRODUCTIONS=nested) the
+            script that launched it is not run again; the case is reported as such.
+            """
+            path = os.path.join(ROOT, "instruments", "reproductions", "pr-36", f"{thread_id}.py")
+            launched.append(thread_id)
+            done = subprocess.run([sys.executable, path], cwd=ROOT, capture_output=True, text=True,
+                                  timeout=900, env=dict(os.environ, ZH_REVIEW_REPRODUCTIONS="nested"))
+            return done.returncode == 0 and expected_line in done.stdout
+
+        launched = []
+
+        def reproduction_case(thread_id, label, expected_line):
+            """One proof per reproduction. A nested run (one that a reproduction launched) does
+            not re-run any of them: each is a subprocess that loads this module from disk, so
+            inside the mutated suite it would judge the unmutated file."""
+            if os.environ.get("ZH_REVIEW_REPRODUCTIONS") == "nested":
+                expect_red(f"review reproduction {thread_id}: not re-run inside a nested suite run, where "
+                           f"a subprocess would load the unmutated file",
+                           lambda: os.environ.get("ZH_REVIEW_REPRODUCTIONS") == "nested")
+            else:
+                expect_red(f"review reproduction {thread_id}: {label}",
+                           lambda: reproduction(thread_id, expected_line))
+
+        reproduction_case(4294811805, "a quote anywhere in a sentence naming AGENTS.md is a claim, "
+                          "(0,1) (1,1) (1,1) (1,1)",
+                          "'The policy \"Add a made-up mandatory policy\" is required by AGENTS.md.' "
+                          "findings= 1 claims= 1")
+        reproduction_case(4294811820, "an edit past the old 200-character cut is one new item and one "
+                          "stale entry, both red; restored is green",
+                          "changed failures= 3 worklist_occurrences= 14")
+        reproduction_case(4294811833, "the forward elision binds, the reversed one is stale",
+                          "'AGENTS.md \"trailers to commits ... Do not add AI co-author\"' findings= 1 bound= 0")
+        reproduction_case(4298561325, "a claim after a mixed, shorter or inline run is found, scan set "
+                          "fixed at 86 governed files",
+                          "mixed_fence_then_claim governed_files= 86 failures, claims = (2, 13)")
+        expect_red("C12 on this tree prints the known stale citations as its worklist",
+                   lambda: all(any(rel in d for d in real_c12.worklists.get("C12", [])) for rel in (
+                       "skills/agent-dispatch/references/deferred.md:88",
+                       "skills/agent-dispatch/references/deferred.md:89",
+                       "skills/git-workflow/references/deferred.md:57",
+                       "skills/git-workflow/references/deferred.md:105",
+                       "skills/git-workflow/references/deferred.md:121",
+                       "skills/pr-review-method/references/deferred.md:97",
+                       "skills/testing-ci/references/deferred.md:79",
+                       "skills/testing-ci/references/deferred.md:147",
+                       "skills/outbound-drafts/SKILL.md:8")))
+        expect_red("the committed baseline carries exactly the 14 live C12 identities",
+                   lambda: load_tool_module("run-skill-evals").load_worklists(ROOT)[1] is None
+                   and len(load_tool_module("run-skill-evals").load_worklists(ROOT)[0]["C12"]) == 14)
+
+        # ---- C13: the coverage manifest accounts for every skill -------------------------
+        cover_root = os.path.join(td, "eval-coverage")
+        for skill in ("alpha", "beta"):
+            os.makedirs(os.path.join(cover_root, "skills", skill))
+            open(os.path.join(cover_root, "skills", skill, "SKILL.md"), "w").write("---\nname: x\n---\n")
+        os.makedirs(os.path.join(cover_root, "skills", "alpha", "evals"))
+        json.dump({"skills": ["alpha"], "query": "q", "files": [], "expected_behavior": ["## Files"]},
+                  open(os.path.join(cover_root, "skills", "alpha", "evals", "001-happy.json"), "w"))
+        os.makedirs(os.path.join(cover_root, "release"))
+        os.makedirs(os.path.join(cover_root, "contracts"))
+        cover_baseline = os.path.join(cover_root, "contracts", "worklists.json")
+
+        def write_cover_baseline(c13):
+            open(cover_baseline, "w").write(json.dumps(
+                {"schema_version": 2, "note": "fixture", "C12": [], "C13": list(c13)}))
+
+        def c13_on(entries, baseline=()):
+            json.dump({"schema_version": 1, "note": "fixture", "skills": entries},
+                      open(os.path.join(cover_root, "release", "evals.json"), "w"))
+            write_cover_baseline(baseline)
+            run = Run(cover_root, ci=True)
+            run.c13_eval_coverage()
+            return run
+
+        listed_all = {"alpha": {"status": "tested", "required": []},
+                      "beta": {"status": "exempt", "reason": "nothing to pin"}}
+        covered = c13_on(listed_all)
+        expect_red("C13 control: every skill listed with an empty baseline is green",
+                   lambda: not covered.failures and not covered.worklists.get("C13"))
+        uncovered = c13_on({"alpha": {"status": "tested", "required": []}})
+        expect_red("C13 goes red naming an unlisted skill the baseline does not carry",
+                   lambda: any(c == "C13" and "unlisted skill beta: not in the baseline" in d
+                               for c, d in uncovered.failures)
+                   and any("unlisted=['beta']" in d for _c, d in uncovered.failures))
+        carried = c13_on({"alpha": {"status": "tested", "required": []}}, baseline=["beta"])
+        expect_red("C13 ratchet: an unlisted skill the baseline carries is green and printed as WORKLIST",
+                   lambda: not carried.failures and carried.worklists.get("C13") == [
+                       "unlisted skill beta: add a tested or exempt entry to release/evals.json and "
+                       "remove it from contracts/worklists.json"])
+        stale_cover = c13_on({"alpha": {"status": "tested", "required": []}}, baseline=["beta", "alpha"])
+        expect_red("C13 ratchet: a baseline naming a listed skill is red (stale)",
+                   lambda: any(c == "C13" and "stale baseline" in d and "lists alpha" in d
+                               for c, d in stale_cover.failures))
+        fixed_cover = c13_on(listed_all, baseline=["beta"])
+        expect_red("C13 ratchet: listing the skill without shrinking the baseline is red",
+                   lambda: any(c == "C13" and "stale baseline" in d for c, d in fixed_cover.failures))
+        shrunk_cover = c13_on(listed_all, baseline=[])
+        expect_red("C13 ratchet: the shrunk baseline matching the shrunk list is green",
+                   lambda: not shrunk_cover.failures)
+        json.dump({"schema_version": 2, "note": "fixture", "skills": {"alpha": {"status": "tested", "required": []}}},
+                  open(os.path.join(cover_root, "release", "evals.json"), "w"))
+        open(cover_baseline, "w").write("{broken")
+        malformed_cover = Run(cover_root, ci=True)
+        malformed_cover.c13_eval_coverage()
+        expect_red("C13 ratchet: a malformed baseline is red and the unlisted skill still reported",
+                   lambda: any(c == "C13" and "cannot apply the ratchet" in d for c, d in malformed_cover.failures)
+                   and any("unlisted skill beta" in d for _c, d in malformed_cover.failures))
+        os.remove(os.path.join(cover_root, "release", "evals.json"))
+        write_cover_baseline([])
+        no_manifest = Run(cover_root, ci=True)
+        no_manifest.c13_eval_coverage()
+        expect_red("C13 fails loud without the manifest",
+                   lambda: any(c == "C13" and "unreadable" in d for c, d in no_manifest.failures))
+        real_c13 = Run(ROOT, ci=True)
+        real_c13.c13_eval_coverage()
+        expect_red("C13 on this tree is green with the five uncovered skills carried by the baseline",
+                   lambda: not real_c13.failures
+                   and sorted(d.split()[2].rstrip(":") for d in real_c13.worklists.get("C13", []))
+                   == ["agent-dispatch", "pr-review-method", "prebid-adcp", "system-design", "testing-ci"])
+
+        # ---- C14: ceilings fail only on growth ---------------------------------------------
+        budget_root = os.path.join(td, "budget")
+        os.makedirs(os.path.join(budget_root, "contracts"))
+        os.makedirs(os.path.join(budget_root, "hooks"))
+        shutil.copyfile(os.path.join(ROOT, "AGENTS.md"), os.path.join(budget_root, "AGENTS.md"))
+        shutil.copyfile(os.path.join(ROOT, "CLAUDE.md"), os.path.join(budget_root, "CLAUDE.md"))
+        shutil.copyfile(os.path.join(ROOT, "hooks", "codex_session_start.py"),
+                        os.path.join(budget_root, "hooks", "codex_session_start.py"))
+        real_record = json.load(open(os.path.join(ROOT, BUDGET_CEILINGS)))
+
+        def c14_on(record):
+            json.dump(record, open(os.path.join(budget_root, BUDGET_CEILINGS), "w"))
+            run = Run(budget_root, ci=True)
+            run.c14_budget_ceilings()
+            return run
+
+        at_record = c14_on(real_record)
+        expect_red("C14 control: the committed record is green on the same policy bytes",
+                   lambda: not at_record.failures)
+        agents_size = os.path.getsize(os.path.join(budget_root, "AGENTS.md"))
+        shrunk = json.loads(json.dumps(real_record))
+        shrunk["ceilings"]["AGENTS.md"]["bytes"] = agents_size - 1
+        over = c14_on(shrunk)
+        expect_red("C14 goes red when AGENTS.md exceeds its recorded ceiling by one byte",
+                   lambda: any(c == "C14" and "AGENTS.md" in d and "grew" in d for c, d in over.failures))
+        grown = json.loads(json.dumps(real_record))
+        grown["ceilings"]["generated-instruction-file"]["bytes"] -= 1
+        over_generated = c14_on(grown)
+        expect_red("C14 goes red when the generated instruction file exceeds its recorded ceiling",
+                   lambda: any(c == "C14" and "generated-instruction-file" in d and "grew" in d
+                               for c, d in over_generated.failures))
+        roomy = json.loads(json.dumps(real_record))
+        roomy["ceilings"]["AGENTS.md"]["bytes"] = agents_size + 1000
+        under = c14_on(roomy)
+        def ceiling_control(module):
+            run = module.Run(budget_root, ci=True)
+            with contextlib.redirect_stdout(io.StringIO()):
+                run.c14_budget_ceilings()
+            return not run.failures and run.ceilings["C14"]["AGENTS.md:bytes"] == {
+                "measured": agents_size, "recorded": agents_size + 1000, "verdict": "shrank"}
+
+        expect_red("C14 control: a ceiling above the measurement passes and reports the surface as shrank",
+                   lambda: ceiling_control(sys.modules[__name__]))
+        drifted = json.loads(json.dumps(real_record))
+        drifted["hard"]["claude-dynamic-block"]["chars"] = 7600
+        hard_drift = c14_on(drifted)
+        expect_red("C14 goes red when the recorded hard ceilings drift from the gate's constants",
+                   lambda: any(c == "C14" and "match the gate's constants: False" in d
+                               for c, d in hard_drift.failures))
+        expect_red("C14 ceilings sit strictly under the runtime caps read from the binaries",
+                   lambda: CLAUDE_DYNAMIC_BLOCK_CHAR_CEILING < CLAUDE_HOOK_CONTEXT_CHAR_CAP
+                   and CLAUDE_DYNAMIC_BLOCK_LINE_CEILING < CLAUDE_HOOK_CONTEXT_LINE_CAP
+                   and PROMPT_SUBMIT_CARRIER_BYTE_CEILING == 600)
+        os.remove(os.path.join(budget_root, BUDGET_CEILINGS))
+        no_record = Run(budget_root, ci=True)
+        no_record.c14_budget_ceilings()
+        expect_red("C14 fails loud without the ceiling record",
+                   lambda: any(c == "C14" and "cannot enforce" in d for c, d in no_record.failures))
+
+        # ---- C15: committed envelopes decode -----------------------------------------------
+        fixture_root = os.path.join(td, "envelopes")
+        shutil.copytree(os.path.join(ROOT, "hooks", "fixtures_codex"),
+                        os.path.join(fixture_root, "hooks", "fixtures_codex"))
+        os.makedirs(os.path.join(fixture_root, "hooks", "fixtures_stop"))
+        shutil.copyfile(os.path.join(ROOT, CLAUDE_STOP_FIXTURE),
+                        os.path.join(fixture_root, CLAUDE_STOP_FIXTURE))
+        c15_clean = Run(fixture_root, ci=True)
+        c15_clean.c15_envelope_fixtures()
+        expect_red("C15 control: the committed fixtures decode", lambda: not c15_clean.failures)
+        # Drop a field that ONLY the required-field list catches. Dropping stop_hook_active
+        # was also caught by the Stop-specific boolean check, so deleting the required-field
+        # clause left this proof green for the neighbour's reason.
+        pre_fixture = os.path.join(fixture_root, "hooks", "fixtures_codex", "C3_pre_tool_use.json")
+        pre_bytes = open(pre_fixture, "rb").read()
+        stripped = json.loads(pre_bytes)
+        del stripped["session_id"]
+        json.dump(stripped, open(pre_fixture, "w"))
+        c15_missing = Run(fixture_root, ci=True)
+        c15_missing.c15_envelope_fixtures()
+        expect_red("C15 goes red when a fixture lacks a field only its schema's required list names",
+                   lambda: any(c == "C15" and "C3_pre_tool_use.json" in d
+                               and "missing required field(s) ['session_id']" in d
+                               for c, d in c15_missing.failures))
+        open(pre_fixture, "wb").write(pre_bytes)
+        stop_fixture = os.path.join(fixture_root, "hooks", "fixtures_codex", "C5_stop.json")
+        stop_bytes = open(stop_fixture, "rb").read()
+        typed = json.loads(stop_bytes)
+        typed["stop_hook_active"] = "false"
+        json.dump(typed, open(stop_fixture, "w"))
+        c15_typed = Run(fixture_root, ci=True)
+        c15_typed.c15_envelope_fixtures()
+        expect_red("C15 goes red when stop_hook_active is present but not a boolean",
+                   lambda: any(c == "C15" and "C5_stop.json" in d and "not a boolean" in d
+                               for c, d in c15_typed.failures))
+        open(stop_fixture, "wb").write(stop_bytes)
+        leaked = json.loads(stop_bytes)
+        leaked["cwd"] = "/" + "Users/someone/project"
+        json.dump(leaked, open(stop_fixture, "w"))
+        c15_leak = Run(fixture_root, ci=True)
+        c15_leak.c15_envelope_fixtures()
+        expect_red("C15 goes red when a fixture carries an absolute host path",
+                   lambda: any(c == "C15" and "absolute host path" in d for c, d in c15_leak.failures))
+        open(stop_fixture, "wb").write(stop_bytes)
+        stray = os.path.join(fixture_root, "hooks", "fixtures_codex", "C9_unregistered.json")
+        open(stray, "w").write("{}")
+        c15_stray = Run(fixture_root, ci=True)
+        c15_stray.c15_envelope_fixtures()
+        expect_red("C15 goes red on a fixture file no table registers",
+                   lambda: any(c == "C15" and "C9_unregistered.json" in d for c, d in c15_stray.failures))
+        os.remove(stray)
+        readme = os.path.join(fixture_root, "hooks", "fixtures_codex", "README.md")
+        readme_bytes = open(readme, "rb").read()
+        open(readme, "w").write("# fixtures\n")
+        c15_unlabeled = Run(fixture_root, ci=True)
+        c15_unlabeled.c15_envelope_fixtures()
+        expect_red("C15 goes red when the synthetic fixture loses its README label",
+                   lambda: any(c == "C15" and "labeled synthetic" in d for c, d in c15_unlabeled.failures))
+        open(readme, "wb").write(readme_bytes)
+
+        # ---- --verify-runtime: a planted wrong anchor goes red -----------------------------
+        def fixture_binary(path, anchors, mutate=None, version=b"// Version: 9.9.9\n"):
+            blob = version + b"\x00".join(anchor[5] for anchor in anchors) + b"\x00"
+            if mutate:
+                blob = mutate(blob)
+            open(path, "wb").write(blob)
+            return path
+
+        claude_fixture = fixture_binary(os.path.join(td, "claude-fixture.bin"), CLAUDE_RUNTIME_ANCHORS)
+        codex_fixture = fixture_binary(os.path.join(td, "codex-fixture.bin"), CODEX_RUNTIME_ANCHORS)
+        buf = io.StringIO()
+        green = verify_runtime(out=buf, claude=[("claude-cli", claude_fixture), ("claude-desktop", claude_fixture)],
+                               codex=[("codex", codex_fixture, "9.9.9")])
+        expect_red("verify-runtime plumbing: fixture binaries assembled from the anchor samples pass",
+                   lambda: green == 0 and "RUNTIME-VERIFY-SUMMARY binaries=3" in buf.getvalue()
+                   and "failures=0" in buf.getvalue())
+        expect_red("verify-runtime reports every catalog scenario as UNVERIFIED with no host evidence",
+                   lambda: buf.getvalue().count("UNVERIFIED ") == len(HOST_SCENARIO_CATALOG) == 14
+                   and "unverified_scenarios=14" in buf.getvalue())
+        wrong_cap = fixture_binary(os.path.join(td, "claude-wrong-cap.bin"), CLAUDE_RUNTIME_ANCHORS,
+                                   mutate=lambda b: b.replace(b"additionalContext:8000", b"additionalContext:9000"))
+        buf = io.StringIO()
+        red = verify_runtime(out=buf, claude=[("claude-cli", wrong_cap), ("claude-desktop", claude_fixture)],
+                             codex=[("codex", codex_fixture, "9.9.9")])
+        expect_red("verify-runtime goes red on a planted wrong hook-output cap",
+                   lambda: red == 1 and "FAIL claude-cli hook_output.cap_table" in buf.getvalue())
+        no_session_end = fixture_binary(os.path.join(td, "claude-no-sessionend.bin"), CLAUDE_RUNTIME_ANCHORS,
+                                        mutate=lambda b: b.replace(b'"SessionEnd",', b""))
+        buf = io.StringIO()
+        verify_runtime(out=buf, claude=[("claude-cli", no_session_end), ("claude-desktop", claude_fixture)],
+                       codex=[("codex", codex_fixture, "9.9.9")])
+        expect_red("verify-runtime goes red when the event enum lacks a registered event",
+                   lambda: "FAIL claude-cli events.registered: event array lacks ['SessionEnd']" in buf.getvalue())
+        no_budget = fixture_binary(os.path.join(td, "codex-no-budget.bin"), CODEX_RUNTIME_ANCHORS,
+                                   mutate=lambda b: b.replace(b"project_doc_max_bytes = 32768", b"project_doc_max_bytes = 65536"))
+        buf = io.StringIO()
+        verify_runtime(out=buf, claude=[("claude-cli", claude_fixture), ("claude-desktop", claude_fixture)],
+                       codex=[("codex", no_budget, "9.9.9")])
+        expect_red("verify-runtime goes red when a Codex needle is absent",
+                   lambda: "FAIL codex project_doc_max_bytes.default: needle absent" in buf.getvalue())
+        wrong_required = fixture_binary(
+            os.path.join(td, "codex-wrong-required.bin"), CODEX_RUNTIME_ANCHORS,
+            mutate=lambda b: b.replace(b'    "session_id",\n    "stop_hook_active",\n    "transcript_path",\n    "turn_id"\n  ],\n  "title": "stop.command.input"',
+                                       b'    "session_id",\n    "transcript_path",\n    "turn_id"\n  ],\n  "title": "stop.command.input"'))
+        buf = io.StringIO()
+        verify_runtime(out=buf, claude=[("claude-cli", claude_fixture), ("claude-desktop", claude_fixture)],
+                       codex=[("codex", wrong_required, "9.9.9")])
+        expect_red("verify-runtime goes red when a Codex schema's required list differs from the record",
+                   lambda: "FAIL codex schema.Stop.required: required [" in buf.getvalue())
+        buf = io.StringIO()
+        absent = verify_runtime(out=buf, claude=[("claude-cli", claude_fixture)], codex=[])
+        expect_red("verify-runtime goes red when a binary class is missing instead of reporting clean",
+                   lambda: absent == 1 and "FAIL no claude-desktop binary found" in buf.getvalue()
+                   and "FAIL no codex binary found" in buf.getvalue())
+        buf = io.StringIO()
+        verify_runtime(out=buf, claude=[("claude-cli", claude_fixture), ("claude-desktop", claude_fixture)],
+                       codex=[("codex", codex_fixture, "9.9.9")],
+                       evidence={("codex", "allow"): {"host": "fixture", "result": "pass"}})
+        expect_red("verify-runtime prints a recorded host scenario as RECORDED and the rest UNVERIFIED",
+                   lambda: "RECORDED codex allow" in buf.getvalue() and "unverified_scenarios=13" in buf.getvalue())
+        expect_red("the Codex event allowlist is exactly the twelve events in the binary's variant run",
+                   lambda: CODEX_VALID_HOOK_EVENTS == set(CODEX_HOOK_INPUT_REQUIRED)
+                   and all(name.encode("ascii") in CODEX_EVENT_VARIANT_RUN for name in CODEX_VALID_HOOK_EVENTS)
+                   and len(CODEX_VALID_HOOK_EVENTS) == 12)
+
+        # ---- harness_health.sh propagates a failing gate ------------------------------------
+        def health_exit(check_rc, verify_rc):
+            root = os.path.join(td, f"health-{check_rc}{verify_rc}")
+            os.makedirs(os.path.join(root, "hooks"))
+            open(os.path.join(root, "hooks", "harness_check.py"), "w").write(
+                f"import sys\nsys.exit({verify_rc} if '--verify-runtime' in sys.argv else {check_rc})\n")
+            done = subprocess.run(["bash", os.path.join(ROOT, "hooks", "harness_health.sh")],
+                                  env=dict(os.environ, ZH_HEALTH_ROOT=root), capture_output=True)
+            log = open(os.path.join(root, "state", "harness-health.log"), encoding="utf-8").read()
+            return done.returncode, log
+
+        health_green, _log = health_exit(0, 0)
+        health_check_red, check_log = health_exit(1, 0)
+        health_verify_red, verify_log = health_exit(0, 1)
+        expect_red("harness_health.sh exits zero when both gate modes pass", lambda: health_green == 0)
+        expect_red("harness_health.sh exits non-zero when the planted gate fails, and says so in the log",
+                   lambda: health_check_red != 0 and "harness_check FAILED (exit 1)" in check_log)
+        expect_red("harness_health.sh exits non-zero when the planted runtime verifier fails",
+                   lambda: health_verify_red != 0 and "--verify-runtime FAILED (exit 1)" in verify_log)
+
+        # ---- assertions that can fail: each control above is re-run against a private copy of
+        # this module carrying one planted defect, and must fail there by name ----------------
+        source_text = open(__file__, encoding="utf-8").read()
+
+        def private_copy(old, new, count=1):
+            if source_text.count(old) != count:
+                raise AssertionError(f"mutation site occurs {source_text.count(old)} time(s), "
+                                     f"expected {count}")
+            module = types.ModuleType("harness_check_mutant")
+            module.__file__ = __file__
+            exec(compile(source_text.replace(old, new), __file__, "exec"), module.__dict__)
+            return module
+
+        # The search strings are assembled, never written whole, so this block does not add
+        # an occurrence of the site it mutates; a wrong count fails the proof by name.
+        this_module = sys.modules[__name__]
+        write_bind_baseline([])
+        c12_on(good)
+        expect_red("mutation: counters['bound'] += 0 fails the bound control (claims == 2, bound == 2) "
+                   "by name",
+                   lambda: bound_control(this_module) and not bound_control(private_copy(
+                       'counters["bound"] ' + '+= 1\n', 'counters["bound"] ' + '+= 0\n', count=2)))
+        write_bind_baseline([unbound_item])
+        c12_on(second_text)
+        expect_red("mutation: the ratchet's new list forced empty fails the new-item control by name",
+                   lambda: new_item_control(this_module) and not new_item_control(private_copy(
+                       "new, stale = evals.ratchet(live, baseline) " + "if worklists is not None else (sorted(live), [])\n",
+                       "new, stale = ([], evals.ratchet(live, baseline)[1]) if worklists is not None else ([], [])\n")))
+        c14_on(roomy)
+        expect_red("mutation: a ceiling verdict that never says shrank fails the C14 control by name",
+                   lambda: ceiling_control(this_module) and not ceiling_control(private_copy(
+                       '("grew" if current > recorded ' + 'else "shrank")',
+                       '("grew" if current > recorded else "equal")')))
+
+        # ---- no expect_red lambda in this suite may carry a fallback clause, iterate an
+        # empty literal or be a constant: that shape passes for a neighbour's reason ----------
+        vacuous = vacuous_expect_red_lines(source_text)
+        expect_red("no expect_red lambda in this suite carries an 'or' fallback, iterates an empty "
+                   "literal or is a constant" + (f" (found at lines {vacuous})" if vacuous else ""),
+                   lambda: vacuous == [])
+        shapes = {
+            "lambda: False or True": True,
+            "lambda: False or (True)": True,
+            "lambda: run.checks == 1 or not run.failures": True,
+            "lambda: all(x for x in [])": True,
+            "lambda: all(x for x in ())": True,
+            "lambda: all(x for x in {})": True,
+            "lambda: all(x for x in set())": True,
+            "lambda: True": True,
+            "lambda: sys.platform == sys.platform or not run.failures": True,
+            'lambda: sys.platform == "darwin" or not run.failures': True,
+            'lambda: other.platform != "darwin" or not run.failures': True,
+            'lambda: sys.version != "darwin" or not run.failures': True,
+            "lambda: sys.platform != 42 or not run.failures": True,
+            "lambda: bool(run.failures) or(bool)": True,
+            "lambda: bool(run.failures) or (bool)": True,
+            "lambda: (bool(run.failures) or\n         (bool))": True,
+            "lambda: any([False or\n    (bool)])": True,
+            "lambda: (a or\n    b or\n(bool))": True,
+            "lambda: (False or  # comment\n    (bool))": True,
+            'lambda: sys.platform != "darwin" or (a and b)': False,
+            'lambda: "x" in (error or "")': False,
+            'lambda: a == 1 or b == 2': False,
+            "lambda: not run.failures and run.checks == 1": False,
+        }
+        verdicts = {shape: bool(vacuous_expect_red_lines(f'expect_red("x", {shape})')) for shape in shapes}
+        expect_red("the lambda sweep rejects each vacuous shape and accepts each sound one"
+                   + "".join(f"; wrong on {s!r}" for s, v in verdicts.items() if v != shapes[s]),
+                   lambda: verdicts == shapes)
+
+        if os.environ.get("ZH_REVIEW_REPRODUCTIONS") == "nested":
+            expect_red("review reproduction 4294811841: not re-run inside the suite run it launched; "
+                       "this run is the reproduction's subject",
+                       lambda: os.environ.get("ZH_REVIEW_REPRODUCTIONS") == "nested")
+        else:
+            expect_red("review reproduction 4294811841: the disabled bound counter fails a named C12 "
+                       "proof in the mutated suite; the baseline and restored suites pass",
+                       lambda: reproduction(4294811841, "mutated bound_control= 0 SELFTEST-SUMMARY "
+                                                        "suite=harness_check checks="))
+
+        if os.environ.get("ZH_REVIEW_REPRODUCTIONS") == "nested":
+            expect_red("a nested suite run launched no reproduction subprocess",
+                       lambda: launched == [])
+        else:
+            expect_red("the top-level suite run launched each of this module's five reproductions once",
+                       lambda: sorted(launched) == [4294811805, 4294811820, 4294811833, 4294811841, 4298561325])
+
+        # --- fence mutants, each failing one shape proof above by name; search strings are
+        # assembled so this block adds no occurrence of the site it mutates
+        any_run_closes = private_copy("                if (closer and closer.group()[0] == char and len(closer.group()) >= "
+                                      + "length\n                        and indent <= k + 3 and not expanded.lstrip(\" \")"
+                                      "[closer.end():].strip(\" \\t\")):\n",
+                                      "                if closer and not expanded.lstrip(\" \")[closer.end():].strip(\" \\t\"):\n")
+        expect_red("mutation: a fence closed by any run swallows the claim after a tilde fence holding "
+                   "a backtick run (the mixed-fence proof goes red)",
+                   lambda: claims_in("~~~text\n```\n~~~\n\n" + fence_claim, any_run_closes) == fence_base)
+        length_ignored = private_copy("[0] == char and len(closer.group()) >= " + "length",
+                                      "[0] == char")
+        expect_red("mutation: a fence closed by a shorter run swallows the claim after a four-backtick "
+                   "fence holding three (the shorter-fence proof goes red)",
+                   lambda: claims_in("````text\n```\n````\n\n" + fence_claim, length_ignored) == fence_base)
+        info_ignored = private_copy(' and not (run.group()[0] == "`" and "`" in ' + 'stripped[run.end():])', "")
+        expect_red("mutation: a backtick run followed by a backtick opening a fence swallows the claim "
+                   "after an inline span (the inline-span proof goes red)",
+                   lambda: claims_in("```AGENTS.md``` is a filename.\n\n" + fence_claim, info_ignored) == fence_base)
+        any_whitespace = private_copy("[closer.end():].strip(" + '" \\t")):\n', "[closer.end():].strip()):\n")
+        expect_red("mutation: stripping any whitespace after a closer makes a no-break space close the fence "
+                   "(the no-break-space proof goes red)",
+                   lambda: claims_in("```\n```\u00a0\n" + fence_claim + "```\n", any_whitespace) == fence_base + 1)
+        any_indent = private_copy('        top_stripped = expanded.lstrip(" ") if indent <= ' + '3 else ""\n',
+                                  '        top_stripped = expanded.lstrip(" ")\n')
+        expect_red("mutation: unrestricted indentation lets a four-space run open a fence and hide the claim "
+                   "(the indentation proof goes red)",
+                   lambda: claims_in("    ```\n" + fence_claim + "\n    ```\n", any_indent) == fence_base)
+        no_html = private_copy('            html_end = html_block_end(stripped, paragraph_' + 'open) if stripped.startswith("<") else None\n',
+                               '            html_end = None\n')
+        no_container_end = private_copy("            if k and line.strip() and indent < " + "k:\n", "            if False:\n")
+        expect_red("mutation: a fence that outlives its list item hides the claim after the list "
+                   "(the list-item proof goes red)",
+                   lambda: claims_in("- item\n  ```\n  code\n\n" + fence_claim, no_container_end) == fence_base)
+        no_marker_opener = private_copy("        if marker and re.match(r\"`{3,}|~{3,}\", " + "expanded[marker.end():]):\n",
+                                        "        if False:\n")
+        expect_red("mutation: ignoring a run after a list marker counts the item's fenced content as prose "
+                   "(the list-item proof goes red)",
+                   lambda: claims_in("- ```\n  " + fence_claim + "  ```\n", no_marker_opener) == fence_base + 1)
+        any_hash_heading = private_copy("        heading = ATX_HEADING.match(line) " + "is not None\n",
+                                        '        heading = line.startswith("#")\n')
+        expect_red("mutation: any `#` line taken as a heading opens no paragraph before `###notheading` and loses "
+                   "the indented-heading cases (the heading proof goes red)",
+                   lambda: claims_in("###notheading\n<custom>\n```\n" + fence_claim, any_hash_heading) == fence_base + 1
+                   or claims_in(" # H\n<custom>\n```\n</custom>\n\n" + fence_claim, any_hash_heading) == fence_base)
+        no_setext = private_copy("        setext = paragraph_open and SETEXT_UNDERLINE.fullmatch(line) is not None " + "and not lazy\n",
+                                 "        setext = False\n")
+        expect_red("mutation: ignoring a setext underline keeps the paragraph open and hides the claim after the "
+                   "next HTML block (the heading proof goes red)",
+                   lambda: claims_in("para\n===\n<custom>\n```\n</custom>\n\n" + fence_claim, no_setext) == fence_base)
+        blank_keeps_paragraph = private_copy("        if not line.strip():\n            paragraph_open = " + "False\n",
+                                             "        if not line.strip():\n            pass\n")
+        table_keeps_paragraph = private_copy("                              or line.lstrip().startswith(" + '"|"))\n', "                              )\n")
+        expect_red("mutation: a blank line or a table row that leaves the paragraph open hides the claim after the "
+                   "next HTML block (the paragraph proof goes red)",
+                   lambda: claims_in("para\n\n<custom>\n```\n</custom>\n\n" + fence_claim, blank_keeps_paragraph) == fence_base
+                   and claims_in("| a | b |\n|---|---|\n| 1 | 2 |\n<custom>\n```\n</custom>\n\n" + fence_claim,
+                                 table_keeps_paragraph) == fence_base)
+        script_closer_off = private_copy('RAW_HTML_TAGS = ("pre", "script", ' + '"style", "textarea")', 'RAW_HTML_TAGS = ("pre", "style", "textarea")')
+        textarea_closer_off = private_copy('RAW_HTML_TAGS = ("pre", "script", "style", ' + '"textarea")', 'RAW_HTML_TAGS = ("pre", "script", "style")')
+        expect_red("mutation: dropping </script> or </textarea> as a raw closer keeps the block open past it "
+                   "(the raw-closer proof goes red)",
+                   lambda: claims_in("<pre>\n```\n</script>\n\n```\n" + fence_claim, script_closer_off) == fence_base + 1
+                   and claims_in("<pre>\n```\n</textarea>\n\n```\n" + fence_claim, textarea_closer_off) == fence_base + 1)
+        closer_before_end = private_copy("            if k and line.strip() and " + "indent < k:\n", "            if False:\n")
+        expect_red("mutation: reading a dedented run as the item's closer hides the prose after the new fence "
+                   "(the list-end proof goes red)",
+                   lambda: claims_in("- ```\n  code\n```\nexample\n```\n\n" + fence_claim, closer_before_end) == fence_base)
+        blank_ends_item = private_copy("            if k and line.strip() and " + "indent < k:\n", "            if k and indent < k:\n")
+        expect_red("mutation: a blank line ending the item exposes the fenced claim after it "
+                   "(the blank-line proof goes red)",
+                   lambda: claims_in("- item\n  ```\n  code\n\n  " + fence_claim + "  ```\n", blank_ends_item) == fence_base + 1)
+        thematic_as_item = private_copy("        marker = None if THEMATIC_BREAK.fullmatch(line) " + "else re.match(",
+                                        "        marker = re.match(")
+        expect_red("mutation: `- - -` read as an item opens a fence under it and hides the claim "
+                   "(the thematic-break proof goes red)",
+                   lambda: claims_in("- - -\n    ```\n  " + fence_claim, thematic_as_item) == fence_base)
+        setext_any_indent = private_copy("        setext = paragraph_open and SETEXT_UNDERLINE.fullmatch(line) is not None and not " + "lazy\n",
+                                         "        setext = paragraph_open and SETEXT_UNDERLINE.fullmatch(line) is not None\n")
+        expect_red("mutation: an underline accepted at any indentation turns lazy continuation into a heading "
+                   "(the setext proof goes red)",
+                   lambda: claims_in("- item\n===\n<custom>\n```\n</custom>\n\n" + fence_claim, setext_any_indent) == fence_base + 1)
+        setext_without_paragraph = private_copy("setext = " + "paragraph_open and SETEXT_UNDERLINE.fullmatch(line) is not None and not lazy\n",
+                                                "setext = SETEXT_UNDERLINE.fullmatch(line) is not None and not lazy\n")
+        expect_red("mutation: an underline with no paragraph open read as a heading exposes the claim after the "
+                   "fence it should have kept (the setext proof goes red)",
+                   lambda: claims_in("===\n<custom>\n```\n" + fence_claim, setext_without_paragraph) == fence_base + 1)
+        declaration_any_case = private_copy('    if re.match(r"<![A-Z]", ' + 'stripped):\n', '    if re.match(r"<![a-zA-Z]", stripped):\n')
+        expect_red("mutation: a case-blind declaration test makes `<!doctype` a block (the declaration proof goes red)",
+                   lambda: claims_in("<!doctype html\n```\n>\n\n" + fence_claim, declaration_any_case) == fence_base + 1)
+        ordered_paren_off = private_copy('[.)]) {1,4}' + '(?=\\S)", expanded)\n', '[.]) {1,2}(?=\\S)", expanded)\n')
+        expect_red("mutation: a marker set without `)` or wider spacing counts the items' fenced content as prose "
+                   "(the marker proof goes red)",
+                   lambda: claims_in("1) ```\n   " + fence_claim + "   ```\n", ordered_paren_off) == fence_base + 1
+                   and claims_in("-   ```\n    " + fence_claim, ordered_paren_off) == fence_base + 1)
+        marker_three_spaces = private_copy('[.)]) {1,4}' + '(?=\\S)", expanded)\n', '[.)]) {1,3}(?=\\S)", expanded)\n')
+        expect_red("mutation: a marker set stopping at three spaces counts a four-space item's fenced content as prose "
+                   "(the marker proof goes red)",
+                   lambda: claims_in("-    ```\n     " + fence_claim, marker_three_spaces) == fence_base + 1)
+        closer_offset_off = private_copy("len(closer.group()) >= length\n                        and indent <= k + " + "3 and not",
+                                         "len(closer.group()) >= length\n                        and indent <= k and not")
+        expect_red("mutation: a closer accepted only at the item's offset leaves the fence open past a closer "
+                   "three columns in (the closer-offset proof goes red)",
+                   lambda: claims_in("- item\n  ```\n  code\n     ```\n  " + fence_claim, closer_offset_off) == fence_base)
+        lazy_ignores_interrupts = private_copy("        lazy = (item_offset is not None and indent < item_offset and bool(line.strip()) and paragraph_open\n                and not " + "interrupts)\n",
+                                               "        lazy = (item_offset is not None and indent < item_offset and bool(line.strip()) and paragraph_open)\n")
+        expect_red("mutation: a lazy exemption blind to interrupting blocks keeps the item open past a heading "
+                   "(the interruption proof goes red)",
+                   lambda: claims_in("- para\n# Heading\n    ```\n  " + fence_claim, lazy_ignores_interrupts) == fence_base)
+        tilde_not_interrupt = private_copy('        top_run = re.match(r"`{3,}|' + '~{3,}", top_stripped)\n',
+                                           '        top_run = re.match(r"`{3,}", top_stripped)\n')
+        expect_red("mutation: a tilde fence that does not interrupt keeps the item open and hides the claim "
+                   "(the tilde-interruption proof goes red)",
+                   lambda: claims_in("- para\n~~~\n~~~\n    ```\n  " + fence_claim, tilde_not_interrupt) == fence_base)
+        inline_run_interrupts = private_copy('                          or (top_run and not (top_run.group()[0] == "`" and "`" in ' + 'top_stripped[top_run.end():]))\n',
+                                             '                          or bool(top_run)\n')
+        expect_red("mutation: an inline backtick run read as an interruption ends the item and exposes the claim "
+                   "(the inline-run proof goes red)",
+                   lambda: claims_in("- para\n```a```\n    ```\n  " + fence_claim, inline_run_interrupts) == fence_base + 1)
+        tag_alone_interrupts = private_copy('                          or (top_stripped.startswith("<") and html_block_end(top_stripped, ' + 'True) is not None))\n',
+                                            '                          or (top_stripped.startswith("<") and html_block_end(top_stripped, False) is not None))\n')
+        expect_red("mutation: a tag standing alone read as an interruption ends the item and exposes the claim "
+                   "(the tag-alone proof goes red)",
+                   lambda: claims_in("- para\n<custom>\n    ```\n  " + fence_claim, tag_alone_interrupts) == fence_base + 1)
+        html_not_interrupt = private_copy('                          or (top_stripped.startswith("<") and html_block_end(top_stripped, True) is not ' + 'None))\n',
+                                          '                          )\n')
+        expect_red("mutation: an HTML block that does not interrupt keeps the item open and hides the claim "
+                   "(the HTML-interruption proof goes red)",
+                   lambda: claims_in("- para\n<!-- c -->\n    ```\n  " + fence_claim, html_not_interrupt) == fence_base)
+        code_threshold_five = private_copy("        indented_code = line.strip() and not paragraph_open and indent - (item_offset or 0) >= " + "4\n",
+                                           "        indented_code = line.strip() and not paragraph_open and indent - (item_offset or 0) >= 5\n")
+        expect_red("mutation: indented code recognised only from five columns opens a paragraph at four and hides the "
+                   "claim (the indented-code proof goes red)",
+                   lambda: claims_in("    code\n<custom>\n```\n</custom>\n\n" + fence_claim, code_threshold_five) == fence_base)
+        code_threshold_three = private_copy("        indented_code = line.strip() and not paragraph_open and indent - (item_offset or 0) " + ">= 4\n",
+                                            "        indented_code = line.strip() and not paragraph_open and indent - (item_offset or 0) >= 3\n")
+        code_ignores_container = private_copy("        indented_code = line.strip() and not paragraph_open and indent - " + "(item_offset or 0) >= 4\n",
+                                              "        indented_code = line.strip() and not paragraph_open and indent >= 4\n")
+        expect_red("mutation: indented code from three columns, or measured from the page inside an item, closes a "
+                   "paragraph that is open and exposes the claim (the boundary proof goes red)",
+                   lambda: claims_in("   para\n<custom>\n```\n" + fence_claim, code_threshold_three) == fence_base + 1
+                   and claims_in("- item\n\n    para\n  <custom>\n  ```\n  " + fence_claim, code_ignores_container) == fence_base + 1)
+        code_opens_paragraph = private_copy("        indented_code = line.strip() and not paragraph_open and " + "indent - (item_offset or 0) >= 4\n",
+                                            "        indented_code = False\n")
+        expect_red("mutation: indented code opening a paragraph hides the claim after the next HTML block "
+                   "(the indented-code proof goes red)",
+                   lambda: claims_in("    code\n<custom>\n```\n</custom>\n\n" + fence_claim, code_opens_paragraph) == fence_base)
+        continuation_branch_off = private_copy("        elif item_offset is not None and indent >= item_offset and indent - item_offset <= 3:\n            stripped = " + "expanded.lstrip(\" \")\n",
+                                               "        elif False:\n            pass\n")
+        expect_red("mutation: without the continuation branch an opener three columns past the item's offset is "
+                   "prose (the opener-offset proof goes red)",
+                   lambda: claims_in("- item\n     ```\n     " + fence_claim, continuation_branch_off) == fence_base + 1)
+        prose_as_paragraph = private_copy("html_block_end(stripped, " + "paragraph_open)", "html_block_end(stripped, bool(current))")
+        expect_red("mutation: accumulated prose taken as an open paragraph hides the claim after a closed HTML block "
+                   "(the paragraph-state proof goes red)",
+                   lambda: claims_in("<pre>\n```\n</pre>\n<custom>\n```\n</custom>\n\n" + fence_claim, prose_as_paragraph)
+                   == fence_base)
+        no_same_line_end = private_copy("                if html_end(line):  # a block of the first five kinds may end on its " + "opening line\n",
+                                        "                if False:\n")
+        expect_red("mutation: an HTML block kept open past its one-line end swallows the fence that follows "
+                   "(the opening-line proof goes red)",
+                   lambda: claims_in("<pre></pre>\n```\n" + fence_claim, no_same_line_end) == fence_base + 1)
+        opener_tag_only = private_copy('        return lambda line: any(f"</{tag}>" in line.lower() for tag in ' + 'RAW_HTML_TAGS)\n',
+                                       '        return lambda line: f"</{raw.group(1)}>" in line.lower()\n')
+        expect_red("mutation: a raw block ended only by its opener's tag keeps </style> content as prose "
+                   "(the closing-tag proof goes red)",
+                   lambda: claims_in("<pre>\n```\n</style>\n\n```\n" + fence_claim, opener_tag_only) == fence_base + 1)
+        cdata_lowercase = private_copy('    if stripped.startswith("<![CDATA[' + '"):\n', '    if lower.startswith("<![cdata["):\n')
+        expect_red("mutation: a case-blind CDATA test makes the lowercase spelling an HTML block "
+                   "(the CDATA proof goes red)",
+                   lambda: claims_in("<![cdata[\n```\n" + fence_claim, cdata_lowercase) == fence_base + 1)
+        raw_off = private_copy('    raw = re.match(r"<(pre|script|style|' + 'textarea)', '    raw = None and re.match(r"<(pre|script|style|textarea)')
+        expect_red("mutation: without the raw-block condition a <script> body is not a block, so its run opens a "
+                   "fence (the start-condition proof goes red)",
+                   lambda: claims_in("<script>\n```\n" + fence_claim + "</script>\n", raw_off) == fence_base)
+        processing_off = private_copy('    if lower.startswith("<?' + '"):\n', '    if False:\n')
+        declaration_off = private_copy('    if re.match(r"<![A-Z]", ' + 'stripped):\n', '    if False:\n')
+        cdata_off = private_copy('    if stripped.startswith("<![CDATA[' + '"):\n', '    if False:\n')
+        known_tags_off = private_copy('    if tag and tag.group(1) in ' + 'HTML_BLOCK_TAGS:\n', '    if False:\n')
+        expect_red("mutation: dropping the processing-instruction, declaration, CDATA or known-tag condition lets "
+                   "the run inside each open a fence (the start-condition proof goes red)",
+                   lambda: claims_in("<?x\n```\n?>\n\n" + fence_claim, processing_off) == fence_base
+                   and claims_in("<!X\n```\n>\n\n" + fence_claim, declaration_off) == fence_base
+                   and claims_in("<![CDATA[\n```\n]]>\n\n" + fence_claim, cdata_off) == fence_base
+                   and claims_in("para\n<div>\n```\n" + fence_claim, known_tags_off) == fence_base)
+        expect_red("mutation: ignoring HTML blocks lets a run inside <pre> open a fence and hide the claim "
+                   "(the HTML-block proof goes red)",
+                   lambda: claims_in("<pre>\n```\n</pre>\n\n" + fence_claim, no_html) == fence_base)
+
     # +1 for this assertion's own increment, so SELFTEST_FLOOR is the number the receipt
     # prints. Comparing the pre-increment count made the floor one less than the reported
     # total, which reads as a wrong floor every time either number is updated.
@@ -4678,6 +7151,11 @@ def main(argv):
         return 0
     if args and args[0] == "--selftest":
         return selftest()
+    if args and args[0] == "--verify-runtime":
+        if len(args) > 1:
+            sys.stderr.write(f"unknown argument: {args[1]!r}\nrun --help\n")
+            return 2
+        return verify_runtime()
     ci = False
     if args and args[0] == "--ci":
         ci = True

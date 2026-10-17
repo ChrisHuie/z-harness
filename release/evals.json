@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "note": "Eval coverage manifest. Every skill under skills/ is listed here as tested or exempt; run-skill-evals --validate and harness_check C13 fail for any skill that is absent. A tested skill has scenarios under skills/<name>/evals/; an exempt skill has none and carries the reason. `required` names scenario files whose every expected behavior must grade mechanically under --run; an ungraded required scenario makes --run exit non-zero. The renderer rejects unknown SKILL.md frontmatter keys, so coverage lives here and never in frontmatter.",
+  "skills": {
+    "craft-context-file": {"status": "tested", "required": []},
+    "craft-prompt": {"status": "tested", "required": []},
+    "craft-skill": {"status": "tested", "required": []},
+    "git-workflow": {"status": "tested", "required": []},
+    "ground-claims": {"status": "tested", "required": []},
+    "outbound-drafts": {"status": "tested", "required": []},
+    "review-prompt": {"status": "tested", "required": []}
+  }
+}

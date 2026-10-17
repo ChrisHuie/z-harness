@@ -59,7 +59,7 @@ EVAL_SKILL_FLOOR = 7
 # 165 here and 178 in harness_check -- and a fake that hardcodes its own number tests the
 # literal rather than the contract.
 SUITE_FLOORS = {
-    "harness_check": 236,
+    "harness_check": 427,
     "render-packages": 192,
     "bash_command_guard": 1865,
     "credential_reach_guard": 84,
@@ -982,7 +982,7 @@ def command_specs(render_root: Path) -> List[Tuple[List[str], ReceiptSpec]]:
                 re.compile(
                     r"^EVAL-VALIDATE-SUMMARY scenarios=(?P<scenarios>\d+) "
                     r"skills=(?P<skills>\d+) failures=(?P<failures>\d+) "
-                    r"scope=shape-only exit=(?P<exit>\d+)$"
+                    r"scope=shape-and-coverage exit=(?P<exit>\d+)$"
                 ),
                 lambda match, code: (
                     f"eval corpus shrank: scenarios={match.group('scenarios')} "
@@ -2219,6 +2219,7 @@ REGISTERED_REVIEW_PATHS = frozenset({
     "pr-28/frozen-publication.json",
     "pr-29/frozen-publication.json",
     "pr-30/frozen-publication.json",
+    "pr-36/frozen-publication.json",
 })
 HANDOFF_DOCTRINE = {
     "AGENTS.md": (
@@ -5253,7 +5254,7 @@ def selftest() -> int:
             return Result(0, f"SELFTEST-SUMMARY suite=credential_reach_guard checks={SUITE_FLOORS['credential_reach_guard']} failures=0\n")
         if "run-skill-evals.py" in joined:
             return Result(0, f"EVAL-VALIDATE-SUMMARY scenarios={EVAL_SCENARIO_FLOOR} "
-                          f"skills={EVAL_SKILL_FLOOR} failures=0 scope=shape-only exit=0\n")
+                          f"skills={EVAL_SKILL_FLOOR} failures=0 scope=shape-and-coverage exit=0\n")
         if "--output" in argv:
             return Result(0, "RENDER-SUMMARY action=render targets=5 failures=0 exit=0\n")
         return Result(0, "RENDER-SUMMARY action=verify targets=5 failures=0 exit=0\n")
@@ -5289,13 +5290,13 @@ def selftest() -> int:
     def shrunken_scenario_runner(argv):
         if "run-skill-evals.py" in " ".join(argv):
             return Result(0, f"EVAL-VALIDATE-SUMMARY scenarios={EVAL_SCENARIO_FLOOR - 1} "
-                          f"skills={EVAL_SKILL_FLOOR} failures=0 scope=shape-only exit=0\n")
+                          f"skills={EVAL_SKILL_FLOOR} failures=0 scope=shape-and-coverage exit=0\n")
         return fake_runner(argv)
 
     def shrunken_skill_runner(argv):
         if "run-skill-evals.py" in " ".join(argv):
             return Result(0, f"EVAL-VALIDATE-SUMMARY scenarios={EVAL_SCENARIO_FLOOR} "
-                          f"skills={EVAL_SKILL_FLOOR - 1} failures=0 scope=shape-only exit=0\n")
+                          f"skills={EVAL_SKILL_FLOOR - 1} failures=0 scope=shape-and-coverage exit=0\n")
         return fake_runner(argv)
 
     expect(

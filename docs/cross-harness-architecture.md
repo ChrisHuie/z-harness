@@ -220,15 +220,14 @@ fabricate both in-repo job classes. Reviewer inspection or an externally adminis
 workflow must govern that boundary. GitHub manages the image contents behind those labels, and this
 repository cannot prove that the jobs are required by branch protection.
 
-The `mutation-proof` workflow accepts pull requests, pushes to `main`, and manual dispatches,
-checks out the exact accepted head, and runs the deterministic guard-mutation plan in fifteen
-private-tree shards every time. Its `if: always()` aggregate job
+No workflow runs the guard-mutation sweep. `tools/write-mutation-receipt.py` runs it by hand,
+sharded with `--shard-index` and `--shard-count` and aggregated with `--aggregate`; the aggregate
 rejects missing, duplicated, overlapping, foreign, or stale fragment IDs and shards measured under
 different tool versions, recomputes the raw suite outcomes, and holds that head's observation against
 the reviewed `contracts/mutation-policy.json`. The observation is reported and never committed, which
 keeps host evidence apart from the canonical source as the rest of this architecture does. The
 offline gate validates the policy against the current plan and requires every module a registered
-hook runs to be swept or listed as unswept; it does not rerun the full mutation plan.
+hook runs to be swept or listed as unswept; it does not run the mutation plan.
 
 The workflow also declares an Ubuntu `portable-conformance` job. It is networked and fail-closed,
 and its lock pins the Agent Skills source archive, `skills-ref` sources and dependency-wheel closure,

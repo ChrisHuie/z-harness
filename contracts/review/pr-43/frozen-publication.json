@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "kind": "pull-request-frozen-publication",
+  "repo": "ChrisHuie/z-harness",
+  "pr": 43,
+  "frozen_at_head": "3ed5a3440f325686b3c6f5985719dd4df9c982a0",
+  "body_bytes": 1030,
+  "body_sha256": "79ecc07c893dcd9f638a89066f289b0cc381451ca885204d06b4a03b21afea37",
+  "title_bytes": 58,
+  "title_sha256": "9adea3b775b92b50d872fd6c951cde0a36fee8b6e69209bd429c0a03cb1b2c3f",
+  "note": "The body and title bytes were frozen when the append-only publication rule was adopted at this observed head. Later review narrative, corrections, and exact-head evidence are append-only pull-request comments."
+}

@@ -154,6 +154,12 @@ PR scope is a contract. Include every caller and fixture broken by the principal
 unrelated discoveries into separate work. Commit a breaking constraint with the fixes it requires
 so intermediate commits do not leave the tree red.
 
+A review thread is closed by the narrowest check that refuses every shape it does not model,
+never by modelling the interpreter, the parser, or the protocol more fully. One read-only closure
+pass per round; a second pass, or any widening of the model, is a scope decision that needs
+Chris's words first. A pass that finds a new corner case each time is a signal that the check has
+the wrong shape, not that it needs another pass.
+
 ## Output
 
 Anything bound for GitHub contains technical facts only. Omit internal strategy, motive,

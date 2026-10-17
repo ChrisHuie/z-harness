@@ -7,7 +7,7 @@ review is large, is a dependency bump, is a port between repos, is a tooling/CLI
 a design or spec document, or when you are about to call something pre-existing, clean, or
 out of scope.
 
-The ten names cited from the body are marked `[body]`.
+The eleven names cited from the body are marked `[body]`.
 
 ---
 
@@ -75,6 +75,14 @@ the inputs and environment that defeat it, and **run it end-to-end on real input
 unit tests mock exactly the environment-bound layer where these bugs live. Catalog-driven
 review is strong at "does this violate a known pattern" and weak at "what invariant should
 this guarantee that nobody wrote down".
+
+## closure pass `[body]`
+
+Close a review thread with the narrowest check that refuses every shape it does not model,
+run **one** read-only pass on the fix, and report. A pass that finds a new corner case each
+time is a signal that the check has the wrong shape, not that it needs another pass: every
+further case goes to Chris as a scope question, never into another commit. Twelve passes on a
+six-file change is the failure this rule names.
 
 ## port norms `[body]`
 

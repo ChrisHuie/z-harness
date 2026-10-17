@@ -8,8 +8,6 @@ grammar, generated messages, and both compared sources by SHA-256.
 from __future__ import annotations
 
 import argparse
-import ast
-import copy
 import contextlib
 import hashlib
 import io
@@ -110,9 +108,7 @@ POSTGROUP_MODIFIERS = (
 # diverges at the minimum case count. That is a guarantee for those three tables and those
 # tokens, and it is the only guarantee here. Widening anything else may or may not diverge,
 # depending on whether some grammar string happens to spell the admitted token into a
-# position the guard reads -- measured, `REPORT_ACTIVITY_HEADS` widened with `three` is
-# caught that way, and `REPORT_TERMS` widened with a non-near-miss token is too. Do not read
-# a clean run over an unpinned table as coverage.
+# position the guard reads. Do not read a clean run over an unpinned table as coverage.
 POSTGROUP_CONTEXTS = (
     ("in", "CI"), ("in", "production"), ("in", "staging"),
     ("on", "GitHub"), ("on", "macos"),
@@ -123,8 +119,8 @@ POSTGROUP_CONTEXTS = (
 # instead and score a control that cannot fail. The context PREPOSITIONS (`in`, `on`) are
 # necessarily the guard's own: they are the keys its context table is indexed by. A grammar seeded only from
 # the tables it tests can detect a narrowed table (a generated token stops being admitted)
-# but never a widened one, because it never emits the token a widening would newly admit --
-# the same blind spot a deletion-only mutation operator has. These near-misses are the allow-direction
+# but never a widened one, because it never emits the token a widening would newly admit.
+# These near-misses are the allow-direction
 # control: each must block today, and starts allowing the moment its table grows to cover it.
 NEAR_MISS_TERMS = ("emitted", "surfaced", "yielded")
 NEAR_MISS_MODIFIERS = ("hastily", "briskly", "loudly", "oddly", "wearily")
@@ -465,69 +461,6 @@ def classify(oracle: str | None, candidate: str | None) -> str:
     return "agreement"
 
 
-def guard_table_literal(tree: ast.Module, table_name: str,
-                        context_key: str | None = None) -> ast.Set:
-    """Return one parsed frozenset literal owned by a named guard table."""
-    assignments = [
-        node for node in tree.body
-        if isinstance(node, ast.Assign)
-        and any(isinstance(target, ast.Name) and target.id == table_name
-                for target in node.targets)
-    ]
-    if len(assignments) != 1:
-        raise RuntimeError(f"expected one assignment for {table_name}, got {len(assignments)}")
-    value = assignments[0].value
-    if context_key is not None:
-        if not isinstance(value, ast.Dict):
-            raise RuntimeError(f"{table_name} is not a literal dictionary")
-        matches = [item for key, item in zip(value.keys, value.values)
-                   if isinstance(key, ast.Constant) and key.value == context_key]
-        if len(matches) != 1:
-            raise RuntimeError(
-                f"expected one {table_name}[{context_key!r}] entry, got {len(matches)}")
-        value = matches[0]
-    if (not isinstance(value, ast.Call) or not isinstance(value.func, ast.Name)
-            or value.func.id != "frozenset" or len(value.args) != 1
-            or not isinstance(value.args[0], ast.Set)):
-        raise RuntimeError(f"{table_name} target is not a literal frozenset")
-    return value.args[0]
-
-
-def widen_guard_table(source: bytes, table_name: str, token: str,
-                      context_key: str | None = None) -> bytes:
-    """Add one literal to one shipped guard table using its parsed source span."""
-    text = source.decode("utf-8")
-    tree = ast.parse(text)
-    literal_set = guard_table_literal(tree, table_name, context_key)
-    members = [item.value for item in literal_set.elts
-               if isinstance(item, ast.Constant) and isinstance(item.value, str)]
-    if len(members) != len(literal_set.elts) or token in members:
-        raise RuntimeError(f"{table_name} cannot be widened with {token!r}")
-    lines = text.splitlines(keepends=True)
-    line_index = literal_set.end_lineno - 1
-    closing = literal_set.end_col_offset - 1
-    if lines[line_index][closing] != "}":
-        raise RuntimeError(f"{table_name} parsed span does not end at its set closer")
-    offset = sum(len(line) for line in lines[:line_index]) + closing
-    separator = "" if text[:offset].rstrip().endswith(",") else ","
-    widened = text[:offset] + f"{separator} {token!r}," + text[offset:]
-    widened_tree = ast.parse(widened)
-    widened_set = guard_table_literal(widened_tree, table_name, context_key)
-    added = [item for item in widened_set.elts
-             if isinstance(item, ast.Constant) and item.value == token]
-    if len(added) != 1 or len(widened_set.elts) != len(literal_set.elts) + 1:
-        raise RuntimeError(f"{table_name} widening did not add exactly one literal")
-    normalized = copy.deepcopy(widened_tree)
-    normalized_set = guard_table_literal(normalized, table_name, context_key)
-    normalized_set.elts = [item for item in normalized_set.elts
-                           if not (isinstance(item, ast.Constant)
-                                   and item.value == token)]
-    if ast.dump(normalized, include_attributes=False) != ast.dump(
-            tree, include_attributes=False):
-        raise RuntimeError(f"{table_name} widening changed more than one AST literal")
-    return widened.encode("utf-8")
-
-
 def silence_failed_stream(stream) -> None:
     """Prevent interpreter-shutdown retries from turning a handled pipe fault into 120."""
     try:
@@ -635,8 +568,8 @@ def compare(oracle_path: Path, candidate_path: Path, seed: int, count: int,
         # allow-to-block, so "no block-to-allow divergence" is entailed by the run rather
         # than measured by it. The `counts` block is then identical to a real clean
         # comparison, so before this check existed the summary line could not tell them
-        # apart even though the full reports differed elsewhere. The sibling instrument refuses a non-green
-        # baseline for the same reason. Fail as an instrument error, not as a verdict.
+        # apart even though the full reports differed elsewhere. Fail as an instrument
+        # error, not as a verdict.
         raise RuntimeError(
             f"oracle blocked none of {len(cases)} generated cases, so this run has no "
             "power to detect a block-to-allow divergence")
@@ -830,8 +763,8 @@ def selftest() -> int:
                 "private worker or guard changed during oracle execution" in str(exc))
         check("an oracle cannot rewrite the worker later used for the candidate",
               rejected_worker_rewrite)
-        seam_mutant = root / "seam-mutant.py"
-        seam_mutant.write_text(
+        seam_regression = root / "seam-regression.py"
+        seam_regression.write_text(
             "def judge(payload):\n"
             "    message = payload['last_assistant_message']\n"
             "    return 'Running the' if any(f' {word} ' in message for word in "
@@ -839,21 +772,21 @@ def selftest() -> int:
             "'silently', 'unexpectedly')) else None\n",
             encoding="utf-8",
         )
-        seam_report = compare(guard, seam_mutant, 9, MIN_CASES, 5)
+        seam_report = compare(guard, seam_regression, 9, MIN_CASES, 5)
         check("the grammar exposes a post-group modifier bridge regression",
               seam_report["counts"]["allow-to-block"] > 0
               and any(item["production"] == "post-group-modifier"
                       and item["classification"] == "allow-to-block"
                       for item in seam_report["results"]))
-        tail_mutant = root / "tail-mutant.py"
-        tail_mutant.write_text(
+        tail_regression = root / "tail-regression.py"
+        tail_regression.write_text(
             "def judge(payload):\n"
             "    message = payload['last_assistant_message']\n"
             "    return 'Running the' if any(f') {word} ' in message for word in "
             "('after', 'at', 'with')) else None\n",
             encoding="utf-8",
         )
-        tail_report = compare(guard, tail_mutant, 9, MIN_CASES, 5)
+        tail_report = compare(guard, tail_regression, 9, MIN_CASES, 5)
         check("the grammar exposes a grouped-result tail regression",
               tail_report["counts"]["allow-to-block"] > 0
               and any(item["production"] == "colon-group-result-tail"
@@ -902,7 +835,7 @@ def selftest() -> int:
             honoured.append(wanted in prefix[index]["message"])
         check("each pinned mandatory case renders the token its pin names", all(honoured))
         # Two assertions, because comparing the realized share against FLAT_SHARE alone
-        # grades the code against the very constant a mutation moves: at 0.0 and at 1.0 the
+        # grades the code against the very constant an edit can move: at 0.0 and at 1.0 the
         # measurement tracks the constant perfectly and the check passes while the random
         # arm is gone. Pin the constant to a band first, then pin the code to the constant.
         check("FLAT_SHARE leaves both the random and structured arms represented",
@@ -939,9 +872,10 @@ def selftest() -> int:
         # shipped guard. Skipped, with the reason recorded, when the guard is not beside us,
         # so the instrument still runs against an arbitrary pair of judges.
         shipped_guard = Path(__file__).resolve().parent.parent / "hooks/announced_work_guard.py"
-        widening_results = {"modifiers": [], "contexts": [], "terms": []}
+        pair_results = {production: [] for production in MANDATORY_VOCABULARIES}
         grouped_historical_blocks = []
-        grouped_historical_mutant_exposed = False
+        historical_pairs = []
+        compound_pairs = []
         if shipped_guard.exists():
             judged = load_guard(shipped_guard, source_digest(shipped_guard))
             near_miss_cases = [
@@ -961,78 +895,43 @@ def selftest() -> int:
                 for case in grouped_historical
             ]
 
-            shipped_source = shipped_guard.read_bytes()
-
-            def exercises_actual_widening(table, token, production, context_key=None):
-                # Mutation power and worker isolation are separate contracts. The worker
-                # path is exercised below; loading each private one-literal mutant here
-                # avoids two fresh interpreter starts per token while retaining the exact
-                # generated-case and block-to-allow classification used by the report.
-                candidate = root / f"widened-{table.lower()}-{token}.py"
-                candidate_source = widen_guard_table(
-                    shipped_source, table, token, context_key)
-                candidate.write_bytes(candidate_source)
-                candidate_sha256 = source_bytes_digest(candidate_source)
-                widened = load_guard(candidate, candidate_sha256, shipped_guard)
-                exposed = any(
-                    case["production"] == production
-                    and token.casefold() in case["message"].casefold()
-                    and classify(
-                        judged.judge({"last_assistant_message": case["message"]}),
-                        widened.judge({"last_assistant_message": case["message"]}),
-                    ) == "block-to-allow"
-                    for case in prefix
-                )
-                if source_digest(candidate) != candidate_sha256:
-                    raise RuntimeError(f"widened guard changed during {table} evaluation")
-                return exposed
-
-            widening_results["modifiers"] = [
-                exercises_actual_widening(
-                    "REPORT_POSTGROUP_MODIFIERS", token, "post-group-near-miss")
-                for token in NEAR_MISS_MODIFIERS
-            ]
-            widening_results["contexts"] = [
-                exercises_actual_widening(
-                    "REPORT_POSTGROUP_CONTEXTS", obj, "colon-context-near-miss", prep)
-                for prep, obj in NEAR_MISS_CONTEXTS
-            ]
-            widening_results["terms"] = [
-                exercises_actual_widening(
-                    "REPORT_TERMS", token, "report-term-near-miss")
-                for token in NEAR_MISS_TERMS
-            ]
-            historical_anchor = (
-                b"        if word in REPORT_TERMS:\n"
-                b"            if grouped_historical_subject:\n"
-                b"                return False"
-            )
-            historical_replacement = (
-                b"        if word in REPORT_TERMS:\n"
-                b"            if False and grouped_historical_subject:\n"
-                b"                return False"
-            )
-            if shipped_source.count(historical_anchor) == 1:
-                historical_mutant = root / "grouped-historical-subject-mutant.py"
-                historical_source = shipped_source.replace(
-                    historical_anchor, historical_replacement, 1)
-                historical_mutant.write_bytes(historical_source)
-                historical_sha256 = source_bytes_digest(historical_source)
-                historical_judge = load_guard(
-                    historical_mutant, historical_sha256, shipped_guard)
-                grouped_historical_mutant_exposed = any(
-                    classify(
-                        judged.judge({"last_assistant_message": case["message"]}),
-                        historical_judge.judge(
-                            {"last_assistant_message": case["message"]}),
-                    ) == "block-to-allow"
-                    for case in grouped_historical
-                )
-                if source_digest(historical_mutant) != historical_sha256:
-                    raise RuntimeError("historical guard changed during evaluation")
+            # Each pinned near-miss case is paired with the same message carrying, in the
+            # token's place, one word the guard's table does hold. The unchanged shipped
+            # guard must block the near-miss and allow the sibling: the two messages differ
+            # only in that word, so the pair shows the grammar spells the token where that
+            # table is read.
+            in_table_sibling = {
+                "post-group-near-miss": "quickly",      # REPORT_POSTGROUP_MODIFIERS
+                "colon-context-near-miss": "ci",        # REPORT_POSTGROUP_CONTEXTS
+                "report-term-near-miss": "produced",    # REPORT_TERMS
+            }
+            for index, (production, _group, pin) in enumerate(MANDATORY_CASES):
+                if production not in MANDATORY_VOCABULARIES or pin is None:
+                    continue
+                token = MANDATORY_VOCABULARIES[production][pin]
+                word = token if isinstance(token, str) else token[1]
+                message = prefix[index]["message"]
+                sibling = message.replace(f" {word} ", f" {in_table_sibling[production]} ", 1)
+                pair_results[production].append(
+                    message.count(f" {word} ") == 1
+                    and judged.judge({"last_assistant_message": message}) is not None
+                    and judged.judge({"last_assistant_message": sibling}) is None)
+            # A grouped historical subject owns the report term after it; the same message
+            # with the marker dropped, or with a non-head word between marker and head,
+            # reports the announced activity and allows.
+            historical_pairs = [
+                judged.judge({"last_assistant_message": case["message"]}) is not None
+                and judged.judge({"last_assistant_message":
+                                  case["message"].replace("the prior run", "the run", 1)}) is None
+                for case in grouped_historical if "the prior run" in case["message"]]
+            compound_pairs = [
+                judged.judge({"last_assistant_message": case["message"]}) is not None
+                and judged.judge({"last_assistant_message": case["message"].replace(
+                    "prior test suite", "prior flaky suite", 1)}) is None
+                for case in grouped_historical if "prior test suite" in case["message"]]
         else:
             # Fail rather than skip. A silent pass here would report the binding as verified
-            # in exactly the copied-tree setup a reviewer uses to mutate this file, which is
+            # in exactly the copied-tree setup a reviewer uses to run this file alone, which is
             # where a dead control most needs to be visible.
             check("the shipped guard is beside this file, so the near-miss binding is"
                   " verifiable", False)
@@ -1041,45 +940,19 @@ def selftest() -> int:
               == (len(GROUPS) * len(GROUPED_HISTORICAL_SUBJECTS)
                   * len(GROUPED_HISTORICAL_SUFFIXES))
               and all(grouped_historical_blocks))
-        check("grouped historical-subject productions expose the ownership mutant",
-              grouped_historical_mutant_exposed)
-        compound_anchor = (
-            b"           and (prefix[marker_cursor] in REPORT_GROUP_ACTIVITY_MODIFIERS\n"
-            b"                or prefix[marker_cursor] in REPORT_ACTIVITY_HEADS))"
-        )
-        compound_replacement = (
-            b"           and prefix[marker_cursor] in REPORT_GROUP_ACTIVITY_MODIFIERS)"
-        )
-        compound_mutant_exposed = False
-        if shipped_source.count(compound_anchor) == 1:
-            compound_mutant = root / "grouped-historical-compound-mutant.py"
-            compound_source = shipped_source.replace(
-                compound_anchor, compound_replacement, 1)
-            compound_mutant.write_bytes(compound_source)
-            compound_sha256 = source_bytes_digest(compound_source)
-            compound_judge = load_guard(
-                compound_mutant, compound_sha256, shipped_guard)
-            compound_mutant_exposed = any(
-                "prior test suite" in case["message"]
-                and classify(
-                    judged.judge({"last_assistant_message": case["message"]}),
-                    compound_judge.judge(
-                        {"last_assistant_message": case["message"]}),
-                ) == "block-to-allow"
-                for case in grouped_historical
-            )
-            if source_digest(compound_mutant) != compound_sha256:
-                raise RuntimeError("compound historical guard changed during evaluation")
-        check("grouped historical-subject productions expose activity-head traversal loss",
-              compound_mutant_exposed)
-        for token, exposed in zip(NEAR_MISS_MODIFIERS,
-                                  widening_results["modifiers"]):
-            check(f"actual modifier-table widening exposes {token!r}", exposed)
-        for (_prep, obj), exposed in zip(NEAR_MISS_CONTEXTS,
-                                         widening_results["contexts"]):
-            check(f"actual context-table widening exposes {obj!r}", exposed)
-        for token, exposed in zip(NEAR_MISS_TERMS, widening_results["terms"]):
-            check(f"actual report-table widening exposes {token!r}", exposed)
+        check("grouped historical-subject cases block only while the grouped subject is historical",
+              len(historical_pairs) == len(GROUPS) * len(GROUPED_HISTORICAL_SUFFIXES)
+              and all(historical_pairs))
+        check("grouped historical-subject cases reach their marker across an activity head",
+              len(compound_pairs) == len(GROUPS) * len(GROUPED_HISTORICAL_SUFFIXES)
+              and all(compound_pairs))
+        for token, paired in zip(NEAR_MISS_MODIFIERS, pair_results["post-group-near-miss"]):
+            check(f"near-miss modifier {token!r} blocks where an in-table modifier allows", paired)
+        for (_prep, obj), paired in zip(NEAR_MISS_CONTEXTS,
+                                        pair_results["colon-context-near-miss"]):
+            check(f"near-miss context {obj!r} blocks where an in-table context allows", paired)
+        for token, paired in zip(NEAR_MISS_TERMS, pair_results["report-term-near-miss"]):
+            check(f"near-miss report term {token!r} blocks where an in-table term allows", paired)
         fail_open = root / "fail-open.py"
         fail_open.write_text("def judge(payload): return None\n", encoding="utf-8")
         fail_open_report = compare(guard, fail_open, 9, MIN_CASES, 5)

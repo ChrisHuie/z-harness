@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""bash_command_guard — one Claude/Codex PreToolUse spawn, two proven predicates.
+"""bash_command_guard — one Claude/Codex PreToolUse spawn, three proven predicates.
 
 Merged because each guard costs ~23 ms of cold Python spawn on EVERY Bash call;
 two scripts is ~46 ms for no benefit. The predicates are independent and both work
@@ -15,6 +15,10 @@ Guards, each with its own fixtures and red-proof in guards/:
                             POSIX ERE has no such atoms; the pattern silently matches
                             the wrong thing or nothing. 332 corpus events, 19 followed
                             within 3 records by a shipped absence claim.
+  mutation_testing_guard  — running or installing a tool the AGENTS.md verification
+                            ban names. Denied for every caller on both runtimes, asked
+                            about when the command word or the source cannot be read;
+                            its suite pins the spellings and prints what it does not model.
 
 Precedence: deny > ask > allow. Reasons from every guard that fired are concatenated,
 so a command tripping both is told about both.
@@ -45,17 +49,19 @@ import time
 # The runtime's hook timeout runs from process start, so the decision deadline is anchored
 # here, before the guard modules below are imported, rather than when a decision begins.
 PROCESS_STARTED = time.monotonic()
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 RUNTIMES = {"claude", "codex"}
 sys.path.insert(0, str(pathlib.Path(__file__).parent / "guards"))
 
 import zsh_rev_modifier_guard as zsh_guard      # noqa: E402
 import git_grep_engine_guard as grep_guard      # noqa: E402
 import credential_reach_guard as cred_guard     # noqa: E402
+import mutation_testing_guard as mutation_guard  # noqa: E402
 
 GUARDS = [
     ("zsh_rev_modifier", zsh_guard),
     ("git_grep_engine", grep_guard),
+    ("mutation_testing", mutation_guard),
 ]
 RANK = {"allow": 0, "ask": 1, "deny": 2}
 PROCESS_GREP_COMMAND = "git grep -E 'harness\\b' -- README.md"
@@ -78,10 +84,9 @@ DECISION_FIXTURES = (
 # Graded by the merged decide(), not by any single sub-guard, because these hazards are
 # denied through a coupling no sub-guard fixture can pin: the zsh path-modifier deny holds
 # only while the git guard can settle the subcommand's identity from its cross-version
-# alias-proof set. Deleting a name from that set moves the merged verdict for that name --
-# thirteen of them from deny to ask -- while the git guard's own verdict never changes, so
-# its FIXTURES cannot see it. The mutation receipt still scored those deletions "caught"
-# because the recorded check count moved, which is arithmetic rather than detection.
+# alias-proof set, so the merged verdict for each name depends on that set while the git
+# guard's own verdict does not, and the git guard's FIXTURES cannot see it. Each case pins
+# one name's merged verdict.
 COMPOSITE_FIXTURES = (
     ("GREEN ALIAS-PROOF: add keeps its merged verdict",
      "command -p git add -p $SHA:src/f.py", "allow"),
@@ -1298,7 +1303,7 @@ def selftest():
     try:
         evaluate_payload(probe_payload, deadline=explicit)
         evaluate_payload(probe_payload)
-    except BaseException as exc:              # a mutated production path fails this case
+    except BaseException as exc:              # a production path that raises fails this case
         handed_error = exc
     finally:
         GUARDS[:] = original_guards
@@ -1355,7 +1360,7 @@ def selftest():
             cred_guard.decide = spent_after_predicates(live + 1)
             output = evaluate_payload(payload, runtime=runtime, deadline=live)
             got = (output or {}).get("hookSpecificOutput", {}).get("permissionDecision")
-        except BaseException as exc:          # a mutated production path fails this case
+        except BaseException as exc:          # a production path that raises fails this case
             predicates, got = "raised", f"raised {type(exc).__name__}"
         finally:
             cred_guard.decide = original_cred_decide
@@ -1377,7 +1382,7 @@ def selftest():
     sys.stdin = io.StringIO(json.dumps(probe_payload))
     try:
         main()
-    except BaseException:                     # a mutated production path fails this case
+    except BaseException:                     # a production path that raises fails this case
         anchored.append("<error>")
     finally:
         globals()["hook_mode"] = original_hook_mode
@@ -1516,9 +1521,9 @@ def perf_selftest():
     """Run the checks whose verdict is a wall-clock claim, once per head.
 
     Each spawns or times real hook work against the 4.5 s cap that sits inside the runtimes'
-    5 s PreToolUse timeout, which lets the command run when it expires. These run once per
-    head and `--selftest` once per mutation. `--selftest` still decides each command under
-    the production deadlines, so a slow enough host can fail a check there as well.
+    5 s PreToolUse timeout, which lets the command run when it expires. They run as their own
+    suite, apart from `--selftest`, which still decides each command under the production
+    deadlines, so a slow enough host can fail a check there as well.
     """
     total = failures = 0
     for name, mod in GUARDS:

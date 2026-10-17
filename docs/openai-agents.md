@@ -124,7 +124,7 @@ space permits; it cannot evict mandatory policy. If mandatory policy itself cann
 Codex hands a subagent no scratch directory. `~/.codex/tmp/arg0/` holds per-invocation `argv[0]`
 shims and `~/.codex/sessions/` holds date-partitioned rollout transcripts; neither is agent-facing,
 and `cwd` defaults to the project root. A worker with no assigned directory therefore writes into the
-checkout rather than beside it, which is the pressure the shared mutation-worker rule already names.
+checkout rather than beside it, which is the pressure the shared isolated-worktree rule already names.
 The parent assigns one by adding `Scratch: <absolute path>` to the spawn prompt; the PreToolUse hook
 resolves the full Git worktree, rejects a relative, pre-existing, symlink-component, inside, or
 above path, and atomically creates the fresh directory before allowing the spawn. Two calls naming
@@ -294,14 +294,6 @@ workflow alone does not prove either job is a branch-protection required check. 
 provenance scans and headless model scenarios remain manual because they require a selected
 document/transcript or spend API budget.
 
-No workflow runs the mutation sweep. `tools/write-mutation-receipt.py` runs it by hand, sharded
-with `--shard-index` and `--shard-count` and aggregated with `--aggregate`; the aggregate rejects
-missing, duplicated, overlapping, foreign, or stale fragment IDs and shards measured under different
-tool versions, independently recomputes each raw suite classification, and holds the result against
-the reviewed `contracts/mutation-policy.json`: exit 0 conforms, 1 is a coverage change the policy does
-not allow, and 2 is a measurement that cannot be trusted. The offline gate validates the policy but
-does not execute the mutation plan.
-
 For an active PR, run the live publication gate after the push:
 
 ```text
@@ -313,9 +305,7 @@ head, the PR is non-conflicting, and both exact-head check and workflow-run list
 successful. Pending CI exits 3; unpublished, conflicting, or failed state exits 1; missing evidence
 exits 2. `pr_commit_count` is the GraphQL `commits.totalCount` observed with that response's PR head;
 a head change during collection is an evidence error rather than a mixed snapshot. This generic
-command does not require a workflow by name or enumerate mutation shard jobs
-and artifacts. No workflow measures mutations; a sweep run by hand with
-`tools/write-mutation-receipt.py` states its verdict and any ratchet candidates in its own output.
+command does not require a workflow by name.
 
 Validate the package manifest with the bundled Codex plugin validator when available:
 

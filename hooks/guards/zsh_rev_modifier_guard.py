@@ -823,9 +823,9 @@ FIXTURES += [
      "git show HEAD:${VAR:0:2}", "allow"),
 ]
 
-# The subcommand gate needs both bounds. Dropping a member is already visible -- removing
-# `show` reddens 62 checks, removing `push` reddens 2 -- but forcing is_rev_path_git to
-# return True left the whole suite green, so nothing described the SET's upper edge. These
+# The subcommand gate needs both bounds. Fixtures on `show` and `push` pin the lower edge,
+# but no fixture carried a live `$VAR:<modifier>` on a subcommand outside the set, so
+# nothing described the SET's upper edge. These
 # carry a live `$VAR:<modifier>` on subcommands outside REV_PATH_SUBCOMMANDS: an
 # over-broad set turns them red. The membership criterion the set records is the test they
 # fail, not a judgement that zsh leaves these alone -- zsh mangles every one of them.
@@ -1104,41 +1104,6 @@ def _modelled_probe_stdout(suffix):
     return f"/a/b/c.py:{suffix}\n".encode("ascii")
 
 
-def _module_without_unmodelled(letter):
-    """This module executed afresh from its source with `letter` removed from MOD_UNMODELLED.
-
-    Built from source rather than by assigning the table after import, so a constant that
-    copied the table while the module loaded sees the removal too.
-    """
-    import ast
-    import types
-    path = os.path.abspath(__file__)
-    with open(path, encoding="utf-8") as handle:
-        source = handle.read()
-    declarations = [
-        node for node in ast.parse(source).body
-        if isinstance(node, ast.Assign)
-        and [getattr(target, "id", None) for target in node.targets] == ["MOD_UNMODELLED"]]
-    if (len(declarations) != 1 or not isinstance(declarations[0].value, ast.Constant)
-            or not isinstance(declarations[0].value.value, str)):
-        raise ValueError("MOD_UNMODELLED is not one literal string declaration")
-    value = declarations[0].value
-    lines = source.splitlines(keepends=True)
-    line = lines[value.lineno - 1]
-    if value.lineno != value.end_lineno or not line.isascii():
-        raise ValueError("MOD_UNMODELLED is not declared on one ASCII line")
-    lines[value.lineno - 1] = (line[:value.col_offset] + repr(value.value.replace(letter, ""))
-                               + line[value.end_col_offset:])
-    module = types.ModuleType(f"{__name__}_without_{letter}")
-    module.__file__ = path
-    saved_path = list(sys.path)
-    try:
-        exec(compile("".join(lines), path, "exec"), module.__dict__)
-    finally:
-        sys.path[:] = saved_path
-    return module
-
-
 FIXTURES += [
     ("RED TOKEN: double-quoted substitution preserves zsh rev hazard",
      '/bin/echo "$(git show $SHA:src/f.py)"', "deny"),
@@ -1399,11 +1364,10 @@ def selftest():
     print("  %-4s modifier probe handles non-UTF-8 bytes through its production call site"
           % ("PASS" if byte_probe_ok else "FAIL"))
 
-    # Deleting W from MOD_UNMODELLED must leave the probe's inputs alone: the same spellings,
-    # the closed W forms and never `Wrest` or `Wa-x`, and under the double's model no failure
-    # beyond the planted one. A copy of this module built from source with W removed is
-    # probed beside the running one, so a probe or model that reads MOD_UNMODELLED again,
-    # directly or through a constant copied at import, changes one of the two lists.
+    # The modifier probe must never run a spelling whose delimiter is left open, because
+    # zsh's output for those is undefined. Under the probe double, the live module's
+    # spellings must be the planned count, include every closed W form and no open one,
+    # and the double's model must report exactly the one planted failure.
     def probed(module):
         suffixes = []
 
@@ -1426,24 +1390,21 @@ def selftest():
     closed_w = {"W@/@h", "W@/@"} | {prefix + "W@/@h" for prefix in MOD_PREFIXES}
     try:
         live_suffixes, live_found = probed(sys.modules[__name__])
-        cold_suffixes, cold_found = probed(_module_without_unmodelled("W"))
-        selection_ok = (cold_suffixes == live_suffixes
-                        and len(cold_suffixes) == modifier_checks
-                        and closed_w <= set(cold_suffixes) and not open_w & set(cold_suffixes))
-        model_ok = (len(live_found) == len(cold_found) == 1
-                    and "starts with 'x'" in cold_found[0])
-        selection_note = (f"{len(cold_suffixes)} spellings, open W "
-                          f"{sorted(open_w & set(cold_suffixes))}, closed W missing "
-                          f"{sorted(closed_w - set(cold_suffixes))}")
-        model_note = f"{len(live_found)} and {len(cold_found)} probe failures"
-    except BaseException as exc:          # a mutated module that cannot load fails both
+        selection_ok = (len(live_suffixes) == modifier_checks
+                        and closed_w <= set(live_suffixes) and not open_w & set(live_suffixes))
+        model_ok = len(live_found) == 1 and "starts with 'x'" in live_found[0]
+        selection_note = (f"{len(live_suffixes)} spellings, open W "
+                          f"{sorted(open_w & set(live_suffixes))}, closed W missing "
+                          f"{sorted(closed_w - set(live_suffixes))}")
+        model_note = f"{len(live_found)} probe failure(s)"
+    except BaseException as exc:          # a probe that raises fails both
         selection_ok = model_ok = False
         selection_note = model_note = f"raised {type(exc).__name__}: {exc}"
     for ok, label, note in (
-            (selection_ok, "deleting W from MOD_UNMODELLED leaves the probe spellings "
-             "unchanged", selection_note),
-            (model_ok, "deleting W from MOD_UNMODELLED adds no failure under the probe "
-             "double's model", model_note)):
+            (selection_ok, "the modifier probe runs every closed W spelling and no open "
+             "one", selection_note),
+            (model_ok, "under the probe double's model only the planted letter fails",
+             model_note)):
         bad += 0 if ok else 1
         print("  %-4s %s (%s)" % ("PASS" if ok else "FAIL", label, note))
 
@@ -1458,7 +1419,7 @@ def selftest():
     git_guard._check_decision_budget = counting_budget_check
     try:
         walked = decide("/bin/echo a; /bin/echo b; /bin/echo c")[0]
-    except BaseException:                     # a mutated production path fails this case
+    except BaseException:                     # a production path that raises fails this case
         walked = "<error>"
     finally:
         git_guard._check_decision_budget = original_budget_check
@@ -1466,123 +1427,6 @@ def selftest():
     bad += 0 if walk_budget_ok else 1
     print("  %-4s the command walk checks the decision budget once per command (%d)"
           % ("PASS" if walk_budget_ok else "FAIL", len(walk_checks)))
-
-    original_equals_states = zsh_equals_states
-    globals()["zsh_equals_states"] = (
-        lambda _source, commands, initial=ZSH_EQUALS_ON, deadline=None:
-        tuple(ZSH_EQUALS_ON for _command in commands)
-    )
-    try:
-        equals_state_red = decide(
-            "SHA=x; setopt noequals; =git show $SHA:src/f.py")[0] != "ask"
-    finally:
-        globals()["zsh_equals_states"] = original_equals_states
-    bad += 0 if equals_state_red else 1
-    print("  %-4s EQUALS-state callsite mutation loses noequals uncertainty"
-          % ("PASS" if equals_state_red else "FAIL"))
-
-    original_nested_invocation = nested_shell_invocation
-    def immediate_post_c_body(resolution, current_shell="sh", deadline=None):
-        if (resolution.items
-                and os.path.basename(resolution.items[0][0]) == "zsh"):
-            args = resolution.items[1:]
-            for index, (word, _quoting) in enumerate(args):
-                if (word == "-c"
-                        or (word.startswith("-") and not word.startswith("--")
-                            and "c" in word[1:])):
-                    command_arg = (args[index + 1]
-                                   if index + 1 < len(args) else ("", ""))
-                    return git_guard.ShellInvocation(
-                        "zsh", command_arg[0],
-                        git_guard.source_has_live_unresolved(
-                            command_arg[0], deadline),
-                        dict(resolution.command_env),
-                        git_guard._descendant_lookup_authority(resolution))
-            return None
-        return original_nested_invocation(resolution, current_shell, deadline)
-    globals()["nested_shell_invocation"] = immediate_post_c_body
-    try:
-        post_c_argv_red = all(decide(source)[0] != "deny" for source in (
-            "zsh -c --no-equals 'SHA=x; git show $SHA:src/f.py'",
-            "zsh -c -o NO_EQUALS 'SHA=x; git show $SHA:src/f.py'",
-            "zsh -c -oNO_EQUALS 'SHA=x; git show $SHA:src/f.py'",
-        ))
-    finally:
-        globals()["nested_shell_invocation"] = original_nested_invocation
-    bad += 0 if post_c_argv_red else 1
-    print("  %-4s nested-zsh argv mutation loses post-c rev:path bodies"
-          % ("PASS" if post_c_argv_red else "FAIL"))
-
-    original_zsh_argv_state = git_guard._zsh_argv_state
-    def scan_post_operand_options(words, default=ZSH_EQUALS_ON):
-        parsed = original_zsh_argv_state(words, default)
-        if parsed.command_index is None:
-            return parsed
-        tail = original_zsh_argv_state(
-            [words[0], *words[parsed.command_index + 1:]], parsed.equals_state)
-        return git_guard.ZshArgvState(
-            tail.equals_state, parsed.command_index,
-            parsed.reads_stdin or tail.reads_stdin)
-    git_guard._zsh_argv_state = scan_post_operand_options
-    try:
-        post_operand_red = all(decide(source)[0] != expected
-                               for source, expected in (
-            ("zsh -c 'SHA=x; =git show $SHA:src/f.py' --no-equals", "deny"),
-            (("zsh -fc '/usr/bin/printf command-only' -s 0<<< "
-              "'SHA=x; git show $SHA:src/f.py'"), "allow"),
-        ))
-    finally:
-        git_guard._zsh_argv_state = original_zsh_argv_state
-    bad += 0 if post_operand_red else 1
-    print("  %-4s zsh-argv boundary mutation parses positional args as options"
-          % ("PASS" if post_operand_red else "FAIL"))
-
-    original_shell_reads_stdin = git_guard._shell_reads_stdin
-    def drop_clustered_zsh_option_value(words):
-        if (len(words) >= 3 and os.path.basename(words[0]) == "zsh"
-                and words[1] in {"-fo", "+fo"}):
-            return False
-        return original_shell_reads_stdin(words)
-    git_guard._shell_reads_stdin = drop_clustered_zsh_option_value
-    try:
-        clustered_stdin_red = decide(
-            "zsh -fo NO_EQUALS <<'EOF'\n"
-            "SHA=x; git show $SHA:src/f.py\nEOF\n")[0] != "deny"
-    finally:
-        git_guard._shell_reads_stdin = original_shell_reads_stdin
-    bad += 0 if clustered_stdin_red else 1
-    print("  %-4s zsh-stdin argv mutation loses clustered option value"
-          % ("PASS" if clustered_stdin_red else "FAIL"))
-
-    original_equals_lookup_error = only_changed_zsh_equals_lookup_authority_error
-    globals()["only_changed_zsh_equals_lookup_authority_error"] = (
-        lambda _resolution: False)
-    try:
-        equals_lookup_red = decide(
-            "PATH=/usr/bin; SHA=x; =git show $SHA:src/f.py")[0] != "deny"
-    finally:
-        globals()["only_changed_zsh_equals_lookup_authority_error"] = (
-            original_equals_lookup_error)
-    bad += 0 if equals_lookup_red else 1
-    print("  %-4s zsh rev:path proof survives prior-PATH EQUALS lookup uncertainty"
-          % ("PASS" if equals_lookup_red else "FAIL"))
-
-    original_ordinary_source = command_without_heredoc_payloads
-    globals()["command_without_heredoc_payloads"] = (
-        lambda source, deadline=None: "" if "<<'EOF'" in source
-        else original_ordinary_source(source, deadline))
-    try:
-        heredoc_composition_red = all(decide(source)[0] != "deny" for source in (
-            ("sh <<'EOF'\n=git show $SHA:src/f.py\nEOF\n"
-             "git show $SHA:src/f.py"),
-            ("git show $SHA:src/f.py\n"
-             "sh <<'EOF'\n=git show $SHA:src/f.py\nEOF\n"),
-        ))
-    finally:
-        globals()["command_without_heredoc_payloads"] = original_ordinary_source
-    bad += 0 if heredoc_composition_red else 1
-    print("  %-4s heredoc composition mutation skips ordinary rev:path denial"
-          % ("PASS" if heredoc_composition_red else "FAIL"))
 
     # This guard's budget raises all originate in the shared parser, so the clock that has
     # to move is the sibling module's. Without the wrap in `decide` the raise escaped into

@@ -51,6 +51,12 @@ Runs from either clone (repo root auto-detected from this file's location). Chec
   C15 hook envelope fixtures decode: every Codex envelope under hooks/fixtures_codex/
       carries every field its event's input schema requires, host paths are scrubbed,
       the synthetic fixture is labeled, and the Claude Stop fixture decodes
+  C16 banned-method tripwire: the vocabulary of the method AGENTS.md bans under
+      Verification mechanics -- its name, machinery, tools and removed identifiers --
+      appears in no tracked file outside the exemptions declared beside C16_PATTERNS,
+      each of which must match exactly once and span its declared lines; zero inputs
+      and an undeclared exemption marker are failures; an installed surface is stated
+      out of scope and not read
 
 Exit codes: 0 all checks pass · 1 one or more checks failed · 2 usage error or
 zero inputs (an empty scan set is an error, never a clean verdict).
@@ -86,9 +92,8 @@ import sys
 import tempfile
 import time
 import tokenize
-import types
 
-VERSION = "3.5.0"
+VERSION = "3.6.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOLS_DIR = os.path.join(ROOT, "tools")
 if TOOLS_DIR not in sys.path:
@@ -152,7 +157,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 427
+SELFTEST_FLOOR = 405
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -167,10 +172,12 @@ DESC_CAP = 400                # house cap (spec ceiling is 1024)
 # checks=111, so a suite can be gutted with nothing failing. Raise a floor in the same
 # commit that adds the checks; lowering one is a deliberate, reviewable edit.
 SELFTEST_SUITES = [
-    ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"], 1865),
-    ("bash_command_guard-perf", ["hooks/bash_command_guard.py", "--perf"], 17),
+    ("bash_command_guard", ["hooks/bash_command_guard.py", "--selftest"], 2084),
+    ("bash_command_guard-perf", ["hooks/bash_command_guard.py", "--perf"], 18),
     ("credential_reach_guard",
      ["hooks/guards/credential_reach_guard.py", "--selftest"], 84),
+    ("mutation_testing_guard",
+     ["hooks/guards/mutation_testing_guard.py", "--selftest"], 223),
     ("askq_timeout_guard", ["hooks/askq_timeout_guard.py", "--selftest"], 13),
     ("announced_work_guard", ["hooks/announced_work_guard.py", "--selftest"], 922),
     ("harness_report", ["hooks/harness_report.py", "--selftest"], 33),
@@ -181,21 +188,18 @@ SELFTEST_SUITES = [
     ("pr-delivery-state", ["tools/pr-delivery-state.py", "--selftest"], 25),
     ("verify-review-publication",
      ["tools/verify-review-publication.py", "--selftest"], 94),
-    ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 53),
-    ("install-claude", ["tools/install-claude.py", "--selftest"], 308),
+    ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 52),
+    ("install-claude", ["tools/install-claude.py", "--selftest"], 234),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
-    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 290),
-    ("write-mutation-receipt",
-     ["tools/write-mutation-receipt.py", "--selftest"], 169),
+    ("ci-gate", ["tools/ci-gate.py", "--selftest"], 235),
     ("portable-conformance", ["tools/portable-conformance.py", "--selftest"], 65),
-    ("enumerate-survivors", ["instruments/enumerate_survivors.py", "--selftest"], 28),
     ("fuzz-judge-diff", ["instruments/fuzz_judge_diff.py", "--selftest"], 65),
     ("corpus-delta", ["instruments/corpus_delta.py", "--selftest"], 20),
     ("codex_session_start", ["hooks/codex_session_start.py", "--selftest"], 32),
     ("spawn_preflight_guard", ["hooks/spawn_preflight_guard.py", "--selftest"], 88),
-    ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 1626),
-    ("git_grep_engine_guard-perf", ["hooks/guards/git_grep_engine_guard.py", "--perf"], 5),
-    ("zsh_rev_modifier_guard", ["hooks/guards/zsh_rev_modifier_guard.py", "--selftest"], 523),
+    ("git_grep_engine_guard", ["hooks/guards/git_grep_engine_guard.py", "--selftest"], 1527),
+    ("git_grep_engine_guard-perf", ["hooks/guards/git_grep_engine_guard.py", "--perf"], 6),
+    ("zsh_rev_modifier_guard", ["hooks/guards/zsh_rev_modifier_guard.py", "--selftest"], 513),
 ]
 
 
@@ -203,10 +207,9 @@ def expected_selftest_checks(name):
     """Exact execution-derived counts for suites whose former formulas hid probes."""
     fixed = {
         "announced_work_guard": 922,
-        "bash_command_guard-perf": 17,
-        "git_grep_engine_guard-perf": 5,
-        "ci-gate": 290,
-        "enumerate-survivors": 28,
+        "bash_command_guard-perf": 18,
+        "git_grep_engine_guard-perf": 6,
+        "ci-gate": 235,
         "fuzz-judge-diff": 65,
         "corpus-delta": 20,
         "spawn_preflight_guard": 88,
@@ -215,11 +218,13 @@ def expected_selftest_checks(name):
     if name in fixed:
         return fixed[name]
     if name == "bash_command_guard":
-        return 1865
+        return 2084
     if name == "credential_reach_guard":
         return 84
+    if name == "mutation_testing_guard":
+        return 223
     if name == "zsh_rev_modifier_guard":
-        return 523
+        return 513
     if name != "git_grep_engine_guard":
         return None
     binaries, seen = [], set()
@@ -233,14 +238,14 @@ def expected_selftest_checks(name):
         if real not in seen:
             seen.add(real)
             binaries.append(real)
-    # The portable corpus is 1626 checks for one Git. Every additional executable adds
+    # The portable corpus is 1527 checks for one Git. Every additional executable adds
     # one version probe, one fixture setup, and 22 alias-proof-name probes.
-    return 1626 + 24 * (max(1, len(binaries)) - 1)
+    return 1527 + 24 * (max(1, len(binaries)) - 1)
 # The Bash guard's perf suite intentionally runs five independent process-level timing
 # observations for each runtime. Give that aggregate suite enough wall-clock without
 # weakening the five-second deadline each individual hook process must meet. Those checks
-# and the grep guard's at-limit timing controls left the two guards' `--selftest` for
-# `--perf`, because the mutation sweep runs `--selftest` once per mutation; measured on the
+# and the grep guard's at-limit timing controls live in the two guards' `--perf` suites,
+# apart from `--selftest`, so each set runs under its own registered timeout; measured on the
 # authoring host after the move, bash_command_guard-perf took 31.6-33.7 s and
 # bash_command_guard 3.3-3.5 s, git_grep_engine_guard-perf 6.2-6.3 s and
 # git_grep_engine_guard 10.6-11.3 s.
@@ -256,7 +261,7 @@ def expected_selftest_checks(name):
 # hand-timing on one host and drifts silently until the day it reddens. announced_work_guard
 # was raised from 30 s the day that happened, on a run that changed none of its checks;
 # ci-gate from 60 s the day its nested run took 36.5 s against a 36 s margin on the Ubuntu
-# runner, after the plan grew to 389 sites and the golden to 1,132 with no check changed, and
+# runner, on a run that changed no check, and
 # from 90 s the day its nested run took 56.5 s on Ubuntu and 56.2 s on macOS against a 54 s
 # margin while the same suite run alone took 31.6 s on the authoring host. fuzz-judge-diff was
 # registered at 25 s the day its nested macOS run took 9.1 s against the default's 9 s margin. The
@@ -275,23 +280,19 @@ SELFTEST_TIMEOUTS = {
     "ci-gate": 120,
     "fuzz-judge-diff": 25,
     # Stages and activates several temporary trees, runs three reviewer reproductions as
-    # subprocesses and 131 fixture hooks in fresh interpreters; measured 24.8s at 308 proofs.
+    # subprocesses and 131 fixture hooks in fresh interpreters; measured 18.1s at 234 proofs.
     "install-claude": 60,
 }
 DEFAULT_SELFTEST_TIMEOUT = 15
 # A suite may use this much of its registered timeout before C1 says so. Without it the
-# timeout was a number nothing checked: setting the Bash suite's to 15 -- below its
-# measured runtime -- left the whole harness selftest green, because the only assertion
-# re-derived the expected value from this table.
+# timeout was a number nothing checked: a registered timeout below the suite's measured
+# runtime passed, because the only assertion re-derived the expected value from this table.
 SELFTEST_TIMEOUT_MARGIN = 0.6
 # Non-aggregated, and why. The discovery above matches any file carrying the STRING
 # "--selftest", which cannot tell a script that exposes one from a script that invokes
 # one. The remaining entry is the recursive case; anything else that lands in this dict
 # is a suite dodging aggregation. Invoking other suites is not by itself grounds for an
-# exemption, and the mutation generator held one on that reasoning while its own kill
-# scoring went unmeasured: an under-generating plan moves plan_sha256, which the gate
-# recomputes, but a mis-scored kill leaves every shard agreeing and the re-measurement
-# reproducing the same verdict. It is aggregated above over that scoring.
+# exemption.
 # Citations in reference documents that name something this repository does not contain.
 # Each is a runtime artifact or an illustrative filename, so requiring it to resolve would be
 # wrong rather than merely noisy. Declared, because no structural test separates them from a
@@ -300,7 +301,7 @@ SELFTEST_TIMEOUT_MARGIN = 0.6
 # outside this repository, and the diff is where that claim gets reviewed.
 EXTERNAL_REFERENCE_CITATIONS = {
     "probe.py": "illustrative worker filename in a collision anecdote",
-    "mutate.py": "illustrative worker filename in a collision anecdote",
+    "check.py": "illustrative worker filename in a collision anecdote",
     "base.py": "illustrative worker filename in a collision anecdote",
     "agents/openai.yaml": "Codex configuration in the user environment",
     "AGENTS.override.md": "Codex convention outside this repository",
@@ -333,6 +334,7 @@ PRODUCTION_CHECKS = (
     ("C13", "c13_eval_coverage"),
     ("C14", "c14_budget_ceilings"),
     ("C15", "c15_envelope_fixtures"),
+    ("C16", "c16_banned_method"),
 )
 
 # C2: basenames shared verbatim across skills. A same-basename file NOT listed in
@@ -436,6 +438,61 @@ SCAN_EXCLUSIONS = (
     "*.jsonl",                  # recorded transcript fixtures, not authored prose
     "**/__pycache__/**",
 )
+
+# C16-EXEMPT-BEGIN: patterns
+# C16: AGENTS.md (Verification mechanics) bans mutation testing. Each pattern names the
+# testing sense only -- the method, its machinery, its vocabulary, its tools and the
+# identifiers of the machinery this tree removed -- and none of the other senses this tree
+# uses: shell identity, alias, option or PATH mutation, GitHub and GraphQL mutations,
+# sys.path mutation, a file or state change, a value that survives parsing, a killed or
+# unkillable process, survivor bias. Matched case-insensitively, line by line, over every
+# tracked file outside the declared exemptions; it is lexical, so a paraphrase is out of
+# scope.
+C16_PATTERNS = (
+    ("the method", r"(?<![\w-])mutation[- ]?test\w*"),
+    ("its machinery", r"(?<![\w-])mutation[- ](?:scor\w*|coverage|operators?|sweeps?|plans?|"
+                      r"receipts?|polic(?:y|ies)|proofs?|analysis|frameworks?|engines?|"
+                      r"kills?|sites?|workers?|agents?|survivors?|campaigns?|generators?|"
+                      r"budgets?|outcomes?|evidence)\b"),
+    ("a mutant", r"(?<![\w-])mutants?(?![\w-])"),
+    ("a survivor", r"(?<![\w-])survivors?(?![\w-])(?!\s+bias)"),
+    ("a kill rate", r"(?<![\w-])kill[- ]rates?(?![\w-])"),
+    ("a mutate-each instruction", r"(?<![\w-])(?:re-)?mutate (?:each|every) |(?<![\w-])re-mutat\w*"),
+    ("a mutation-proof label", r"(?<![\w-])mutation:\s+(?:without|with|a|an|the|any|\w+ing)\b|"
+                               r"(?:call-?site|argv|boundary|composition|classification|scanner|"
+                               r"table|limit|traversal|recursion|reducer|checkpoint|deadline|"
+                               r"fallback)\s+mutation\s+(?:loses|drops|bypasses|transfers|exposes|"
+                               r"accepts|skips|parses|misclassifies|lets|leaks|inherits|survives|"
+                               r"fails|turns)\b"),
+    ("a mutation tool", r"(?<![\w./-])(?:mutmut|cosmic[-_]ray|mutatest|mutpy|mutahunter|"
+                        r"stryker(?:-mutator)?|pitest|cargo[- ]mutants|go-mutesting|"
+                        r"universalmutator|mull-(?:runner|cxx)|dextool mutate)(?![\w-])"),
+    ("the removed machinery", r"write-mutation-receipt|enumerate_survivors|mutation-policy\.json|"
+                              r"mutation-proof\.yml|allowed_survivors|count_only_kills|"
+                              r"unswept_guards|EXPECTED_MUTATION_\w+|MUTATION_PLAN_FLOOR|"
+                              r"MUTATION_PROBES"),
+    ("a removed identifier", r"(?<![A-Za-z0-9])_?mutation_(?:plan|polic|sweep|site|evidence|"
+                             r"generator|score|receipt|kill|survivor|writer)\w*|"
+                             r"(?<![A-Za-z0-9])mutant_\w+|\w+_mutator\b"),
+)
+# Reviewed exemptions. Each must match exactly once -- a file that is tracked, one BEGIN and
+# one END marker line, an anchor that occurs once -- and must span exactly the number of
+# lines declared beside it, so a moved or doubled anchor, a moved END marker or a paragraph
+# that absorbed the next one fails loudly instead of silently widening the hole. A marker
+# line no entry declares is a failure too. A blank or whitespace-only line ends a paragraph.
+C16_EXEMPT_FILES = {
+    "hooks/guards/mutation_testing_guard.py": "the Bash guard that denies these tools names them",
+    "contracts/goldens/guard-decisions.json": "the reviewed verdicts of that guard's fixture commands",
+}
+C16_EXEMPT_REGIONS = {      # (file, name) -> (reason, lines from BEGIN to END inclusive)
+    ("hooks/harness_check.py", "patterns"): ("this pattern and exemption table", 54),
+    ("hooks/harness_check.py", "selftest"): ("C16's planted-input proofs", 184),
+}
+C16_EXEMPT_PARAGRAPHS = {   # (file, anchor) -> (reason, lines in the paragraph)
+    ("AGENTS.md", "Mutation testing is banned in every project and runtime"): ("the ban itself", 12),
+}
+C16_MARKER = re.compile(r"^[ \t]*# C16-EXEMPT-(BEGIN|END): (\S+)[ \t]*$", re.M)
+# C16-EXEMPT-END: patterns
 
 ROUTING_SKILLS = ["git-workflow", "pr-review-method", "testing-ci", "agent-dispatch",
                   "ground-claims", "prebid-adcp", "system-design", "outbound-drafts",
@@ -2199,8 +2256,8 @@ class Run:
             self.result("C7", os.path.isdir(p), f"routing-table skill exists: {skill}")
         st = json.load(open(os.path.join(self.root, "settings.json")))
         # Emit one fixed-cardinality verdict per required handler. Counting the handlers
-        # discovered in settings made a deletion shrink the selector, so the mutation was
-        # caught but could not prove the same suite ran. Exact argv also rejects shell
+        # discovered in settings made a deleted handler shrink the selector, so the deletion was
+        # caught but the run could not show it judged the same handlers. Exact argv also rejects shell
         # wrappers such as ``VAR=off ...`` and ``... || true`` that name the script while
         # disabling or masking it.
         actual_claude_handlers = []
@@ -2959,6 +3016,115 @@ class Run:
                     f"{decoded} of {len(CODEX_FIXTURES)} Codex envelope fixtures decode against "
                     f"their event's required-field list ({len(present)} json file(s) present)")
 
+    # ---- C16 ---------------------------------------------------------------
+    def c16_banned_method(self, scan_floor=None, exemptions=None):
+        """The method AGENTS.md bans stays out of every tracked file but its exemptions.
+
+        The scan set is every tracked file (`git ls-files`, without C6's SCAN_EXCLUSIONS),
+        read whole, with three exemption kinds declared beside the patterns. Each exemption
+        must match exactly once and span exactly its declared lines. Zero inputs, a scan set
+        below the floor, an exemption that does not match or whose span moved, and an
+        undeclared exemption marker are failures, never a clean verdict. An installed
+        surface is not scanned: it holds this checkout's shipped copies beside host files
+        and none of the exempt files, so C16 states that and reads nothing there.
+        `exemptions` replaces the three tables for planted fixture trees.
+        """
+        files, regions, paragraphs = exemptions or (
+            C16_EXEMPT_FILES, C16_EXEMPT_REGIONS, C16_EXEMPT_PARAGRAPHS)
+        surface, paths, error = package_paths(self.root)
+        if error:
+            self.result("C16", False, f"cannot enumerate scan set: {error}")
+            return
+        if surface != "source":
+            self.counters["C16"] = {"files": 0, "hits": [], "surface": surface}
+            self.result("C16", True, f"C16 reads a source checkout only; {self.root} is an "
+                                     f"{surface} surface and was not scanned")
+            return
+        problems, texts, exempt_files = [], {}, 0
+        for rel in paths:
+            absolute = os.path.join(self.root, rel)
+            if os.path.islink(absolute) or not os.path.isfile(absolute):
+                continue
+            if rel in files:
+                exempt_files += 1
+                continue
+            texts[rel] = open(absolute, encoding="utf-8", errors="replace").read()
+        for rel in sorted(set(files) - set(paths)):
+            problems.append(f"exempt file {rel} is not in the scan set")
+        for rel, text in sorted(texts.items()):
+            for match in C16_MARKER.finditer(text):
+                if (rel, match.group(2)) not in regions:
+                    problems.append(f"{rel}: undeclared exemption marker {match.group(0).strip()!r}")
+        exempt_regions = 0
+        for (rel, name), (_reason, span) in sorted(regions.items()):
+            text = texts.get(rel)
+            lines = text.split("\n") if text is not None else []
+            begins = [i for i, line in enumerate(lines)
+                      if line.strip() == f"# C16-EXEMPT-BEGIN: {name}"]
+            ends = [i for i, line in enumerate(lines)
+                    if line.strip() == f"# C16-EXEMPT-END: {name}"]
+            if len(begins) != 1 or len(ends) != 1 or begins[0] > ends[0]:
+                problems.append(f"exempt region {rel}:{name} needs one BEGIN before one END "
+                                f"(found {len(begins)} and {len(ends)})")
+                continue
+            if ends[0] - begins[0] + 1 != span:
+                problems.append(f"exempt region {rel}:{name} spans {ends[0] - begins[0] + 1} "
+                                f"line(s), declared {span}")
+                continue
+            for i in range(begins[0], ends[0] + 1):
+                lines[i] = ""
+            texts[rel] = "\n".join(lines)
+            exempt_regions += 1
+        exempt_paragraphs = 0
+        for (rel, anchor), (_reason, span) in sorted(paragraphs.items()):
+            text = texts.get(rel)
+            count = 0 if text is None else text.count(anchor)
+            if count != 1:
+                problems.append(f"exempt paragraph anchor in {rel} occurs {count} time(s), not once")
+                continue
+            lines = text.split("\n")
+            start = end = text[:text.index(anchor)].count("\n")
+            while start > 0 and lines[start - 1].strip():
+                start -= 1
+            while end + 1 < len(lines) and lines[end + 1].strip():
+                end += 1
+            if end - start + 1 != span:
+                problems.append(f"exempt paragraph in {rel} spans {end - start + 1} line(s), "
+                                f"declared {span}")
+                continue
+            for i in range(start, end + 1):
+                lines[i] = ""
+            texts[rel] = "\n".join(lines)
+            exempt_paragraphs += 1
+        floor = C6_SCAN_FLOOR if scan_floor is None else scan_floor
+        hits = []
+        compiled = [(label, re.compile(pattern, re.I)) for label, pattern in C16_PATTERNS]
+        for rel, text in sorted(texts.items()):
+            for number, line in enumerate(text.split("\n"), 1):
+                for label, pattern in compiled:
+                    if pattern.search(line):
+                        hits.append((rel, number, label))
+        self.counters["C16"] = {"files": len(texts), "hits": hits, "exempt_files": exempt_files,
+                                "exempt_regions": exempt_regions,
+                                "exempt_paragraphs": exempt_paragraphs, "problems": problems,
+                                "surface": surface}
+        if not texts:
+            self.result("C16", False, "cannot enforce: zero files in the scan set")
+            return
+        if len(texts) < floor:
+            self.result("C16", False, f"scan set shrank to {len(texts)}, floor {floor}")
+            return
+        for problem in problems:
+            self.result("C16", False, f"cannot enforce an exemption: {problem}")
+        for label, _pattern in compiled:
+            found = [(rel, number) for rel, number, hit in hits if hit == label]
+            self.result("C16", not found,
+                        f"banned-method pattern {label!r}: {len(found)} hit(s)"
+                        + (f" e.g. {found[0][0]}:{found[0][1]}" if found else ""))
+        self.result("C16", not hits and not problems,
+                    f"banned-method tripwire over {len(texts)} {surface} files at {self.root} "
+                    f"(git ls-files; {exempt_files} exempt file(s), {exempt_regions} exempt "
+                    f"region(s), {exempt_paragraphs} exempt paragraph(s)): {len(hits)} hit(s)")
 
     def run(self):
         print(f"harness_check {VERSION}  root={self.root}  mode={'ci' if self.ci else 'local'}")
@@ -3318,8 +3484,8 @@ def selftest():
         finally:
             subprocess.run = original_subprocess_run
         # 90 is a literal here on purpose. Reading it back out of SELFTEST_TIMEOUTS
-        # re-derived the expected value from the table under test: setting the Bash
-        # suite's timeout to 15 -- below its measured runtime -- left this green.
+        # re-derived the expected value from the table under test, so a timeout lowered below
+        # the suite's measured runtime would still have passed.
         expect_red(
             "C1 gives the process-level Bash timing suite its registered aggregate timeout",
             lambda: observed_timeouts == [90] and not c1_timeout.failures,
@@ -3630,8 +3796,9 @@ def selftest():
             ("C10", "c10_delivery_contract"), ("C11", "c11_claim_vocabulary"),
             ("C12", "c12_claim_binding"), ("C13", "c13_eval_coverage"),
             ("C14", "c14_budget_ceilings"), ("C15", "c15_envelope_fixtures"),
+            ("C16", "c16_banned_method"),
         )
-        expect_red("production check registry is exact through C15",
+        expect_red("production check registry is exact through C16",
                    lambda: PRODUCTION_CHECKS == expected_registry)
         method_names = [method_name for _check_id, method_name in expected_registry]
         for method_name in method_names:
@@ -3804,7 +3971,7 @@ def selftest():
                         and "malformed=1" in d for c, d in malformed_stop.failures),
         )
         expect_red(
-            "C7 registration mutations preserve the exact selector cardinality",
+            "C7 registration defect fixtures preserve the exact selector cardinality",
             lambda: all(run.checks == exact_registration_checks for run in (
                 missing_stop, wrong_stop, duplicate_stop, disabled_stop, masked_stop,
                 async_stop, malformed_stop)),
@@ -3879,7 +4046,7 @@ def selftest():
                         and "malformed=1" in d for c, d in malformed_codex.failures),
         )
         expect_red(
-            "Codex C7 registration mutations preserve selector cardinality",
+            "Codex C7 registration defect fixtures preserve selector cardinality",
             lambda: all(run.checks == exact_registration_checks for run in (
                 missing_codex_activation, masked_codex, malformed_codex)),
         )
@@ -4294,8 +4461,8 @@ def selftest():
         )
 
         # A LITERAL roster, never *_GIT_REPOSITORY_ENV: an input built from the constant
-        # under test follows it, so deleting a member removed it from both the input and the
-        # expectation and the proof stayed green.
+        # under test follows it, so a member missing from the constant would be missing from
+        # both the input and the expectation, and the proof could not see it.
         reviewed_repository_selectors = (
             "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
             "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
@@ -4365,8 +4532,8 @@ def selftest():
                 "GIT_AUTHOR_NAME": "retained"}),
         )
         # The constant is not the whole copy. The function around it is restated too, and
-        # comparing only the names left its GIT_CONFIG operands ungraded in the hook: either
-        # could be deleted there with both suites green. Compared by RESULT over the same
+        # comparing only the names left its GIT_CONFIG operands ungraded in the hook: no
+        # input reached either of them there. Compared by RESULT over the same
         # hostile environment, so the two implementations have to agree on what they remove
         # rather than on how they spell it.
         expect_red(
@@ -4832,7 +4999,7 @@ def selftest():
         # The clause above decides an INDEXED path. A separate clause decides the untracked
         # ones by walking their parent components, and nothing reached it: Git does not
         # descend into a nested repository, so `--others` normally lists nothing below one
-        # and that walk could be made inert with the whole suite green. Index a file inside
+        # and no fixture ever handed that walk a path. Index a file inside
         # the directory first and Git does descend, so an untracked context file beside it
         # arrives in the inventory and only the parent-component walk keeps the nested
         # repository's own file out of the owner's scan set.
@@ -5382,9 +5549,9 @@ def selftest():
         shutil.rmtree(separate_tree)
         shutil.rmtree(separate_admin)
 
-        # The core.worktree reply is validated by three operands and none was asserted:
-        # replacing the whole condition with `if False:` left this suite green, because on
-        # every existing fixture the downstream comparison rejected the path anyway. These
+        # The core.worktree reply is validated by three operands and none was asserted: on
+        # every existing fixture the downstream comparison rejected the path before any operand
+        # decided. These
         # drive the helper directly so each operand is the only thing standing between the
         # reply and acceptance. The operands do two different jobs -- the first rejects a
         # failed query, the other two reject a malformed reply that would otherwise reach
@@ -5966,10 +6133,8 @@ def selftest():
         good = ('The lead rule is always-on in `~/.claude/CLAUDE.md` ("Named a tool? Run exactly '
                 'that and stop."), so this body carries only the mechanism.\n\n'
                 'Nearest coverage: `AGENTS.md`, "Prefer a gate over a promise to remember."\n')
-        # Controls that a mutation proof below re-runs against a private, mutated copy of this
-        # module: each takes the module so the same assertion judges both.
-        def bound_control(module):
-            run = module.Run(bind_root, ci=True)
+        def bound_control():
+            run = Run(bind_root, ci=True)
             with contextlib.redirect_stdout(io.StringIO()):
                 run.c12_claim_binding()
             return not run.failures and run.counters["C12"] == {"claims": 2, "bound": 2}
@@ -5978,7 +6143,7 @@ def selftest():
         expect_red("C12 control: claims quoting verbatim AGENTS.md phrases stay green",
                    lambda: not bound_run.failures and bound_run.checks == 1)
         expect_red("C12 control: the bound control reports claims == 2 and bound == 2",
-                   lambda: bound_control(sys.modules[__name__]))
+                   lambda: bound_control())
         expect_red("C12 control: with no finding the ratchet reports an empty live list against an "
                    "empty baseline",
                    lambda: bound_run.ratchets["C12"] == {"baseline": 0, "live": 0, "in_baseline": 0,
@@ -6007,7 +6172,7 @@ def selftest():
         expect_red("C12 control: a negated claim whose phrase is absent is a true statement",
                    lambda: not negated_true.failures)
         line_cited = c12_on("The lead clause is `~/.claude/CLAUDE.md`:43 verbatim and CLAUDE.md:48 adds the rest.\n"
-                            "- `:61-64` mutation workers get an isolated worktree.\n")
+                            "- `:61-64` parallel workers get an isolated worktree.\n")
         expect_red("C12 goes red on CLAUDE.md:<n> line citations and bare :<n> citations, naming each",
                    lambda: sum(1 for c, d in line_cited.failures if "line citation" in d) == 3
                    and any("deferred.md:2: bare line citation `:61-64`" in d for _c, d in line_cited.failures))
@@ -6030,14 +6195,8 @@ def selftest():
         # its line is an inline span, not an opener.
         fence_claim = 'AGENTS.md says "A made-up mandatory policy."\n'
 
-        def claims_in(text, module=None):
-            run = c12_on(text) if module is None else None
-            if module is not None:
-                open(bind_ref, "w").write(text)
-                run = module.Run(bind_root, ci=True)
-                with contextlib.redirect_stdout(io.StringIO()):
-                    run.c12_claim_binding()
-            return run.counters["C12"]["claims"]
+        def claims_in(text):
+            return c12_on(text).counters["C12"]["claims"]
 
         fence_base = claims_in("")
         expect_red("C12 fence control: a bare claim counts once; the same claim inside a tilde fence counts "
@@ -6486,8 +6645,8 @@ def selftest():
         write_bind_baseline([unbound_item])
         second_text = unbound_text + "\nSee `~/.claude/CLAUDE.md`'s \"zorblat rule\" too.\n"
 
-        def new_item_control(module):
-            run = module.Run(bind_root, ci=True)
+        def new_item_control():
+            run = Run(bind_root, ci=True)
             with contextlib.redirect_stdout(io.StringIO()):
                 run.c12_claim_binding()
             return (any(c == "C12" and "deferred.md:3: stale quote" in d and "(not in baseline" in d
@@ -6498,7 +6657,7 @@ def selftest():
         second = c12_on(second_text)
         expect_red("C12 ratchet: a second finding outside the baseline is red, named as new, and "
                    "counted as one new item",
-                   lambda: new_item_control(sys.modules[__name__])
+                   lambda: new_item_control()
                    and len(second.worklists.get("C12", [])) == 1)
         open(bind_baseline, "w").write(json.dumps({"schema_version": 2, "note": "x", "C12": "no", "C13": []}))
         malformed = c12_on(unbound_text)
@@ -6540,11 +6699,9 @@ def selftest():
 
         def reproduction_case(thread_id, label, expected_line):
             """One proof per reproduction. A nested run (one that a reproduction launched) does
-            not re-run any of them: each is a subprocess that loads this module from disk, so
-            inside the mutated suite it would judge the unmutated file."""
+            not re-run any of them, so a reproduction that launches this suite cannot recurse."""
             if os.environ.get("ZH_REVIEW_REPRODUCTIONS") == "nested":
-                expect_red(f"review reproduction {thread_id}: not re-run inside a nested suite run, where "
-                           f"a subprocess would load the unmutated file",
+                expect_red(f"review reproduction {thread_id}: not re-run inside a nested suite run",
                            lambda: os.environ.get("ZH_REVIEW_REPRODUCTIONS") == "nested")
             else:
                 expect_red(f"review reproduction {thread_id}: {label}",
@@ -6681,15 +6838,15 @@ def selftest():
         roomy = json.loads(json.dumps(real_record))
         roomy["ceilings"]["AGENTS.md"]["bytes"] = agents_size + 1000
         under = c14_on(roomy)
-        def ceiling_control(module):
-            run = module.Run(budget_root, ci=True)
+        def ceiling_control():
+            run = Run(budget_root, ci=True)
             with contextlib.redirect_stdout(io.StringIO()):
                 run.c14_budget_ceilings()
             return not run.failures and run.ceilings["C14"]["AGENTS.md:bytes"] == {
                 "measured": agents_size, "recorded": agents_size + 1000, "verdict": "shrank"}
 
         expect_red("C14 control: a ceiling above the measurement passes and reports the surface as shrank",
-                   lambda: ceiling_control(sys.modules[__name__]))
+                   lambda: ceiling_control())
         drifted = json.loads(json.dumps(real_record))
         drifted["hard"]["claude-dynamic-block"]["chars"] = 7600
         hard_drift = c14_on(drifted)
@@ -6717,8 +6874,8 @@ def selftest():
         c15_clean.c15_envelope_fixtures()
         expect_red("C15 control: the committed fixtures decode", lambda: not c15_clean.failures)
         # Drop a field that ONLY the required-field list catches. Dropping stop_hook_active
-        # was also caught by the Stop-specific boolean check, so deleting the required-field
-        # clause left this proof green for the neighbour's reason.
+        # is also caught by the Stop-specific boolean check, so that fixture would pass for the
+        # neighbour's reason even if the required-field clause caught nothing.
         pre_fixture = os.path.join(fixture_root, "hooks", "fixtures_codex", "C3_pre_tool_use.json")
         pre_bytes = open(pre_fixture, "rb").read()
         stripped = json.loads(pre_bytes)
@@ -6851,42 +7008,9 @@ def selftest():
         expect_red("harness_health.sh exits non-zero when the planted runtime verifier fails",
                    lambda: health_verify_red != 0 and "--verify-runtime FAILED (exit 1)" in verify_log)
 
-        # ---- assertions that can fail: each control above is re-run against a private copy of
-        # this module carrying one planted defect, and must fail there by name ----------------
-        source_text = open(__file__, encoding="utf-8").read()
-
-        def private_copy(old, new, count=1):
-            if source_text.count(old) != count:
-                raise AssertionError(f"mutation site occurs {source_text.count(old)} time(s), "
-                                     f"expected {count}")
-            module = types.ModuleType("harness_check_mutant")
-            module.__file__ = __file__
-            exec(compile(source_text.replace(old, new), __file__, "exec"), module.__dict__)
-            return module
-
-        # The search strings are assembled, never written whole, so this block does not add
-        # an occurrence of the site it mutates; a wrong count fails the proof by name.
-        this_module = sys.modules[__name__]
-        write_bind_baseline([])
-        c12_on(good)
-        expect_red("mutation: counters['bound'] += 0 fails the bound control (claims == 2, bound == 2) "
-                   "by name",
-                   lambda: bound_control(this_module) and not bound_control(private_copy(
-                       'counters["bound"] ' + '+= 1\n', 'counters["bound"] ' + '+= 0\n', count=2)))
-        write_bind_baseline([unbound_item])
-        c12_on(second_text)
-        expect_red("mutation: the ratchet's new list forced empty fails the new-item control by name",
-                   lambda: new_item_control(this_module) and not new_item_control(private_copy(
-                       "new, stale = evals.ratchet(live, baseline) " + "if worklists is not None else (sorted(live), [])\n",
-                       "new, stale = ([], evals.ratchet(live, baseline)[1]) if worklists is not None else ([], [])\n")))
-        c14_on(roomy)
-        expect_red("mutation: a ceiling verdict that never says shrank fails the C14 control by name",
-                   lambda: ceiling_control(this_module) and not ceiling_control(private_copy(
-                       '("grew" if current > recorded ' + 'else "shrank")',
-                       '("grew" if current > recorded else "equal")')))
-
         # ---- no expect_red lambda in this suite may carry a fallback clause, iterate an
         # empty literal or be a constant: that shape passes for a neighbour's reason ----------
+        source_text = open(__file__, encoding="utf-8").read()
         vacuous = vacuous_expect_red_lines(source_text)
         expect_red("no expect_red lambda in this suite carries an 'or' fallback, iterates an empty "
                    "literal or is a constant" + (f" (found at lines {vacuous})" if vacuous else ""),
@@ -6922,209 +7046,197 @@ def selftest():
                    lambda: verdicts == shapes)
 
         if os.environ.get("ZH_REVIEW_REPRODUCTIONS") == "nested":
-            expect_red("review reproduction 4294811841: not re-run inside the suite run it launched; "
-                       "this run is the reproduction's subject",
-                       lambda: os.environ.get("ZH_REVIEW_REPRODUCTIONS") == "nested")
-        else:
-            expect_red("review reproduction 4294811841: the disabled bound counter fails a named C12 "
-                       "proof in the mutated suite; the baseline and restored suites pass",
-                       lambda: reproduction(4294811841, "mutated bound_control= 0 SELFTEST-SUMMARY "
-                                                        "suite=harness_check checks="))
-
-        if os.environ.get("ZH_REVIEW_REPRODUCTIONS") == "nested":
             expect_red("a nested suite run launched no reproduction subprocess",
                        lambda: launched == [])
         else:
-            expect_red("the top-level suite run launched each of this module's five reproductions once",
-                       lambda: sorted(launched) == [4294811805, 4294811820, 4294811833, 4294811841, 4298561325])
+            expect_red("the top-level suite run launched each of this module's four reproductions once",
+                       lambda: sorted(launched) == [4294811805, 4294811820, 4294811833, 4298561325])
 
-        # --- fence mutants, each failing one shape proof above by name; search strings are
-        # assembled so this block adds no occurrence of the site it mutates
-        any_run_closes = private_copy("                if (closer and closer.group()[0] == char and len(closer.group()) >= "
-                                      + "length\n                        and indent <= k + 3 and not expanded.lstrip(\" \")"
-                                      "[closer.end():].strip(\" \\t\")):\n",
-                                      "                if closer and not expanded.lstrip(\" \")[closer.end():].strip(\" \\t\"):\n")
-        expect_red("mutation: a fence closed by any run swallows the claim after a tilde fence holding "
-                   "a backtick run (the mixed-fence proof goes red)",
-                   lambda: claims_in("~~~text\n```\n~~~\n\n" + fence_claim, any_run_closes) == fence_base)
-        length_ignored = private_copy("[0] == char and len(closer.group()) >= " + "length",
-                                      "[0] == char")
-        expect_red("mutation: a fence closed by a shorter run swallows the claim after a four-backtick "
-                   "fence holding three (the shorter-fence proof goes red)",
-                   lambda: claims_in("````text\n```\n````\n\n" + fence_claim, length_ignored) == fence_base)
-        info_ignored = private_copy(' and not (run.group()[0] == "`" and "`" in ' + 'stripped[run.end():])', "")
-        expect_red("mutation: a backtick run followed by a backtick opening a fence swallows the claim "
-                   "after an inline span (the inline-span proof goes red)",
-                   lambda: claims_in("```AGENTS.md``` is a filename.\n\n" + fence_claim, info_ignored) == fence_base)
-        any_whitespace = private_copy("[closer.end():].strip(" + '" \\t")):\n', "[closer.end():].strip()):\n")
-        expect_red("mutation: stripping any whitespace after a closer makes a no-break space close the fence "
-                   "(the no-break-space proof goes red)",
-                   lambda: claims_in("```\n```\u00a0\n" + fence_claim + "```\n", any_whitespace) == fence_base + 1)
-        any_indent = private_copy('        top_stripped = expanded.lstrip(" ") if indent <= ' + '3 else ""\n',
-                                  '        top_stripped = expanded.lstrip(" ")\n')
-        expect_red("mutation: unrestricted indentation lets a four-space run open a fence and hide the claim "
-                   "(the indentation proof goes red)",
-                   lambda: claims_in("    ```\n" + fence_claim + "\n    ```\n", any_indent) == fence_base)
-        no_html = private_copy('            html_end = html_block_end(stripped, paragraph_' + 'open) if stripped.startswith("<") else None\n',
-                               '            html_end = None\n')
-        no_container_end = private_copy("            if k and line.strip() and indent < " + "k:\n", "            if False:\n")
-        expect_red("mutation: a fence that outlives its list item hides the claim after the list "
-                   "(the list-item proof goes red)",
-                   lambda: claims_in("- item\n  ```\n  code\n\n" + fence_claim, no_container_end) == fence_base)
-        no_marker_opener = private_copy("        if marker and re.match(r\"`{3,}|~{3,}\", " + "expanded[marker.end():]):\n",
-                                        "        if False:\n")
-        expect_red("mutation: ignoring a run after a list marker counts the item's fenced content as prose "
-                   "(the list-item proof goes red)",
-                   lambda: claims_in("- ```\n  " + fence_claim + "  ```\n", no_marker_opener) == fence_base + 1)
-        any_hash_heading = private_copy("        heading = ATX_HEADING.match(line) " + "is not None\n",
-                                        '        heading = line.startswith("#")\n')
-        expect_red("mutation: any `#` line taken as a heading opens no paragraph before `###notheading` and loses "
-                   "the indented-heading cases (the heading proof goes red)",
-                   lambda: claims_in("###notheading\n<custom>\n```\n" + fence_claim, any_hash_heading) == fence_base + 1
-                   or claims_in(" # H\n<custom>\n```\n</custom>\n\n" + fence_claim, any_hash_heading) == fence_base)
-        no_setext = private_copy("        setext = paragraph_open and SETEXT_UNDERLINE.fullmatch(line) is not None " + "and not lazy\n",
-                                 "        setext = False\n")
-        expect_red("mutation: ignoring a setext underline keeps the paragraph open and hides the claim after the "
-                   "next HTML block (the heading proof goes red)",
-                   lambda: claims_in("para\n===\n<custom>\n```\n</custom>\n\n" + fence_claim, no_setext) == fence_base)
-        blank_keeps_paragraph = private_copy("        if not line.strip():\n            paragraph_open = " + "False\n",
-                                             "        if not line.strip():\n            pass\n")
-        table_keeps_paragraph = private_copy("                              or line.lstrip().startswith(" + '"|"))\n', "                              )\n")
-        expect_red("mutation: a blank line or a table row that leaves the paragraph open hides the claim after the "
-                   "next HTML block (the paragraph proof goes red)",
-                   lambda: claims_in("para\n\n<custom>\n```\n</custom>\n\n" + fence_claim, blank_keeps_paragraph) == fence_base
-                   and claims_in("| a | b |\n|---|---|\n| 1 | 2 |\n<custom>\n```\n</custom>\n\n" + fence_claim,
-                                 table_keeps_paragraph) == fence_base)
-        script_closer_off = private_copy('RAW_HTML_TAGS = ("pre", "script", ' + '"style", "textarea")', 'RAW_HTML_TAGS = ("pre", "style", "textarea")')
-        textarea_closer_off = private_copy('RAW_HTML_TAGS = ("pre", "script", "style", ' + '"textarea")', 'RAW_HTML_TAGS = ("pre", "script", "style")')
-        expect_red("mutation: dropping </script> or </textarea> as a raw closer keeps the block open past it "
-                   "(the raw-closer proof goes red)",
-                   lambda: claims_in("<pre>\n```\n</script>\n\n```\n" + fence_claim, script_closer_off) == fence_base + 1
-                   and claims_in("<pre>\n```\n</textarea>\n\n```\n" + fence_claim, textarea_closer_off) == fence_base + 1)
-        closer_before_end = private_copy("            if k and line.strip() and " + "indent < k:\n", "            if False:\n")
-        expect_red("mutation: reading a dedented run as the item's closer hides the prose after the new fence "
-                   "(the list-end proof goes red)",
-                   lambda: claims_in("- ```\n  code\n```\nexample\n```\n\n" + fence_claim, closer_before_end) == fence_base)
-        blank_ends_item = private_copy("            if k and line.strip() and " + "indent < k:\n", "            if k and indent < k:\n")
-        expect_red("mutation: a blank line ending the item exposes the fenced claim after it "
-                   "(the blank-line proof goes red)",
-                   lambda: claims_in("- item\n  ```\n  code\n\n  " + fence_claim + "  ```\n", blank_ends_item) == fence_base + 1)
-        thematic_as_item = private_copy("        marker = None if THEMATIC_BREAK.fullmatch(line) " + "else re.match(",
-                                        "        marker = re.match(")
-        expect_red("mutation: `- - -` read as an item opens a fence under it and hides the claim "
-                   "(the thematic-break proof goes red)",
-                   lambda: claims_in("- - -\n    ```\n  " + fence_claim, thematic_as_item) == fence_base)
-        setext_any_indent = private_copy("        setext = paragraph_open and SETEXT_UNDERLINE.fullmatch(line) is not None and not " + "lazy\n",
-                                         "        setext = paragraph_open and SETEXT_UNDERLINE.fullmatch(line) is not None\n")
-        expect_red("mutation: an underline accepted at any indentation turns lazy continuation into a heading "
-                   "(the setext proof goes red)",
-                   lambda: claims_in("- item\n===\n<custom>\n```\n</custom>\n\n" + fence_claim, setext_any_indent) == fence_base + 1)
-        setext_without_paragraph = private_copy("setext = " + "paragraph_open and SETEXT_UNDERLINE.fullmatch(line) is not None and not lazy\n",
-                                                "setext = SETEXT_UNDERLINE.fullmatch(line) is not None and not lazy\n")
-        expect_red("mutation: an underline with no paragraph open read as a heading exposes the claim after the "
-                   "fence it should have kept (the setext proof goes red)",
-                   lambda: claims_in("===\n<custom>\n```\n" + fence_claim, setext_without_paragraph) == fence_base + 1)
-        declaration_any_case = private_copy('    if re.match(r"<![A-Z]", ' + 'stripped):\n', '    if re.match(r"<![a-zA-Z]", stripped):\n')
-        expect_red("mutation: a case-blind declaration test makes `<!doctype` a block (the declaration proof goes red)",
-                   lambda: claims_in("<!doctype html\n```\n>\n\n" + fence_claim, declaration_any_case) == fence_base + 1)
-        ordered_paren_off = private_copy('[.)]) {1,4}' + '(?=\\S)", expanded)\n', '[.]) {1,2}(?=\\S)", expanded)\n')
-        expect_red("mutation: a marker set without `)` or wider spacing counts the items' fenced content as prose "
-                   "(the marker proof goes red)",
-                   lambda: claims_in("1) ```\n   " + fence_claim + "   ```\n", ordered_paren_off) == fence_base + 1
-                   and claims_in("-   ```\n    " + fence_claim, ordered_paren_off) == fence_base + 1)
-        marker_three_spaces = private_copy('[.)]) {1,4}' + '(?=\\S)", expanded)\n', '[.)]) {1,3}(?=\\S)", expanded)\n')
-        expect_red("mutation: a marker set stopping at three spaces counts a four-space item's fenced content as prose "
-                   "(the marker proof goes red)",
-                   lambda: claims_in("-    ```\n     " + fence_claim, marker_three_spaces) == fence_base + 1)
-        closer_offset_off = private_copy("len(closer.group()) >= length\n                        and indent <= k + " + "3 and not",
-                                         "len(closer.group()) >= length\n                        and indent <= k and not")
-        expect_red("mutation: a closer accepted only at the item's offset leaves the fence open past a closer "
-                   "three columns in (the closer-offset proof goes red)",
-                   lambda: claims_in("- item\n  ```\n  code\n     ```\n  " + fence_claim, closer_offset_off) == fence_base)
-        lazy_ignores_interrupts = private_copy("        lazy = (item_offset is not None and indent < item_offset and bool(line.strip()) and paragraph_open\n                and not " + "interrupts)\n",
-                                               "        lazy = (item_offset is not None and indent < item_offset and bool(line.strip()) and paragraph_open)\n")
-        expect_red("mutation: a lazy exemption blind to interrupting blocks keeps the item open past a heading "
-                   "(the interruption proof goes red)",
-                   lambda: claims_in("- para\n# Heading\n    ```\n  " + fence_claim, lazy_ignores_interrupts) == fence_base)
-        tilde_not_interrupt = private_copy('        top_run = re.match(r"`{3,}|' + '~{3,}", top_stripped)\n',
-                                           '        top_run = re.match(r"`{3,}", top_stripped)\n')
-        expect_red("mutation: a tilde fence that does not interrupt keeps the item open and hides the claim "
-                   "(the tilde-interruption proof goes red)",
-                   lambda: claims_in("- para\n~~~\n~~~\n    ```\n  " + fence_claim, tilde_not_interrupt) == fence_base)
-        inline_run_interrupts = private_copy('                          or (top_run and not (top_run.group()[0] == "`" and "`" in ' + 'top_stripped[top_run.end():]))\n',
-                                             '                          or bool(top_run)\n')
-        expect_red("mutation: an inline backtick run read as an interruption ends the item and exposes the claim "
-                   "(the inline-run proof goes red)",
-                   lambda: claims_in("- para\n```a```\n    ```\n  " + fence_claim, inline_run_interrupts) == fence_base + 1)
-        tag_alone_interrupts = private_copy('                          or (top_stripped.startswith("<") and html_block_end(top_stripped, ' + 'True) is not None))\n',
-                                            '                          or (top_stripped.startswith("<") and html_block_end(top_stripped, False) is not None))\n')
-        expect_red("mutation: a tag standing alone read as an interruption ends the item and exposes the claim "
-                   "(the tag-alone proof goes red)",
-                   lambda: claims_in("- para\n<custom>\n    ```\n  " + fence_claim, tag_alone_interrupts) == fence_base + 1)
-        html_not_interrupt = private_copy('                          or (top_stripped.startswith("<") and html_block_end(top_stripped, True) is not ' + 'None))\n',
-                                          '                          )\n')
-        expect_red("mutation: an HTML block that does not interrupt keeps the item open and hides the claim "
-                   "(the HTML-interruption proof goes red)",
-                   lambda: claims_in("- para\n<!-- c -->\n    ```\n  " + fence_claim, html_not_interrupt) == fence_base)
-        code_threshold_five = private_copy("        indented_code = line.strip() and not paragraph_open and indent - (item_offset or 0) >= " + "4\n",
-                                           "        indented_code = line.strip() and not paragraph_open and indent - (item_offset or 0) >= 5\n")
-        expect_red("mutation: indented code recognised only from five columns opens a paragraph at four and hides the "
-                   "claim (the indented-code proof goes red)",
-                   lambda: claims_in("    code\n<custom>\n```\n</custom>\n\n" + fence_claim, code_threshold_five) == fence_base)
-        code_threshold_three = private_copy("        indented_code = line.strip() and not paragraph_open and indent - (item_offset or 0) " + ">= 4\n",
-                                            "        indented_code = line.strip() and not paragraph_open and indent - (item_offset or 0) >= 3\n")
-        code_ignores_container = private_copy("        indented_code = line.strip() and not paragraph_open and indent - " + "(item_offset or 0) >= 4\n",
-                                              "        indented_code = line.strip() and not paragraph_open and indent >= 4\n")
-        expect_red("mutation: indented code from three columns, or measured from the page inside an item, closes a "
-                   "paragraph that is open and exposes the claim (the boundary proof goes red)",
-                   lambda: claims_in("   para\n<custom>\n```\n" + fence_claim, code_threshold_three) == fence_base + 1
-                   and claims_in("- item\n\n    para\n  <custom>\n  ```\n  " + fence_claim, code_ignores_container) == fence_base + 1)
-        code_opens_paragraph = private_copy("        indented_code = line.strip() and not paragraph_open and " + "indent - (item_offset or 0) >= 4\n",
-                                            "        indented_code = False\n")
-        expect_red("mutation: indented code opening a paragraph hides the claim after the next HTML block "
-                   "(the indented-code proof goes red)",
-                   lambda: claims_in("    code\n<custom>\n```\n</custom>\n\n" + fence_claim, code_opens_paragraph) == fence_base)
-        continuation_branch_off = private_copy("        elif item_offset is not None and indent >= item_offset and indent - item_offset <= 3:\n            stripped = " + "expanded.lstrip(\" \")\n",
-                                               "        elif False:\n            pass\n")
-        expect_red("mutation: without the continuation branch an opener three columns past the item's offset is "
-                   "prose (the opener-offset proof goes red)",
-                   lambda: claims_in("- item\n     ```\n     " + fence_claim, continuation_branch_off) == fence_base + 1)
-        prose_as_paragraph = private_copy("html_block_end(stripped, " + "paragraph_open)", "html_block_end(stripped, bool(current))")
-        expect_red("mutation: accumulated prose taken as an open paragraph hides the claim after a closed HTML block "
-                   "(the paragraph-state proof goes red)",
-                   lambda: claims_in("<pre>\n```\n</pre>\n<custom>\n```\n</custom>\n\n" + fence_claim, prose_as_paragraph)
-                   == fence_base)
-        no_same_line_end = private_copy("                if html_end(line):  # a block of the first five kinds may end on its " + "opening line\n",
-                                        "                if False:\n")
-        expect_red("mutation: an HTML block kept open past its one-line end swallows the fence that follows "
-                   "(the opening-line proof goes red)",
-                   lambda: claims_in("<pre></pre>\n```\n" + fence_claim, no_same_line_end) == fence_base + 1)
-        opener_tag_only = private_copy('        return lambda line: any(f"</{tag}>" in line.lower() for tag in ' + 'RAW_HTML_TAGS)\n',
-                                       '        return lambda line: f"</{raw.group(1)}>" in line.lower()\n')
-        expect_red("mutation: a raw block ended only by its opener's tag keeps </style> content as prose "
-                   "(the closing-tag proof goes red)",
-                   lambda: claims_in("<pre>\n```\n</style>\n\n```\n" + fence_claim, opener_tag_only) == fence_base + 1)
-        cdata_lowercase = private_copy('    if stripped.startswith("<![CDATA[' + '"):\n', '    if lower.startswith("<![cdata["):\n')
-        expect_red("mutation: a case-blind CDATA test makes the lowercase spelling an HTML block "
-                   "(the CDATA proof goes red)",
-                   lambda: claims_in("<![cdata[\n```\n" + fence_claim, cdata_lowercase) == fence_base + 1)
-        raw_off = private_copy('    raw = re.match(r"<(pre|script|style|' + 'textarea)', '    raw = None and re.match(r"<(pre|script|style|textarea)')
-        expect_red("mutation: without the raw-block condition a <script> body is not a block, so its run opens a "
-                   "fence (the start-condition proof goes red)",
-                   lambda: claims_in("<script>\n```\n" + fence_claim + "</script>\n", raw_off) == fence_base)
-        processing_off = private_copy('    if lower.startswith("<?' + '"):\n', '    if False:\n')
-        declaration_off = private_copy('    if re.match(r"<![A-Z]", ' + 'stripped):\n', '    if False:\n')
-        cdata_off = private_copy('    if stripped.startswith("<![CDATA[' + '"):\n', '    if False:\n')
-        known_tags_off = private_copy('    if tag and tag.group(1) in ' + 'HTML_BLOCK_TAGS:\n', '    if False:\n')
-        expect_red("mutation: dropping the processing-instruction, declaration, CDATA or known-tag condition lets "
-                   "the run inside each open a fence (the start-condition proof goes red)",
-                   lambda: claims_in("<?x\n```\n?>\n\n" + fence_claim, processing_off) == fence_base
-                   and claims_in("<!X\n```\n>\n\n" + fence_claim, declaration_off) == fence_base
-                   and claims_in("<![CDATA[\n```\n]]>\n\n" + fence_claim, cdata_off) == fence_base
-                   and claims_in("para\n<div>\n```\n" + fence_claim, known_tags_off) == fence_base)
-        expect_red("mutation: ignoring HTML blocks lets a run inside <pre> open a fence and hide the claim "
-                   "(the HTML-block proof goes red)",
-                   lambda: claims_in("<pre>\n```\n</pre>\n\n" + fence_claim, no_html) == fence_base)
+        # C16-EXEMPT-BEGIN: selftest
+        # ---- C16: the banned method stays out of every tracked file ----------------------------
+        # Every proof below reads a planted tree through the production entry point, with
+        # planted exemption tables whose spans fit the planted files. The first 24 sense lines
+        # are copied verbatim from this repository's own files, where each uses the word in a
+        # sense the ban does not reach; the last 12 are kept-sense phrasings written for this
+        # proof. The method lines are former lines of this tree.
+        c16_base = {
+            "AGENTS.md": ("Intro.\n\nMutation testing is banned in every project and runtime: no mutant.\n"
+                          "Second line names a mutation sweep.\n\nPlain prose.\n"),
+            "hooks/harness_check.py": ("x = 1\n# C16-EXEMPT-BEGIN: patterns\nmutmut\n"
+                                       "# C16-EXEMPT-END: patterns\n# C16-EXEMPT-BEGIN: selftest\n"
+                                       "fence mutants\n# C16-EXEMPT-END: selftest\n"),
+            "hooks/guards/mutation_testing_guard.py": "TOOLS = ('mutmut', 'stryker')\n",
+            "contracts/goldens/guard-decisions.json": '{"mutmut run": "deny"}\n',
+        }
+        c16_planted = (dict(C16_EXEMPT_FILES),
+                       {key: (reason, 3) for key, (reason, _span) in C16_EXEMPT_REGIONS.items()},
+                       {key: (reason, 2) for key, (reason, _span) in C16_EXEMPT_PARAGRAPHS.items()})
+        c16_roots = []
+
+        def c16_on(files=None, drop=(), floor=1, git=True):
+            root = os.path.join(td, f"banned-method-{len(c16_roots)}")
+            c16_roots.append(root)
+            os.makedirs(root)
+            if git:
+                subprocess.run(["git", "init", "--quiet", root], check=True)
+            planted = dict(c16_base, **(files or {}))
+            for rel in drop:
+                planted.pop(rel)
+            for rel, text in planted.items():
+                path = os.path.join(root, rel)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                open(path, "w", encoding="utf-8").write(text)
+            if planted and git:
+                subprocess.run(["git", "-C", root, "add", "-A"], check=True)
+            run = Run(root, ci=True)
+            with contextlib.redirect_stdout(io.StringIO()):
+                run.c16_banned_method(scan_floor=floor, exemptions=c16_planted)
+            return run
+
+        def c16_failed(run, text):
+            return any(c == "C16" and text in d for c, d in run.failures)
+
+        c16_clean = c16_on()
+        expect_red("C16 control: a planted tree whose only method vocabulary sits in its declared "
+                   "exemptions is green over 2 files, 2 exempt files, 2 regions and 1 paragraph",
+                   lambda: not c16_clean.failures and c16_clean.counters["C16"]["hits"] == []
+                   and (c16_clean.counters["C16"]["files"], c16_clean.counters["C16"]["exempt_files"],
+                        c16_clean.counters["C16"]["exempt_regions"],
+                        c16_clean.counters["C16"]["exempt_paragraphs"]) == (2, 2, 2, 1))
+        c16_senses = (
+            "other outward mutations still require an explicit user instruction aimed at that operation. Local",
+            '    ("GREEN WRAPPER: builtin printf bypasses shell identity mutation",',
+            '        ("ASK EQUALS: a conditional option mutation is not unconditional authority",',
+            "            == [\"hooks/a.py line 4: sys.path mutated outside a top-level call statement; "
+            "the search path cannot be ordered\",",
+            '                "whether a `rev:path` argument survives shell expansion. Run Git "',
+            "# from. Plain `git clean -fd` is safe; ignored files survive it. Never use -x here.",
+            "Personal tooling that **reviews** others' work must never mutate the shared repo or gate",
+            "Answers and notes grounded in code citations; mutates nothing. Any findings are notes for "
+            "the next stance, not edits.",
+            "  kill the process *group*.",
+            '        planted("verification rejects a post-render payload mutation", "claude", touch_payload)',
+            '    ("GREEN ALIAS: helper defined after its caller runs cannot mutate alias state",',
+            "subject followed by a fresh install/session check, not a mutation of old artifact evidence.",
+            "        def c9_after(mutated_hooks=None, mutated_manifest=None, mutated_marketplace=None):",
+            "        with identity_mutation_scope(scan_command, _deadline), \\",
+            '    ("GREEN SENSE: Mutagen file sync", "mutagen sync list", "allow"),',
+            "    (\"GREEN SENSE: a GraphQL mutation\", \"gh api graphql -f query='mutation { addStar(input: "
+            "{starrableId: \\\"x\\\"}) { clientMutationId } }'\", \"allow\"),",
+            "Do not mutate a shared machine's policy merely to run an experiment.",
+            "- Intent changes things (write, fix, refactor, generate artifacts that persist — code, files, "
+            "configs) → implement. When a verb matches both this and the transform rule above, the "
+            "state-mutation test decides.",
+            "| 13 | Volatile tokens in stable blocks | timestamps/run-values kill prefix caching | ✅ regex |",
+            "- Seeded-defect corpus: ≥1 fixture per row of the current catalog (concepts M9 — the corpus "
+            "tracks catalog growth).",
+            "  idempotency rule and survived three rounds because it was grounded in an SDK error code: two",
+            '    "Does not run git push or another outward mutation."',
+            "A successful write proves mutation, not prior observation.",
+            '        ("an outer dash break survives a following inline-code group",',
+        ) + (
+            "the addStar mutation fails when the token lacks scope",
+            "a GraphQL mutation runs only after the read query",
+            "the gh api graphql mutation tool needs -f query=",
+            "    ('ASK ALIAS: an alias mutation leaks out of the subshell', 'alias git=x; (git status)', 'ask'),",
+            "a sys.path mutation leaks into the importer's later imports",
+            "an option mutation inherits into eval",
+            "mutation: addLabelsToLabelable",
+            "beware survivor bias when sampling only merged PRs",
+            "an unkillable D-state child holds the pipe open",
+            "a killable background job",
+            "the setopt mutation turns EQUALS off for the rest of the source",
+            "PATH mutation exposes a different git",
+        )
+        c16_sense_run = c16_on({"notes/senses.md": "\n".join(c16_senses) + "\n"})
+        expect_red(f"C16 finds nothing in {len(c16_senses)} lines that use the word in a sense the ban "
+                   "does not reach",
+                   lambda: not c16_sense_run.failures and c16_sense_run.counters["C16"]["hits"] == [])
+        c16_method = (
+            ("the method", "proves anything — mutation-testing a call site, a suite that passed suspiciously,"),
+            ("its machinery", "image contents behind those labels. No workflow runs the mutation sweep."),
+            ("a mutant", "# --- fence mutants, each failing one shape proof above by name; search strings are"),
+            ("a survivor", "measurement exits 0 and reports survivors in JSON rather than treating coverage debt"),
+            ("a kill rate", "the guard reached a 92% kill rate on that head"),
+            ("a mutate-each instruction", "  same case neuters it. Re-mutate after any change to the guarded path."),
+            ("a mutation-proof label", '    print("  %-4s EQUALS-state callsite mutation loses noequals uncertainty"'),
+            ("a mutation tool", "run `mutmut run` on the parser before review"),
+            ("the removed machinery", "python3 instruments/enumerate_survivors.py --selftest"),
+            ("a removed identifier", "def mutation_plan_error(plan=None, exclusions=None, policy=None) -> str:"),
+        )
+        c16_method_run = c16_on({"notes/method.md": "\n".join(line for _label, line in c16_method) + "\n"})
+        expect_red("C16 reports each method line by file, line and the one pattern it matches",
+                   lambda: c16_method_run.counters["C16"]["hits"]
+                   == [("notes/method.md", index, label)
+                       for index, (label, _line) in enumerate(c16_method, 1)]
+                   and sorted(label for label, _pattern in C16_PATTERNS)
+                   == sorted(label for label, _line in c16_method)
+                   and c16_failed(c16_method_run, "10 hit(s)"))
+        c16_copy = c16_on({"notes/copy.py": "TOOLS = ('mutmut', 'stryker')\n"})
+        expect_red("C16 exempts a declared file by path only: the same bytes elsewhere are reported",
+                   lambda: c16_copy.counters["C16"]["hits"] == [("notes/copy.py", 1, "a mutation tool")])
+        c16_outside = c16_on({"hooks/harness_check.py": c16_base["hooks/harness_check.py"] + "mutmut run\n"})
+        expect_red("C16 exempts a marked region only between its markers",
+                   lambda: c16_outside.counters["C16"]["hits"]
+                   == [("hooks/harness_check.py", 8, "a mutation tool")])
+        c16_open = c16_on({"hooks/harness_check.py": c16_base["hooks/harness_check.py"].replace(
+            "# C16-EXEMPT-END: selftest\n", "")})
+        expect_red("C16 goes red on a declared region whose END marker is missing",
+                   lambda: c16_failed(c16_open, "exempt region hooks/harness_check.py:selftest needs one "
+                                                "BEGIN before one END (found 1 and 0)"))
+        c16_moved = c16_on({"hooks/harness_check.py": c16_base["hooks/harness_check.py"].replace(
+            "mutmut\n# C16-EXEMPT-END: patterns\n",
+            "mutmut\nmutmut run --paths-to-mutate src\n# C16-EXEMPT-END: patterns\n")})
+        expect_red("C16 goes red when a region's END marker moves down over another line",
+                   lambda: c16_failed(c16_moved, "exempt region hooks/harness_check.py:patterns spans 4 "
+                                                 "line(s), declared 3")
+                   and ("hooks/harness_check.py", 4, "a mutation tool") in c16_moved.counters["C16"]["hits"])
+        c16_rogue = c16_on({"README.md": "# C16-EXEMPT-BEGIN: other\nmutmut\n# C16-EXEMPT-END: other\n"})
+        expect_red("C16 goes red on an exemption marker no entry declares, and still reads the region",
+                   lambda: c16_failed(c16_rogue, "README.md: undeclared exemption marker")
+                   and ("README.md", 2, "a mutation tool") in c16_rogue.counters["C16"]["hits"])
+        c16_after = c16_on({"AGENTS.md": c16_base["AGENTS.md"] + "\nRun mutmut on it.\n"})
+        expect_red("C16 exempts only the paragraph holding the ban's anchor",
+                   lambda: c16_after.counters["C16"]["hits"] == [("AGENTS.md", 8, "a mutation tool")])
+        c16_joined = c16_on({"AGENTS.md": c16_base["AGENTS.md"].replace(
+            "mutation sweep.\n\nPlain prose.\n", "mutation sweep.\nRun mutmut on the parser.\n")})
+        expect_red("C16 goes red when the ban's paragraph absorbs the next one through a removed blank line",
+                   lambda: c16_failed(c16_joined, "exempt paragraph in AGENTS.md spans 3 line(s), declared 2"))
+        c16_spaced = c16_on({"AGENTS.md": c16_base["AGENTS.md"].replace(
+            "mutation sweep.\n\nPlain prose.\n", "mutation sweep.\n \nRun mutmut on the parser.\n")})
+        expect_red("C16 ends the ban's paragraph at a whitespace-only line and reads the next one",
+                   lambda: not c16_spaced.counters["C16"]["problems"]
+                   and c16_spaced.counters["C16"]["hits"] == [("AGENTS.md", 6, "a mutation tool")])
+        c16_twice = c16_on({"AGENTS.md": c16_base["AGENTS.md"] + "\nMutation testing is banned in every "
+                                                                 "project and runtime: again.\n"})
+        expect_red("C16 goes red when the ban's anchor occurs twice",
+                   lambda: c16_failed(c16_twice, "exempt paragraph anchor in AGENTS.md occurs 2 time(s), not once"))
+        c16_unanchored = c16_on({"AGENTS.md": "Intro.\n"})
+        expect_red("C16 goes red when the ban's anchor is gone",
+                   lambda: c16_failed(c16_unanchored, "exempt paragraph anchor in AGENTS.md occurs 0 time(s), not once"))
+        c16_missing = c16_on(drop=("contracts/goldens/guard-decisions.json",))
+        expect_red("C16 goes red when a declared exempt file is not tracked",
+                   lambda: c16_failed(c16_missing, "exempt file contracts/goldens/guard-decisions.json is not in "
+                                                   "the scan set"))
+        c16_empty = c16_on(drop=tuple(c16_base))
+        expect_red("C16 treats zero files as an error, not a clean verdict",
+                   lambda: c16_failed(c16_empty, "cannot enforce: zero files in the scan set")
+                   and len(c16_empty.failures) == 1)
+        c16_small = c16_on(floor=50)
+        expect_red("C16 goes red when the scan set falls below its floor",
+                   lambda: c16_failed(c16_small, "scan set shrank to 2, floor 50"))
+        c16_installed = c16_on({"notes/run.md": "mutmut run\n"}, git=False)
+        expect_red("C16 states an installed surface out of scope in one verdict and reads none of it",
+                   lambda: c16_installed.checks == 1 and not c16_installed.failures
+                   and c16_installed.counters["C16"] == {"files": 0, "hits": [], "surface": "installed"})
+        c16_real = Run(ROOT, ci=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            c16_real.c16_banned_method()
+        expect_red("C16 on this tree is green with no hit over at least the C6 floor of tracked files",
+                   lambda: not c16_real.failures and c16_real.counters["C16"]["hits"] == []
+                   and c16_real.counters["C16"]["files"] >= C6_SCAN_FLOOR)
+        # C16-EXEMPT-END: selftest
+
 
     # +1 for this assertion's own increment, so SELFTEST_FLOOR is the number the receipt
     # prints. Comparing the pre-increment count made the floor one less than the reported

@@ -1,22 +1,22 @@
 ---
 name: testing-ci
-description: Deciding whether a test, a guard, or a green check proves anything — mutation-testing a call site, a suite that passed suspiciously, a selector that may have selected nothing, an allowlist or detector that reads as an all-clear, a patch or mock that quietly stopped taking effect, a check that never ran. Use before trusting a green run or calling a behavior covered.
+description: Deciding whether a test, a guard, or a green check proves anything — a call site no test reaches, a suite that passed suspiciously, a selector that may have selected nothing, an allowlist or detector that reads as an all-clear, a patch or mock that quietly stopped taking effect, a check that never ran. Use before trusting a green run or calling a behavior covered.
 ---
 
 # Proving a test or CI signal is real
 
 ## The empty red set
 
-- **"I broke it and nothing failed" is a claim about your selector.** `baseline N passed →
-  mutated N passed` is the only trustworthy shape; a changed *deselected* count means the
-  selector moved.
-- **A prose-asserted invariant needs something that goes RED.** Looks enforced, is not: docstring
-  only · dead defensive clause · a neighbor green for another reason · partial enumeration (3 of
-  4) · a helper whose revert reddens every path. **Mutate each call site, not the helper.**
+- **"Nothing failed" is a claim about your selector.** Compare runs that select the same N
+  (`parent N → head N`); a changed *deselected* count means the selector moved.
+- **A prose-asserted invariant needs an input that goes RED, never edited code.** Looks enforced,
+  is not: docstring only · dead defensive clause · a neighbor green for another reason · partial
+  enumeration (3 of 4) · a helper tested while its call sites are not. **Give each call site one.**
 - **A passing oracle can stop guarding without failing**: a later redundant mechanism over the
-  same case neuters it. Re-mutate after any change to the guarded path.
-- **Mutate each link, not the leaf.** A self-test calling the extracted matcher stays green
-  while the mid-chain walker or the file filter is mutated to yield nothing.
+  same case neuters it. Assert the rejecting mechanism's exact reason.
+- **Test each link, not the leaf.** A self-test calling the extracted matcher stays green
+  while the walker or file filter yields nothing. Drive a fixture tree through the entry
+  point; assert its exact findings.
 
 ## Guards, detectors, allowlists
 

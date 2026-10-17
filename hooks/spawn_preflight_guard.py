@@ -3,7 +3,7 @@
 
 The shared AGENTS.md rule this mechanizes: preflight EVERY
 dispatch. At 100% disk every command fails ENOSPC on unrelated paths and
-mutation agents emit false findings — infra failure is neither pass nor fail.
+agents report those failures as findings — infra failure is neither pass nor fail.
 `agent-dispatch`'s own body: "a preflight written as prose is a reminder, not a
 gate."
 
@@ -101,7 +101,7 @@ def decide(pct):
     if pct >= deny_at:
         return ("deny",
                 f"data volume at {pct}% (deny >= {deny_at}%). At 100% every command "
-                "fails ENOSPC on unrelated paths and mutation agents emit false "
+                "fails ENOSPC on unrelated paths and agents report those failures as "
                 "findings — infra failure is neither pass nor fail. Decide the "
                 "reclaim order and clear space, or point TMPDIR at a volume with "
                 "room, before dispatching.")
@@ -399,10 +399,10 @@ def selftest():
             print(f"  {'PASS' if ok else 'FAIL'} the ancestor walk reports a descriptor {label}")
 
         # The walk has two independent terminators -- the parent-is-itself test and the
-        # depth bound -- and each masks the other, so neither can be killed on its own.
-        # Removing BOTH hangs the suite rather than reddening it. This case pins the
-        # observable property they jointly produce: a walk that reaches the filesystem
-        # root answers, rather than spinning inside a hook that runs on every spawn.
+        # depth bound -- and each masks the other, so no single input separates them.
+        # This case pins the observable property they jointly produce: a walk that
+        # reaches the filesystem root answers, rather than spinning inside a hook that
+        # runs on every spawn.
         root_fd = os.open(os.sep, _walk_flags)
         try:
             walked = _fd_within_workspace(root_fd, adopted)
@@ -462,9 +462,9 @@ def selftest():
         print(f"  {'PASS' if ok else 'FAIL'} stable-parent open failure denies without creating scratch")
 
         # Each descriptor proof failure is an independent fail-closed link. A single
-        # ``open('..')`` test did not exercise stat, dup, or either fstat arm, so replacing
-        # any of those arms with ``return False`` left the suite green and converted an
-        # unknown ancestry into permission to create.
+        # ``open('..')`` test did not exercise stat, dup, or either fstat arm, so no input
+        # showed that a failure in any of them keeps an unknown ancestry from becoming
+        # permission to create.
         descriptor_probe_fd = os.open(outside_probe, _walk_flags)
         real_stat, real_dup, real_fstat = os.stat, os.dup, os.fstat
         descriptor_cases = []
@@ -648,8 +648,8 @@ def selftest():
         bad += (not ok); checks += 1
         print(f"  {'PASS' if ok else 'FAIL'} a taken path is refused with a different path to retry on")
 
-        # Four rejection conditions in the workspace-root and path helpers had no case: each
-        # is reachable from a real input, and each was removable with this suite green.
+        # Four rejection conditions in the workspace-root and path helpers had no case,
+        # although each is reachable from a real input; each gets one here.
         try:
             protected_workspace_root(os.path.join(adopted, "README-not-a-dir"))
             cwd_problem = ""

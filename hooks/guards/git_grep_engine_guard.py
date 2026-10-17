@@ -44,11 +44,9 @@ Python or awk semantics is a different guard, not a widening of this one.
 Exit codes:  0 = decision emitted on stdout (allow/deny/ask)
              2 = usage error / unknown flag / zero inputs in --selftest or --perf
 
-`--perf` holds the controls whose verdict is a timing claim and runs once per head; the
-mutation sweep runs `--selftest` once per mutation. `--selftest` still decides inside
-GUARD_BUDGET_SECONDS, so a slow enough host can fail one of its checks as well:
-"function-declaration limit mutation loses bounded-parse ask" parses a source one declaration
-past the default limit inside that budget.
+`--perf` holds the controls whose verdict is a timing claim and runs once per head.
+`--selftest` still decides inside GUARD_BUDGET_SECONDS, so a slow enough host can fail
+one of its checks as well.
 """
 import builtins
 import contextlib
@@ -3281,12 +3279,7 @@ GIT_UNSETTLED_EXECUTABLE_ERROR = (
 # of them: on git 2.46.1 `git --exec-path rev-parse --is-bare-repository` prints the exec
 # path and never runs rev-parse, so the bare spelling terminates argument processing. Only
 # `--exec-path=VALUE` sets it and continues, and that spelling is handled where options are
-# parsed. Both sets below were previously duplicated as function-local, lower-case literals
-# inside resolve_effective_git_invocation, where the mutation plan could not reach them: it
-# enumerates module scope and requires an upper-case name, so a change to either was
-# unmeasured. The copy carrying `--exec-path` fed a subcommand scanner no caller ever
-# invoked, so its nine planned mutations could never be caught and were recorded as
-# coverage debt against dead code.
+# parsed.
 _GIT_GLOBAL_OPTIONS_WITH_VALUES = {
     "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix",
     "--config-env", "--attr-source",
@@ -4660,8 +4653,8 @@ def unwrap_command_prefix(tokens, shell="zsh", equals_state=ZSH_EQUALS_ON,
         # the cross-version alias-proof set and nothing else -- same rule as a named
         # alternate binary. Keeping the arm as well questioned `sudo git status` and
         # downgraded `sudo git grep -E 'harness\b'` from a proven deny to a question.
-        # With the floor rule in place it decided nothing: neutering it moved no verdict
-        # across the 745-command fixture corpus.
+        # With the floor rule in place it decided nothing: removing it moved no verdict
+        # across the 745-command fixture corpus, base against head.
         # A bare `echo` in front of Git-looking text is a hazard only where this command
         # shows a way to make `echo` something else: a declaration, an alias, an eval, a
         # sourced file, a lookup-table write. With none in sight, `echo "=== git diff
@@ -5832,7 +5825,6 @@ GIT_LOG_ENGINE_TOKENS = {
 
 CONFIG_ENGINE = {"extended": "E", "ere": "E", "perl": "P", "pcre": "P",
                  "fixed": "F", "basic": "B", "default": "B"}
-AMBIENT_ENGINE_REQUIRES_EXPLICIT = True
 
 
 def git_config_bool_is_false(value):
@@ -6903,7 +6895,7 @@ def _classify_source(command, scan_command, decisions, _shell_depth, _deadline, 
             continue
         if engine not in {None, "E"}:
             continue
-        if engine is None and AMBIENT_ENGINE_REQUIRES_EXPLICIT and pattern_from_file:
+        if engine is None and pattern_from_file:
             decisions.append((
                 "ask", "git grep has no command-resolved regex engine and reads a "
                 "pattern file that argv inspection cannot classify. Ambient Git "
@@ -6949,7 +6941,7 @@ def _classify_source(command, scan_command, decisions, _shell_depth, _deadline, 
             scan = scan_pcre_constructs(literal_pattern)
             bad_atoms.update(scan.atoms)
             uncertain_atoms.update(scan.uncertain)
-        if engine is None and AMBIENT_ENGINE_REQUIRES_EXPLICIT:
+        if engine is None:
             if bad_atoms or uncertain_atoms or unresolved is not None:
                 constructs = sorted(bad_atoms | uncertain_atoms)
                 detail = (", ".join(constructs) if constructs
@@ -7030,15 +7022,12 @@ FIXTURES = [
      """git grep --extended -e'harness\\b' -- README.md""", "deny"),
     ("RED  LONG ABBREV: --extended-r uniquely selects extended-regexp",
      """git grep --extended-r -e'harness\\b' -- README.md""", "deny"),
-    # The four below pin the ADDITION direction for the option-grammar sets. Removing a
-    # member of any of them only makes this guard stricter, so the element sweep -- which
-    # only removes -- reported them clean while each could be widened by one token into an
-    # allow. `-Ew 'harness\b'` returns no match on git 2.46.1 where `-Pw` matches, so the
-    # silent-wrong-result hazard these deny is live rather than theoretical.
+    # The four RED ADDITION fixtures below pin the ADDITION direction for the option-grammar
+    # sets: each set could be widened by one token into an allow. `-Ew 'harness\b'` returns
+    # no match on git 2.46.1 where `-Pw` matches, so the silent-wrong-result hazard these deny
+    # is live rather than theoretical.
     # `-F` selects fixed-strings for the log family, where a `\b` in the pattern is a literal
-    # rather than a word boundary and the engine hazard does not arise. Nothing else asserted
-    # this token, so deleting it changed three verdicts while the receipt still scored the
-    # mutation caught -- on the recorded check count alone, with no assertion failing.
+    # rather than a word boundary and the engine hazard does not arise.
     ("GREEN LOG ENGINE: -F selects fixed-strings, so \\b carries no engine hazard",
      """git log -F --grep='harness\\b'""", "allow"),
     ("GREEN LOG ENGINE: trailing -F selects fixed-strings just as the leading form does",
@@ -7544,7 +7533,7 @@ def check_option_table_against_git():
     return failures, checks
 
 
-def check_option_grammar_against_git(argv_mutator=None):
+def check_option_grammar_against_git():
     """Exercise the valid spellings whose argv grammar is load-bearing here."""
     failures = []
     checks = 0
@@ -7702,8 +7691,6 @@ def check_option_grammar_against_git(argv_mutator=None):
             for label, args, expected_stdout in exact_engine_cases:
                 checks += 1
                 command = ["git", "grep", *args]
-                if argv_mutator is not None:
-                    command = argv_mutator(label, command)
                 observed = subprocess.run(
                     command, cwd=repo, capture_output=True, text=True, timeout=10,
                 )
@@ -7841,7 +7828,7 @@ def check_alias_shadowing_against_installed_gits(*, runner=None):
     return failures, scan_set, checks
 
 
-# The engine the log-family probe selects; the selftest swaps it to prove the probe reports.
+# The engine flag every log-family probe passes.
 _LOG_FAMILY_PROBE_ENGINE = "-E"
 
 
@@ -7918,7 +7905,7 @@ def _check_log_family_against_git(env):
     return failures
 
 
-# The interval the always-ERE probe selects with; the selftest swaps it to prove it reports.
+# The interval every always-ERE probe selects with.
 _ALWAYS_ERE_PROBE_PATTERN = "a{2}b"
 
 
@@ -8458,10 +8445,8 @@ def check_shell_boundary_behavior():
 
     # `_equals_expanded`'s doubled-equals condition models a real zsh refusal that the
     # DECISION surface cannot observe: `os.path.basename` already reduces a doubled-equals
-    # absolute Git path
-    # to `git`, and `==git` reaches no guarded arm either way. Deleting the condition
-    # therefore reddens nothing downstream, which is the shape of a dead defensive clause.
-    # Bind it to the installed zsh directly instead, so it is covered rather than assumed.
+    # absolute Git path to `git`, and `==git` reaches no guarded arm either way. Bind it to
+    # the installed zsh directly, so the refusal it models is checked against zsh.
     if has_zsh:
         for word, expanded, runs_git in (
             ("=git", "git", True),
@@ -9235,6 +9220,8 @@ FIXTURES += [
 _BYTE_LIMIT_SOURCE = "/bin/echo " + "x" * (MAX_COMMAND_CHARS - 11)
 _FUNCTION_PARSE_LIMIT_SOURCE = (
     "f(){ git status --short; }; f;" * (MAX_FUNCTION_DECLARATIONS + 1))
+# The at-limit member of the pair, sized by a literal like the other closed limits.
+_FUNCTION_PARSE_AT_LIMIT_SOURCE = "f(){ git status --short; }; f;" * 512
 
 
 def _nested_env_split_source(depth, inner):
@@ -9259,23 +9246,21 @@ def _nested_shell_source(depth, inner):
 
 
 # Each closed limit gets a pair: at the limit the source must still be classified, past it
-# the guard must say so. Four of these limits had no control at all -- MAX_TOKENS,
-# MAX_SUBCOMMANDS, MAX_PREFIX_DEPTH and MAX_ENV_SPLITS could each be raised to effectively
-# unbounded with every suite green -- and writing the MAX_ENV_SPLITS pair is what found
-# that exceeding it ALLOWED a live `git grep -E 'harness\b'`, because the walk stopped
-# with an unread blob and set no hazard hint.
+# the guard must say so. Writing the MAX_ENV_SPLITS pair found that exceeding it ALLOWED a
+# live `git grep -E 'harness\b'`, because the walk stopped with an unread blob and set no
+# hazard hint.
 #
-# The sizes below are LITERALS, deliberately. Building them from the constants they test
-# makes the fixture move with the mutation: raising MAX_PREFIX_DEPTH to 800 also produced
-# an 800-wrapper fixture, and the pair stayed green. `_CLOSED_LIMITS` is the drift check --
-# change a limit and it reddens, so these sources are re-derived on purpose rather than
-# following along silently.
+# The sizes below are LITERALS, deliberately: a size built from the constant it tests moves
+# with that constant, so its pair could never disagree with it. `_CLOSED_LIMITS` is the
+# drift check -- change a limit and it reddens, so these sources are re-derived on purpose
+# rather than following along silently.
 _CLOSED_LIMITS = {
     "MAX_TOKENS": 65536,
     "MAX_SUBCOMMANDS": 16384,
     "MAX_PREFIX_DEPTH": 8,
     "MAX_ENV_SPLITS": 4,
     "MAX_SOURCE_DEPTH": 16,
+    "MAX_FUNCTION_DECLARATIONS": 512,
 }
 _GUARDED_GREP = r"""git grep -E 'harness\b' -- README.md"""
 _TOKEN_LIMIT_SOURCE = "/bin/echo " + " ".join(["x"] * 65535)
@@ -9294,8 +9279,8 @@ _TOKEN_OVERFLOW_SOURCE = "/bin/echo " + " ".join(["x"] * 65537)
 # the margin fell to x1.9, which is a red on a runner twice this host's cost.
 _ENV_SPLIT_BUDGET_SOURCE = "env -S '" + "a" * 734_000 + "'"
 # The argument-count cap needs the count, not the byte cap: a megabyte of separators pins
-# the same clause and cost 2.2 s in every mutation run of this suite, which the hosted sweep
-# pays once per mutation on every head. Literal, like its `_TOKEN_OVERFLOW_SOURCE` sibling.
+# the same clause and costs 2.2 s on every run of this suite. Literal, like its
+# `_TOKEN_OVERFLOW_SOURCE` sibling.
 _ENV_SPLIT_TOKEN_OVERFLOW_SOURCE = "env -S '" + " ".join(["x"] * 65537) + "'"
 _SUBCOMMAND_LIMIT_SOURCE = "; ".join(["/bin/echo x"] * 16384)
 _SUBCOMMAND_OVERFLOW_SOURCE = "; ".join(["/bin/echo x"] * 16385)
@@ -9340,8 +9325,8 @@ FIXTURES += [
 # into an `ask`. With the guard's clock run eight times fast the first four, and no other
 # fixture, change verdict; the token-count one changes past that, and a per-word scan made
 # quadratic stalls on it for minutes instead of failing a check. `--perf` runs them once per
-# head. `--selftest`, which the mutation sweep runs for every mutation, still decides inside
-# the same budget, so a host slower still can turn one of its verdicts as well.
+# head. `--selftest` still decides inside the same budget, so a host slower still can turn
+# one of its verdicts as well.
 PERF_FIXTURES = [
     ("GREEN LIMIT: a legal source at the byte cap is classified inside the budget",
      _BYTE_LIMIT_SOURCE, "allow"),
@@ -9353,6 +9338,8 @@ PERF_FIXTURES = [
      _FUNCTION_OPERATOR_BUDGET_SOURCE, "allow"),
     ("GREEN LIMIT: a token count at the cap is still classified",
      _TOKEN_LIMIT_SOURCE, "allow"),
+    ("GREEN LIMIT: function declarations at the cap are still classified",
+     _FUNCTION_PARSE_AT_LIMIT_SOURCE, "allow"),
 ]
 
 # Authority and decision composition across command/alias boundaries. These cases bind
@@ -10221,11 +10208,9 @@ FIXTURES += [
      'git --html-path $SHA:src/f.py', "allow"),
 ]
 
-# One fixture per PCRE_ESCAPE_LETTERS member that no check held. A per-element sweep found
-# twelve of the twenty-one letters at a margin of zero, while `\b` carried 194 checks because
-# it is the atom everyone reaches for. Dropping an unheld letter moves its atom from proven to
-# uncertain, taking the command from deny to ask with every suite still green -- measured, not
-# inferred. Each fixture below reddens on removal of the one letter it names.
+# One deny fixture per PCRE_ESCAPE_LETTERS member that no other fixture names. `\b` is the
+# atom everyone reaches for and carries most of the rest, so without these a letter's atom
+# could fall from proven to uncertain -- deny to ask -- with no fixture naming it.
 FIXTURES += [
     ("RED PCRE ATOM: \\B (non-word-boundary) is not POSIX ERE",
      r"""git grep -E 'harness\B' -- README.md""", "deny"),
@@ -10268,9 +10253,32 @@ FIXTURES.append((
     "ask",
 ))
 
+# Wrapper and re-entry authority: a nested shell, here-string or heredoc that clears or
+# replaces PATH leaves the executing Git unsettled, so a guarded name outside the
+# cross-version alias-proof set asks; the same body under an inherited PATH is allowed.
+FIXTURES += [
+    ("ASK  AUTHORITY: env -i before a nested sh -c leaves the executing Git unsettled",
+     "env -i sh -c 'git submodule status'", "ask"),
+    ("ASK  AUTHORITY: env -u PATH before a nested sh -c leaves the executing Git unsettled",
+     "env -u PATH sh -c 'git submodule status'", "ask"),
+    ("ASK  AUTHORITY: sudo before a nested sh -c leaves the executing Git unsettled",
+     "sudo sh -c 'git submodule status'", "ask"),
+    ("ASK  AUTHORITY: env -i before a shell here-string leaves the executing Git unsettled",
+     "env -i sh 0<<< 'git submodule status'", "ask"),
+    ("ASK  AUTHORITY: a prior PATH before a shell here-string leaves the executing Git unsettled",
+     "PATH=/usr/bin; sh 0<<< 'git submodule status'", "ask"),
+    ("ASK  AUTHORITY: env -i before a shell heredoc leaves the executing Git unsettled",
+     "env -i sh <<'EOF'\ngit submodule status\nEOF\n", "ask"),
+    ("GREEN AUTHORITY: a nested sh -c under the inherited PATH keeps the trusted Git",
+     "sh -c 'git submodule status'", "allow"),
+    ("GREEN AUTHORITY: a shell here-string under the inherited PATH keeps the trusted Git",
+     "sh 0<<< 'git submodule status'", "allow"),
+    ("GREEN AUTHORITY: a shell heredoc under the inherited PATH keeps the trusted Git",
+     "sh <<'EOF'\ngit submodule status\nEOF\n", "allow"),
+]
 
 # Command-table assignment and executable expansion are unresolved identities, not proof
-# of a Git hazard. These fixtures deliberately include harmless mutations: the guard
+# of a Git hazard. These fixtures deliberately include harmless table writes: the guard
 # does not execute or emulate their state. Quoted data and inert declarations stay data.
 FIXTURES += [
     ("ASK IDENTITY: command table can rename Git",
@@ -11433,19 +11441,6 @@ def selftest():
             print("  FAIL alias behavior vs installed git: %s" % failure)
     else:
         print("  PASS quoted, recursive, and cyclic aliases match installed git")
-    def retain_pcre_engine(label, command):
-        if label != "-NUM between P and E":
-            return command
-        return [word.replace("-P1Ee", "-P1Pe") for word in command]
-    retained_pcre_failures, _retained_pcre_checks = (
-        check_option_grammar_against_git(retain_pcre_engine))
-    retained_pcre_red = any(
-        "exact final-engine order for -NUM between P and E" in failure
-        for failure in retained_pcre_failures
-    )
-    bad += 0 if retained_pcre_red else 1
-    print("  %s final-engine oracle rejects an incorrectly retained PCRE engine" % (
-        "PASS" if retained_pcre_red else "FAIL"))
     boundary_failures, boundary_checks, boundary_skips = check_shell_boundary_behavior()
     bad.add_group(boundary_failures, boundary_checks, boundary_skips)
     if boundary_failures:
@@ -11456,53 +11451,105 @@ def selftest():
     print("SHELL-BOUNDARY-SUMMARY checks=%d skips=%d failures=%d" % (
         boundary_checks, boundary_skips, len(boundary_failures)))
 
-    # Every group above reports through add_group, which adds `executed + skipped` to the
-    # check count and `len(failures)` to the failure count. The two terms are independent,
-    # so replacing a detector's `return failures, ...` with `return [], ...` leaves the
-    # recorded count byte-identical: the shrink-only floor and the exact-count binding both
-    # stay green while the probes stop being able to report anything. The count measures how
-    # many probes RAN, never whether any of them could speak. These controls perturb each
-    # detector's own input and require a failure to arrive, so a severed failure channel is
-    # a red check rather than a silent one.
-    def _channel_is_live(detector, **swaps):
-        saved = {name: globals()[name] for name in swaps}
+    # Each installed-tool detector must be able to report. Every group above reports through
+    # add_group, which counts the probes that RAN whatever they found, so a detector whose
+    # failure list can never be non-empty keeps the recorded count byte-identical. These
+    # controls put a planted `git` or `zsh` first on PATH: a /bin/sh shim that answers one
+    # probe the way a drifted tool would and hands every other call to the real binary. Each
+    # unchanged detector must then report that drift by its exact failure text, against the
+    # same tables it reads in production.
+    def _with_planted_tool(tool, planted_answer, detector):
+        real = shutil.which(tool)
+        if real is None:
+            return None
+        with tempfile.TemporaryDirectory(prefix="z-harness-planted-") as bindir:
+            shim = os.path.join(bindir, tool)
+            with open(shim, "w", encoding="utf-8") as handle:
+                handle.write("#!/bin/sh\n" + planted_answer % {"real": shlex.quote(real)}
+                             + "exec %s \"$@\"\n" % shlex.quote(real))
+            os.chmod(shim, 0o700)
+            saved_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = bindir + os.pathsep + saved_path
+            _GIT_AUTHORITY_CACHE.clear()
+            try:
+                return detector()
+            finally:
+                os.environ["PATH"] = saved_path
+                _GIT_AUTHORITY_CACHE.clear()
+
+    def _probe_env():
+        return dict(os.environ, GIT_AUTHOR_EMAIL="a@b", GIT_COMMITTER_EMAIL="a@b",
+                    GIT_CONFIG_NOSYSTEM="1")
+
+    def _authority_under_planted_git():
         try:
-            globals().update(swaps)
-            return bool(detector()[0])
-        finally:
-            globals().update(saved)
+            trusted_git_authority()
+            raised = ""
+        except GitAuthorityError as exc:
+            raised = str(exc)
+        return [raised, decide("git submodule status")[0]]
 
-    _original_authority = trusted_git_authority
-
-    def _submodule_reported_builtin(executable="git", deadline=None, **kwargs):
-        authority = _original_authority(executable, deadline, **kwargs)
-        return authority._replace(builtins=authority.builtins | {"submodule"})
-
-    for _label, _detector, _swaps in (
-        ("short-option table", check_option_table_against_git,
-         {"GREP_SHORT_ENGINE": {k: v for k, v in GREP_SHORT_ENGINE.items() if k != "E"}}),
-        ("log-family grammar", check_log_grammar_against_git,
-         {"GIT_LOG_ENGINE_TOKENS": {k: v for k, v in GIT_LOG_ENGINE_TOKENS.items()
-                                    if k != "-E"}}),
-        ("PCRE constructs", check_pcre_constructs_against_git,
-         {"scan_pcre_constructs": lambda _pattern: PatternScan((), ())}),
-        ("log-family subcommand", lambda: (_check_log_family_against_git(dict(
-            os.environ, GIT_AUTHOR_EMAIL="a@b", GIT_COMMITTER_EMAIL="a@b",
-            GIT_CONFIG_NOSYSTEM="1")), 0),
-         {"_LOG_FAMILY_PROBE_ENGINE": "-F"}),
-        ("always-ERE option", lambda: (_check_always_ere_against_git(dict(
-            os.environ, GIT_AUTHOR_EMAIL="a@b", GIT_COMMITTER_EMAIL="a@b",
-            GIT_CONFIG_NOSYSTEM="1")), 0),
-         {"_ALWAYS_ERE_PROBE_PATTERN": "a{3}b"}),
-        ("installed-git aliases", check_aliases_against_git,
-         {"trusted_git_authority": _submodule_reported_builtin}),
-        ("shell boundary", check_shell_boundary_behavior,
-         {"_equals_expansion_is_live": lambda _text, _quoting: True}),
+    _rewrite_engine = (
+        'if [ "$1" = %s ]; then\n'
+        '  for arg do shift; if [ "$arg" = -E ]; then set -- "$@" -F; '
+        'else set -- "$@" "$arg"; fi; done\n'
+        'fi\n')
+    for _label, _tool, _answer, _detector, _expected in (
+        ("short-option table", "git",
+         'if [ "$#" -eq 3 ] && [ "$1" = grep ] && [ "$2" = -E ] && [ "$3" = x ]; then\n'
+         '  echo "error: unknown switch \\`E\'" >&2; exit 129\nfi\n',
+         lambda: check_option_table_against_git()[0],
+         "the table models short flag(s) ['E'] that this git rejects"),
+        ("log-family grammar", "git", _rewrite_engine % "log",
+         lambda: check_log_grammar_against_git()[0],
+         "installed Git read log engine token '-E' as LITERAL, the table models INTERVAL"),
+        ("PCRE constructs", "git",
+         'if [ "$1" = grep ] && [ "$2" = --only-matching ] && [ "$3" = -E ] '
+         '&& [ "$4" = \'^\\Qabc\\E$\' ]; then\n'
+         "  printf 'quote.txt:abc\\n'; exit 0\nfi\n",
+         lambda: check_pcre_constructs_against_git()[0],
+         r"installed Git did not ground '^\\Qabc\\E$' under -E"),
+        ("log-family subcommand", "git", _rewrite_engine % "show",
+         lambda: _check_log_family_against_git(_probe_env()),
+         "installed Git `show -E --grep` did not select the interval subject alone"),
+        ("always-ERE option", "git",
+         'if [ "$1" = log ]; then\n'
+         '  for arg do [ "$arg" = -G%s ] && exit 0; done\nfi\n' % _ALWAYS_ERE_PROBE_PATTERN,
+         lambda: _check_always_ere_against_git(_probe_env()),
+         "installed Git `log -G` did not select through the ERE interval 'a{2}b'"),
+        ("installed-git inventory", "git",
+         'if [ "$1" = --list-cmds=builtins ]; then\n'
+         "  %(real)s \"$@\" || exit $?; printf 'submodule\\n'; exit 0\nfi\n",
+         _authority_under_planted_git,
+         "trusted Git command discovery failed or drifted"),
+        ("installed-git aliases", "git",
+         'if [ "$1" = -c ] && [ "$2" = alias.a=b ] && [ "$3" = -c ] && [ "$4" = alias.b=a ] '
+         '&& [ "$5" = a ]; then exit 0; fi\n',
+         lambda: check_aliases_against_git()[0],
+         "installed Git did not reject the recursive alias cycle"),
+        ("option grammar", "git",
+         'case "$3" in -P1Ee*) if [ "$1" = grep ]; then '
+         'printf "engine-order.txt:z\\nengine-order.txt:z\\n"; exit 0; fi;; esac\n',
+         lambda: check_option_grammar_against_git()[0],
+         "installed Git did not preserve exact final-engine order for -NUM between P and E"),
+        ("shell boundary", "zsh",
+         'if [ "$1" = -c ] && [ "$2" = "=git --version" ]; then exit 0; fi\n',
+         lambda: check_shell_boundary_behavior()[0],
+         "equals-expansion model disagrees with this zsh for '=git'"),
     ):
-        _live = _channel_is_live(_detector, **_swaps)
-        bad += 0 if _live else 1
-        print("  %s the %s detector still reports when its input is broken" % (
-            "PASS" if _live else "FAIL", _label))
+        _found = _with_planted_tool(_tool, _answer, _detector)
+        if _found is None:
+            bad.add_group([], 0, 1)
+            print("  SKIP the %s detector: %s is not installed, so it cannot be planted" % (
+                _label, _tool))
+            continue
+        if _label == "installed-git inventory":
+            _reported = _found == [_expected, "ask"]
+        else:
+            _reported = any(_expected in failure for failure in _found)
+        bad += 0 if _reported else 1
+        print("  %s the %s detector reports a planted %s that disagrees with its table" % (
+            "PASS" if _reported else "FAIL", _label, _tool))
 
     def _shadow_every_proof_member(argv, **kwargs):
         # Shadow whichever name the probe is currently testing, so this control witnesses
@@ -11528,8 +11575,8 @@ def selftest():
         "PASS" if _alias_channel_live else "FAIL",
         len(_alias_reported), len(CROSS_VERSION_ALIAS_PROOF)))
 
-    # Prove the absence branch is narrow: removing the availability check or broadening
-    # it to skip sh/bash/exact-path probes changes these counts and turns this selftest red.
+    # With zsh absent, exactly the 87 atomic zsh probes skip and the 12 sh, bash and
+    # exact-path probes still execute.
     original_which = shutil.which
     shutil.which = lambda name: None if name == "zsh" else original_which(name)
     try:
@@ -11541,218 +11588,19 @@ def selftest():
     print("  %s absent zsh skips 87 atomic zsh probes; 12 portable probes still execute" % (
         "PASS" if absence_ok else "FAIL"))
 
-    # Mutate each production call site, not its helper in isolation. Every representative
-    # command must lose its protected outcome when the mechanism is bypassed.
-    original_scanner = scan_pcre_constructs
-    globals()["scan_pcre_constructs"] = lambda _pattern: PatternScan((), ())
-    try:
-        scanner_red = decide(r"""git grep -E '^\Qabc\E$' -- fixture.txt""")[0] != "deny"
-    finally:
-        globals()["scan_pcre_constructs"] = original_scanner
-    bad += 0 if scanner_red else 1
-    print("  %s scanner callsite mutation loses the PCRE-construct deny" % (
-        "PASS" if scanner_red else "FAIL"))
 
-    def premature_posix_close(pattern):
-        scan = original_scanner(pattern)
-        if "[[:" in pattern and "(?" in pattern:
-            return PatternScan(tuple(sorted(set(scan.atoms) | {"(?"})), scan.uncertain)
-        return scan
-    globals()["scan_pcre_constructs"] = premature_posix_close
-    try:
-        posix_bracket_red = decide(
-            r"""git grep -E '^[[:alpha:](?)]+$' -- fixture.txt"""
-        )[0] != "allow"
-    finally:
-        globals()["scan_pcre_constructs"] = original_scanner
-    bad += 0 if posix_bracket_red else 1
-    print("  %s scanner callsite mutation exposes premature POSIX bracket closure" % (
-        "PASS" if posix_bracket_red else "FAIL"))
 
-    original_long = canonical_long_option
-    def exact_long_only(text):
-        name = text.partition("=")[0]
-        if name not in GREP_LONG_OPTION_NAMES:
-            value = text.partition("=")[2]
-            return LongOptionResolution(None, value, "=" in text, (), True)
-        return original_long(text)
-    globals()["canonical_long_option"] = exact_long_only
-    try:
-        long_red = decide(
-            r"""git grep --max-de 1 -E 'harness\b' -- README.md""")[0] != "deny"
-    finally:
-        globals()["canonical_long_option"] = original_long
-    bad += 0 if long_red else 1
-    print("  %s long-option callsite mutation loses required-value abbreviation deny" % (
-        "PASS" if long_red else "FAIL"))
 
-    original_alias = resolve_git_alias
-    globals()["resolve_git_alias"] = (
-        lambda subcommand, tail, _aliases, _authority, _exec_path, _deadline=None,
-        _command_env=None, _lookup_authority_uncertain=False,
-        _executable_lookup_uncertain=False, _alias_seen=(), _alias_depth=0:
-        (subcommand.lower(), list(tail), None, [])
-    )
-    try:
-        alias_red = decide(
-            r"""git -c alias.a=b -c 'alias.b=grep -E' a 'harness\b' -- README.md"""
-        )[0] != "deny"
-    finally:
-        globals()["resolve_git_alias"] = original_alias
-    bad += 0 if alias_red else 1
-    print("  %s alias-resolution callsite mutation loses recursive alias deny" % (
-        "PASS" if alias_red else "FAIL"))
 
-    original_nested_shell = nested_shell_invocation
-    def ignore_alias_eval(resolution, current_shell="sh", deadline=None):
-        if resolution.items and os.path.basename(resolution.items[0][0]) == "eval":
-            return None
-        return original_nested_shell(resolution, current_shell, deadline)
-    globals()["nested_shell_invocation"] = ignore_alias_eval
-    try:
-        alias_eval_red = decide(
-            r'''git -c "alias.x=!eval 'git grep -E harness\\b -- README.md'" x'''
-        )[0] != "ask"
-    finally:
-        globals()["nested_shell_invocation"] = original_nested_shell
-    bad += 0 if alias_eval_red else 1
-    print("  %s shell-alias eval traversal mutation loses uncertain outcome" % (
-        "PASS" if alias_eval_red else "FAIL"))
 
-    def ignore_alias_shell_c(resolution, current_shell="sh", deadline=None):
-        if (resolution.items
-                and os.path.basename(resolution.items[0][0]) in SHELLS):
-            return None
-        return original_nested_shell(resolution, current_shell, deadline)
-    globals()["nested_shell_invocation"] = ignore_alias_shell_c
-    try:
-        alias_shell_red = decide(
-            r'''git -c 'alias.x=!sh -c "git show $SHA:src/f.py"' x'''
-        )[0] != "ask"
-    finally:
-        globals()["nested_shell_invocation"] = original_nested_shell
-    bad += 0 if alias_shell_red else 1
-    print("  %s shell-alias -c traversal mutation loses uncertain outcome" % (
-        "PASS" if alias_shell_red else "FAIL"))
 
-    original_parameter_items = _git_config_parameter_items
-    globals()["_git_config_parameter_items"] = lambda _parameters: ([], None)
-    try:
-        alias_parameter_red = decide(
-            r'''git -c "alias.s=!GIT_CONFIG_PARAMETERS=\"'alias.y=status'\" '''
-            r'''git y" s'''
-        )[0] != "allow"
-    finally:
-        globals()["_git_config_parameter_items"] = original_parameter_items
-    bad += 0 if alias_parameter_red else 1
-    print("  %s shell-alias config-parameter mutation loses harmless alias" % (
-        "PASS" if alias_parameter_red else "FAIL"))
 
-    original_dollar = _command_substitution
-    def drop_dollar_body(source, start):
-        _body, end = original_dollar(source, start)
-        return "", end
-    globals()["_command_substitution"] = drop_dollar_body
-    try:
-        dollar_red = decide(
-            r'''/bin/echo "$(git grep -E 'harness\b' -- README.md)"'''
-        )[0] != "deny"
-    finally:
-        globals()["_command_substitution"] = original_dollar
-    bad += 0 if dollar_red else 1
-    print("  %s dollar-substitution callsite mutation loses nested deny" % (
-        "PASS" if dollar_red else "FAIL"))
 
-    def close_at_first_parenthesis(source, start):
-        end = source.find(")", start + 2)
-        if end < 0:
-            return original_dollar(source, start)
-        return source[start + 2:end], end + 1
-    globals()["_command_substitution"] = close_at_first_parenthesis
-    try:
-        grouped_red = decide(
-            r'''/bin/echo "$( (printf x); git grep -E 'harness\b' -- README.md)"'''
-        )[0] != "deny"
-    finally:
-        globals()["_command_substitution"] = original_dollar
-    bad += 0 if grouped_red else 1
-    print("  %s parenthesis-balancing mutation loses grouped substitution deny" % (
-        "PASS" if grouped_red else "FAIL"))
 
-    original_case = _has_unmodelled_case_pattern
-    globals()["_has_unmodelled_case_pattern"] = lambda _body: False
-    try:
-        case_red = decide(
-            r'''/bin/echo "$(case x in x) git grep -E 'harness\b' -- README.md;; esac)"'''
-        )[0] != "ask"
-    finally:
-        globals()["_has_unmodelled_case_pattern"] = original_case
-    bad += 0 if case_red else 1
-    print("  %s case-closer mutation loses fail-closed substitution outcome" % (
-        "PASS" if case_red else "FAIL"))
 
-    original_arithmetic = _arithmetic_expansion
-    def drop_arithmetic_sources(source, start):
-        body, end, _sources = original_arithmetic(source, start)
-        return body, end, ()
-    globals()["_arithmetic_expansion"] = drop_arithmetic_sources
-    try:
-        arithmetic_red = decide(
-            r'''/bin/echo "$(( $(git grep -E 'harness\b' -- README.md) + 1 ))"'''
-        )[0] != "deny"
-    finally:
-        globals()["_arithmetic_expansion"] = original_arithmetic
-    bad += 0 if arithmetic_red else 1
-    print("  %s arithmetic-source mutation loses nested substitution deny" % (
-        "PASS" if arithmetic_red else "FAIL"))
 
-    original_parameter = _parameter_expansion
-    def drop_parameter_sources(source, start):
-        text, end, _sources = original_parameter(source, start)
-        return text, end, ()
-    globals()["_parameter_expansion"] = drop_parameter_sources
-    try:
-        parameter_red = decide(
-            r'''/bin/echo ${value:-$(git grep -E 'harness\b' -- README.md)}'''
-        )[0] != "deny"
-    finally:
-        globals()["_parameter_expansion"] = original_parameter
-    bad += 0 if parameter_red else 1
-    print("  %s parameter-expansion callsite mutation loses nested deny" % (
-        "PASS" if parameter_red else "FAIL"))
 
-    globals()["_arithmetic_expansion"] = drop_arithmetic_sources
-    try:
-        quoted_arithmetic_red = decide(
-            r'''/bin/echo "$(( "$(git grep -E 'harness\b' -- README.md)" + 1 ))"'''
-        )[0] != "deny"
-        backtick_arithmetic_red = decide(
-            r'''/bin/echo "$(( `git grep -E 'harness\b' -- README.md` + 1 ))"'''
-        )[0] != "deny"
-    finally:
-        globals()["_arithmetic_expansion"] = original_arithmetic
-    bad += 0 if quoted_arithmetic_red else 1
-    bad += 0 if backtick_arithmetic_red else 1
-    print("  %s quoted-arithmetic dollar mutation loses nested deny" % (
-        "PASS" if quoted_arithmetic_red else "FAIL"))
-    print("  %s arithmetic-backtick mutation loses nested deny" % (
-        "PASS" if backtick_arithmetic_red else "FAIL"))
 
-    original_authorize = authorize_git_subcommand
-    def admit_unknown(subcommand, authority, effective_exec_path,
-                      lookup_authority_uncertain=False):
-        if subcommand == "project-helper":
-            return None
-        return original_authorize(subcommand, authority, effective_exec_path,
-                                  lookup_authority_uncertain)
-    globals()["authorize_git_subcommand"] = admit_unknown
-    try:
-        unknown_subcommand_red = decide("git project-helper --version")[0] != "ask"
-    finally:
-        globals()["authorize_git_subcommand"] = original_authorize
-    bad += 0 if unknown_subcommand_red else 1
-    print("  %s native-command classification mutation loses unknown-alias ask" % (
-        "PASS" if unknown_subcommand_red else "FAIL"))
 
     original_discovery = trusted_git_authority
     globals()["trusted_git_authority"] = lambda _executable="git", deadline=None: (
@@ -11775,7 +11623,7 @@ def selftest():
     finally:
         globals()["trusted_git_authority"] = original_discovery
     bad += 0 if drift_red else 1
-    print("  %s trusted-Git inventory drift loses standard submodule allow" % (
+    print("  %s a Git whose main inventory lacks submodule does not allow it" % (
         "PASS" if drift_red else "FAIL"))
 
     # The candidate is never executed, whatever its path: asking a binary the command
@@ -11807,156 +11655,13 @@ def selftest():
     print("  %s an alternate Git is classified without ever executing the candidate" % (
         "PASS" if alternate_preprobe_ok else "FAIL"))
 
-    # `submodule` is a main command in every Git this suite already asserts, and it is
-    # outside the cross-version builtin floor, so it is exactly the name whose verdict
-    # turns on candidate_trusted.
-    globals()["trusted_git_authority"] = (
-        lambda _executable="git", deadline=None: trusted_authority
-    )
-    try:
-        alternate_callsite_red = decide(
-            "/nonexistent/bin/git submodule status")[0] != "ask"
-    finally:
-        globals()["trusted_git_authority"] = original_discovery
-    bad += 0 if alternate_callsite_red else 1
-    print("  %s forcing candidate_trusted admits a non-floor command on another Git" % (
-        "PASS" if alternate_callsite_red else "FAIL"))
 
-    original_nested_invocation = nested_shell_invocation
-    def drop_nested_authority(resolution, current_shell="sh", deadline=None):
-        invocation = original_nested_invocation(resolution, current_shell, deadline)
-        if invocation is None:
-            return None
-        return invocation._replace(
-            command_env=dict(os.environ), lookup_authority_uncertain=False)
-    globals()["nested_shell_invocation"] = drop_nested_authority
-    try:
-        nested_authority_red = all(decide(source)[0] != "ask" for source in (
-            "env -i sh -c 'git status --short'",
-            "env -u PATH sh -c 'git status --short'",
-            "sudo sh -c 'git status --short'",
-        ))
-    finally:
-        globals()["nested_shell_invocation"] = original_nested_invocation
-    bad += 0 if nested_authority_red else 1
-    print("  %s nested-shell mutation drops wrapper lookup authority" % (
-        "PASS" if nested_authority_red else "FAIL"))
 
-    original_direct_invocation = direct_here_string_invocation
-    def drop_here_string_authority(
-            source, current_shell="zsh", equals_state=ZSH_EQUALS_ON,
-            command_env=None, lookup_authority_uncertain=False, deadline=None):
-        direct = original_direct_invocation(
-            source, current_shell, equals_state, command_env,
-            lookup_authority_uncertain, deadline)
-        if direct is None:
-            return None
-        resolution, invocation = direct
-        return (resolution._replace(
-                    command_env=dict(os.environ),
-                    lookup_authority_uncertain=False),
-                invocation._replace(
-                    command_env=dict(os.environ),
-                    lookup_authority_uncertain=False))
-    globals()["direct_here_string_invocation"] = drop_here_string_authority
-    try:
-        here_authority_red = all(decide(source)[0] != "ask" for source in (
-            "env -i sh 0<<< 'git status --short'",
-            "PATH=/usr/bin; sh 0<<< 'git status --short'",
-        ))
-    finally:
-        globals()["direct_here_string_invocation"] = original_direct_invocation
-    bad += 0 if here_authority_red else 1
-    print("  %s here-string mutation drops wrapper lookup authority" % (
-        "PASS" if here_authority_red else "FAIL"))
 
-    original_heredoc_decision = heredoc_equals_decision
-    def drop_heredoc_authority(
-            source, deadline=None, subcommands=None, classifier=None,
-            **context):
-        stripped = (None if classifier is None else
-                    lambda body, shell, state, inner_deadline, _env, _lookup:
-                    classifier(body, shell, state, inner_deadline,
-                               dict(os.environ), False))
-        return original_heredoc_decision(
-            source, deadline, subcommands, stripped, **context)
-    globals()["heredoc_equals_decision"] = drop_heredoc_authority
-    try:
-        heredoc_authority_red = decide(
-            "env -i sh <<'EOF'\ngit status --short\nEOF\n")[0] != "ask"
-    finally:
-        globals()["heredoc_equals_decision"] = original_heredoc_decision
-    bad += 0 if heredoc_authority_red else 1
-    print("  %s heredoc mutation drops wrapper lookup authority" % (
-        "PASS" if heredoc_authority_red else "FAIL"))
 
-    original_alias_context = _alias_authority_context
-    globals()["_alias_authority_context"] = (
-        lambda _env, _lookup: (dict(os.environ), False))
-    try:
-        alias_authority_red = all(decide(source)[0] != "ask" for source in (
-            "git -c 'alias.x=!env -i sh -c \"git status --short\"' x",
-            "git -c 'alias.x=!env -i sh -c \"eval git\\ status\\ --short\"' x",
-            "git -c 'alias.x=!env -i sh 0<<< \"git status --short\"' x",
-        ))
-    finally:
-        globals()["_alias_authority_context"] = original_alias_context
-    bad += 0 if alias_authority_red else 1
-    print("  %s shell-alias re-entry mutation drops lookup authority" % (
-        "PASS" if alias_authority_red else "FAIL"))
 
-    original_alias_environments = _alias_command_environment_states
-    globals()["_alias_command_environment_states"] = (
-        lambda _source, commands, command_env,
-        lookup_authority_uncertain, _deadline: tuple(
-            (dict(command_env), bool(lookup_authority_uncertain))
-            for _command in commands))
-    try:
-        alias_path_red = decide(
-            "git -c 'alias.x=!PATH=/usr/bin; sh -c \"git status --short\"' x"
-        )[0] != "ask"
-    finally:
-        globals()["_alias_command_environment_states"] = original_alias_environments
-    bad += 0 if alias_path_red else 1
-    print("  %s shell-alias PATH-state callsite mutation transfers ambient authority" % (
-        "PASS" if alias_path_red else "FAIL"))
 
-    original_environment_states = command_environment_states
-    globals()["command_environment_states"] = (
-        lambda _source, commands, initial_env=None,
-        initial_lookup_uncertain=False, deadline=None: tuple(
-            (dict(os.environ if initial_env is None else initial_env),
-             bool(initial_lookup_uncertain)) for _command in commands))
-    try:
-        path_state_red = all(decide(source)[0] != "ask" for source in (
-            "PATH=/usr/bin; =git grep -P harness -- README.md",
-            "PATH=/definitely-missing; =git grep -E 'harness\\b' -- README.md",
-            "PATH=/usr/bin; sh 0<<< 'git status --short'",
-            "git -c 'alias.x=!PATH=/usr/bin; sh 0<<< \"git status --short\"' x",
-        ))
-    finally:
-        globals()["command_environment_states"] = original_environment_states
-    bad += 0 if path_state_red else 1
-    print("  %s straight-line PATH-state mutation transfers ambient Git authority" % (
-        "PASS" if path_state_red else "FAIL"))
 
-    original_descendant_lookup = _descendant_lookup_authority
-    globals()["_descendant_lookup_authority"] = (
-        lambda resolution: resolution.lookup_authority_uncertain)
-    try:
-        command_p_child_red = all(decide(source)[0] != expected for source, expected in (
-            ("command -p zsh -c \"=git grep -E 'harness\\\\b' -- README.md\"",
-             "deny"),
-            ("command -p zsh -c \"=git grep -P 'harness\\\\b' -- README.md\"",
-             "allow"),
-            ("command -p zsh 0<<< \"=git grep -E 'harness\\b' -- README.md\"",
-             "deny"),
-        ))
-    finally:
-        globals()["_descendant_lookup_authority"] = original_descendant_lookup
-    bad += 0 if command_p_child_red else 1
-    print("  %s command-p descendant mutation transfers launcher uncertainty" % (
-        "PASS" if command_p_child_red else "FAIL"))
 
     # All three discovery calls share one monotonic budget. A slow first probe reduces the
     # next timeout; it cannot reset a fresh allowance for each subprocess.
@@ -12025,33 +11730,6 @@ def selftest():
     print("  %s Git discovery timeout asks before a second probe" % (
         "PASS" if subprocess_timeout_ok else "FAIL"))
 
-    original_remaining_timeout = _remaining_probe_timeout
-    globals()["_remaining_probe_timeout"] = lambda _deadline, _clock: 0.75
-    _GIT_AUTHORITY_CACHE.clear()
-    ticks = [0.0]
-    def reset_budget_runner(argv, **kwargs):
-        ticks[0] += 2.0
-        if argv[-1] == "--exec-path":
-            stdout = "/tmp/trusted-git-core\n"
-        elif argv[-1] == "--list-cmds=builtins":
-            stdout = "grep status\n"
-        else:
-            stdout = "grep status submodule\n"
-        return subprocess.CompletedProcess(argv, 0, stdout, "")
-    try:
-        try:
-            original_discovery(
-                "git", deadline=1.0, runner=reset_budget_runner,
-                clock=lambda: ticks[0])
-            per_call_deadline_red = True
-        except GitAuthorityError:
-            per_call_deadline_red = False
-    finally:
-        globals()["_remaining_probe_timeout"] = original_remaining_timeout
-        _GIT_AUTHORITY_CACHE.clear()
-    bad += 0 if per_call_deadline_red else 1
-    print("  %s independent-per-call deadline mutation bypasses the shared budget" % (
-        "PASS" if per_call_deadline_red else "FAIL"))
 
     timeout_contract_ok = hook_timeout_contract() == ""
     planted_settings = json.load(open(os.path.join(
@@ -12063,37 +11741,15 @@ def selftest():
     process_budget_contract_red = bool(hook_timeout_contract(process_budget=3.51))
     for label, ok in (
         ("registered Claude/Codex timeout contract matches", timeout_contract_ok),
-        ("registered timeout mutation turns the contract red", timeout_contract_red),
-        ("internal budget margin mutation turns the contract red", budget_contract_red),
-        ("hook process budget margin mutation turns the contract red",
+        ("a settings file registering a 4 s timeout fails the contract", timeout_contract_red),
+        ("a 4.01 s decision budget fails the contract", budget_contract_red),
+        ("a 3.51 s hook process budget fails the contract",
          process_budget_contract_red),
     ):
         bad += 0 if ok else 1
         print("  %s %s" % ("PASS" if ok else "FAIL", label))
 
-    original_parse_limit = MAX_FUNCTION_DECLARATIONS
-    globals()["MAX_FUNCTION_DECLARATIONS"] = original_parse_limit + 1
-    try:
-        parse_limit_red = decide(_FUNCTION_PARSE_LIMIT_SOURCE)[0] != "ask"
-    finally:
-        globals()["MAX_FUNCTION_DECLARATIONS"] = original_parse_limit
-    bad += 0 if parse_limit_red else 1
-    print("  %s function-declaration limit mutation loses bounded-parse ask" % (
-        "PASS" if parse_limit_red else "FAIL"))
 
-    original_budget_check = _check_decision_budget
-    globals()["_check_decision_budget"] = lambda _deadline: None
-    try:
-        try:
-            split_commands("/bin/echo safe", _deadline=time.monotonic() - 1.0)
-            parser_budget_red = True
-        except CommandParseError:
-            parser_budget_red = False
-    finally:
-        globals()["_check_decision_budget"] = original_budget_check
-    bad += 0 if parser_budget_red else 1
-    print("  %s parser-deadline checkpoint mutation accepts an expired budget" % (
-        "PASS" if parser_budget_red else "FAIL"))
 
     # Cost, counted rather than timed, so the check means the same thing on every host and
     # fails fast when it fails. Rescanning the tail per candidate word was quadratic:
@@ -12172,10 +11828,9 @@ def selftest():
               "PASS" if function_cache_ok else "FAIL",
               len(annotation_calls), cache_entry_count))
 
-    # The arm above proves the checkpoint is REMOVABLE; nothing proved it fires. Replacing
-    # `_check_decision_budget`'s body with `return None` left this suite, the sibling
-    # guard's and the merged Bash suite all green, which is why the two defects below
-    # shipped. These three drive the real checkpoint instead.
+    # These drive the real checkpoint: an expired budget must raise from the live parser,
+    # the GIT_CONFIG_COUNT loop must consult it once per entry, and exhaustion during
+    # classification must ask.
     try:
         split_commands("/bin/echo safe", _deadline=time.monotonic() - 1.0)
         parser_budget_live = False
@@ -12186,8 +11841,8 @@ def selftest():
         "PASS" if parser_budget_live else "FAIL"))
 
     # Pin the attacker-controlled GIT_CONFIG_COUNT loop itself, not only the shared
-    # checkpoint helper. Removing this call site used to leave every suite green because
-    # later checkpoints still returned the same final `ask` decision.
+    # checkpoint helper: later checkpoints return the same final `ask`, so only a per-entry
+    # count shows the loop consults the budget.
     config_tokens = split_commands("GIT_CONFIG_COUNT=3 git status")[0]
     config_resolution = unwrap_command_prefix(config_tokens)
     config_budget_calls = []
@@ -12313,351 +11968,23 @@ def selftest():
     print("  %s function operator scan receives the shared decision deadline" % (
         "PASS" if function_operator_deadline else "FAIL"))
 
-    original_equals_states = zsh_equals_states
-    globals()["zsh_equals_states"] = (
-        lambda _source, commands, initial=ZSH_EQUALS_ON, deadline=None:
-        tuple(ZSH_EQUALS_ON for _command in commands)
-    )
-    try:
-        equals_transition_red = decide(
-            "setopt noequals; =git grep -E 'harness\\b' -- README.md"
-        )[0] != "ask"
-        equals_conditional_red = decide(
-            "if true; then setopt equals; fi; "
-            "=git grep -E 'harness\\b' -- README.md"
-        )[0] != "ask"
-        equals_function_red = decide(
-            "f(){ setopt noequals; }; f; "
-            "=git grep -E 'harness\\b' -- README.md"
-        )[0] != "ask"
-    finally:
-        globals()["zsh_equals_states"] = original_equals_states
-    bad += 0 if equals_transition_red else 1
-    bad += 0 if equals_conditional_red else 1
-    bad += 0 if equals_function_red else 1
-    print("  %s EQUALS-state callsite mutation loses noequals uncertainty" % (
-        "PASS" if equals_transition_red else "FAIL"))
-    print("  %s EQUALS-state callsite mutation loses conditional uncertainty" % (
-        "PASS" if equals_conditional_red else "FAIL"))
-    print("  %s EQUALS-state callsite mutation loses function uncertainty" % (
-        "PASS" if equals_function_red else "FAIL"))
 
-    original_nested_equals = nested_shell_equals_state
-    globals()["nested_shell_equals_state"] = (
-        lambda _resolution, invocation, _inherited=ZSH_EQUALS_ON:
-        ZSH_EQUALS_ON if invocation.shell == "zsh" else ZSH_EQUALS_OFF)
-    try:
-        nested_option_red = all(decide(source)[0] != "ask" for source in (
-            "zsh -o NO_EQUALS -c \"=git grep -E 'harness\\\\b' -- README.md\"",
-            "zsh +o EQUALS -c \"=git grep -E 'harness\\\\b' -- README.md\"",
-            "zsh -oNO_EQUALS -c \"=git grep -E 'harness\\\\b' -- README.md\"",
-            "zsh +oEQUALS -c \"=git grep -E 'harness\\\\b' -- README.md\"",
-            "zsh --no-equals -c \"=git grep -E 'harness\\\\b' -- README.md\"",
-            "zsh -foNO_EQUALS -c \"=git grep -E 'harness\\\\b' -- README.md\"",
-            "zsh +foEQUALS -c \"=git grep -E 'harness\\\\b' -- README.md\"",
-            "zsh -coNO_EQUALS \"=git grep -E 'harness\\\\b' -- README.md\"",
-        ))
-    finally:
-        globals()["nested_shell_equals_state"] = original_nested_equals
-    bad += 0 if nested_option_red else 1
-    print("  %s nested-zsh option-state mutation loses startup uncertainty" % (
-        "PASS" if nested_option_red else "FAIL"))
 
-    original_nested_invocation = nested_shell_invocation
-    def immediate_post_c_body(resolution, current_shell="sh", deadline=None):
-        if (resolution.items
-                and os.path.basename(resolution.items[0][0]) == "zsh"):
-            args = resolution.items[1:]
-            for index, (word, _quoting) in enumerate(args):
-                if (word == "-c"
-                        or (word.startswith("-") and not word.startswith("--")
-                            and "c" in word[1:])):
-                    command_arg = (args[index + 1]
-                                   if index + 1 < len(args) else ("", ""))
-                    return ShellInvocation(
-                        "zsh", command_arg[0],
-                        source_has_live_unresolved(command_arg[0], deadline),
-                        dict(resolution.command_env),
-                        _descendant_lookup_authority(resolution))
-            return None
-        return original_nested_invocation(resolution, current_shell, deadline)
-    globals()["nested_shell_invocation"] = immediate_post_c_body
-    try:
-        post_c_argv_red = all(decide(source)[0] != "deny" for source in (
-            "zsh -c --no-equals \"git grep -E 'harness\\\\b' -- README.md\"",
-            "zsh -c -o NO_EQUALS \"git grep -E 'harness\\\\b' -- README.md\"",
-            "zsh -c -oNO_EQUALS \"git grep -E 'harness\\\\b' -- README.md\"",
-        ))
-    finally:
-        globals()["nested_shell_invocation"] = original_nested_invocation
-    bad += 0 if post_c_argv_red else 1
-    print("  %s nested-zsh argv callsite mutation loses post-c command bodies" % (
-        "PASS" if post_c_argv_red else "FAIL"))
 
-    original_zsh_argv_state = _zsh_argv_state
-    def scan_post_operand_options(words, default=ZSH_EQUALS_ON):
-        parsed = original_zsh_argv_state(words, default)
-        if parsed.command_index is None:
-            return parsed
-        tail = original_zsh_argv_state(
-            [words[0], *words[parsed.command_index + 1:]], parsed.equals_state)
-        return ZshArgvState(
-            tail.equals_state, parsed.command_index,
-            parsed.reads_stdin or tail.reads_stdin)
-    globals()["_zsh_argv_state"] = scan_post_operand_options
-    try:
-        post_operand_red = all(decide(source)[0] != expected
-                               for source, expected in (
-            ("zsh -c \"=git grep -E 'harness\\\\b' -- README.md\" "
-             "--no-equals", "deny"),
-            ("zsh -c \"=git grep -P 'harness\\\\b' -- README.md\" "
-             "-o NO_EQUALS", "allow"),
-            (("zsh -fc '/usr/bin/printf command-only' -s 0<<< "
-              "\"git grep -E 'harness\\b' -- README.md\""), "allow"),
-        ))
-    finally:
-        globals()["_zsh_argv_state"] = original_zsh_argv_state
-    bad += 0 if post_operand_red else 1
-    print("  %s zsh-argv boundary mutation parses positional args as options" % (
-        "PASS" if post_operand_red else "FAIL"))
 
-    original_direct_invocation = direct_here_string_invocation
-    def force_direct_equals_on(source, current_shell="zsh",
-                               equals_state=ZSH_EQUALS_ON, command_env=None,
-                               lookup_authority_uncertain=False, deadline=None):
-        direct = original_direct_invocation(
-            source, current_shell, equals_state, command_env,
-            lookup_authority_uncertain, deadline)
-        if not direct:
-            return None
-        resolution, invocation = direct
-        return resolution._replace(items=[("zsh", "")]), invocation
-    globals()["direct_here_string_invocation"] = force_direct_equals_on
-    try:
-        here_option_red = all(decide(source)[0] != "ask" for source in (
-            "zsh -o NO_EQUALS <<< \"=git grep -E 'harness\\b' -- README.md\"",
-            "zsh -foNO_EQUALS 0<<< \"=git grep -E 'harness\\b' -- README.md\"",
-        ))
-    finally:
-        globals()["direct_here_string_invocation"] = original_direct_invocation
-    bad += 0 if here_option_red else 1
-    print("  %s here-string zsh option-state mutation loses startup uncertainty" % (
-        "PASS" if here_option_red else "FAIL"))
 
-    original_heredoc_equals = heredoc_equals_decision
-    globals()["heredoc_equals_decision"] = (
-        lambda _source, _deadline=None, _subcommands=None, classifier=None,
-        **_context: None)
-    try:
-        heredoc_default_red = all(decide(source)[0] != expected
-                                  for source, expected in (
-            ("unsetopt equals; zsh <<'EOF'\n"
-             "=git grep -E 'harness\\b' -- README.md\nEOF\n", "deny"),
-            ("zsh -foNO_EQUALS <<'EOF'\n"
-             "=git grep -E 'harness\\b' -- README.md\nEOF\n", "ask"),
-        ))
-    finally:
-        globals()["heredoc_equals_decision"] = original_heredoc_equals
-    bad += 0 if heredoc_default_red else 1
-    print("  %s heredoc child-state mutation inherits the outer EQUALS option" % (
-        "PASS" if heredoc_default_red else "FAIL"))
 
-    original_shell_reads_stdin = _shell_reads_stdin
-    def drop_clustered_zsh_option_value(words):
-        if (len(words) >= 3 and os.path.basename(words[0]) == "zsh"
-                and words[1] in {"-fo", "+fo"}):
-            return False
-        return original_shell_reads_stdin(words)
-    globals()["_shell_reads_stdin"] = drop_clustered_zsh_option_value
-    try:
-        clustered_stdin_red = decide(
-            "zsh -fo NO_EQUALS <<'EOF'\n"
-            "git grep -E 'harness\\b' -- README.md\nEOF\n")[0] != "deny"
-    finally:
-        globals()["_shell_reads_stdin"] = original_shell_reads_stdin
-    bad += 0 if clustered_stdin_red else 1
-    print("  %s zsh-stdin argv callsite mutation loses clustered option value" % (
-        "PASS" if clustered_stdin_red else "FAIL"))
 
-    original_scope_pairs = _function_scope_pairs
-    globals()["_function_scope_pairs"] = (
-        lambda _source, _records, deadline=None: ())
-    try:
-        scope_equals_red = decide(
-            "(unsetopt equals); =git grep -E 'harness\\b' -- README.md"
-        )[0] != "deny"
-    finally:
-        globals()["_function_scope_pairs"] = original_scope_pairs
-    bad += 0 if scope_equals_red else 1
-    print("  %s EQUALS scope mutation leaks a subshell option change" % (
-        "PASS" if scope_equals_red else "FAIL"))
 
-    original_outer_equals = _resolve_outer_zsh_equals
-    globals()["_resolve_outer_zsh_equals"] = (
-        lambda tokens, _shell, _state, _env, _lookup: list(tokens))
-    try:
-        outer_equals_red = (
-            decide("env -i =git grep -E 'harness\\b' -- README.md")[0]
-            != "deny"
-            and decide("env -i =git grep -P 'harness\\b' -- README.md")[0]
-            != "allow")
-    finally:
-        globals()["_resolve_outer_zsh_equals"] = original_outer_equals
-    bad += 0 if outer_equals_red else 1
-    print("  %s outer EQUALS pre-resolution mutation transfers wrapper authority" % (
-        "PASS" if outer_equals_red else "FAIL"))
 
-    original_strongest = _strongest_decision
-    globals()["_strongest_decision"] = (
-        lambda decisions: min(
-            decisions, key=lambda item: {"allow": 0, "ask": 1, "deny": 2}[item[0]]))
-    try:
-        precedence_red = all(decide(source)[0] != "deny" for source in (
-            "sh <<'A'\n=git grep -E 'harness\\b' -- README.md\nA\n"
-            "zsh <<'B'\n=git grep -E 'harness\\b' -- README.md\nB\n",
-            "zsh <<'A'\n=git grep -E 'harness\\b' -- README.md\nA\n"
-            "sh <<'B'\n=git grep -E 'harness\\b' -- README.md\nB\n",
-            ("sh -c \"=git grep -E 'harness\\\\b' -- README.md\"; "
-             "=git grep -E 'harness\\b' -- README.md"),
-            ("=git grep -E 'harness\\b' -- README.md; "
-             "sh -c \"=git grep -E 'harness\\\\b' -- README.md\""),
-            ("sh <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n"
-             "git grep -E 'harness\\b' -- README.md"),
-            ("git grep -E 'harness\\b' -- README.md\n"
-             "sh <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n"),
-        ))
-    finally:
-        globals()["_strongest_decision"] = original_strongest
-    bad += 0 if precedence_red else 1
-    print("  %s decision-reducer mutation lets a question mask a deny" % (
-        "PASS" if precedence_red else "FAIL"))
 
-    original_stdin_reducer = _reduce_stdin_provenance
-    globals()["_reduce_stdin_provenance"] = lambda findings: findings[0]
-    try:
-        here_string_precedence_red = decide(
-            "sh 0<<< \"=git grep -E 'harness\\b' -- README.md\"; "
-            "zsh 0<<< \"=git grep -E 'harness\\b' -- README.md\""
-        )[0] != "deny"
-    finally:
-        globals()["_reduce_stdin_provenance"] = original_stdin_reducer
-    bad += 0 if here_string_precedence_red else 1
-    print("  %s stdin-reducer mutation lets a here-string question mask a deny" % (
-        "PASS" if here_string_precedence_red else "FAIL"))
 
-    ambient_occurrence = lambda _finding, command_env=None, \
-        lookup_authority_uncertain=False, deadline=None: (
-            dict(os.environ if command_env is None else command_env),
-            bool(lookup_authority_uncertain))
-    original_heredoc_occurrence = _heredoc_occurrence_environment
-    globals()["_heredoc_occurrence_environment"] = ambient_occurrence
-    try:
-        heredoc_occurrence_red = decide(
-            "PATH=/usr/bin\nzsh <<'EOF'\n"
-            "=git grep -P 'harness\\b' -- README.md\nEOF\n")[0] != "ask"
-    finally:
-        globals()["_heredoc_occurrence_environment"] = original_heredoc_occurrence
-    bad += 0 if heredoc_occurrence_red else 1
-    print("  %s heredoc-occurrence mutation drops prior-line PATH authority" % (
-        "PASS" if heredoc_occurrence_red else "FAIL"))
 
-    original_expansion_occurrence = _heredoc_expansion_environment
-    globals()["_heredoc_expansion_environment"] = ambient_occurrence
-    try:
-        expansion_occurrence_red = decide(
-            "PATH=/usr/bin; cat <<EOF\n"
-            "$(=git grep -P 'harness\\b' -- README.md)\nEOF\n")[0] != "ask"
-    finally:
-        globals()["_heredoc_expansion_environment"] = original_expansion_occurrence
-    bad += 0 if expansion_occurrence_red else 1
-    print("  %s heredoc-expansion mutation drops prior PATH authority" % (
-        "PASS" if expansion_occurrence_red else "FAIL"))
 
-    original_here_occurrence = _here_string_occurrence_environment
-    globals()["_here_string_occurrence_environment"] = (
-        lambda _source, _fragment, command_env=None,
-        lookup_authority_uncertain=False, deadline=None: (
-            dict(os.environ if command_env is None else command_env),
-            bool(lookup_authority_uncertain)))
-    try:
-        here_occurrence_red = decide(
-            "PATH=/usr/bin\nzsh 0<<< \"=git grep -P 'harness\\b' -- README.md\""
-        )[0] != "ask"
-    finally:
-        globals()["_here_string_occurrence_environment"] = original_here_occurrence
-    bad += 0 if here_occurrence_red else 1
-    print("  %s here-string occurrence mutation drops prior-line PATH authority" % (
-        "PASS" if here_occurrence_red else "FAIL"))
 
-    original_occurrence_index = _marked_occurrence_command_index
-    def choose_last_occurrence(source, deadline=None):
-        commands = split_commands(source, _deadline=deadline)
-        if not commands:
-            raise CommandParseError("mutated occurrence source has no command")
-        return len(commands) - 1
-    globals()["_marked_occurrence_command_index"] = choose_last_occurrence
-    try:
-        future_occurrence_red = all(decide(source)[0] != "allow" for source in (
-            ("zsh 0<<< \"=git grep -P 'harness\\b' -- README.md\"; "
-             "PATH=/usr/bin; /bin/echo done"),
-            ("zsh 0<<< \"=git grep -P 'harness\\b' -- README.md\"; "
-             "unset PATH; /bin/echo done"),
-            ("cat <<EOF; PATH=/usr/bin; /bin/echo done\n"
-             "$(=git grep -P 'harness\\b' -- README.md)\nEOF\n"),
-        ))
-    finally:
-        globals()["_marked_occurrence_command_index"] = original_occurrence_index
-    bad += 0 if future_occurrence_red else 1
-    print("  %s occurrence-index mutation lets future PATH state flow backward" % (
-        "PASS" if future_occurrence_red else "FAIL"))
 
-    original_ordinary_source = command_without_heredoc_payloads
-    globals()["command_without_heredoc_payloads"] = (
-        lambda source, deadline=None: "" if "<<'EOF'" in source
-        else original_ordinary_source(source, deadline))
-    try:
-        heredoc_composition_red = all(decide(source)[0] != "deny" for source in (
-            ("sh <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n"
-             "git grep -E 'harness\\b' -- README.md"),
-            ("git grep -E 'harness\\b' -- README.md\n"
-             "sh <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n"),
-        ))
-    finally:
-        globals()["command_without_heredoc_payloads"] = original_ordinary_source
-    bad += 0 if heredoc_composition_red else 1
-    print("  %s heredoc-composition mutation skips ordinary-command denial" % (
-        "PASS" if heredoc_composition_red else "FAIL"))
 
-    globals()["authorize_git_subcommand"] = (
-        lambda subcommand, authority, effective_exec_path,
-        lookup_authority_uncertain=False:
-        None if subcommand == "submodule"
-        else original_authorize(subcommand, authority, effective_exec_path,
-                                lookup_authority_uncertain)
-    )
-    try:
-        env_exec_red = decide(
-            "GIT_EXEC_PATH=/tmp/untrusted git submodule status")[0] != "ask"
-        option_exec_red = decide(
-            "git --exec-path=/tmp/untrusted submodule status")[0] != "ask"
-    finally:
-        globals()["authorize_git_subcommand"] = original_authorize
-    bad += 0 if env_exec_red else 1
-    bad += 0 if option_exec_red else 1
-    print("  %s GIT_EXEC_PATH authority mutation loses external-command ask" % (
-        "PASS" if env_exec_red else "FAIL"))
-    print("  %s --exec-path authority mutation loses external-command ask" % (
-        "PASS" if option_exec_red else "FAIL"))
 
-    globals()["AMBIENT_ENGINE_REQUIRES_EXPLICIT"] = False
-    try:
-        ambient_engine_red = decide(
-            r"git grep 'harness\b' -- README.md")[0] != "ask"
-    finally:
-        globals()["AMBIENT_ENGINE_REQUIRES_EXPLICIT"] = True
-    bad += 0 if ambient_engine_red else 1
-    print("  %s implicit-engine classification mutation loses ambient-config ask" % (
-        "PASS" if ambient_engine_red else "FAIL"))
 
     # Filename-pattern uncertainty can independently keep a broken function parse at
     # ask. Pin the declaration parser's diagnostic as well as the inert-body controls.
@@ -12679,62 +12006,8 @@ def selftest():
     bad += 0 if label_ok else 1
     print("  %s an unreadable source is reported as unreadable, not as budget exhaustion" % (
         "PASS" if label_ok else "FAIL"))
-    original_functions = extract_function_invocations
-    globals()["extract_function_invocations"] = (
-        lambda source, deadline=None: (source, ()))
-    try:
-        declaration_red = all(decide(source)[0] != "allow" for source in (
-            r'''scan() { git grep -E 'harness\b' -- README.md; }; /bin/echo safe''',
-            r'''scan() ( git grep -E 'harness\b' -- README.md ); /bin/echo safe''',
-            r'''scan() { git grep -E 'harness\b' -- README.md; }; /bin/echo scan''',
-        ))
-        declaration_red = (declaration_red
-                           and prefix_diagnostic not in decide(prefix_probe)[1])
-    finally:
-        globals()["extract_function_invocations"] = original_functions
-    bad += 0 if declaration_red else 1
-    print("  %s declaration-time execution mutation loses harmless declaration control" % (
-        "PASS" if declaration_red else "FAIL"))
 
-    def drop_function_invocations(source, deadline=None):
-        cleaned, _sources = original_functions(source, deadline)
-        return cleaned, ()
-    globals()["extract_function_invocations"] = drop_function_invocations
-    try:
-        invocation_red = all(decide(source)[0] != "deny" for source in (
-            r'''scan() { git grep -E 'harness\b' -- README.md; }; scan''',
-            r'''scan() { git grep -E 'harness\b' -- README.md; }; ! scan''',
-            r'''scan() ( git grep -E 'harness\b' -- README.md ); scan''',
-        ))
-    finally:
-        globals()["extract_function_invocations"] = original_functions
-    bad += 0 if invocation_red else 1
-    print("  %s disabled function-invocation traversal loses nested deny" % (
-        "PASS" if invocation_red else "FAIL"))
 
-    original_function_records = function_declaration_records
-    def collapse_function_versions(source, deadline=None):
-        records = original_function_records(source, deadline)
-        last_body = {record.name: record.body for record in records}
-        return tuple(FunctionDeclaration(
-            record.start, record.end, record.name, last_body[record.name],
-            record.scope_start, record.scope_end, record.conditional,
-            record.maybe, record.pipeline_start, record.pipeline_end,
-        ) for record in records)
-    globals()["function_declaration_records"] = collapse_function_versions
-    try:
-        collapse_red = decide(
-            r'''scan(){ git grep -E 'harness\b' -- README.md; }; scan; '''
-            r'''scan(){ /bin/echo safe; }; scan''')[0] != "deny"
-        collapse_red = collapse_red and decide(
-            r'''scan(){ /bin/echo safe; }; scan; '''
-            r'''scan(){ git grep -E 'harness\b' -- README.md; }; /bin/echo done'''
-        )[0] != "allow"
-    finally:
-        globals()["function_declaration_records"] = original_function_records
-    bad += 0 if collapse_red else 1
-    print("  %s global-definition collapse mutation loses temporal function outcomes" % (
-        "PASS" if collapse_red else "FAIL"))
 
     # A whole-source pass that spends the budget appends a question. A long pipeline after
     # a proven hazard once spent it in the stdin-provenance pass, before any command was
@@ -12756,329 +12029,24 @@ def selftest():
         print("  %s a budget %s spends keeps the deny already proven (got %s)" % (
             "PASS" if kept_ok else "FAIL", budget_pass, kept[0]))
 
-    original_annotation = annotate_function_declarations
-    def ignore_conditional_reachability(source, records, deadline=None):
-        return tuple(record._replace(conditional=False)
-                     for record in original_annotation(source, records, deadline))
-    globals()["annotate_function_declarations"] = ignore_conditional_reachability
-    try:
-        conditional_red = decide(
-            r'''if false; then scan(){ git grep -E 'harness\b' -- README.md; }; '''
-            r'''fi; scan''')[0] != "ask"
-    finally:
-        globals()["annotate_function_declarations"] = original_annotation
-    bad += 0 if conditional_red else 1
-    print("  %s conditional-reachability mutation loses uncertain call outcome" % (
-        "PASS" if conditional_red else "FAIL"))
 
-    def globalize_function_scope(source, records, deadline=None):
-        return tuple(record._replace(scope_start=-1, scope_end=len(source))
-                     for record in original_annotation(source, records, deadline))
-    globals()["annotate_function_declarations"] = globalize_function_scope
-    try:
-        scope_red = decide(
-            r'''scan(){ git grep -E 'harness\b' -- README.md; }; '''
-            r'''(scan(){ /bin/echo safe; }); scan''')[0] != "deny"
-        scope_red = scope_red and decide(
-            r'''scan(){ /bin/echo safe; }; '''
-            r'''(scan(){ git grep -E 'harness\b' -- README.md; }); scan'''
-        )[0] != "allow"
-    finally:
-        globals()["annotate_function_declarations"] = original_annotation
-    bad += 0 if scope_red else 1
-    print("  %s subshell-scope mutation loses both outer-definition controls" % (
-        "PASS" if scope_red else "FAIL"))
 
-    def globalize_maybe_definitions(source, records, deadline=None):
-        return tuple(record._replace(maybe=False)
-                     for record in original_annotation(source, records, deadline))
-    globals()["annotate_function_declarations"] = globalize_maybe_definitions
-    try:
-        maybe_red = all(decide(source)[0] != "ask" for source in (
-            r'''scan(){ git grep -E 'harness\b' -- README.md; }; true && '''
-            r'''scan(){ /bin/echo safe; }; scan''',
-            r'''scan(){ /bin/echo safe; }; true && '''
-            r'''scan(){ git grep -E 'harness\b' -- README.md; }; scan''',
-            r'''scan(){ git grep -E 'harness\b' -- README.md; }; false || '''
-            r'''scan(){ /bin/echo safe; }; scan''',
-            r'''scan(){ /bin/echo safe; }; false || '''
-            r'''scan(){ git grep -E 'harness\b' -- README.md; }; scan''',
-        ))
-    finally:
-        globals()["annotate_function_declarations"] = original_annotation
-    bad += 0 if maybe_red else 1
-    print("  %s short-circuit-state mutation loses all maybe-definition asks" % (
-        "PASS" if maybe_red else "FAIL"))
 
-    def globalize_pipeline_definitions(source, records, deadline=None):
-        return tuple(record._replace(pipeline_start=-1, pipeline_end=-1)
-                     for record in original_annotation(source, records, deadline))
-    globals()["annotate_function_declarations"] = globalize_pipeline_definitions
-    try:
-        pipeline_scope_red = decide(
-            r'''scan(){ git grep -E 'harness\b' -- README.md; }; '''
-            r'''{ scan(){ /bin/echo safe; }; /bin/echo component; } '''
-            r'''| /bin/cat; scan''')[0] != "deny"
-        pipeline_scope_red = pipeline_scope_red and decide(
-            r'''scan(){ /bin/echo safe; }; '''
-            r'''{ scan(){ git grep -E 'harness\b' -- README.md; }; '''
-            r'''/bin/echo component; } | /bin/cat; scan'''
-        )[0] != "allow"
-    finally:
-        globals()["annotate_function_declarations"] = original_annotation
-    bad += 0 if pipeline_scope_red else 1
-    print("  %s pipeline-child mutation loses both outer-definition controls" % (
-        "PASS" if pipeline_scope_red else "FAIL"))
 
-    original_marked_stdin = _marked_stdin_command
-    globals()["_marked_stdin_command"] = (
-        lambda _line, _start, _end, _deadline=None: None)
-    try:
-        leading_stdin_red = decide(
-            r'''(sh) <<< "git grep -E 'harness\b' -- README.md"''')[0] != "deny"
-    finally:
-        globals()["_marked_stdin_command"] = original_marked_stdin
-    bad += 0 if leading_stdin_red else 1
-    print("  %s grouped-shell association mutation loses recursive deny" % (
-        "PASS" if leading_stdin_red else "FAIL"))
 
-    original_association = associated_stdin_consumer
-    globals()["associated_stdin_consumer"] = (
-        lambda _line, _start, _end, _deadline=None:
-        StdinConsumer(False, False, ""))
-    try:
-        compound_stdin_red = decide(
-            r'''{ /bin/echo prep; sh; } <<< "git grep -E 'harness\b' -- README.md"'''
-        )[0] != "ask"
-    finally:
-        globals()["associated_stdin_consumer"] = original_association
-    bad += 0 if compound_stdin_red else 1
-    print("  %s command-graph reachability mutation loses compound stdin ask" % (
-        "PASS" if compound_stdin_red else "FAIL"))
 
-    original_file_inputs = live_file_input_sources
-    globals()["live_file_input_sources"] = lambda _source: ()
-    try:
-        file_input_red = decide(r'''0<"$SCRIPT" sh''')[0] != "ask"
-    finally:
-        globals()["live_file_input_sources"] = original_file_inputs
-    bad += 0 if file_input_red else 1
-    print("  %s fd-zero file-input callsite mutation loses dynamic-source ask" % (
-        "PASS" if file_input_red else "FAIL"))
 
-    globals()["associated_stdin_consumer"] = (
-        lambda _line, _start, _end, _deadline=None:
-        StdinConsumer(True, False, "sh"))
-    try:
-        cartesian_red = decide(
-            r'''/bin/cat <<< "git grep -E 'harness\b' -- README.md"; '''
-            r'''sh </dev/null''')[0] != "allow"
-    finally:
-        globals()["associated_stdin_consumer"] = original_association
-    bad += 0 if cartesian_red else 1
-    print("  %s global-source association mutation loses inert cross-command allow" % (
-        "PASS" if cartesian_red else "FAIL"))
 
-    original_here_classifier = classify_direct_here_string
-    globals()["classify_direct_here_string"] = (
-        lambda _source, _depth, _deadline, _resolution, _invocation,
-        _equals_state: StdinProvenance(
-            "ask", "planted unconditional ask"))
-    try:
-        unconditional_here_red = decide(
-            r'''sh 0<<< "/bin/echo safe"''')[0] != "allow"
-    finally:
-        globals()["classify_direct_here_string"] = original_here_classifier
-    bad += 0 if unconditional_here_red else 1
-    print("  %s unconditional here-string mutation loses harmless static allow" % (
-        "PASS" if unconditional_here_red else "FAIL"))
 
-    globals()["classify_direct_here_string"] = (
-        lambda _source, _depth, _deadline, _resolution, _invocation,
-        _equals_state: None)
-    try:
-        here_recursion_red = decide(
-            r'''sh <<< "git grep -E 'harness\b' -- README.md"''')[0] != "deny"
-    finally:
-        globals()["classify_direct_here_string"] = original_here_classifier
-    bad += 0 if here_recursion_red else 1
-    print("  %s here-string recursion mutation loses guarded nested deny" % (
-        "PASS" if here_recursion_red else "FAIL"))
 
-    original_direct_invocation = direct_here_string_invocation
-    def force_direct_zsh(source, current_shell="zsh",
-                         equals_state=ZSH_EQUALS_ON, command_env=None,
-                         lookup_authority_uncertain=False, deadline=None):
-        direct = original_direct_invocation(
-            source, current_shell, equals_state, command_env,
-            lookup_authority_uncertain, deadline)
-        if not direct:
-            return None
-        resolution, invocation = direct
-        return (resolution._replace(items=[("zsh", "")]),
-                invocation._replace(shell="zsh"))
-    globals()["direct_here_string_invocation"] = force_direct_zsh
-    try:
-        here_shell_red = decide(
-            r'''sh <<< "=git grep -E 'harness\b' -- README.md"''')[0] != "ask"
-    finally:
-        globals()["direct_here_string_invocation"] = original_direct_invocation
-    bad += 0 if here_shell_red else 1
-    print("  %s here-string shell-identity mutation misclassifies sh EQUALS syntax" % (
-        "PASS" if here_shell_red else "FAIL"))
 
-    original_heredoc_decision = heredoc_equals_decision
-    def force_zsh_heredoc_identity(
-            source, deadline=None, subcommands=None, classifier=None,
-            **context):
-        forced = (None if classifier is None else
-                  lambda body, _shell, state, inner_deadline, env, lookup:
-                  classifier(body, "zsh", ZSH_EQUALS_ON, inner_deadline,
-                             env, lookup))
-        return original_heredoc_decision(
-            source, deadline, subcommands, forced, **context)
-    globals()["heredoc_equals_decision"] = force_zsh_heredoc_identity
-    try:
-        heredoc_shell_red = decide(
-            "sh <<'EOF'\n=git grep -E 'harness\\b' -- README.md\nEOF\n"
-        )[0] != "ask"
-    finally:
-        globals()["heredoc_equals_decision"] = original_heredoc_decision
-    bad += 0 if heredoc_shell_red else 1
-    print("  %s heredoc shell-identity mutation misclassifies sh EQUALS syntax" % (
-        "PASS" if heredoc_shell_red else "FAIL"))
 
-    # The mutant replaces the scanner production reads, not a wrapper around it: a patch
-    # on a name the extractor no longer calls would leave every verdict unchanged and
-    # this arm green for the wrong reason.
-    original_scan_heredoc = _scan_heredoc_operator
-    def confuse_redirection_context(line, quote="", arithmetic_depth=0):
-        if "<<<" in line:
-            return (line.index("<<<"), False), quote, arithmetic_depth
-        if "<<" in line:
-            return (line.index("<<"), False), quote, arithmetic_depth
-        return original_scan_heredoc(line, quote, arithmetic_depth)
-    globals()["_scan_heredoc_operator"] = confuse_redirection_context
-    try:
-        here_string_red = decide(
-            r'''/bin/cat <<< "git grep -E 'harness\b' -- README.md"''')[0] != "allow"
-        shift_red = all(decide(source)[0] != "allow" for source in (
-            r'''/bin/echo "$(( 1 << 2 ))"''',
-            r'''(( value = 1 << 2 ))''',
-            r'''for ((i = 1; i << 2; i++)); do /bin/echo "$i"; done''',
-        ))
-    finally:
-        globals()["_scan_heredoc_operator"] = original_scan_heredoc
-    bad += 0 if here_string_red and shift_red else 1
-    print("  %s redirection-context mutation misclassifies here-string and shift" % (
-        "PASS" if here_string_red and shift_red else "FAIL"))
 
-    original_backtick = _backtick_substitution
-    def drop_backtick_body(source, start):
-        _body, end = original_backtick(source, start)
-        return "", end
-    globals()["_backtick_substitution"] = drop_backtick_body
-    try:
-        backtick_command = "/bin/echo " + chr(96) + (
-            "git grep -E 'harness\\b' -- README.md") + chr(96)
-        backtick_red = decide(backtick_command)[0] != "deny"
-    finally:
-        globals()["_backtick_substitution"] = original_backtick
-    bad += 0 if backtick_red else 1
-    print("  %s backtick callsite mutation loses nested deny" % (
-        "PASS" if backtick_red else "FAIL"))
 
-    original_heredoc = extract_heredoc_sources
-    def drop_heredoc_body(source, deadline=None, equals_findings=None,
-                          equals_subcommands=None, shell_findings=None,
-                          expansion_findings=None,
-                          classify_non_direct_shell_bodies=False,
-                          source_lines=None):
-        cleaned, _bodies = original_heredoc(
-            source, deadline, equals_findings, equals_subcommands, None,
-            source_lines=source_lines)
-        return cleaned, ()
-    globals()["extract_heredoc_sources"] = drop_heredoc_body
-    try:
-        heredoc_red = decide(
-            "sh <<'EOF'\ngit grep -E 'harness\\b' -- README.md\nEOF\n"
-        )[0] != "deny"
-    finally:
-        globals()["extract_heredoc_sources"] = original_heredoc
-    bad += 0 if heredoc_red else 1
-    print("  %s executable-heredoc callsite mutation loses nested deny" % (
-        "PASS" if heredoc_red else "FAIL"))
 
-    def keep_winning_heredoc_only(source, deadline=None, equals_findings=None,
-                                  equals_subcommands=None, shell_findings=None,
-                                  expansion_findings=None,
-                                  classify_non_direct_shell_bodies=False,
-                                  source_lines=None):
-        expansion_start = (len(expansion_findings)
-                           if expansion_findings is not None else 0)
-        cleaned, bodies = original_heredoc(
-            source, deadline, equals_findings, equals_subcommands,
-            shell_findings, expansion_findings,
-            classify_non_direct_shell_bodies, source_lines=source_lines)
-        if "<<A <<'B'" in source:
-            if expansion_findings is not None:
-                del expansion_findings[expansion_start:]
-            return cleaned, ()
-        return cleaned, bodies
-    globals()["extract_heredoc_sources"] = keep_winning_heredoc_only
-    try:
-        winner_red = decide(
-            "cat <<A <<'B'\n$(git grep -E 'harness\\b' -- README.md)\nA\n"
-            "literal\nB\n"
-        )[0] != "deny"
-    finally:
-        globals()["extract_heredoc_sources"] = original_heredoc
-    bad += 0 if winner_red else 1
-    print("  %s winner-only heredoc mutation loses nonwinning-body expansion deny" % (
-        "PASS" if winner_red else "FAIL"))
 
-    original_header_shell = _header_stdin_shell
-    globals()["_header_stdin_shell"] = (
-        lambda _header, _suffix="", deadline=None: "")
-    try:
-        heredoc_path_red = decide(
-            "sh 0<<'EOF'\ngit grep -E 'harness\\b' -- README.md\nEOF\n"
-        )[0] != "deny"
-    finally:
-        globals()["_header_stdin_shell"] = original_header_shell
-    bad += 0 if heredoc_path_red else 1
-    print("  %s heredoc execution-header mutation loses descriptor-zero deny" % (
-        "PASS" if heredoc_path_red else "FAIL"))
 
-    original_fallback = conservative_allow_uncertainty
-    globals()["conservative_allow_uncertainty"] = (
-        lambda _source, _deadline=None: None)
-    try:
-        fallback_red = decide(
-            r'''launcher /bin/sh 0<<< "git grep -E 'harness\b' -- README.md"'''
-        )[0] != "ask"
-    finally:
-        globals()["conservative_allow_uncertainty"] = original_fallback
-    bad += 0 if fallback_red else 1
-    print("  %s conservative allow-fallback mutation loses obscured-input ask" % (
-        "PASS" if fallback_red else "FAIL"))
 
-    original_delimiter = _parse_heredoc_delimiter_word
-    def identifier_delimiter_only(line, start):
-        delimiter, quoted, end = original_delimiter(line, start)
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", delimiter):
-            raise CommandParseError("legacy identifier-only heredoc delimiter")
-        return delimiter, quoted, end
-    globals()["_parse_heredoc_delimiter_word"] = identifier_delimiter_only
-    try:
-        dashed_heredoc_red = decide(
-            "sh <<'END-MARK'\ngit grep -E 'harness\\b' -- README.md\nEND-MARK\n"
-        )[0] != "deny"
-    finally:
-        globals()["_parse_heredoc_delimiter_word"] = original_delimiter
-    bad += 0 if dashed_heredoc_red else 1
-    print("  %s identifier-only heredoc mutation loses dashed-delimiter deny" % (
-        "PASS" if dashed_heredoc_red else "FAIL"))
 
     checks = bad.checks
     failures = bad.failures

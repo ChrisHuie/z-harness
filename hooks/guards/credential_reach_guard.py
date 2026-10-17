@@ -455,13 +455,28 @@ FIXTURES = [
     ("GREEN codex-runtime main codex", "codex exec 'x'", "main", "codex", "allow"),
     ("GREEN codex-runtime main reads auth", "cat ~/.codex/auth.json", "main", "codex", "allow"),
 ]
-# Each name here must have a fixture whose verdict changes when the name is removed from
-# its collection; selftest proves it, so a deleted entry cannot pass silently.
-MUTATION_PROBES = [("MODEL_CLIS", n) for n in ("codex", "hermes", "claude")] + \
-    [("CREDENTIAL_CLIS", n) for n in ("gh", "wrangler", "tailscale", "aws")] + \
-    [("GIT_NETWORK", n) for n in ("push", "fetch")] + \
-    [("KEYCHAIN_READS", "find-generic-password")] + \
-    [("SHELLS", n) for n in ("bash", "zsh")]
+# Each table entry named here has one command whose whole finding comes from that entry, and
+# a control that differs only in the entry's word finds nothing. selftest asserts both exact
+# results, so an entry that stops being read cannot pass silently.
+TABLE_BINDINGS = [
+    ("MODEL_CLIS", "codex", "codex exec x", [("model", "codex (another model's CLI)")]),
+    ("MODEL_CLIS", "hermes", "hermes chat -q hi", [("model", "hermes (another model's CLI)")]),
+    ("MODEL_CLIS", "claude", "claude -p hi", [("model", "claude (another model's CLI)")]),
+    ("CREDENTIAL_CLIS", "gh", "gh pr list", [("cred", "gh (uses a stored credential)")]),
+    ("CREDENTIAL_CLIS", "wrangler", "wrangler r2 bucket list",
+     [("cred", "wrangler (uses a stored credential)")]),
+    ("CREDENTIAL_CLIS", "tailscale", "tailscale status --json",
+     [("cred", "tailscale (uses a stored credential)")]),
+    ("CREDENTIAL_CLIS", "aws", "aws s3 ls", [("cred", "aws (uses a stored credential)")]),
+    ("GIT_NETWORK", "push", "git push origin main",
+     [("cred", "git push (network operation using a credential helper)")]),
+    ("GIT_NETWORK", "fetch", "git -C /repo fetch -q origin",
+     [("cred", "git fetch (network operation using a credential helper)")]),
+    ("KEYCHAIN_READS", "find-generic-password", "security find-generic-password -s svc -w",
+     [("secret", "security find-generic-password (keychain secret read)")]),
+    ("SHELLS", "bash", 'bash -lc "gh api user"', [("cred", "gh (uses a stored credential)")]),
+    ("SHELLS", "zsh", "zsh -c 'gh api user'", [("cred", "gh (uses a stored credential)")]),
+]
 
 
 def _graded(cmd, subagent, runtime="claude"):
@@ -491,19 +506,14 @@ def selftest():
         total += 1
         failures += (not ok)
         print(f"  {'PASS' if ok else 'FAIL'} want={want:<5} got={got:<5} {label}")
-    for coll, name in MUTATION_PROBES:
-        target = globals()[coll]
-        target.discard(name)
-        try:
-            mutated = _run_fixtures()
-        finally:
-            target.add(name)
-        flipped = sum(1 for (_l, _w, a), (_l2, _w2, b) in zip(baseline, mutated) if a != b)
-        ok = flipped > 0
+    for coll, name, command, finding in TABLE_BINDINGS:
+        control = command.replace(name, "notatool", 1)
+        got, control_got = _scan(command), _scan(control)
+        ok = name in globals()[coll] and got == finding and control_got == []
         total += 1
         failures += (not ok)
-        print(f"  {'PASS' if ok else 'FAIL'} mutation  removing {name!r} from {coll} "
-              f"changes {flipped} verdict(s)")
+        print(f"  {'PASS' if ok else 'FAIL'} table     {name!r} in {coll} is the whole finding "
+              f"for {command!r}; {control!r} finds {len(control_got)}")
     sub_deny, _ = _graded("gh pr list", True)
     main_allow, _ = _graded("gh pr list", False)
     ok = sub_deny == "deny" and main_allow == "allow"

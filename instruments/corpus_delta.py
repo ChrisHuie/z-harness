@@ -7,7 +7,7 @@ distinct Bash tool command from local transcripts, decides each one with the gua
 base checkout and at a head checkout, and reports the verdict matrix, the moved verdicts
 by direction, and the head's reasons for every command the base allowed and the head did
 not. The measurement that motivated it: a head that answered `ask` on 23.6% of commands
-main allowed, with every fixture, sweep and fuzz green.
+main allowed, with every fixture and fuzz green.
 
 Only aggregates leave this process. Transcripts are private; no command text is printed.
 

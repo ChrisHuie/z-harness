@@ -49,7 +49,6 @@ import re
 import subprocess
 import sys
 import tempfile
-import types
 
 VERSION = "1.3.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -803,27 +802,6 @@ def selftest():
             rc == 1 and "missing_required=0 errors=1 exit=1" in buf.getvalue())
         json.dump(scenario, open(happy, "w"))
         json.dump(scenario, open(failure, "w"))
-
-        # --- mutation proof on a private copy of this module: without the child-exit term, a
-        # failed child with every marker grades, which the proof above rejects
-        def private_copy(old, new):
-            source_text = open(__file__, encoding="utf-8").read()
-            if source_text.count(old) != 1:
-                raise AssertionError(f"mutation site occurs {source_text.count(old)} time(s)")
-            module = types.ModuleType("run_skill_evals_mutant")
-            module.__file__ = __file__
-            exec(compile(source_text.replace(old, new), __file__, "exec"), module.__dict__)
-            return module
-
-        mutant = private_copy("            fully_graded = code == 0 and bool(rows) and all(ok for ok, _ in rows)\n",
-                              "            fully_graded = bool(rows) and all(ok for ok, _ in rows)\n")
-        json.dump(dict(scenario, query="the required thing"), open(happy, "w"))
-        buf = io.StringIO()
-        chk("mutation: without the child-exit term a failed child with every marker grades (exit 0), "
-            "the verdict the child-exit proof rejects",
-            mutant.run(root, budget_note=False, runner=failing_child, out=buf) == 0
-            and "graded=3 ungraded_required=0" in buf.getvalue())
-        json.dump(scenario, open(happy, "w"))
 
         chk("review reproduction 4294811785: a required scenario absent from the corpus makes --run red",
             reproduction(4294811785, "validate_exit= 1 run_exit= 1"))

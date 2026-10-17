@@ -2548,9 +2548,9 @@ def selftest(
         fixture_root = temp / "fixture-repo"
         (fixture_root / "skills").mkdir(parents=True)
         shutil.copytree(ROOT / "skills/ground-claims", fixture_root / "skills/ground-claims")
-        before_mutation = temp / "before-mutation"
-        after_mutation = temp / "after-mutation"
-        render_all(fixture_root, before_mutation, render_config, adapter_config)
+        before_edit = temp / "before-edit"
+        after_edit = temp / "after-edit"
+        render_all(fixture_root, before_edit, render_config, adapter_config)
         expect_error(
             "renderer rejects output paths inside a selected skill source",
             lambda: render_all(
@@ -2562,29 +2562,29 @@ def selftest(
         )
         skill_body = fixture_root / "skills/ground-claims/SKILL.md"
         contract = fixture_root / "skills/ground-claims/CONTRACT.md"
-        contract.write_text(contract.read_text(encoding="utf-8") + "\nmutation\n", encoding="utf-8")
-        render_all(fixture_root, after_mutation, render_config, adapter_config)
+        contract.write_text(contract.read_text(encoding="utf-8") + "\nedited\n", encoding="utf-8")
+        render_all(fixture_root, after_edit, render_config, adapter_config)
         before_manifest = read_json_object(
-            before_mutation / f"codex/{ARTIFACT_MANIFEST}", "before artifact manifest"
+            before_edit / f"codex/{ARTIFACT_MANIFEST}", "before artifact manifest"
         )
         after_manifest = read_json_object(
-            after_mutation / f"codex/{ARTIFACT_MANIFEST}", "after artifact manifest"
+            after_edit / f"codex/{ARTIFACT_MANIFEST}", "after artifact manifest"
         )
         expect(
-            "an excluded source mutation moves the input digest and leaves the payload fixed",
+            "an excluded source edit moves the input digest and leaves the payload fixed",
             before_manifest["source"]["inputTreeSha256"]
             != after_manifest["source"]["inputTreeSha256"]
             and before_manifest["payload"]["sha256"]
             == after_manifest["payload"]["sha256"],
         )
-        included_mutation = temp / "included-mutation"
+        included_edit = temp / "included-edit"
         original_body = skill_body.read_text(encoding="utf-8")
-        skill_body.write_text(original_body + "\nmutation\n", encoding="utf-8")
+        skill_body.write_text(original_body + "\nedited\n", encoding="utf-8")
         included_manifest = render_all(
-            fixture_root, included_mutation, render_config, adapter_config
+            fixture_root, included_edit, render_config, adapter_config
         )["codex"]
         expect(
-            "an included source mutation moves both the input and payload digests",
+            "an included source edit moves both the input and payload digests",
             included_manifest["source"]["inputTreeSha256"]
             != after_manifest["source"]["inputTreeSha256"]
             and included_manifest["payload"]["sha256"]
@@ -2592,7 +2592,7 @@ def selftest(
         )
         skill_body.write_text(original_body, encoding="utf-8")
         contract.write_text(
-            contract.read_text(encoding="utf-8").replace("\nmutation\n", ""), encoding="utf-8"
+            contract.read_text(encoding="utf-8").replace("\nedited\n", ""), encoding="utf-8"
         )
 
         tamper_base = temp / "tamper-base"
@@ -2705,48 +2705,48 @@ def selftest(
             tamper_base / f"claude/{ARTIFACT_MANIFEST}", "sweep manifest"
         )
         manifest_paths = leaf_paths(base_manifest)
-        survivors: List[str] = []
+        accepted_tampers: List[str] = []
         for position, path in enumerate(manifest_paths):
             case_root = temp / f"sweep-manifest-{position:03d}"
             shutil.copytree(tamper_base / "claude", case_root)
-            mutated = json.loads(json.dumps(base_manifest))
-            write_path(mutated, path, shape_preserving_variant(read_path(mutated, path)))
-            write_json(case_root / ARTIFACT_MANIFEST, mutated)
+            tampered = json.loads(json.dumps(base_manifest))
+            write_path(tampered, path, shape_preserving_variant(read_path(tampered, path)))
+            write_json(case_root / ARTIFACT_MANIFEST, tampered)
             try:
                 verify_artifact(
                     fixture_root, case_root, "claude", render_config, adapter_config
                 )
-                survivors.append(path)
+                accepted_tampers.append(path)
             except RenderError:
                 continue
             except Exception as exc:  # noqa: BLE001
-                survivors.append(f"{path} (crashed: {type(exc).__name__})")
+                accepted_tampers.append(f"{path} (crashed: {type(exc).__name__})")
         expect(
-            f"no artifact-manifest leaf survives mutation ({len(manifest_paths)} swept)"
-            + (f" -- survived: {survivors}" if survivors else ""),
-            bool(manifest_paths) and not survivors,
+            f"verification rejects a tamper of every artifact-manifest leaf ({len(manifest_paths)} leaves)"
+            + (f" -- accepted: {accepted_tampers}" if accepted_tampers else ""),
+            bool(manifest_paths) and not accepted_tampers,
         )
 
         base_index = read_json_object(tamper_base / RENDER_INDEX, "sweep render index")
         index_paths = leaf_paths(base_index)
-        index_survivors: List[str] = []
+        accepted_index_tampers: List[str] = []
         for position, path in enumerate(index_paths):
             case_root = temp / f"sweep-index-{position:03d}"
             shutil.copytree(tamper_base, case_root)
-            mutated = json.loads(json.dumps(base_index))
-            write_path(mutated, path, shape_preserving_variant(read_path(mutated, path)))
-            write_json(case_root / RENDER_INDEX, mutated)
+            tampered = json.loads(json.dumps(base_index))
+            write_path(tampered, path, shape_preserving_variant(read_path(tampered, path)))
+            write_json(case_root / RENDER_INDEX, tampered)
             try:
                 verify_render_root(fixture_root, case_root, render_config, adapter_config)
-                index_survivors.append(path)
+                accepted_index_tampers.append(path)
             except RenderError:
                 continue
             except Exception as exc:  # noqa: BLE001
-                index_survivors.append(f"{path} (crashed: {type(exc).__name__})")
+                accepted_index_tampers.append(f"{path} (crashed: {type(exc).__name__})")
         expect(
-            f"no render-index leaf survives mutation ({len(index_paths)} swept)"
-            + (f" -- survived: {index_survivors}" if index_survivors else ""),
-            bool(index_paths) and not index_survivors,
+            f"verification rejects a tamper of every render-index leaf ({len(index_paths)} leaves)"
+            + (f" -- accepted: {accepted_index_tampers}" if accepted_index_tampers else ""),
+            bool(index_paths) and not accepted_index_tampers,
         )
 
         planted(

@@ -120,7 +120,7 @@ same shared policy at both user and project scope.
 | `hooks/announced_work_guard.py` | Claude | Stop hook that blocks a final message which announces work that has not begun; no claimed Codex equivalent |
 | `hooks/codex_session_start.py` | Codex | injects mandatory shared policy, resolved adapter commands, and optional host-local context |
 | `$CODEX_HOME/z-harness/AGENTS.local.md` | local Codex host | optional non-packaged machine instructions appended by the session adapter |
-| `hooks/harness_check.py` | shared | mechanical gate over skills, hooks, context files, plugin packaging, claim binding, eval coverage, budget ceilings, and envelope fixtures; `--verify-runtime` reads the installed binaries |
+| `hooks/harness_check.py` | shared | mechanical gate over skills, hooks, context files, plugin packaging, claim binding, eval coverage, budget ceilings, envelope fixtures, and the banned-method tripwire; `--verify-runtime` reads the installed binaries |
 | `hooks/harness_health.sh` | Claude | weekly health run; exits non-zero when the gate or the runtime verifier fails |
 | `hooks/harness_report.py` | Claude | transcript evidence for Claude skill firing/reference reads; capture is a per-context intersection, timestamps are UTC |
 | `hooks/fixtures_codex/` | Codex | six hook envelopes captured from codex-cli 0.154.0 plus one labeled synthetic Stop with a null message |
@@ -222,6 +222,20 @@ Claude receives `ask` for uncertainty; the Codex adapter maps it to `deny`. A se
 regex-engine or rev-path hazard retains `deny` precedence. Prefer a direct literal executable and
 an explicit pattern engine when rewriting a questioned command.
 
+`hooks/guards/mutation_testing_guard.py` runs inside the Bash guard for every caller on both
+runtimes and denies running or installing the tools listed in that module, which enforce the `AGENTS.md`
+verification ban: at
+command position after control keywords, wrappers and launchers; through a package runner, with
+its value options skipped; through an interpreter; as a build-tool goal or task; as a package an
+installer of that ecosystem receives; as a package script, make target, tox environment or nox
+session named for the method; and inside `sh -c`, `eval`, here-strings, substitutions, and
+heredocs fed to a shell. A command word chosen at run time, in a command that names a listed tool,
+and command source the tokenizer cannot read are asked about. A command that contains none of its
+needles is allowed before it is parsed. Its selftest prints what it does not model: a variant
+built by arbitrary code, a tool launched from interpreter code, a renamed tool, an alias or
+function defined in an earlier command, a script whose name does not say what it runs, text piped
+into a shell, a container image's entrypoint, and a requirements file.
+
 ### Verification commands
 
 ```text
@@ -233,6 +247,7 @@ python3 tools/install-claude.py --render
 python3 tools/install-claude.py --check
 python3 hooks/bash_command_guard.py --selftest
 python3 hooks/bash_command_guard.py --perf
+python3 hooks/guards/mutation_testing_guard.py --selftest
 python3 hooks/guards/git_grep_engine_guard.py --perf
 python3 hooks/spawn_preflight_guard.py --selftest
 python3 hooks/codex_session_start.py --selftest
@@ -249,7 +264,6 @@ python3 tools/run-skill-evals.py --selftest
 python3 tools/run-skill-evals.py --validate
 python3 tools/render-packages.py --selftest
 python3 tools/verify-review-publication.py --selftest
-python3 instruments/enumerate_survivors.py --selftest
 python3 instruments/fuzz_judge_diff.py --selftest
 python3 tools/ci-gate.py --selftest
 python3 tools/ci-gate.py
@@ -257,10 +271,8 @@ python3 tools/ci-gate.py
 
 The Bash and grep guards run their wall-clock checks -- hook processes timed against the 4.5 s cap
 and the at-limit sources decided inside the decision budget -- under `--perf`, which
-`hooks/harness_check.py` runs once per head; the mutation sweep runs each guard's `--selftest` once
-per mutation. `--selftest` still decides commands under the production deadlines, so a slow enough
-host can fail a check there as well, such as the grep guard's "function-declaration limit mutation
-loses bounded-parse ask".
+`hooks/harness_check.py` runs once per head. `--selftest` still decides commands under the
+production deadlines, so a slow enough host can fail a check there as well.
 
 `python3 tools/ci-gate.py` is the offline CI-equivalent entry point. It runs the ordinary gate, its
 meta-selftest, the renderer and guard selftests, eval validation, and a fresh render/verify pair. It
@@ -273,29 +285,19 @@ isolation fails before its claimed receipt is accepted when the declared workflo
 The in-repository workflow files are trust roots: a workflow-only edit can bypass those runners,
 and coordinated edits to both workflows can fabricate both in-repo job classes. Reviewer inspection
 or an externally administered required workflow must govern that boundary. GitHub still manages the
-image contents behind those labels. No workflow runs the mutation sweep. `tools/write-mutation-receipt.py`
-runs it by hand, sharded with `--shard-index` and `--shard-count` and aggregated with `--aggregate`;
-the aggregator rejects missing, duplicate, overlapping, foreign, or stale mutation IDs and shards
-measured under different tool versions, recomputes each raw outcome, and holds that observation
-against the reviewed `contracts/mutation-policy.json`: it exits 0 when the outcomes conform, 1 on a
-survivor or count-only kill the policy does not list or on any site or declared-addition survivor,
-and 2 when the measurement cannot be trusted, such as an `inert` entry being caught. The report is
-never committed. The offline gate validates the policy against the current plan, holds the plan
-against an independent closed inventory, and requires every module a registered hook runs to be
-swept or listed as unswept; it does not run the mutation plan. A separate
+image contents behind those labels. A separate
 declared Ubuntu job runs `tools/portable-conformance.py`. It resolves locked wheel filenames through
 live PyPI metadata, requires the published digest to equal the lock, hash-verifies every downloaded
 artifact, derives the vendored Agent Plugins schema and license URLs from their pinned repository
 revision and paths, and verifies a signed, hash-pinned Claude Code release before validating a fresh render.
 Network failure is red, never skipped. The repository workflow does not itself prove that either job
 is a branch-protection required check. `tools/pr-delivery-state.py` proves generic exact-head check
-and workflow presence; mutation evidence, when a sweep has been run by hand, is its own output and
-is inspected explicitly.
+and workflow presence.
 
 Local `harness_check.py` mode adds machine-specific Claude anchors, compares the complete payload
 of repository-owned skills under `~/.claude/skills`, and scans tracked plus authored-untracked
 context files
-without crossing nested Git ownership. `--selftest` plants defects and proves each check family can
+without crossing nested Git ownership. `--selftest` plants defective inputs and proves each check family can
 turn red; a zero-input scan is an error, not a clean verdict. C1 requires
 every direct selftest to be registered with a positive floor and a unique terminal suite receipt;
 `harness_check.py` is the sole recursive meta-suite exemption.
@@ -317,7 +319,9 @@ same baseline to its coverage receipt. An empty list makes the check an ordinary
 C14 holds `AGENTS.md` and the generated instruction file at or under the sizes recorded in
 `contracts/budget-ceilings.json`, and pins the dynamic hook block (7,500 characters, 190 lines) and
 per-turn carrier (600 bytes) ceilings under the runtime caps. C15 decodes every committed hook
-envelope against its event's required-field list.
+envelope against its event's required-field list. C16 keeps the vocabulary of the method the
+`AGENTS.md` verification ban names out of every tracked file outside the exemptions declared
+beside its patterns, and prints the scan set and file count it read.
 
 `harness_check.py --verify-runtime` reads the installed Claude CLI, every installed desktop build,
 and the installed Codex binary for the anchored contracts (Stop fields, `afkTimeoutMs`, the hook
@@ -336,34 +340,19 @@ only after a child exit of 0 with every marker present, reconciles the manifest'
 against the scenarios that executed, and exits non-zero when a required scenario does not grade or
 did not execute, or when the runner raised.
 
-The nine reviewer reproductions for pull request 36 live under `instruments/reproductions/pr-36/`
+The reviewer reproductions for pull request 36 live under `instruments/reproductions/pr-36/`
 and run verbatim as acceptance cases of the suites they exercise.
 
 Document quote/citation scans are also manual because they require the target document, artifact
 root, and session transcript. Their detector selftest is blocking through C1.
 
-The mutation-development instruments are also bound into C1 by source digest and exact selftest
-count, while their full exploratory runs remain explicit. Keep their JSON outside the checkout:
+The differential fuzzing instrument is also bound into C1 by source digest and exact selftest
+count, while its full exploratory runs remain explicit. Keep its JSON outside the checkout:
 
 ```text
-python3 instruments/enumerate_survivors.py hooks/announced_work_guard.py hooks/fixtures_stop \
-  > /tmp/announced-work-survivors.json
 python3 instruments/fuzz_judge_diff.py /path/to/oracle.py hooks/announced_work_guard.py 17 10000 \
   > /tmp/announced-work-fuzz.json
 ```
-
-`enumerate_survivors.py` first requires one complete green pristine receipt, then mutates each
-top-level function except the selftest and CLI runner. It records target, fixture-tree, plan, and
-instrument hashes. A semantic kill requires the same suite and check count, a positive failure
-count, and assertion-failure exit 1; a timeout, crash, missing receipt, count drift, source drift,
-any other exit, or setup failure exits 2 as an instrument error. Fixture roots and descendants
-containing symlinks are rejected, as are Python bytecode caches. The completed private destination
-is checked against the recorded digest before an isolated interpreter executes it and checked again
-afterward. This binds the starting and ending private snapshots, not transient changes restored by
-the code under test or arbitrary files it reads outside those declared copies. A complete
-measurement exits 0 and reports survivors in JSON rather than treating coverage debt as tool
-failure.
-
 `fuzz_judge_diff.py` captures the instrument, oracle, and candidate bytes once, creates and
 post-verifies a separate private worker snapshot for each guard, and compiles each guard directly
 without import bytecode. Runtime `__file__` reads resolve to that private guard while the original
@@ -374,11 +363,12 @@ message-corpus, and instrument hashes. In comparison mode it exits 1 only when t
 allow, exits 2 on instrument failure -- including a run whose oracle blocked nothing, which could only
 have classified every case as agreement or allow-to-block -- and reports allow-to-block and block-reason changes separately
 without collapsing them into that safety verdict. Its grammar carries near-miss tokens drawn from
-outside the guard's tables. The mandatory prefix pins every one, so a widening that admits
-one of those tokens diverges at the minimum case count rather than needing a large run. That
-guarantee is exercised with actual one-literal private-copy widenings and covers three of the
-guard's collections; a widening elsewhere may still diverge by
-chance, and a clean run over an unpinned collection is not evidence of coverage. The accepted count range runs from the
+outside the guard's tables. The mandatory prefix pins every one, and the selftest asserts that
+each pinned near-miss case blocks under the shipped guard while the same message with an in-table
+token in that position is allowed, so a candidate that admits one of those tokens diverges at the
+minimum case count rather than needing a large run. That guarantee covers three of the guard's
+collections; a widening elsewhere may still diverge by chance, and a clean run over an unpinned
+collection is not evidence of coverage. The accepted count range runs from the
 mandatory-case count to 100,000; the
 mandatory prefix includes every production and renders every supported delimiter spelling. Use
 multiple recorded seeds instead of one unbounded worker allocation. Source symlinks are rejected;

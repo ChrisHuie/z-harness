@@ -10,15 +10,12 @@ import hashlib
 import importlib.util
 import io
 import json
-import modulefinder
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
-import types
 from typing import Callable, List, Optional, Sequence, Tuple
 
 from repository_ownership import git_toplevel_error, run_git
@@ -58,12 +55,13 @@ EVAL_SKILL_FLOOR = 7
 # 165 here and 178 in harness_check -- and a fake that hardcodes its own number tests the
 # literal rather than the contract.
 SUITE_FLOORS = {
-    "harness_check": 427,
+    "harness_check": 405,
     "render-packages": 192,
-    "bash_command_guard": 1865,
+    "bash_command_guard": 2084,
     "credential_reach_guard": 84,
-    "git_grep_engine_guard": 1626,
-    "zsh_rev_modifier_guard": 523,
+    "mutation_testing_guard": 223,
+    "git_grep_engine_guard": 1527,
+    "zsh_rev_modifier_guard": 513,
 }
 EXPECTED_WORKFLOW = """name: harness-check
 on:
@@ -645,6 +643,8 @@ def command_specs(render_root: Path) -> List[Tuple[List[str], ReceiptSpec]]:
          selftest_receipt("zsh_rev_modifier_guard", SUITE_FLOORS["zsh_rev_modifier_guard"])),
         ([python, "hooks/guards/credential_reach_guard.py", "--selftest"],
          selftest_receipt("credential_reach_guard", SUITE_FLOORS["credential_reach_guard"])),
+        ([python, "hooks/guards/mutation_testing_guard.py", "--selftest"],
+         selftest_receipt("mutation_testing_guard", SUITE_FLOORS["mutation_testing_guard"])),
         (
             [python, "tools/run-skill-evals.py", "--validate"],
             ReceiptSpec(
@@ -746,8 +746,8 @@ RETAINED_DECISION_COMMANDS = ROOT / "contracts/goldens/retained-guard-commands.j
 SUITE_SOURCE_GOLDEN = ROOT / "contracts/goldens/suite-sources.json"
 HARNESS_SOURCE = ROOT / "hooks/harness_check.py"
 REPOSITORY_OWNERSHIP_SOURCE = ROOT / "tools/repository_ownership.py"
-DECISION_CORPUS_FLOOR = 1466
-DECISION_WRITER_SHA256 = "2d3209ae53b50f897039a100952768b8556c0f8de2fd85888ef0c8651f9b0a9b"
+DECISION_CORPUS_FLOOR = 1685
+DECISION_WRITER_SHA256 = "12a398f57514bb5435533a143ffe618b98563ffcf542b5c9eac74cecd3650abb"
 RETAINED_DECISION_SCHEMA_VERSION = 1
 RETAINED_DECISION_NOTE = (
     "reviewed decision commands retained after their originating fixtures left the "
@@ -854,33 +854,6 @@ def repository_ownership_source_error(golden_data=None, source_bytes=None) -> st
         return f"cannot verify repository-ownership source: {exc}"
     if actual != expected:
         return "tools/repository_ownership.py differs from its reviewed suite source digest"
-    return ""
-
-
-def mutation_generator_source_error(golden_data=None, source_bytes=None) -> str:
-    """Bind the mutation generator to the reviewed source registry.
-
-    The three guards carry an authored digest here, so editing one reddens this gate until a
-    reviewer updates the registry in the same commit. The tool that MEASURES those guards had
-    no such binding: its only digest was one it wrote into its own output, so editing the
-    generator and regenerating in one commit moved both together and the gate stayed green.
-    A self-attesting measurement instrument is not attested.
-    """
-    try:
-        if golden_data is None:
-            golden_data = _json_without_duplicate_keys(SUITE_SOURCE_GOLDEN)
-        suites = golden_data.get("suites") if isinstance(golden_data, dict) else None
-        expected = suites.get("write-mutation-receipt") if isinstance(suites, dict) else None
-        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
-            return "suite source registry has no valid write-mutation-receipt digest"
-        current = ((ROOT / "tools/write-mutation-receipt.py").read_bytes()
-                   if source_bytes is None else source_bytes)
-        actual = hashlib.sha256(current).hexdigest()
-    except (OSError, ValueError) as exc:
-        return f"cannot verify write-mutation-receipt source: {exc}"
-    if actual != expected:
-        return ("tools/write-mutation-receipt.py differs from its reviewed suite source "
-                "digest; update its entry in the same commit and review that diff")
     return ""
 
 
@@ -1005,875 +978,6 @@ def decision_golden_error(golden_data=None, decide=None, snapshot=None,
             f"tools/write-decision-golden.py in the same commit and review that diff")
 
 
-# The plan may grow; it may not shrink below what the sweep is reviewed to cover.
-MUTATION_PLAN_FLOOR = 600
-# Declared additions, pinned here independently of the generator. The element sweep only
-# REMOVES members, and removal makes a collection that grants an exemption stricter, so the
-# generated sweep cannot express the direction these fail in. Each entry must be caught; a
-# survivor is a live fail-open rather than coverage debt. Pinned so an entry cannot be
-# dropped without this gate saying so.
-EXPECTED_MUTATION_ADDITIONS = {
-    (
-        "hooks/guards/git_grep_engine_guard.py", "_GIT_TERMINAL_OPTIONS", "set",
-        "--icase-pathspecs", "a non-terminating git global is treated as terminal", (),
-    ),
-    (
-        "hooks/guards/git_grep_engine_guard.py", "_GIT_GLOBAL_OPTIONS_WITH_VALUES", "set",
-        "--no-advice", "a valueless git global is treated as value-taking", (),
-    ),
-    (
-        "hooks/guards/git_grep_engine_guard.py", "GREP_SHORT_PATTERN_ARG", "set", "w",
-        "a boolean grep short option is treated as taking the pattern", (),
-    ),
-    (
-        "hooks/guards/git_grep_engine_guard.py", "GREP_SHORT_OPTIONAL_VALUE", "set", "w",
-        "a boolean grep short option is treated as optionally valued", (),
-    ),
-}
-EXPECTED_MUTATION_COLLECTIONS = {
-    ("hooks/bash_command_guard.py", "GUARDS"): 2,
-    ("hooks/bash_command_guard.py", "RANK"): 3,
-    ("hooks/bash_command_guard.py", "RUNTIMES"): 2,
-    ("hooks/guards/git_grep_engine_guard.py", "CONFIG_ENGINE"): 7,
-    ("hooks/guards/git_grep_engine_guard.py", "CONTROL_KEYWORDS"): 12,
-    ("hooks/guards/git_grep_engine_guard.py", "CROSS_VERSION_ALIAS_PROOF"): 22,
-    ("hooks/guards/git_grep_engine_guard.py", "ENV_SPLIT_ESCAPES"): 10,
-    ("hooks/guards/git_grep_engine_guard.py", "EXEC_WRAPPERS"): 6,
-    ("hooks/guards/git_grep_engine_guard.py", "GIT_HAZARD_SUBCOMMANDS"): 28,
-    ("hooks/guards/git_grep_engine_guard.py", "GIT_LOG_ENGINE_TOKENS"): 7,
-    ("hooks/guards/git_grep_engine_guard.py", "GIT_LOG_GREP_SUBCOMMANDS"): 10,
-    ("hooks/guards/git_grep_engine_guard.py", "GIT_LOG_PATTERN_OPTIONS"): 4,
-    ("hooks/guards/git_grep_engine_guard.py", "GREP_LONG_BOOLEAN_OPTIONS"): 37,
-    ("hooks/guards/git_grep_engine_guard.py", "GREP_LONG_ENGINE"): 4,
-    ("hooks/guards/git_grep_engine_guard.py", "GREP_LONG_NEGATED_ENGINE"): 4,
-    ("hooks/guards/git_grep_engine_guard.py", "GREP_LONG_OPTIONAL_VALUE"): 2,
-    ("hooks/guards/git_grep_engine_guard.py", "GREP_LONG_OPTION_NAMES"): 6,
-    ("hooks/guards/git_grep_engine_guard.py", "GREP_LONG_REQUIRED_VALUE"): 6,
-    ("hooks/guards/git_grep_engine_guard.py", "GREP_SHORT_ENGINE"): 4,
-    ("hooks/guards/git_grep_engine_guard.py", "GREP_SHORT_NOARG"): 17,
-    ("hooks/guards/git_grep_engine_guard.py", "GREP_SHORT_OPTIONAL_VALUE"): 1,
-    ("hooks/guards/git_grep_engine_guard.py", "GREP_SHORT_PATTERN_ARG"): 2,
-    ("hooks/guards/git_grep_engine_guard.py", "GREP_SHORT_VALUE"): 4,
-    ("hooks/guards/git_grep_engine_guard.py", "PCRE_ESCAPE_LETTERS"): 21,
-    ("hooks/guards/git_grep_engine_guard.py", "REV_PATH_SUBCOMMANDS"): 15,
-    ("hooks/guards/git_grep_engine_guard.py", "SHELLS"): 5,
-    ("hooks/guards/git_grep_engine_guard.py", "SHELL_NON_FORWARDING_COMMANDS"): 2,
-    ("hooks/guards/git_grep_engine_guard.py", "TRUSTED_EXTERNAL_NON_FORWARDING_COMMANDS"): 3,
-    ("hooks/guards/git_grep_engine_guard.py", "WRAPPER_TERMINAL_OPTIONS"): 2,
-    ("hooks/guards/git_grep_engine_guard.py", "_CLOSED_LIMITS"): 5,
-    ("hooks/guards/git_grep_engine_guard.py", "_GIT_GLOBAL_OPTIONS_WITH_VALUES"): 8,
-    ("hooks/guards/git_grep_engine_guard.py", "_GIT_TERMINAL_OPTIONS"): 8,
-    ("hooks/guards/zsh_rev_modifier_guard.py", "MODS"): 13,
-    ("hooks/guards/zsh_rev_modifier_guard.py", "MOD_MEANING"): 13,
-    ("hooks/guards/zsh_rev_modifier_guard.py", "MOD_PREFIXES"): 4,
-    ("hooks/guards/zsh_rev_modifier_guard.py", "MOD_UNMODELLED"): 1,
-    ("hooks/guards/git_grep_engine_guard.py", "_ANSI_C_SIMPLE_ESCAPES"): 13,
-    ("hooks/guards/git_grep_engine_guard.py", "STDIN_SCRIPT_PATHS"): 3,
-    ("hooks/guards/git_grep_engine_guard.py", "DIFF_REGEX_SUBCOMMANDS"): 10,
-    ("hooks/guards/git_grep_engine_guard.py", "STASH_DIFF_REGEX_ACTIONS"): 2,
-    ("hooks/guards/git_grep_engine_guard.py", "GIT_CONFIG_OPTIONS"): 9,
-    ("hooks/guards/git_grep_engine_guard.py", "GIT_CONFIG_VALUE_PATTERN_ACTIONS"): 4,
-    ("hooks/guards/git_grep_engine_guard.py", "GIT_CONFIG_SUBCOMMANDS"): 3,
-    ("hooks/guards/git_grep_engine_guard.py", "GIT_CONFIG_SHORT_VALUE_OPTIONS"): 2,
-}
-EXPECTED_MUTATION_SITES = {
-    ("hooks/guards/git_grep_engine_guard.py", 'path command word read as possible eval'),
-    ("hooks/guards/git_grep_engine_guard.py", 'path command word counted as a rebinding'),
-    ("hooks/guards/git_grep_engine_guard.py", 'computed script file exemption dropped'),
-    ("hooks/guards/git_grep_engine_guard.py", 'stdin-shaped script tail read as a file'),
-    ("hooks/guards/git_grep_engine_guard.py", 'computed script name read as a file'),
-    ("hooks/guards/git_grep_engine_guard.py", 'globbed script name read as a file'),
-    ("hooks/guards/git_grep_engine_guard.py", 'split script path read as one word'),
-    ("hooks/announced_work_guard.py", 'conditional handback base form dropped'),
-    ("hooks/announced_work_guard.py", 'conditional handback perfect form dropped'),
-    ("hooks/announced_work_guard.py", 'conditional handback noun form dropped'),
-    ("hooks/guards/git_grep_engine_guard.py", 'stdin provenance runs before command grading'),
-    ("hooks/guards/git_grep_engine_guard.py", 'dynamic source findings run before command grading'),
-    ("hooks/guards/git_grep_engine_guard.py", 'occurrence scan restarted per command'),
-    ("hooks/guards/git_grep_engine_guard.py", 'absent-word occurrence shortcut dropped'),
-    ("hooks/guards/git_grep_engine_guard.py", 'eval-only source skips the call walk'),
-    ("hooks/guards/git_grep_engine_guard.py", 'eval declaration gate closed'),
-    ("hooks/guards/git_grep_engine_guard.py", 'eval-declared functions not bound'),
-    ("hooks/guards/git_grep_engine_guard.py", 'called function declarations not bound'),
-    ("hooks/guards/git_grep_engine_guard.py", 'binding outside a plain list made definite'),
-    ("hooks/guards/git_grep_engine_guard.py", 'uncertain binding dropped'),
-    ("hooks/guards/git_grep_engine_guard.py", 'definite binding dropped'),
-    ("hooks/guards/git_grep_engine_guard.py", 'plain list accepts a conditional or pipeline operator'),
-    ("hooks/guards/git_grep_engine_guard.py", 'plain list accepts a background &'),
-    ("hooks/guards/git_grep_engine_guard.py", 'plain list accepts a subshell'),
-    ("hooks/guards/git_grep_engine_guard.py", 'plain list accepts a conditional block'),
-    ("hooks/guards/git_grep_engine_guard.py", 'plain list accepts a backtick substitution'),
-    ("hooks/guards/git_grep_engine_guard.py", 'executed source conditional declaration trusted'),
-    ("hooks/guards/git_grep_engine_guard.py", 'nested eval declarations trusted'),
-    ("hooks/guards/git_grep_engine_guard.py", 'pickaxe flag after -- read'),
-    ("hooks/guards/git_grep_engine_guard.py", 'git hazard log-family union dropped'),
-    ("hooks/guards/git_grep_engine_guard.py", 'git hazard diff-regex union dropped'),
-    ("hooks/guards/git_grep_engine_guard.py", 'stash list log argv not lifted'),
-    ("hooks/guards/git_grep_engine_guard.py", 'stash diff action check dropped'),
-    ("hooks/guards/git_grep_engine_guard.py", 'config subcommand form ignored'),
-    ("hooks/guards/git_grep_engine_guard.py", 'config options read past the first operand'),
-    ("hooks/guards/git_grep_engine_guard.py", 'config -- terminator dropped'),
-    ("hooks/guards/git_grep_engine_guard.py", 'config long prefix resolution dropped'),
-    ("hooks/guards/git_grep_engine_guard.py", 'config negation ignored'),
-    ("hooks/guards/git_grep_engine_guard.py", 'config short value option not consumed'),
-    ("hooks/guards/git_grep_engine_guard.py", 'config negated option given a value'),
-    ("hooks/guards/git_grep_engine_guard.py", 'config negated value-pattern kept'),
-    ("hooks/guards/git_grep_engine_guard.py", 'config attached long value read as separated'),
-    ("hooks/guards/git_grep_engine_guard.py", 'config separated option value not consumed'),
-    ("hooks/guards/git_grep_engine_guard.py", 'config --value pattern ignored'),
-    ("hooks/guards/git_grep_engine_guard.py", 'config fixed-value ignored for an operand pattern'),
-    ("hooks/guards/git_grep_engine_guard.py", 'config implicit value-pattern slot dropped'),
-    ("hooks/guards/git_grep_engine_guard.py", 'config get --regexp name ignored'),
-    ("hooks/guards/git_grep_engine_guard.py", 'config fixed-value ignored for --value'),
-    ("hooks/guards/git_grep_engine_guard.py", 'always-ERE findings dropped'),
-    ("hooks/guards/git_grep_engine_guard.py", 'pickaxe regex not detected'),
-    ("hooks/guards/git_grep_engine_guard.py", 'separated diff regex value ignored'),
-    ("hooks/guards/git_grep_engine_guard.py", 'attached diff regex value ignored'),
-    ("hooks/guards/git_grep_engine_guard.py", 'long diff regex options ignored'),
-    ("hooks/guards/git_grep_engine_guard.py", 'config get-regexp pattern ignored'),
-    ("hooks/guards/git_grep_engine_guard.py", 'always-ERE expansion check dropped'),
-    ("hooks/guards/git_grep_engine_guard.py", 'stdin script path read as a file in a POSIX shell'),
-    ("hooks/guards/git_grep_engine_guard.py", 'stdin script path read as a file in zsh'),
-    ("hooks/guards/git_grep_engine_guard.py", 'shell script operand not checked'),
-    ("hooks/guards/git_grep_engine_guard.py", 'POSIX script operand index not found'),
-    ("hooks/guards/git_grep_engine_guard.py", 'zsh script operand index not recorded'),
-    ("hooks/guards/git_grep_engine_guard.py", "find exec argv not launched"),
-    ("hooks/guards/git_grep_engine_guard.py", "xargs argv not launched"),
-    ("hooks/guards/git_grep_engine_guard.py", "xargs replacement placeholder ignored"),
-    ("hooks/guards/git_grep_engine_guard.py", "flock command string not launched"),
-    ("hooks/guards/git_grep_engine_guard.py", "git bisect run argv not launched"),
-    ("hooks/guards/git_grep_engine_guard.py", "submodule foreach string read as argv"),
-    ("hooks/guards/git_grep_engine_guard.py", "rebase exec string not launched"),
-    ("hooks/guards/git_grep_engine_guard.py", "launched shell body not decided"),
-    ("hooks/guards/git_grep_engine_guard.py", "launched argv not decided"),
-    ("hooks/guards/git_grep_engine_guard.py", "operands before terminator accepted"),
-    ("hooks/guards/git_grep_engine_guard.py", "unmodelled launcher shell body ignored"),
-    ("hooks/guards/git_grep_engine_guard.py", "launched shell string not decided"),
-    ("hooks/guards/git_grep_engine_guard.py", "launched command decisions dropped"),
-    ("hooks/guards/zsh_rev_modifier_guard.py", "launched rev-path argv not checked"),
-    ("hooks/guards/zsh_rev_modifier_guard.py", "launched shell string modifier not checked"),
-    ("hooks/guards/zsh_rev_modifier_guard.py", "launched zsh body not decided"),
-    ("hooks/guards/zsh_rev_modifier_guard.py", "launched body expansion by the calling zsh not checked"),
-    ("hooks/guards/zsh_rev_modifier_guard.py", "launched rev-path decisions dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", 'scalar word facts recomputed reentrantly'),
-    ("hooks/guards/git_grep_engine_guard.py", 'dynamic command word recomputed reentrantly'),
-    ("hooks/guards/git_grep_engine_guard.py", 'outer-expanded heredoc read as quoted'),
-    ("hooks/guards/git_grep_engine_guard.py", "same-shell body ignores this shell's splitting"),
-    ("hooks/guards/git_grep_engine_guard.py", 'unquoted scalar command word refused'),
-    ("hooks/guards/git_grep_engine_guard.py", 'scalar word splitting visibility dropped'),
-    ("hooks/guards/git_grep_engine_guard.py", 'scalar word array visibility dropped'),
-    ("hooks/guards/git_grep_engine_guard.py", 'lowercase special array name accepted'),
-    ("hooks/guards/git_grep_engine_guard.py", 'unquoted substitution output kept whole'),
-    ("hooks/guards/git_grep_engine_guard.py", 'zsh startup splitting not inherited'),
-    ("hooks/guards/git_grep_engine_guard.py", 'inherited splitting leaks into a further shell'),
-    ("hooks/guards/git_grep_engine_guard.py", "nested body graded in the parent's scope"),
-    ("hooks/guards/git_grep_engine_guard.py", 'dynamic command word ignored before echo'),
-    ("hooks/guards/git_grep_engine_guard.py", 'dynamic command word ignored before a stdin consumer'),
-    ("hooks/guards/git_grep_engine_guard.py", 'parameter braces read as a brace group'),
-    ("hooks/guards/git_grep_engine_guard.py", 'visible array assignment dropped'),
-    ("hooks/guards/git_grep_engine_guard.py", 'declared array dropped'),
-    ("hooks/guards/git_grep_engine_guard.py", 'set -y splitting dropped'),
-    ("hooks/guards/git_grep_engine_guard.py", 'set -o shwordsplit dropped'),
-    ("hooks/guards/git_grep_engine_guard.py", 'set -A array dropped'),
-    ("hooks/guards/git_grep_engine_guard.py", 'setopt splitting dropped'),
-    ("hooks/guards/git_grep_engine_guard.py", 'emulate splitting dropped'),
-    ("hooks/guards/git_grep_engine_guard.py", 'zsh -y startup splitting dropped'),
-    ("hooks/guards/git_grep_engine_guard.py", 'zsh -o shwordsplit startup dropped'),
-    ("hooks/guards/git_grep_engine_guard.py", "zsh --emulate value read as an operand"),
-    ("hooks/guards/git_grep_engine_guard.py", "nested zsh emulation ignored"),
-    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C escaped quote closes the string'),
-    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C cross-shell escape accepted'),
-    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C hex NUL accepted'),
-    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C decode dropped in the tokenizer'),
-    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C skip dropped in command substitution'),
-    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C skip dropped in arithmetic expansion'),
-    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C skip dropped in parameter expansion'),
-    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C state dropped in the heredoc scanner'),
-    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C escapes dropped in carried heredoc state'),
-    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C skip dropped in function scope pairs'),
-    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C mask dropped in conditional intervals'),
-    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C skip dropped in function list operators'),
-    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C mask dropped in declaration liveness'),
-    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C skip dropped in declaration bodies'),
-    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C mask dropped in the option skeleton'),
-    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C skip dropped in shell operator positions'),
-    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C skip dropped in interpreter input redirects'),
-    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C decode dropped in shell input words'),
-    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C skip dropped in here-string sources'),
-    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C skip dropped in file-input sources'),
-    ("hooks/guards/git_grep_engine_guard.py", 'ANSI-C octal NUL accepted'),
-    ("hooks/guards/git_grep_engine_guard.py", "setter ANSI-C candidate fallback dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "pattern interval read as a brace expansion"),
-    ("hooks/guards/git_grep_engine_guard.py", "pattern positional parameter check dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "command-word redirection strip dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "process substitution read as a redirection"),
-    ("hooks/guards/git_grep_engine_guard.py", "literal whitespace fast path dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "literal parameter fast path dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "literal unresolved fast path dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "unmodelled setter option-prefix uncertainty dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "POSIX setter command-prefix visibility dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "setter candidate dequoting dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "setter continuation candidate fallback dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "decoded identity setter visibility dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "dynamic executable operand reparse uncertainty dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "dynamic executable single-word proof dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "dynamic executable rebinding uncertainty dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "wrapped dynamic argv hazard dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "dynamic builtin dispatch uncertainty dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "file-input rebinding uncertainty dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "interpreter option values treated as scripts"),
-    ("hooks/guards/git_grep_engine_guard.py", "heredoc fast path ignores arithmetic state"),
-    ("hooks/guards/git_grep_engine_guard.py", "pattern brace expansion adoption dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "shell identity write adoption dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "executable filename expansion adoption dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "executable pattern group preservation dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "executable noglob suppression dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "executable leading redirection removal dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "parse-failure label dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "cross-line quote state dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "source lines include heredoc payloads"),
-    ("hooks/guards/git_grep_engine_guard.py", "trap declarations read from payload text"),
-    ("hooks/guards/zsh_rev_modifier_guard.py", "trap declarations read from payload text"),
-    ("hooks/guards/git_grep_engine_guard.py", "case pattern terminator dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "identity mutation gate dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "dynamic command relevance gate dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "file-input program check dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "pipeline scan reads raw lines"),
-    ("hooks/guards/git_grep_engine_guard.py", "payload extraction ordered after declarations"),
-    ("hooks/guards/git_grep_engine_guard.py", "comment recognition dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "in-word brace pairing dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "bracket closer requirement dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "home-relative tilde exemption dropped"),
-    ("hooks/announced_work_guard.py", "adjectival group ambiguity guard dropped"),
-    ("hooks/announced_work_guard.py", "adjectival group modifier state dropped"),
-    ("hooks/announced_work_guard.py", "adjectival group subject-resume bridge dropped"),
-    ("hooks/announced_work_guard.py", "attached period classification dropped"),
-    ("hooks/announced_work_guard.py", "bounded post-group context bridge dropped"),
-    ("hooks/announced_work_guard.py", "colon bridge same-line boundary dropped"),
-    ("hooks/announced_work_guard.py", "colon adjectival group deferral dropped"),
-    ("hooks/announced_work_guard.py", "colon grouped-result tail resolution dropped"),
-    ("hooks/announced_work_guard.py", "colon predicate bridge classification dropped"),
-    ("hooks/announced_work_guard.py", "colon predicate-modifier bridge dropped"),
-    ("hooks/announced_work_guard.py", "colon-to-group predicate bridge dropped"),
-    ("hooks/announced_work_guard.py", "comma adjective distinction dropped"),
-    ("hooks/announced_work_guard.py", "comma predicate continuation dropped"),
-    ("hooks/announced_work_guard.py", "decorated colon classification dropped"),
-    ("hooks/announced_work_guard.py", "escaped group delimiter handling dropped"),
-    ("hooks/announced_work_guard.py", "hard separator classification dropped"),
-    ("hooks/announced_work_guard.py", "grouped historical subject ownership dropped"),
-    ("hooks/announced_work_guard.py", "grouped historical compound traversal dropped"),
-    ("hooks/announced_work_guard.py", "grouped historical compound bound dropped"),
-    ("hooks/announced_work_guard.py", "grouped latest-run distinction dropped"),
-    ("hooks/announced_work_guard.py", "inline-code group recognition dropped"),
-    ("hooks/announced_work_guard.py", "open-group association dropped"),
-    ("hooks/announced_work_guard.py", "outer-group closure signal dropped"),
-    ("hooks/announced_work_guard.py", "post-group predicate modifier bridge dropped"),
-    ("hooks/announced_work_guard.py", "post-group context object validation dropped"),
-    ("hooks/announced_work_guard.py", "post-group subject replacement guard dropped"),
-    ("hooks/announced_work_guard.py", "productive complement tokens dropped"),
-    ("hooks/announced_work_guard.py", "straight-single outer predicate closure dropped"),
-    ("hooks/announced_work_guard.py", "unexpected judge exception block dropped"),
-    ("hooks/announced_work_guard.py", "whole complement-token membership dropped"),
-    ("hooks/announced_work_guard.py", "whole report-token membership dropped"),
-    ("hooks/announced_work_guard.py", "URL punctuation bypass dropped"),
-    ("hooks/announced_work_guard.py", "URL trailing-punctuation trim dropped"),
-    ("hooks/announced_work_guard.py", "URL prose-release boundary dropped"),
-    ("hooks/announced_work_guard.py", "URL semantic-token bypass dropped"),
-    ("tools/repository_ownership.py", "effective core.worktree scalar lookup dropped"),
-    ("hooks/bash_command_guard.py", "merged guard function cache scope dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "alias shadowing failure channel dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "attached exec argv-zero grammar dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "builtin trap wrapper adoption dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "budget wrap deleted"),
-    ("hooks/guards/git_grep_engine_guard.py", "candidate authority forced trusted"),
-    ("hooks/guards/git_grep_engine_guard.py", "decision-budget checkpoint neutered"),
-    ("hooks/guards/git_grep_engine_guard.py", "dynamic source adoption removed"),
-    ("hooks/guards/git_grep_engine_guard.py", "dynamic source command identity dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "exec single-dash terminator dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "function record decision cache dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "function record cache cap raised"),
-    ("hooks/guards/git_grep_engine_guard.py", "git config count cap dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "git config loop budget dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "git hazard union adoption dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "guarded-tail predicate rescans per word"),
-    ("hooks/guards/git_grep_engine_guard.py",
-     "invoked alias body state transition dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "native command checked after alias"),
-    ("hooks/guards/git_grep_engine_guard.py", "nested source shell identity dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "process substitution loses typed operand"),
-    ("hooks/guards/git_grep_engine_guard.py", "shell alias depth context corrupted"),
-    ("hooks/guards/git_grep_engine_guard.py", "shell alias forwarding dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "source alias invocation dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "source alias wrapper resolution dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "source alias body traversal dropped"),
-    ("hooks/guards/git_grep_engine_guard.py",
-     "ordinary shell alias Git classification dropped"),
-    ("hooks/guards/git_grep_engine_guard.py",
-     "executed alias Git traversal dropped"),
-    ("hooks/guards/git_grep_engine_guard.py",
-     "nonordinary alias mode tracking dropped"),
-    ("hooks/guards/git_grep_engine_guard.py",
-     "nonordinary alias use detection dropped"),
-    ("hooks/guards/git_grep_engine_guard.py",
-     "declared helper function alias traversal dropped"),
-    ("hooks/guards/git_grep_engine_guard.py",
-     "source alias embedded operand classification dropped"),
-    ("hooks/guards/git_grep_engine_guard.py",
-     "source alias dynamic command detection dropped"),
-    ("hooks/guards/git_grep_engine_guard.py",
-     "source alias invocation lookup bypass dropped"),
-    ("hooks/guards/git_grep_engine_guard.py",
-     "source alias state lookup bypass dropped"),
-    ("hooks/guards/git_grep_engine_guard.py",
-     "same-shell alias mutation wrapper resolution dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "called function alias state dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "TRAPDEBUG function alias state dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "DEBUG trap alias state dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "repeat zero execution boundary dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "source command wrapper omitted"),
-    ("hooks/guards/git_grep_engine_guard.py", "source exec wrapper omitted"),
-    ("hooks/guards/git_grep_engine_guard.py", "trap action traversal dropped"),
-    ("hooks/guards/git_grep_engine_guard.py", "zsh trap function source traversal dropped"),
-    ("hooks/guards/zsh_rev_modifier_guard.py", "zsh shared resolver bypassed"),
-    ("hooks/guards/zsh_rev_modifier_guard.py", "zsh trap function traversal dropped"),
-    ("hooks/guards/zsh_rev_modifier_guard.py", "zsh unmodelled modifier uncertainty dropped"),
-    ("hooks/guards/zsh_rev_modifier_guard.py",
-     "zsh unmodelled modifier prefix grammar dropped"),
-}
-EXPECTED_MUTATION_SELECTORS = {
-    ("hooks/guards/git_grep_engine_guard.py", "parse-failure label dropped"):
-        ("an unreadable source is reported as unreadable, not as budget exhaustion",),
-    ("hooks/announced_work_guard.py", "adjectival group ambiguity guard dropped"):
-        ("main string blocks a group-modified failure adjective before the activity noun",
-         "main content blocks a group-modified failure adjective before the activity noun",
-         "main bare blocks a group-modified failure adjective before the activity noun"),
-    ("hooks/announced_work_guard.py", "adjectival group modifier state dropped"):
-        ("main string preserves a later predicate after an adjective group",
-         "main content preserves a later predicate after an adjective group",
-         "main bare preserves a later predicate after an adjective group"),
-    ("hooks/announced_work_guard.py", "adjectival group subject-resume bridge dropped"):
-        ("main string preserves a later predicate after an adjective group",
-         "main content preserves a later predicate after an adjective group",
-         "main bare preserves a later predicate after an adjective group"),
-    ("hooks/announced_work_guard.py", "attached period classification dropped"):
-        ("main blocks an attached full-stop historical report clause",),
-    ("hooks/announced_work_guard.py", "comma adjective distinction dropped"):
-        ("main blocks a straight possessive comma modifier",
-         "main blocks an overseas comma modifier",
-         "main blocks a DevOps comma modifier"),
-    ("hooks/announced_work_guard.py", "bounded post-group context bridge dropped"):
-        ("main string preserves a bounded post-group CI adjunct",
-         "main content preserves a bounded post-group CI adjunct",
-         "main bare preserves a bounded post-group CI adjunct"),
-    ("hooks/announced_work_guard.py", "colon bridge same-line boundary dropped"):
-        ("a newline keeps a colon from deferring into a group",),
-    ("hooks/announced_work_guard.py", "colon adjectival group deferral dropped"):
-        ("main string blocks a colon group-modified failure adjective",
-         "main content blocks a colon group-modified failure adjective",
-         "main bare blocks a colon group-modified failure adjective"),
-    ("hooks/announced_work_guard.py", "colon grouped-result tail resolution dropped"):
-        ("main string preserves a colon predicate result-group duration adjunct",
-         "main string preserves a colon predicate result-group timestamp adjunct",
-         "main string preserves a colon predicate result-group object adjunct",
-         "main content preserves a colon predicate result-group duration adjunct",
-         "main content preserves a colon predicate result-group timestamp adjunct",
-         "main content preserves a colon predicate result-group object adjunct",
-         "main bare preserves a colon predicate result-group duration adjunct",
-         "main bare preserves a colon predicate result-group timestamp adjunct",
-         "main bare preserves a colon predicate result-group object adjunct"),
-    ("hooks/announced_work_guard.py", "colon predicate bridge classification dropped"):
-        ("main string preserves a colon-deferred modifier after a subject aside",
-         "main string preserves a direct colon predicate modifier",
-         "main content preserves a colon-deferred modifier after a subject aside",
-         "main bare preserves a direct colon predicate modifier"),
-    ("hooks/announced_work_guard.py", "colon predicate-modifier bridge dropped"):
-        ("main string blocks an unknown direct-colon context",
-         "main content blocks an unknown direct-colon context",
-         "main bare blocks an unknown direct-colon context"),
-    ("hooks/announced_work_guard.py", "colon-to-group predicate bridge dropped"):
-        ("main string preserves a colon-deferred predicate after a subject aside",
-         "main content preserves a colon-deferred predicate after a subject aside",
-         "main bare preserves a colon-deferred predicate after a subject aside"),
-    ("hooks/announced_work_guard.py", "comma predicate continuation dropped"):
-        ("main preserves a participial comma result continuation",
-         "main preserves a terminal comma result adverb",
-         "main preserves a direct plural comma subject",
-         "main preserves an audit comma subject",
-         "main preserves a multiword integration-test comma subject",
-         "main preserves a hundred-test comma subject"),
-    ("hooks/announced_work_guard.py", "decorated colon classification dropped"):
-        ("main blocks a unicode colon-labelled historical report",),
-    ("hooks/announced_work_guard.py", "escaped group delimiter handling dropped"):
-        ("main string blocks a predicate after an escaped parenthesis",
-         "main string blocks a predicate after an escaped quote",
-         "main content blocks a predicate after an escaped parenthesis",
-         "main content blocks a predicate after an escaped quote",
-         "main bare blocks a predicate after an escaped parenthesis",
-         "main bare blocks a predicate after an escaped quote"),
-    ("hooks/announced_work_guard.py", "hard separator classification dropped"):
-        ("main blocks attached and decorated historical report clauses",),
-    ("hooks/announced_work_guard.py", "grouped historical subject ownership dropped"):
-        ("a parenthetical historical subject cannot lend its predicate to the activity",
-         "a parenthetical historical subject retains ownership through a modifier",
-         "a parenthetical historical subject retains ownership through a context",
-         "main string blocks a parenthetical historical subject before its predicate",
-         "main string blocks a parenthetical historical subject through a predicate modifier",
-         "main string blocks a parenthetical historical subject through a bounded context"),
-    ("hooks/announced_work_guard.py", "grouped historical compound traversal dropped"):
-        ("a latest CI run retains its grouped predicate",
-         "a previous CI run retains its grouped predicate",
-         "a prior test suite retains its grouped predicate",
-         "a last GitHub Actions run retains its grouped predicate",
-         "main string blocks a latest CI run historical subject",
-         "main string blocks a previous CI run historical subject",
-         "main string blocks a prior test-suite historical subject",
-         "main string blocks a last GitHub Actions run historical subject"),
-    ("hooks/announced_work_guard.py", "grouped historical compound bound dropped"):
-        ("four activity-compound words exceed the ownership bound",),
-    ("hooks/announced_work_guard.py", "grouped latest-run distinction dropped"):
-        ("a latest workflow appositive still describes the outer test",
-         "main string preserves a latest workflow-test appositive"),
-    ("hooks/announced_work_guard.py", "inline-code group recognition dropped"):
-        ("main string blocks a single-backtick nested report",
-         "main string blocks a double-backtick nested report",
-         "main string blocks an emphasised inline-code nested report",
-         "main content blocks a single-backtick nested report",
-         "main content blocks a double-backtick nested report",
-         "main content blocks an emphasised inline-code nested report",
-         "main bare blocks a single-backtick nested report",
-         "main bare blocks a double-backtick nested report",
-         "main bare blocks an emphasised inline-code nested report"),
-    ("hooks/announced_work_guard.py", "open-group association dropped"):
-        ("main string blocks a parenthetical nested report",
-         "main string blocks a parenthetical historical report",
-         "main string blocks a bracketed nested report",
-         "main string blocks a curly-quoted nested report",
-         "main content blocks a parenthetical nested report",
-         "main content blocks a parenthetical historical report",
-         "main content blocks a bracketed nested report",
-         "main content blocks a curly-quoted nested report",
-         "main bare blocks a parenthetical nested report",
-         "main bare blocks a parenthetical historical report",
-         "main bare blocks a bracketed nested report",
-         "main bare blocks a curly-quoted nested report"),
-    ("hooks/announced_work_guard.py", "outer-group closure signal dropped"):
-        ("main string blocks an empty parenthetical from replacing the activity subject",
-         "main string blocks a spaced empty parenthetical from replacing the activity subject",
-         "main string blocks nested empty groups from replacing the activity subject",
-         "main string blocks empty brackets from replacing the activity subject",
-         "main string blocks empty straight-double quotes from replacing the activity subject",
-         "main string blocks empty straight-single quotes from replacing the activity subject",
-         "main string blocks empty inline code from replacing the activity subject",
-         "main content blocks an empty parenthetical from replacing the activity subject",
-         "main content blocks a spaced empty parenthetical from replacing the activity subject",
-         "main content blocks nested empty groups from replacing the activity subject",
-         "main content blocks empty brackets from replacing the activity subject",
-         "main content blocks empty straight-double quotes from replacing the activity subject",
-         "main content blocks empty straight-single quotes from replacing the activity subject",
-         "main content blocks empty inline code from replacing the activity subject",
-         "main bare blocks an empty parenthetical from replacing the activity subject",
-         "main bare blocks a spaced empty parenthetical from replacing the activity subject",
-         "main bare blocks nested empty groups from replacing the activity subject",
-         "main bare blocks empty brackets from replacing the activity subject",
-         "main bare blocks empty straight-double quotes from replacing the activity subject",
-         "main bare blocks empty straight-single quotes from replacing the activity subject",
-         "main bare blocks empty inline code from replacing the activity subject"),
-    ("hooks/announced_work_guard.py", "post-group predicate modifier bridge dropped"):
-        ("main string preserves a modified predicate after a straight-single-quoted subject",
-         "main content preserves a modified predicate after a straight-single-quoted subject",
-         "main bare preserves a modified predicate after a straight-single-quoted subject",
-         "main string preserves a common post-group predicate modifier",
-         "main content preserves a common post-group predicate modifier",
-         "main bare preserves a common post-group predicate modifier"),
-    ("hooks/announced_work_guard.py", "post-group context object validation dropped"):
-        ("main string blocks an unknown post-group context",
-         "main content blocks an unknown post-group context",
-         "main bare blocks an unknown post-group context"),
-    ("hooks/announced_work_guard.py", "post-group subject replacement guard dropped"):
-        ("main string blocks a plural possessive inside a straight-single-quoted aside",
-         "main string blocks a quoted noun from replacing the announced activity subject",
-         "main string blocks a noun after a closed parenthetical from replacing the activity subject",
-         "main content blocks a plural possessive inside a straight-single-quoted aside",
-         "main content blocks a quoted noun from replacing the announced activity subject",
-         "main content blocks a noun after a closed parenthetical from replacing the activity subject",
-         "main bare blocks a plural possessive inside a straight-single-quoted aside",
-         "main bare blocks a quoted noun from replacing the announced activity subject",
-         "main bare blocks a noun after a closed parenthetical from replacing the activity subject"),
-    ("hooks/announced_work_guard.py", "productive complement tokens dropped"):
-        ("main blocks productive interrogative complements",),
-    ("hooks/announced_work_guard.py", "straight-single outer predicate closure dropped"):
-        ("main string preserves a predicate after a straight-single-quoted subject",
-         "main string preserves a modified predicate after a straight-single-quoted subject",
-         "main content preserves a predicate after a straight-single-quoted subject",
-         "main content preserves a modified predicate after a straight-single-quoted subject",
-         "main bare preserves a predicate after a straight-single-quoted subject",
-         "main bare preserves a modified predicate after a straight-single-quoted subject"),
-    ("hooks/announced_work_guard.py", "unexpected judge exception block dropped"):
-        ("unexpected judge exceptions block through main",),
-    ("hooks/announced_work_guard.py", "whole complement-token membership dropped"):
-        ("main keeps a hyphenated complement root inside the activity token",),
-    ("hooks/announced_work_guard.py", "whole report-token membership dropped"):
-        ("main blocks embedded report substrings after a retained activity noun",),
-    ("hooks/announced_work_guard.py", "URL punctuation bypass dropped"):
-        ("main keeps URL query punctuation inside the direct report",
-         "main keeps uppercase URL hostname dots inside the direct report",
-         "main keeps URL semicolons opaque until whitespace",
-         "main keeps URL exclamations opaque until whitespace",
-         "main keeps mixed-case URL dots opaque until whitespace"),
-    ("hooks/announced_work_guard.py", "URL prose-release boundary dropped"):
-        ("main string keeps a URL closing backtick out of prose grouping",
-         "main content keeps a URL closing backtick out of prose grouping",
-         "main bare keeps a URL closing backtick out of prose grouping"),
-    ("hooks/announced_work_guard.py", "URL trailing-punctuation trim dropped"):
-        ("a comma ending a URL is prose punctuation",
-         "main blocks a report after a URL-ending comma",
-         "a colon ending a URL is prose punctuation",
-         "a semicolon ending a URL is prose punctuation",
-         "main string blocks a report after a URL-ending colon",
-         "main string blocks a report after a URL-ending semicolon"),
-    ("hooks/announced_work_guard.py", "URL semantic-token bypass dropped"):
-        ("main keeps URL complement words opaque",
-         "main ignores report words inside a URL"),
-    ("tools/repository_ownership.py", "effective core.worktree scalar lookup dropped"):
-        ("a repeated core.worktree binds the effective candidate Git recognises",),
-}
-EXPECTED_MUTATION_SITE_DIGEST = (
-    "59551628e5a707524da7989541e281637b5c45a5f539cabce460ddaa66052825"
-)
-EXPECTED_MUTATION_EXCLUSIONS = {
-    "hooks/guards/git_grep_engine_guard.py::ALIAS_GUARDED":
-        "repeated characters identify an enum word, not a membership charset",
-    "hooks/guards/git_grep_engine_guard.py::ALIAS_HARMLESS":
-        "repeated characters identify an enum word, not a membership charset",
-    "hooks/guards/git_grep_engine_guard.py::ALIAS_UNCERTAIN":
-        "repeated characters identify an enum word, not a membership charset",
-    "hooks/guards/git_grep_engine_guard.py::FIXTURES":
-        "fixture corpus; removing a fixture measures the grader",
-    "hooks/guards/git_grep_engine_guard.py::GREP_LONG_PATTERN_ARG":
-        "empty grammar collection has no element mutation; absence is fixture-pinned",
-    "hooks/guards/git_grep_engine_guard.py::ZSH_EQUALS_OFF":
-        "repeated characters identify an enum word, not a membership charset",
-    "hooks/guards/git_grep_engine_guard.py::ZSH_EQUALS_UNKNOWN":
-        "repeated characters identify an enum word, not a membership charset",
-    "hooks/guards/git_grep_engine_guard.py::_EQUALS_LOOKUP_CACHE":
-        "runtime memoization map, not a guarded membership collection",
-    "hooks/guards/git_grep_engine_guard.py::_GIT_AUTHORITY_CACHE":
-        "runtime memoization map, not a guarded membership collection",
-    "hooks/guards/zsh_rev_modifier_guard.py::FIXTURES":
-        "fixture corpus; removing a fixture measures the grader",
-    "hooks/guards/zsh_rev_modifier_guard.py::UNRESOLVED_GIT":
-        "repeated characters identify an enum word, not a membership charset",
-}
-
-
-def mutation_site_policy_digest(descriptors) -> str:
-    """Hash every semantic site field under a stable, reviewable framing."""
-    records = []
-    for descriptor in descriptors:
-        records.append({
-            "module": descriptor["module"],
-            "label": descriptor["label"],
-            "anchor_sha256": descriptor["anchor_sha256"],
-            "replacement_sha256": descriptor["replacement_sha256"],
-            "selectors": list(descriptor.get("selectors", ())),
-            "allowed_statuses": list(descriptor["allowed_statuses"]),
-        })
-    records.sort(key=lambda item: (item["module"], item["label"]))
-    framed = json.dumps(
-        records, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(framed).hexdigest()
-
-
-def mutation_policy_error(plan, exclusions, policy) -> str:
-    """Validate the plan against a closed inventory independent of its generator."""
-    collection_counts = {}
-    addition_descriptors = []
-    site_identities = []
-    site_descriptors = []
-    selector_inventory = {}
-    semantic_targets = []
-    ids = []
-    problems = []
-    for descriptor in plan:
-        if not isinstance(descriptor, dict):
-            return "mutation plan contains a non-object descriptor"
-        ids.append(descriptor.get("id"))
-        if descriptor.get("kind") == "set-element":
-            identity = (descriptor.get("module"), descriptor.get("name"))
-            collection_counts[identity] = collection_counts.get(identity, 0) + 1
-            if descriptor.get("allowed_statuses") not in ([], ()):
-                problems.append(
-                    f"set-element descriptor permits a non-behavioral kill for {identity}")
-        elif descriptor.get("kind") == "site":
-            module = descriptor.get("module")
-            label = descriptor.get("label")
-            anchor = descriptor.get("anchor_sha256")
-            replacement = descriptor.get("replacement_sha256")
-            selectors = descriptor.get("selectors", ())
-            allowed = descriptor.get("allowed_statuses")
-            site_identities.append((module, label))
-            if (not isinstance(module, str) or not isinstance(label, str)
-                    or not isinstance(anchor, str)
-                    or not re.fullmatch(r"[0-9a-f]{64}", anchor)
-                    or not isinstance(replacement, str)
-                    or not re.fullmatch(r"[0-9a-f]{64}", replacement)
-                    or not isinstance(selectors, (list, tuple))
-                    or any(not isinstance(selector, str) or not selector
-                           for selector in selectors)
-                    or len(selectors) != len(set(selectors))
-                    or not isinstance(allowed, (list, tuple))
-                    or any(not isinstance(status, str) for status in allowed)):
-                problems.append(f"site descriptor fields are invalid for {(module, label)}")
-                continue
-            normalized = {
-                "module": module, "label": label,
-                "anchor_sha256": anchor,
-                "replacement_sha256": replacement,
-                "selectors": tuple(selectors),
-                "allowed_statuses": tuple(allowed),
-            }
-            site_descriptors.append(normalized)
-            if selectors:
-                selector_inventory[(module, label)] = tuple(selectors)
-            semantic_targets.append((module, anchor, replacement))
-        elif descriptor.get("kind") == "set-addition":
-            module = descriptor.get("module")
-            name = descriptor.get("name")
-            collection_kind = descriptor.get("collection_kind")
-            element = descriptor.get("element")
-            label = descriptor.get("label")
-            allowed = descriptor.get("allowed_statuses")
-            if (not isinstance(module, str) or not isinstance(name, str)
-                    or not isinstance(collection_kind, str)
-                    or not isinstance(element, str) or not isinstance(label, str)
-                    or not isinstance(allowed, (list, tuple))
-                    or any(not isinstance(status, str) for status in allowed)):
-                problems.append(
-                    f"addition descriptor fields are invalid for {(module, name)}")
-                continue
-            addition_descriptors.append(
-                (module, name, collection_kind, element, label, tuple(allowed)))
-        else:
-            return f"mutation plan contains unknown kind {descriptor.get('kind')!r}"
-    if len(addition_descriptors) != len(set(addition_descriptors)):
-        problems.append("addition inventory contains duplicate full descriptors")
-    if set(addition_descriptors) != policy["additions"]:
-        problems.append(
-            f"addition inventory differs: observed={set(addition_descriptors)} "
-            f"required={policy['additions']}")
-    if collection_counts != policy["collections"]:
-        problems.append(
-            f"collection inventory differs: observed={collection_counts} "
-            f"required={policy['collections']}")
-    if len(site_identities) != len(set(site_identities)):
-        problems.append("site inventory contains duplicate module/label identities")
-    if set(site_identities) != policy["sites"]:
-        problems.append(
-            f"site inventory differs: observed={set(site_identities)} "
-            f"required={policy['sites']}")
-    if selector_inventory != policy["selectors"]:
-        problems.append(
-            f"site selector inventory differs: observed={selector_inventory} "
-            f"required={policy['selectors']}")
-    if len(semantic_targets) != len(set(semantic_targets)):
-        problems.append("site inventory contains duplicate semantic mutation targets")
-    if (len(site_descriptors) == len(site_identities)
-            and mutation_site_policy_digest(site_descriptors)
-            != policy["site_digest"]):
-        problems.append("site descriptor semantics differ from the independent digest")
-    if exclusions != policy["exclusions"]:
-        problems.append("sweep exclusions differ from the independent closed inventory")
-    if len(plan) < policy["floor"]:
-        problems.append(
-            f"plan cardinality {len(plan)} is below floor {policy['floor']}")
-    if len(ids) != len(set(ids)) or any(not isinstance(item, str) for item in ids):
-        problems.append("mutation IDs are missing or duplicated")
-    return "; ".join(problems)
-
-
-def mutation_plan_error(plan=None, exclusions=None, policy=None) -> str:
-    """The generated plan matches the closed inventory pinned here, independently of it.
-
-    A generator that silently drops a collection, a site or a declared addition would still
-    measure cleanly, so the plan is held against pins this gate owns and a floor.
-    """
-    try:
-        if plan is None or exclusions is None:
-            plan, exclusions = _mutation_writer("_ci_gate_mutation_plan").mutation_plan()
-        if policy is None:
-            policy = {
-                "collections": EXPECTED_MUTATION_COLLECTIONS,
-                "sites": EXPECTED_MUTATION_SITES,
-                "selectors": EXPECTED_MUTATION_SELECTORS,
-                "site_digest": EXPECTED_MUTATION_SITE_DIGEST,
-                "exclusions": EXPECTED_MUTATION_EXCLUSIONS,
-                "additions": EXPECTED_MUTATION_ADDITIONS,
-                "floor": MUTATION_PLAN_FLOOR,
-            }
-    except Exception as exc:
-        return f"cannot verify the mutation plan: {exc!r}"
-    problem = mutation_policy_error(plan, exclusions, policy)
-    return ("closed mutation plan: " + problem) if problem else ""
-
-
-MUTATION_POLICY = ROOT / "contracts/mutation-policy.json"
-HOOK_REGISTRATION_FILES = ("settings.json", "hooks/hooks.json")
-HOOK_IMPORT_ROOTS = ("hooks", "hooks/guards", "tools")
-
-
-def _mutation_writer(label: str):
-    spec = importlib.util.spec_from_file_location(
-        label, ROOT / "tools/write-mutation-receipt.py")
-    if spec is None or spec.loader is None:
-        raise ValueError("cannot load write-mutation-receipt.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def mutation_policy_file_error(policy_bytes=None, plan=None, writer=None) -> str:
-    """The reviewed mutation policy names only planned element deletions, canonically.
-
-    The canonical one-entry-per-line form is required because a reviewer reads this file
-    as a diff: a reformatted policy turns one changed survivor into a page of noise.
-    """
-    try:
-        writer = _mutation_writer("_ci_gate_mutation_policy") if writer is None else writer
-        raw = MUTATION_POLICY.read_bytes() if policy_bytes is None else policy_bytes
-        policy = _unique_json(raw)
-        if plan is None:
-            plan, _exclusions = writer.mutation_plan()
-        problem = writer.policy_error(policy, plan)
-        if problem:
-            return "mutation policy: " + problem
-        canonical = raw.decode("utf-8") == writer.policy_text(policy)
-    except Exception as exc:
-        return f"cannot verify the mutation policy: {exc!r}"
-    if not canonical:
-        return "contracts/mutation-policy.json is not in the canonical one-entry-per-line form"
-    return ""
-
-
-HOOK_INTERPRETER = re.compile(r"python3?(?:\.\d+)?")
-
-
-def registered_hook_closure(root: Path | None = None) -> set:
-    """Every repository module a registered hook command executes, by static import.
-
-    Commands come from the ``hooks`` table of both runtimes' registrations. Each must run
-    ``python3 <script>`` with the script under a directory hooks import from. Any other form
-    -- ``-m``, ``-c``, an interpreter option, a command that is not Python -- is refused
-    rather than skipped, because skipping would let a registration escape the scan set with
-    every check green. The standard library's ``modulefinder`` resolves imports over those
-    directories, so package, dotted, relative and function-local imports are followed as
-    Python follows them; a namespace package makes it raise, which is reported, not passed.
-    A module loaded through ``importlib`` or similar is outside the closure, so the closure
-    is a lower bound on what runs.
-    """
-    root = ROOT if root is None else root
-    tops = sorted({base.split("/")[0] for base in HOOK_IMPORT_ROOTS})
-    repository_script = re.compile(
-        rf"(?:^|/)((?:{'|'.join(tops)})/[A-Za-z0-9_./-]+\.py)$")
-    scripts = set()
-
-    def walk(node):
-        if isinstance(node, dict):
-            command = node.get("command")
-            if node.get("type") == "command" and isinstance(command, str):
-                argv = shlex.split(command)
-                found = None
-                if len(argv) > 1 and HOOK_INTERPRETER.fullmatch(Path(argv[0]).name):
-                    found = repository_script.search(argv[1])
-                if found is None:
-                    raise ValueError(
-                        f"registered hook command {command!r} does not run a script under "
-                        f"{' or '.join(top + '/' for top in tops)} with python3")
-                scripts.add(found.group(1))
-            for value in node.values():
-                walk(value)
-        elif isinstance(node, list):
-            for value in node:
-                walk(value)
-
-    for relative in HOOK_REGISTRATION_FILES:
-        registration = _json_without_duplicate_keys(root / relative)
-        if not isinstance(registration, dict) or "hooks" not in registration:
-            raise ValueError(f"{relative} has no hooks table")
-        walk(registration["hooks"])
-    real_root = root.resolve()
-    # One finder scans each shared module once. Every script loads as ``__main__``, so the
-    # files are collected after each run, before the next script replaces that entry.
-    finder = modulefinder.ModuleFinder(path=[str(root / base) for base in HOOK_IMPORT_ROOTS])
-    closure = set()
-    for relative in sorted(scripts):
-        path = root / relative
-        if not path.is_file():
-            raise ValueError(f"registered hook module {relative} is not a file")
-        finder.run_script(str(path))
-        for module in finder.modules.values():
-            filename = getattr(module, "__file__", None)
-            if filename and Path(filename).resolve().is_relative_to(real_root):
-                closure.add(Path(filename).resolve().relative_to(real_root).as_posix())
-    return closure
-
-
-def mutation_sweep_coverage_error(root=None, swept=None, unswept=None) -> str:
-    """Every module a registered hook runs is either mutated by the plan or named as unswept.
-
-    The sweep's scan set is part of its claim. Without this, a new guard reached by a
-    registered hook ships with no mutation evidence and nothing says so; with it, the
-    omission is a reviewed line in the policy. Swept means targeted by a planned mutation:
-    the writer's GUARDS also lists modules for their digests and baselines, and membership
-    there mutates nothing.
-    """
-    try:
-        closure = registered_hook_closure(root)
-        if swept is None or unswept is None:
-            writer = _mutation_writer("_ci_gate_mutation_coverage")
-            if swept is None:
-                plan, _exclusions = writer.mutation_plan()
-                swept = {item["module"] for item in plan}
-            if unswept is None:
-                unswept = {item["path"]
-                           for item in writer.load_policy()["unswept_guards"]}
-    except Exception as exc:
-        return f"cannot verify mutation sweep coverage: {exc!r}"
-    if not closure:
-        return "no registered hook module was found, so sweep coverage is unverified"
-    unswept_modules = closure - set(swept)
-    problems = []
-    missing = sorted(unswept_modules - set(unswept))
-    if missing:
-        problems.append(
-            f"registered hook modules are neither swept nor listed as unswept: {missing}")
-    stale = sorted(set(unswept) - unswept_modules)
-    if stale:
-        problems.append(
-            f"unswept_guards names modules no registered hook reaches unswept: {stale}")
-    return "; ".join(problems)
-
-
-def mutation_evidence_problems() -> list:
-    """The offline mutation checks in gate order, as (check name, problem) pairs.
-
-    The writer is loaded and its plan generated once, and all three checks read that one
-    plan, so they judge the same inventory.
-    """
-    names = ("mutation-plan", "mutation-policy", "mutation-sweep-coverage")
-    try:
-        writer = _mutation_writer("_ci_gate_mutation_evidence")
-        plan, exclusions = writer.mutation_plan()
-        unswept = {item["path"] for item in writer.load_policy()["unswept_guards"]}
-    except Exception as exc:
-        return [(name, f"cannot generate the mutation plan: {exc!r}") for name in names]
-    return [
-        ("mutation-plan", mutation_plan_error(plan=plan, exclusions=exclusions)),
-        ("mutation-policy", mutation_policy_file_error(plan=plan, writer=writer)),
-        ("mutation-sweep-coverage", mutation_sweep_coverage_error(
-            swept={item["module"] for item in plan}, unswept=unswept)),
-    ]
-
-
 REVIEW_ROOT = ROOT / "contracts/review"
 FROZEN_PUBLICATION = REVIEW_ROOT / "pr-8/frozen-publication.json"
 INCLUDE_OPEN = "<!-- include: "
@@ -1891,6 +995,7 @@ REGISTERED_REVIEW_PATHS = frozenset({
     "pr-30/frozen-publication.json",
     "pr-36/frozen-publication.json",
     "pr-41/frozen-publication.json",
+    "pr-42/frozen-publication.json",
 })
 HANDOFF_DOCTRINE = {
     "AGENTS.md": (
@@ -2173,17 +1278,6 @@ def eval_corpus_distribution_error(counts=None, floors=None) -> str:
     return ("eval corpus distribution: " + "; ".join(problems[:6])) if problems else ""
 
 
-def _raises(call, kind) -> bool:
-    """True when `call` raises `kind`; a check that swallows it would prove nothing."""
-    try:
-        call()
-    except kind:
-        return True
-    except Exception:
-        return False
-    return False
-
-
 def review_document_inventory_error(review_root=None, expected_paths=None) -> str:
     """Require the review tree's exact registered relative paths and regular files."""
     root = REVIEW_ROOT if review_root is None else Path(review_root)
@@ -2464,7 +1558,7 @@ def review_handoff_policy_error(source_texts=None, review_root=None,
     else:
         scanned.update(extra_texts)
     # The explicit doctrine sources are the authoritative injected test seam. Production
-    # passes the same repository bytes, while a planted source mutation must not be erased by
+    # passes the same repository bytes, while a planted doctrine edit must not be erased by
     # the tracked inventory loaded above.
     scanned.update(source_texts)
     for relative, text in sorted(scanned.items()):
@@ -2575,10 +1669,6 @@ def gate(
     print(f"  {'FAIL' if ownership_source_problem else 'PASS'} repository-ownership-source")
     if ownership_source_problem:
         failures.append(ownership_source_problem)
-    generator_source_problem = mutation_generator_source_error()
-    print(f"  {'FAIL' if generator_source_problem else 'PASS'} mutation-generator-source")
-    if generator_source_problem:
-        failures.append(generator_source_problem)
     budget_problem = hook_budget_error()
     print(f"  {'FAIL' if budget_problem else 'PASS'} hook-budget")
     if budget_problem:
@@ -2587,22 +1677,6 @@ def gate(
     print(f"  {'FAIL' if decision_problem else 'PASS'} decision-golden")
     if decision_problem:
         failures.append(decision_problem)
-    for check_name, mutation_problem in mutation_evidence_problems():
-        print(f"  {'FAIL' if mutation_problem else 'PASS'} {check_name}")
-        if mutation_problem:
-            failures.append(mutation_problem)
-    # Measurements come from a sweep run by hand with tools/write-mutation-receipt.py, never
-    # from the tree; what the offline gate can state is the reviewed policy a sweep is held
-    # against.
-    try:
-        _policy = _unique_json(MUTATION_POLICY.read_bytes())
-        _classes = [entry.get("class") for entry in _policy.get("allowed_survivors", [])]
-        print(f"  INFO mutation-policy allowed-survivors={len(_classes)} "
-              f"debt={_classes.count('debt')} inert={_classes.count('inert')} "
-              f"count-only={len(_policy.get('count_only_kills', []))} "
-              f"unswept-guards={len(_policy.get('unswept_guards', []))}")
-    except Exception as exc:
-        print(f"  INFO mutation-policy unavailable: {exc!r}")
     retired_claim_problem = retired_dispatch_claim_error()
     print(f"  {'FAIL' if retired_claim_problem else 'PASS'} dispatch-channel-claims "
           f"over {len(RETIRED_DISPATCH_CLAIMS)} retired spelling(s) in "
@@ -2704,24 +1778,24 @@ def selftest() -> int:
         publication_workflow_error(EXPECTED_WORKFLOW) == "",
     )
 
-    def publication_semantic_mutation(old, new, diagnosis):
+    def publication_block_tamper(old, new, diagnosis):
         block = _yaml_mapping_block(EXPECTED_WORKFLOW, "  publication:")
         if not block or block.count(old) != 1:
             return False
-        mutated = EXPECTED_WORKFLOW.replace(block, block.replace(old, new, 1), 1)
-        problem = publication_workflow_error(mutated)
+        tampered = EXPECTED_WORKFLOW.replace(block, block.replace(old, new, 1), 1)
+        problem = publication_workflow_error(tampered)
         return diagnosis in problem
 
-    def coordinated_job_mutation(old, new, diagnosis):
+    def coordinated_job_tamper(old, new, diagnosis):
         """Move the byte oracle with a changed workflow; semantic authority must still red."""
         if EXPECTED_WORKFLOW.count(old) != 1:
             return False
-        mutated = EXPECTED_WORKFLOW.replace(old, new, 1)
+        tampered = EXPECTED_WORKFLOW.replace(old, new, 1)
         original = EXPECTED_WORKFLOW
-        globals()["EXPECTED_WORKFLOW"] = mutated
+        globals()["EXPECTED_WORKFLOW"] = tampered
         try:
-            return workflow_error(mutated) is None and diagnosis in publication_workflow_error(
-                mutated)
+            return workflow_error(tampered) is None and diagnosis in publication_workflow_error(
+                tampered)
         finally:
             globals()["EXPECTED_WORKFLOW"] = original
 
@@ -2750,7 +1824,7 @@ def selftest() -> int:
     ):
         expect(
             f"coordinated workflow bytes cannot hide changed {label}",
-            coordinated_job_mutation(old, new, diagnosis),
+            coordinated_job_tamper(old, new, diagnosis),
         )
 
     publication_block = _yaml_mapping_block(EXPECTED_WORKFLOW, "  publication:")
@@ -2763,8 +1837,8 @@ def selftest() -> int:
             workflow_error(workflow_without_publication) is None
             # The exact diagnosis, not merely non-empty. This is the only case asserting the
             # oracle is independent of the byte tripwire, and `!= ""` over fourteen non-empty
-            # return paths let the branch it names be neutralised while three fallbacks kept
-            # the assertion true.
+            # return paths is also satisfied by any of three fallbacks, so it could not show
+            # that the branch it names answered.
             and publication_workflow_error(workflow_without_publication)
             == "publication workflow job is absent or duplicated",
         )
@@ -2794,7 +1868,7 @@ def selftest() -> int:
     # The jobs mapping was append-open. A sibling job is invisible to every closed list this
     # function builds, because they cover top-level keys, needle counts, and lists inside the
     # publication block -- never the mapping itself.
-    for position, mutated_workflow in (
+    for position, tampered_workflow in (
             ("appended after", EXPECTED_WORKFLOW
              + "  exfil:\n    runs-on: ubuntu-24.04\n"
                "    permissions:\n      contents: write\n"
@@ -2806,7 +1880,7 @@ def selftest() -> int:
     ):
         expect(
             f"publication workflow rejects a sibling job {position} publication",
-            publication_workflow_error(mutated_workflow)
+            publication_workflow_error(tampered_workflow)
             == "publication workflow job inventory is not exactly closed",
         )
     # Top-level permissions had their KEY pinned and their CONTENT unread. The publication job
@@ -2829,7 +1903,7 @@ def selftest() -> int:
     # whitespace is the shape that reaches them: `job_fields` strips, so the line still matches
     # the closed contract, while the needle is an exact substring and no longer does.
     # Scoped to the publication block, because that is what the needle loop searches and
-    # `runs-on: ubuntu-24.04` occurs in sibling jobs too -- mutating the workflow's first
+    # `runs-on: ubuntu-24.04` occurs in sibling jobs too -- editing the workflow's first
     # occurrence would change a different job and prove nothing about this loop.
     for label, line in (
             ("pull-request job condition", "    if: github.event_name == 'pull_request'\n"),
@@ -2887,23 +1961,23 @@ def selftest() -> int:
     ):
         expect(
             f"publication workflow rejects a changed {label}",
-            publication_semantic_mutation(old, new, diagnosis),
+            publication_block_tamper(old, new, diagnosis),
         )
     expect(
         "publication workflow retains the unregistered-PR manifest branch",
-        publication_semantic_mutation(
+        publication_block_tamper(
             '          if [ ! -f "$MANIFEST" ]; then\n',
             "", "unregistered-PR manifest branch"),
     )
     expect(
         "publication workflow fails when a pull request has no frozen manifest",
-        publication_semantic_mutation(
+        publication_block_tamper(
             '            exit 1\n',
             '            exit 0\n', "unregistered-PR manifest exit"),
     )
     expect(
         "publication workflow rejects an early success exit before the verifier",
-        publication_semantic_mutation(
+        publication_block_tamper(
             '          fi\n'
             '          python3 tools/verify-review-publication.py pr-snapshot ',
             '          fi\n'
@@ -2913,7 +1987,7 @@ def selftest() -> int:
     )
     expect(
         "publication workflow rejects a skipped verification step",
-        publication_semantic_mutation(
+        publication_block_tamper(
             "      - name: frozen publication still matches the live pull request\n",
             "      - name: frozen publication still matches the live pull request\n"
             "        if: false\n",
@@ -2921,7 +1995,7 @@ def selftest() -> int:
     )
     expect(
         "publication workflow rejects a non-blocking verification step",
-        publication_semantic_mutation(
+        publication_block_tamper(
             "      - name: frozen publication still matches the live pull request\n",
             "      - name: frozen publication still matches the live pull request\n"
             "        continue-on-error: true\n",
@@ -2929,14 +2003,14 @@ def selftest() -> int:
     )
     expect(
         "publication workflow rejects a verifier whose failure is ignored",
-        publication_semantic_mutation(
+        publication_block_tamper(
             '--expected-head "$HEAD_SHA" --manifest "$MANIFEST"\n',
             '--expected-head "$HEAD_SHA" --manifest "$MANIFEST" || true\n',
             "command sequence"),
     )
     expect(
         "publication workflow rejects a backgrounded verifier",
-        publication_semantic_mutation(
+        publication_block_tamper(
             '--expected-head "$HEAD_SHA" --manifest "$MANIFEST"\n',
             '--expected-head "$HEAD_SHA" --manifest "$MANIFEST" &\n',
             "command sequence"),
@@ -2950,7 +2024,7 @@ def selftest() -> int:
     )
     expect(
         "publication workflow rejects an unexpected pre-verifier step",
-        publication_semantic_mutation(
+        publication_block_tamper(
             "      - name: frozen publication still matches the live pull request\n",
             "      - name: remove the frozen publication\n"
             "        run: rm -f contracts/review/pr-8/frozen-publication.json\n"
@@ -2959,7 +2033,7 @@ def selftest() -> int:
     )
     expect(
         "publication workflow rejects a bare-dash pre-verifier step",
-        publication_semantic_mutation(
+        publication_block_tamper(
             "      - name: frozen publication still matches the live pull request\n",
             "      -\n"
             "        name: remove the frozen publication\n"
@@ -2995,7 +2069,7 @@ def selftest() -> int:
     ):
         expect(
             f"publication workflow rejects a {label}",
-            publication_semantic_mutation(old, new, diagnosis),
+            publication_block_tamper(old, new, diagnosis),
         )
     expect(
         "ordinary full-gate checkout must retain the fixed decision-corpus base",
@@ -3049,7 +2123,7 @@ def selftest() -> int:
         workflow_error(EXPECTED_WORKFLOW.replace(
             "          python3 hooks/harness_check.py --ci\n", "", 1)) is not None,
     )
-    expect("workflow gate command mutation fails", workflow_error(EXPECTED_WORKFLOW.replace(
+    expect("workflow gate command substitution fails", workflow_error(EXPECTED_WORKFLOW.replace(
         "python3 tools/ci-gate.py", "python3 hooks/harness_check.py --ci", 1
     )) is not None)
     expect(
@@ -3086,7 +2160,7 @@ def selftest() -> int:
     expect(
         "changing the executed harness invalidates its source digest",
         harness_source_error(
-            source_bytes=HARNESS_SOURCE.read_bytes() + b"# planted mutation\n") != "",
+            source_bytes=HARNESS_SOURCE.read_bytes() + b"# planted source drift\n") != "",
     )
     expect(
         "the repository-ownership authority matches its reviewed source digest",
@@ -3096,7 +2170,7 @@ def selftest() -> int:
         "changing repository-ownership bytes invalidates its source digest",
         repository_ownership_source_error(
             source_bytes=REPOSITORY_OWNERSHIP_SOURCE.read_bytes()
-            + b"# planted mutation\n") != "",
+            + b"# planted source drift\n") != "",
     )
     source_registry = _json_without_duplicate_keys(SUITE_SOURCE_GOLDEN)
     without_ownership = dict(source_registry)
@@ -3117,31 +2191,12 @@ def selftest() -> int:
         "removing the harness source digest is not permission to skip the binding",
         harness_source_error(golden_data=without_harness) != "",
     )
-    expect(
-        "the mutation generator matches its reviewed source digest",
-        mutation_generator_source_error() == "",
-    )
-    expect(
-        "editing the mutation generator invalidates its source digest",
-        mutation_generator_source_error(
-            source_bytes=(ROOT / "tools/write-mutation-receipt.py").read_bytes()
-            + b"# planted mutation\n") != "",
-    )
-    without_generator = dict(source_registry)
-    without_generator["suites"] = {
-        name: value for name, value in source_registry["suites"].items()
-        if name != "write-mutation-receipt"
-    }
-    expect(
-        "removing the generator source digest is not permission to skip the binding",
-        mutation_generator_source_error(golden_data=without_generator) != "",
-    )
     expect("hook timeout and internal budget contract matches", hook_budget_error() == "")
     def retime_bash_hook(data: dict, seconds: int) -> int:
         """Set the Bash guard hook's timeout by identity, not by list position.
 
         Indexing PreToolUse[0] assumed the Bash matcher comes first: reordering
-        settings.json so Agent|Task leads mutated the spawn guard instead, the contract
+        settings.json so Agent|Task leads retimed the spawn guard instead, the contract
         saw no change, and this check went red on an edit that changed nothing about the
         hook it names.
         """
@@ -3156,13 +2211,13 @@ def selftest() -> int:
     settings_fixture = json.loads((ROOT / "settings.json").read_text(encoding="utf-8"))
     settings_touched = retime_bash_hook(settings_fixture, 4)
     expect(
-        "hook budget contract rejects a Claude timeout mutation",
+        "hook budget contract rejects a changed Claude timeout",
         settings_touched == 1 and hook_budget_error(settings_data=settings_fixture) != "",
     )
     codex_fixture = json.loads((ROOT / "hooks/hooks.json").read_text(encoding="utf-8"))
     codex_touched = retime_bash_hook(codex_fixture, 4)
     expect(
-        "hook budget contract rejects a Codex timeout mutation",
+        "hook budget contract rejects a changed Codex timeout",
         codex_touched == 1 and hook_budget_error(codex_data=codex_fixture) != "",
     )
     reordered = json.loads((ROOT / "settings.json").read_text(encoding="utf-8"))
@@ -3391,519 +2446,6 @@ def selftest() -> int:
         "hook budget contract rejects a sub-second margin",
         hook_budget_error(budget=4.01) != "",
     )
-
-    set_mutation = {
-        "version": 1, "kind": "set-element", "module": "guard-a.py",
-        "name": "TOKENS", "collection_kind": "set", "element": "x",
-        "allowed_statuses": [], "id": "set-id",
-    }
-    site_mutation = {
-        "version": 1, "kind": "site", "module": "guard-b.py", "label": "site probe",
-        "anchor_sha256": "a" * 64, "replacement_sha256": "b" * 64,
-        "selectors": ["probe selector"], "allowed_statuses": [], "id": "site-id",
-    }
-    addition_mutation = {
-        "version": 1, "kind": "set-addition", "module": "guard-a.py",
-        "name": "TOKENS", "collection_kind": "set", "element": "z",
-        "label": "probe addition", "allowed_statuses": [], "id": "add-id",
-    }
-    mutation_plan_probe = [set_mutation, site_mutation, addition_mutation]
-    probe_exclusions = {"guard-a.py::FIXTURES": "fixture corpus"}
-    probe_policy = {
-        "collections": {("guard-a.py", "TOKENS"): 1},
-        "sites": {("guard-b.py", "site probe")},
-        "selectors": {("guard-b.py", "site probe"): ("probe selector",)},
-        "site_digest": mutation_site_policy_digest([site_mutation]),
-        "exclusions": probe_exclusions,
-        "additions": {
-            ("guard-a.py", "TOKENS", "set", "z", "probe addition", ()),
-        },
-        "floor": 3,
-    }
-    writer = _mutation_writer("_ci_gate_mutation_writer_selftest")
-    original_writer_which = writer.shutil.which
-    writer.shutil.which = (
-        lambda name: None if name == "zsh" else original_writer_which(name))
-    try:
-        try:
-            writer.baseline_results(ROOT)
-            missing_zsh_rejected = False
-        except ValueError as exc:
-            missing_zsh_rejected = "zsh is required" in str(exc)
-    finally:
-        writer.shutil.which = original_writer_which
-    expect(
-        "mutation baselines reject a host that skipped the zsh runtime probes",
-        missing_zsh_rejected,
-    )
-    raw_baseline = {
-        relative: {
-            "status": "completed", "returncode": 0,
-            "checks": 10, "failures": 0, "failed_checks": [],
-        }
-        for relative in writer.GUARDS
-    }
-    raw_descriptor = {
-        "id": "raw-probe", "kind": "set-element", "module": writer.GREP,
-        "allowed_statuses": [],
-    }
-    raw_survivor = {
-        "owner": raw_baseline[writer.GREP],
-        "merged": raw_baseline[writer.BASH],
-        "outcome": "survived", "reason": "survived",
-    }
-    expect(
-        "fragment aggregation independently recomputes a truthful raw outcome",
-        writer.recompute_raw_result(
-            raw_survivor, raw_descriptor, raw_baseline) == ("survived", "survived"),
-    )
-    try:
-        writer.recompute_raw_result(
-            dict(raw_survivor, outcome="caught", reason="suite-failure"),
-            raw_descriptor, raw_baseline)
-        forged_raw_rejected = False
-    except ValueError:
-        forged_raw_rejected = True
-    expect(
-        "fragment aggregation rejects a forged self-reported outcome",
-        forged_raw_rejected,
-    )
-    malformed_owner = dict(raw_baseline[writer.GREP], invented=True)
-    try:
-        writer.recompute_raw_result(
-            dict(raw_survivor, owner=malformed_owner), raw_descriptor, raw_baseline)
-        malformed_raw_rejected = False
-    except ValueError:
-        malformed_raw_rejected = True
-    expect(
-        "fragment aggregation rejects an extra raw suite field",
-        malformed_raw_rejected,
-    )
-    invalid_receipt = {
-        "status": "invalid-receipt", "returncode": 1,
-        "receipt_count": 0, "stderr_tail": "mutated receipt",
-    }
-    try:
-        writer.recompute_raw_result(
-            {
-                "owner": invalid_receipt, "merged": None,
-                "outcome": "caught", "reason": "invalid-receipt",
-            },
-            raw_descriptor, raw_baseline,
-        )
-        invalid_owner_rejected = False
-    except ValueError:
-        invalid_owner_rejected = True
-    expect(
-        "fragment aggregation rejects an invalid terminal receipt",
-        invalid_owner_rejected,
-    )
-    original_apply_mutation = writer.apply_mutation
-    original_run_suite = writer.run_suite
-    with tempfile.TemporaryDirectory(prefix="z-harness-merged-kill-") as raw:
-        target = Path(raw) / "guard.py"
-        target.write_text("pristine\n", encoding="utf-8")
-        writer.apply_mutation = lambda _tree, _descriptor: (target, "pristine\n")
-        writer.run_suite = lambda _tree, relative, **_kwargs: (
-            raw_baseline[writer.GREP] if relative == writer.GREP else invalid_receipt)
-        try:
-            try:
-                propagated_kill = writer.execute_mutation(
-                    Path(raw), raw_descriptor, raw_baseline)
-            except ValueError:
-                propagated_kill = None
-        finally:
-            writer.apply_mutation = original_apply_mutation
-            writer.run_suite = original_run_suite
-        expect(
-            "an invalid merged-suite receipt aborts mutation scoring",
-            propagated_kill is None,
-        )
-    try:
-        writer.recompute_raw_result(
-            {
-                "owner": raw_baseline[writer.GREP],
-                "merged": invalid_receipt,
-                "outcome": "caught", "reason": "invalid-receipt",
-            },
-            raw_descriptor, raw_baseline,
-        )
-        invalid_merged_rejected = False
-    except ValueError:
-        invalid_merged_rejected = True
-    expect(
-        "aggregation rejects an invalid merged-suite receipt",
-        invalid_merged_rejected,
-    )
-    context_fragment = {"head_sha": "head-a", "baseline": raw_baseline}
-    expect(
-        "aggregate context accepts the exact head and fresh baseline",
-        writer.aggregate_context_error(
-            context_fragment, "head-a", raw_baseline) == "",
-    )
-    expect(
-        "aggregate context rejects a foreign fragment head",
-        writer.aggregate_context_error(
-            context_fragment, "head-b", raw_baseline) != "",
-    )
-    changed_baseline = dict(raw_baseline)
-    changed_baseline[writer.GREP] = dict(
-        raw_baseline[writer.GREP], checks=9)
-    expect(
-        "aggregate context rejects a shard-only baseline",
-        writer.aggregate_context_error(
-            context_fragment, "head-a", changed_baseline) != "",
-    )
-    assignment_plan = [{"id": name} for name in ("a", "b", "c")]
-    assignment_fragment = {
-        "shard": {"index": 0, "count": 2},
-        "results": {"a": {}, "c": {}},
-    }
-    expect(
-        "a deterministic shard assignment clears",
-        writer.shard_assignment_error(
-            assignment_fragment, assignment_plan, 2) == "",
-    )
-    expect(
-        "a same-union fragment with the wrong shard assignment fails",
-        writer.shard_assignment_error(
-            dict(assignment_fragment, results={"a": {}}),
-            assignment_plan, 2) != "",
-    )
-    with tempfile.TemporaryDirectory(prefix="z-harness-fragment-json-") as raw:
-        duplicate_fragment = Path(raw) / "fragment.json"
-        duplicate_fragment.write_text(
-            '{"results": {}, "results": {}}\n', encoding="utf-8")
-        try:
-            writer.load_json(duplicate_fragment)
-            duplicate_fragment_rejected = False
-        except ValueError:
-            duplicate_fragment_rejected = True
-        expect(
-            "fragment JSON rejects duplicate object keys",
-            duplicate_fragment_rejected,
-        )
-    # The helper below controls the CLI-removal checks, so prove both arms first.
-    expect(
-        "the raise helper reports a call that does not raise",
-        _raises(lambda: None, ValueError) is False,
-    )
-    expect(
-        "the raise helper does not accept the wrong exception type",
-        _raises(lambda: (_ for _ in ()).throw(KeyError("x")), ValueError) is False,
-    )
-    expect(
-        "the raise helper reports a call that raises the named type",
-        _raises(lambda: (_ for _ in ()).throw(ValueError("x")), ValueError) is True,
-    )
-    expect(
-        "the removed resweep selector is rejected by the public CLI",
-        _raises(lambda: writer.parse_args(["--resweep-needed", "base"]), SystemExit),
-    )
-    expect(
-        "the removed inheritance mode is rejected by the public CLI",
-        _raises(lambda: writer.parse_args(["--verify-inherited", "base"]), SystemExit),
-    )
-    expect(
-        "the removed receipt-acceptance flag is rejected by the public CLI",
-        _raises(lambda: writer.parse_args(["--aggregate", "x", "--accept-receipt-changes"]),
-                SystemExit),
-    )
-    # result_kill can return any status the plan tolerates, so a new allowed_statuses entry
-    # that nobody added to the vocabulary would make every result carrying it unvalidatable.
-    planned_statuses = set()
-    for _descriptor in writer.mutation_plan()[0]:
-        planned_statuses.update(_descriptor.get("allowed_statuses", ()) or ())
-    expect(
-        "every status the plan tolerates is a reason the gate can validate",
-        planned_statuses <= set(writer.KILL_REASONS),
-    )
-    expect(
-        "the unasserted reason is one the generator can actually emit",
-        writer.UNASSERTED_KILL_REASON in writer.KILL_REASONS,
-    )
-    expect(
-        "the production mutation plan matches its independent closed inventory",
-        mutation_plan_error() == "",
-    )
-    expect(
-        "a synthetic plan matching its closed inventory clears",
-        mutation_plan_error(plan=mutation_plan_probe, exclusions=probe_exclusions,
-                            policy=probe_policy) == "",
-    )
-    expect(
-        "a plan that shrinks below its floor fails even when every pin is moved with it",
-        "below floor" in mutation_plan_error(
-            plan=[set_mutation], exclusions=probe_exclusions,
-            policy=dict(probe_policy, sites=set(), selectors={},
-                        site_digest=mutation_site_policy_digest([]), additions=set())),
-    )
-    expect(
-        "a foreign site identity fails the independent closed inventory",
-        mutation_policy_error(
-            [set_mutation, dict(site_mutation, label="foreign")],
-            probe_exclusions, probe_policy,
-        ) != "",
-    )
-    expect(
-        "a duplicate site identity fails the independent closed inventory",
-        mutation_policy_error(
-            [set_mutation, site_mutation, dict(site_mutation, id="duplicate-site")],
-            probe_exclusions, probe_policy,
-        ) != "",
-    )
-    expect(
-        "changing a site anchor fails the independent semantic digest",
-        mutation_policy_error(
-            [set_mutation, dict(
-                site_mutation, anchor_sha256="c" * 64, id="changed-site")],
-            probe_exclusions, probe_policy,
-        ) != "",
-    )
-    expect(
-        "changing a site selector fails the independent closed inventory",
-        mutation_policy_error(
-            [set_mutation, dict(
-                site_mutation, selectors=["different selector"], id="changed-selector")],
-            probe_exclusions, probe_policy,
-        ) != "",
-    )
-    expect(
-        "changing a declared addition's allowed kill modes fails closed",
-        mutation_policy_error(
-            [set_mutation, site_mutation,
-             dict(addition_mutation, allowed_statuses=["timeout"])],
-            probe_exclusions, probe_policy,
-        ) != "",
-    )
-    expect(
-        "set-element mutations cannot declare invalid receipts as kills",
-        mutation_policy_error(
-            [dict(set_mutation, allowed_statuses=["invalid-receipt"]),
-             site_mutation, addition_mutation],
-            probe_exclusions, probe_policy,
-        ) != "",
-    )
-    duplicate_target = dict(
-        site_mutation, label="site twin", id="duplicate-target")
-    duplicate_target_policy = dict(
-        probe_policy,
-        sites={("guard-b.py", "site probe"), ("guard-b.py", "site twin")},
-        selectors={
-            ("guard-b.py", "site probe"): ("probe selector",),
-            ("guard-b.py", "site twin"): ("probe selector",),
-        },
-        site_digest=mutation_site_policy_digest(
-            [site_mutation, duplicate_target]),
-        floor=3,
-    )
-    expect(
-        "two labels cannot execute the same semantic site mutation",
-        mutation_policy_error(
-            [set_mutation, site_mutation, duplicate_target],
-            probe_exclusions, duplicate_target_policy,
-        ) != "",
-    )
-    expect(
-        "the reviewed mutation policy names only planned element deletions, canonically",
-        mutation_policy_file_error() == "",
-    )
-    reviewed_policy = writer.load_policy()
-    production_plan = writer.mutation_plan()[0]
-    unplanned_policy = json.loads(json.dumps(reviewed_policy))
-    unplanned_policy["allowed_survivors"][0]["element"] = "no-such-element"
-    expect(
-        "a policy entry naming no planned element deletion fails",
-        "names no planned element deletion" in mutation_policy_file_error(
-            policy_bytes=writer.policy_text(unplanned_policy).encode("utf-8"),
-            plan=production_plan, writer=writer),
-    )
-    planned_addition = next(
-        item for item in production_plan if item["kind"] == "set-addition")
-    addition_policy = json.loads(json.dumps(reviewed_policy))
-    addition_policy["allowed_survivors"] = sorted(
-        addition_policy["allowed_survivors"] + [{
-            "module": planned_addition["module"],
-            "collection": planned_addition["name"],
-            "element": planned_addition["element"], "class": "debt"}],
-        key=lambda item: (item["module"], item["collection"], item["element"]))
-    expect(
-        "a declared addition listed as an allowed survivor fails",
-        "names no planned element deletion" in mutation_policy_file_error(
-            policy_bytes=writer.policy_text(addition_policy).encode("utf-8"),
-            plan=production_plan, writer=writer),
-    )
-    expect(
-        "a reformatted policy fails the canonical one-entry-per-line form",
-        "canonical" in mutation_policy_file_error(
-            policy_bytes=(json.dumps(reviewed_policy, indent=2) + "\n").encode("utf-8"),
-            plan=production_plan, writer=writer),
-    )
-    expect(
-        "every module a registered hook runs is swept or listed as unswept",
-        mutation_sweep_coverage_error() == "",
-    )
-    with tempfile.TemporaryDirectory(prefix="z-harness-sweep-coverage-") as raw:
-        coverage_root = Path(raw)
-        (coverage_root / "hooks/guards").mkdir(parents=True)
-        (coverage_root / "tools").mkdir()
-        (coverage_root / "hooks/hooks.json").write_text(
-            json.dumps({"hooks": {}}), encoding="utf-8")
-        (coverage_root / "hooks/entry.py").write_text("import helper\n", encoding="utf-8")
-        (coverage_root / "hooks/guards/helper.py").write_text("", encoding="utf-8")
-        (coverage_root / "tools/stop_tool.py").write_text("", encoding="utf-8")
-
-        def register(*commands):
-            (coverage_root / "settings.json").write_text(json.dumps({"hooks": {
-                "PreToolUse": [{"hooks": [{"type": "command", "command": command}
-                                          for command in commands]}]}}),
-                encoding="utf-8")
-
-        def closure_or_error():
-            try:
-                return registered_hook_closure(coverage_root)
-            except Exception as exc:
-                return repr(exc)
-
-        register("python3 hooks/entry.py")
-        expect(
-            "a guard imported by a registered hook and neither swept nor listed fails",
-            "neither swept nor listed" in mutation_sweep_coverage_error(
-                root=coverage_root, swept={"hooks/entry.py"}, unswept=set()),
-        )
-        expect(
-            "listing the imported guard as unswept clears the coverage rule",
-            mutation_sweep_coverage_error(
-                root=coverage_root, swept={"hooks/entry.py"},
-                unswept={"hooks/guards/helper.py"}) == "",
-        )
-        expect(
-            "an unswept entry no registered hook reaches is stale and fails",
-            "no registered hook reaches" in mutation_sweep_coverage_error(
-                root=coverage_root, swept={"hooks/entry.py"},
-                unswept={"hooks/guards/helper.py", "hooks/stale.py"}),
-        )
-        # GUARDS lists modules for their digests and baselines; only the plan mutates.
-        # A writer whose GUARDS names the helper while its plan never touches it must
-        # still be made to list the helper as unswept.
-        baseline_only_writer = types.SimpleNamespace(
-            GUARDS=("hooks/entry.py", "hooks/guards/helper.py"),
-            mutation_plan=lambda: ([{"module": "hooks/entry.py"}], {}),
-            load_policy=lambda: {"unswept_guards": []})
-        original_mutation_writer = _mutation_writer
-        globals()["_mutation_writer"] = lambda _label: baseline_only_writer
-        try:
-            baseline_only = mutation_sweep_coverage_error(root=coverage_root)
-        finally:
-            globals()["_mutation_writer"] = original_mutation_writer
-        expect(
-            "a module baselined but never mutated is not counted as swept",
-            "neither swept nor listed as unswept: ['hooks/guards/helper.py']"
-            in baseline_only,
-        )
-        (coverage_root / "hooks/guards/__init__.py").write_text(
-            "from . import relative\n", encoding="utf-8")
-        for name in ("relative", "submodule", "dotted"):
-            (coverage_root / f"hooks/guards/{name}.py").write_text("", encoding="utf-8")
-        (coverage_root / "hooks/late.py").write_text("", encoding="utf-8")
-        (coverage_root / "hooks/entry.py").write_text(
-            "from guards import submodule\nimport guards.dotted\n"
-            "def later():\n    import late\n", encoding="utf-8")
-        expect(
-            "package, dotted, relative and function-local imports all enter the closure",
-            closure_or_error() == {
-                "hooks/entry.py", "hooks/guards/__init__.py", "hooks/guards/relative.py",
-                "hooks/guards/submodule.py", "hooks/guards/dotted.py", "hooks/late.py"},
-        )
-        (coverage_root / "hooks/guards/__init__.py").unlink()
-        (coverage_root / "hooks/entry.py").write_text(
-            "from guards import submodule\n", encoding="utf-8")
-        expect(
-            "a namespace-package import is reported as unverifiable, not passed",
-            "cannot verify" in mutation_sweep_coverage_error(
-                root=coverage_root, swept={"hooks/entry.py"}, unswept=set()),
-        )
-        register()
-        expect(
-            "registrations naming no hook module are unverified, not clean",
-            "unverified" in mutation_sweep_coverage_error(
-                root=coverage_root, swept=set(), unswept=set()),
-        )
-        register("python3 ~/.claude/tools/stop_tool.py --flag")
-        expect(
-            "a registered module under tools/ enters the closure",
-            closure_or_error() == {"tools/stop_tool.py"},
-        )
-        for label, command in (
-                ("a Python file outside the read directories", "python3 scripts/stop.py"),
-                ("a module entry point", "python3 -m hooks.entry"),
-                ("an interpreter option before the script", "python3 -B hooks/entry.py"),
-                ("a Python file under a command that is not Python", "sh hooks/entry.py"),
-        ):
-            # A refused command beside a recognised one: skipping it would leave the
-            # closure non-empty and the check green.
-            register("python3 hooks/entry.py", command)
-            expect(
-                f"a registered hook running {label} is refused, not skipped",
-                "does not run a script under hooks/ or tools/ with python3"
-                in mutation_sweep_coverage_error(
-                    root=coverage_root, swept={"hooks/entry.py"}, unswept=set()),
-            )
-    # The three checks read one plan and report in gate order. Each production call is
-    # replaced by a recorder so a dropped or blanked call, or a check handed another
-    # inventory, is visible without generating anything.
-    evidence_writer = types.SimpleNamespace(
-        GUARDS=("hooks/a.py", "hooks/b.py"),
-        mutation_plan=lambda: ([{"module": "hooks/a.py"}], {"x": "y"}),
-        load_policy=lambda: {"unswept_guards": [{"path": "hooks/u.py"}]})
-    received = {}
-
-    def recorder(name):
-        def record(**kwargs):
-            received[name] = kwargs
-            return f"planted {name} failure"
-        return record
-
-    planted_checks = {
-        "_mutation_writer": lambda _label: evidence_writer,
-        "mutation_plan_error": recorder("plan"),
-        "mutation_policy_file_error": recorder("policy"),
-        "mutation_sweep_coverage_error": recorder("coverage"),
-    }
-    restored_checks = {name: globals()[name] for name in planted_checks}
-    globals().update(planted_checks)
-    try:
-        evidence = mutation_evidence_problems()
-    finally:
-        globals().update(restored_checks)
-    expect(
-        "every mutation check's result reaches the gate under its own name",
-        evidence == [("mutation-plan", "planted plan failure"),
-                     ("mutation-policy", "planted policy failure"),
-                     ("mutation-sweep-coverage", "planted coverage failure")],
-    )
-    expect(
-        "the three mutation checks judge one plan, and coverage counts only its targets",
-        received.get("plan") == {"plan": [{"module": "hooks/a.py"}], "exclusions": {"x": "y"}}
-        and received.get("policy") == {"plan": [{"module": "hooks/a.py"}],
-                                       "writer": evidence_writer}
-        and received.get("coverage") == {"swept": {"hooks/a.py"},
-                                         "unswept": {"hooks/u.py"}},
-    )
-
-    def unloadable_writer(_label):
-        raise ValueError("planted writer failure")
-
-    globals()["_mutation_writer"] = unloadable_writer
-    try:
-        unloadable = mutation_evidence_problems()
-    finally:
-        globals()["_mutation_writer"] = restored_checks["_mutation_writer"]
-    expect(
-        "a plan that cannot be generated fails every mutation check by name",
-        [name for name, problem in unloadable if "planted writer failure" in problem]
-        == ["mutation-plan", "mutation-policy", "mutation-sweep-coverage"],
-    )
     handoff_sources = {
         relative: (ROOT / relative).read_text(encoding="utf-8")
         for relative in HANDOFF_DOCTRINE
@@ -3931,8 +2473,8 @@ def selftest() -> int:
                         **{"outbound-drafts": 0, "craft-prompt": 6})) != "",
     )
     dispatch_body = (ROOT / DISPATCH_BODY_DOCUMENT).read_text(encoding="utf-8")
-    # The scan target is part of the claim. Deriving the fixture from the constant let the
-    # check be aimed at any clean file with the suite still green.
+    # The scan target is part of the claim. A fixture derived from the constant passes for
+    # whatever clean file the constant names, so the target is pinned by its literal path.
     expect(
         "the dispatch-body scan targets the skill body an agent loads first",
         DISPATCH_BODY_DOCUMENT == "skills/agent-dispatch/SKILL.md"
@@ -4072,8 +2614,8 @@ def selftest() -> int:
                 "missing required workspace rule" in workspace_doctrine_error(
                     source_texts=stripped)[0],
             )
-    # Every forbidden path, not just the first: shrinking a forbidden set loosens it, and a
-    # deletion sweep cannot see that direction.
+    # Every forbidden path, not just the first: each path is its own rule, so each
+    # gets its own leaked-path fixture.
     for path_text in RUNTIME_PATHS_FORBIDDEN_IN_SHARED_POLICY:
         leaked = dict(workspace_sources)
         leaked[SHARED_POLICY_DOCUMENT] += f"\nWorkers write under {path_text}/scratch.\n"
@@ -4117,8 +2659,8 @@ def selftest() -> int:
         "the verdict reports one document per doctrine entry",
         clean_verdict[1] == len(WORKSPACE_DOCTRINE),
     )
-    # ...and each counter must reach a NONZERO value from its own arm. Read only at zero, both
-    # increments were dead: removing either left every case green.
+    # ...and each counter must reach a NONZERO value from its own arm. Read only at zero, no
+    # case exercised either increment.
     leaked_once = dict(workspace_sources)
     leaked_once[SHARED_POLICY_DOCUMENT] += "\nWorkers write under ~/.claude/scratch.\n"
     leaked_verdict = workspace_doctrine_error(source_texts=leaked_once)
@@ -4564,6 +3106,8 @@ def selftest() -> int:
             return Result(0, f"SELFTEST-SUMMARY suite=zsh_rev_modifier_guard checks={expected_selftest_checks('zsh_rev_modifier_guard')} failures=0\n")
         if "credential_reach_guard.py" in joined:
             return Result(0, f"SELFTEST-SUMMARY suite=credential_reach_guard checks={SUITE_FLOORS['credential_reach_guard']} failures=0\n")
+        if "mutation_testing_guard.py" in joined:
+            return Result(0, f"SELFTEST-SUMMARY suite=mutation_testing_guard checks={SUITE_FLOORS['mutation_testing_guard']} failures=0\n")
         if "run-skill-evals.py" in joined:
             return Result(0, f"EVAL-VALIDATE-SUMMARY scenarios={EVAL_SCENARIO_FLOOR} "
                           f"skills={EVAL_SKILL_FLOOR} failures=0 scope=shape-and-coverage exit=0\n")
@@ -4575,7 +3119,7 @@ def selftest() -> int:
         "fake runner covers the production command registry",
         gate(fake_runner, emit_child_output=False) == 0,
     )
-    expect("production registry is non-empty", len(fake_calls) == 10)
+    expect("production registry is non-empty", len(fake_calls) == 11)
 
     def timeout_subprocess(argv, **_kwargs):
         if tuple(argv) == tuple(harness_argv):
@@ -4629,28 +3173,17 @@ def selftest() -> int:
     finally:
         SUITE_FLOORS["harness_check"] = recorded_harness_floor
     original_handoff_policy = review_handoff_policy_error
-    original_mutation_evidence = mutation_evidence_problems
     globals()["review_handoff_policy_error"] = lambda: "planted handoff-policy failure"
-    # One gate run carries two planted failures, each asserted by its own summary line:
-    # dropping either adoption removes that line while the other keeps the exit red.
-    globals()["mutation_evidence_problems"] = lambda: [
-        ("mutation-plan", ""), ("mutation-policy", "planted mutation-evidence failure"),
-        ("mutation-sweep-coverage", "")]
     adopted = io.StringIO()
     try:
         with contextlib.redirect_stdout(adopted):
             adopted_code = gate(fake_runner, emit_child_output=False)
     finally:
         globals()["review_handoff_policy_error"] = original_handoff_policy
-        globals()["mutation_evidence_problems"] = original_mutation_evidence
     adopted_lines = adopted.getvalue().splitlines()
     expect(
         "production gate adopts the review handoff policy result",
         adopted_code != 0 and "  - planted handoff-policy failure" in adopted_lines,
-    )
-    expect(
-        "production gate adopts a failure from any mutation check",
-        adopted_code != 0 and "  - planted mutation-evidence failure" in adopted_lines,
     )
     original_ownership_source = repository_ownership_source_error
     globals()["repository_ownership_source_error"] = (
@@ -4682,8 +3215,8 @@ def selftest() -> int:
         )
     finally:
         globals()["publication_workflow_error"] = original_publication_workflow
-    # Both new checks were wired into gate() without a plant, so deleting the call or the
-    # append left the suite green while the gate printed FAIL and exited 0.
+    # Both new checks were wired into gate() without a planted failure, so no case showed
+    # that gate() exits non-zero when either check fails.
     original_workspace_doctrine = workspace_doctrine_error
     globals()["workspace_doctrine_error"] = (
         lambda *a, **k: ("planted workspace-doctrine failure", 4, 0, 0))

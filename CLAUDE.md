@@ -27,6 +27,11 @@ Claude's spawn tools are `Agent` and `Task`. Background agents must send their r
 `SendMessage`; never read an agent's `.output` symlink because it is the full JSONL transcript.
 Worktree isolation may branch from `main`, so pass the target SHA and make the worker verify it.
 
+In the Claude desktop app, put every question for Chris in plain prose in the final message.
+Call the next-step tool (`mcp__ccd_turn__wrap_up`) with a recap only, never with a question or
+buttons, and show no new-session card (`start_session` with `offer` or `own_initiative`) unless
+Chris asks for a separate session.
+
 Claude Code gives a session one scratchpad directory and every subagent inherits that exact path, so
 a fan-out writes into one shared namespace. Assign each worker its own subdirectory and name it in
 the worker's prompt; the shared root is not a workspace. To inspect that collision surface, run

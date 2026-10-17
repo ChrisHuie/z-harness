@@ -624,6 +624,7 @@ def hook_import_problems(tree, receipt):
         loaded = {}
         walked = set()
         context = []
+        executed = {}
 
         def present(relative):
             return relative in files or os.path.isfile(os.path.join(tree, relative))
@@ -691,7 +692,8 @@ def hook_import_problems(tree, receipt):
 
         def binds(module_file, name, visiting=frozenset()):
             """A module binds `name` as an attribute when a top-level statement that always
-            runs stores, defines or imports it, and no top-level `del` removes it. A binding
+            runs, and has already run if the module is still initialising, stores, defines or
+            imports it, and no top-level `del` removes it. A binding
             inside a function, class or compound statement does not count; nor does an
             annotation without a value, a star import, or a from-import whose source does
             not itself provide the name (so the module's own `from . import name`, under any
@@ -700,6 +702,9 @@ def hook_import_problems(tree, receipt):
             if module is None:
                 return True
             visiting = visiting | {(module_file, name)}
+            # A module still initialising has bound only what its statements executed so
+            # far bound: an import that reaches back into it sees nothing later.
+            statements = module.body[:executed[module_file]] if module_file in executed else module.body
             def stores(target):
                 # The names a target binds: a plain name, or the names inside an unpacking
                 # target; a name read inside a subscript or attribute target binds nothing.
@@ -712,7 +717,7 @@ def hook_import_problems(tree, receipt):
                 return set()
 
             bound = False
-            for statement in module.body:
+            for statement in statements:
                 if isinstance(statement, (ast.Assign, ast.AugAssign)):
                     targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
                     bound = bound or any(name in stores(target) for target in targets)
@@ -944,7 +949,9 @@ def hook_import_problems(tree, receipt):
             other statement (a compound statement's branches and header expressions, a
             function's defaults, decorators and body, a class's bases and body) resolves where
             the statement stands, speculatively."""
-            for statement in statements:
+            for index, statement in enumerate(statements):
+                if top_level:
+                    executed[relative] = index
                 if isinstance(statement, ast.Expr) and sys_path_mutation(statement.value) is not None:
                     (mutate if top_level else unordered)(relative, statement.value)
                 elif isinstance(statement, ast.ImportFrom) and statement.level > 0:
@@ -1014,8 +1021,10 @@ def hook_import_problems(tree, receipt):
             try:
                 module = module_ast(relative)
                 if module is not None:
+                    executed[relative] = 0
                     run(relative, module.body, top_level=True)
             finally:
+                executed.pop(relative, None)
                 context.pop()
 
         walk(entry, 0)
@@ -2764,6 +2773,35 @@ def selftest():
             "reexport_parent_climb": ({"hooks/a.py": "from pkg.a import x\n", "hooks/pkg/__init__.py": "x = 1\n", "hooks/pkg/a/__init__.py": "from .. import x\n"}, (True, True)),
             "cycle_guard_by_name": ({"hooks/a.py": "from pkg import x\n", "hooks/pkg/__init__.py": "z = 1\nfrom .mod import y as x\n",
                                      "hooks/pkg/mod.py": "from . import z as y\n"}, (True, True)),
+            "comp_later_target_checked": ({"hooks/a.py": 'box = {}\n[1 for _ in [1] for box[__import__("nope")] in [1]]\n'}, (False, False)),
+            "comp_later_filter_checked": ({"hooks/a.py": '[1 for _ in [1] for __ in [1] if __import__("nope")]\n'}, (False, False)),
+            "set_comp_elt_checked": ({"hooks/a.py": '{__import__("nope") for _ in [1]}\n'}, (False, False)),
+            "generator_consumed_checked": ({"hooks/a.py": 'list(__import__("nope") for _ in [1])\n'}, (False, False)),
+            "comp_later_iter_before_elt": ({"hooks/a.py": '[__import__("boot") for _ in [1] for __ in __import__("lib").__dict__]\n',
+                                            "hooks/boot.py": "BOOT", "hooks/g/lib.py": "VALUE = 42\n"}, (False, False)),
+            "comp_target_before_filter": ({"hooks/a.py": 'box = {}\n[1 for box[__import__("boot").__name__] in [1] if __import__("lib")]\n',
+                                           "hooks/boot.py": "BOOT", "hooks/g/lib.py": "VALUE = 42\n"}, (True, True)),
+            "dict_key_before_value": ({"hooks/a.py": '{__import__("boot").__name__: __import__("lib") for _ in [1]}\n',
+                                       "hooks/boot.py": "BOOT", "hooks/g/lib.py": "VALUE = 42\n"}, (True, True)),
+            "dict_value_not_before_key": ({"hooks/a.py": '{__import__("lib").__name__: __import__("boot") for _ in [1]}\n',
+                                           "hooks/boot.py": "BOOT", "hooks/g/lib.py": "VALUE = 42\n"}, (False, False)),
+            "late_binding_partial": ({"hooks/a.py": "from pkg import x\n", "hooks/pkg/__init__.py": "from . import helper\nfrom dep import x\n",
+                                      "hooks/pkg/helper.py": "from pkg import x\n", "hooks/dep.py": "x = 1\n"}, (False, False)),
+            "early_binding_partial": ({"hooks/a.py": "from pkg import x\n", "hooks/pkg/__init__.py": "from dep import x\nfrom . import helper\n",
+                                       "hooks/pkg/helper.py": "from pkg import x\n", "hooks/dep.py": "x = 1\n"}, (True, True)),
+            "late_assignment_partial": ({"hooks/a.py": "import pkg\n", "hooks/pkg/__init__.py": "from . import helper\nx = 1\n",
+                                         "hooks/pkg/helper.py": "from pkg import x\n"}, (False, False)),
+            "comp_later_filters_checked_twice": ({"hooks/a.py": '[1 for _ in [1] for __ in [1] if True if __import__("nope")]\n'}, (False, False)),
+            "comp_later_iter_before_target": ({"hooks/a.py": 'box = {}\n[1 for _ in [1] for box[__import__("lib").__name__] in __import__("boot").__dict__]\n',
+                                               "hooks/boot.py": "BOOT", "hooks/g/lib.py": "VALUE = 42\n"}, (True, True)),
+            "comp_later_filter_before_target": ({"hooks/a.py": 'box = {}\n[1 for _ in [1] for box[__import__("boot").__name__] in [1] if __import__("lib")]\n',
+                                                 "hooks/boot.py": "BOOT", "hooks/g/lib.py": "VALUE = 42\n"}, (True, True)),
+            "comp_generators_in_order": ({"hooks/a.py": '[1 for _ in [1] for a in __import__("boot").__dict__ for b in __import__("lib").__dict__]\n',
+                                          "hooks/boot.py": "BOOT", "hooks/g/lib.py": "VALUE = 42\n"}, (True, True)),
+            "comp_first_filters_in_order": ({"hooks/a.py": '[1 for _ in [1] if __import__("boot") if __import__("lib")]\n',
+                                             "hooks/boot.py": "BOOT", "hooks/g/lib.py": "VALUE = 42\n"}, (True, True)),
+            "comp_later_filters_in_order": ({"hooks/a.py": '[1 for _ in [1] for __ in [1] if __import__("boot") if __import__("lib")]\n',
+                                             "hooks/boot.py": "BOOT", "hooks/g/lib.py": "VALUE = 42\n"}, (True, True)),
             "triple_dirname_root_lib": ({"hooks/a.py": 'import os, sys\nsys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))\nimport lib\n',
                                          "lib.py": "X = 1\n"}, (False, False)),
         }
@@ -3035,6 +3073,31 @@ def selftest():
             and import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes["comp_filter_before_elt"][0], owned=["a.py"])
             == ["hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks"]
             and import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes["comp_elt_after_boot_iterable"][0], owned=["a.py"]) == [])
+        chk("every comprehension part is checked (a later generator's target and filter, a set's element, a consumed "
+            "generator) and each runs in order: the target before the filter, a later iterable before the element, a "
+            "dict's key before its value",
+            all(import_check(["hooks/a.py"], shapes[n][0]) == [
+                    "hooks/a.py imports nope, which is neither standard library nor in the receipt's files under hooks"]
+                for n in ("comp_later_target_checked", "comp_later_filter_checked", "set_comp_elt_checked", "generator_consumed_checked"))
+            and all(import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes[n][0], owned=["a.py"])
+                    == ["hooks/a.py imports lib, which is neither standard library nor in the receipt's files under hooks"]
+                    for n in ("comp_later_iter_before_elt", "dict_value_not_before_key"))
+            and all(import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes[n][0], owned=["a.py"]) == []
+                    for n in ("comp_target_before_filter", "dict_key_before_value")))
+        chk("a module still initialising binds only what it has executed: an import reaching back into it before "
+            "the binding is reported, after it is accepted",
+            import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/pkg/helper.py", "hooks/dep.py"], shapes["late_binding_partial"][0], owned=["a.py"])
+            == ["hooks/pkg/helper.py imports x from pkg, which hooks/pkg/__init__.py neither binds nor holds as a submodule"]
+            and import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/pkg/helper.py", "hooks/dep.py"], shapes["early_binding_partial"][0], owned=["a.py"]) == []
+            and import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/pkg/helper.py"], shapes["late_assignment_partial"][0], owned=["a.py"])
+            == ["hooks/pkg/helper.py imports x from pkg, which hooks/pkg/__init__.py neither binds nor holds as a submodule"])
+        chk("comprehension order, continued: a second filter is checked; a later target runs after its iterable and "
+            "before its filters; generators and filters run in source order with effects kept between them",
+            import_check(["hooks/a.py"], shapes["comp_later_filters_checked_twice"][0])
+            == ["hooks/a.py imports nope, which is neither standard library nor in the receipt's files under hooks"]
+            and all(import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes[n][0], owned=["a.py"]) == []
+                    for n in ("comp_later_iter_before_target", "comp_later_filter_before_target", "comp_generators_in_order",
+                              "comp_first_filters_in_order", "comp_later_filters_in_order")))
         chk("a starred positional argument is reported; a binding source already loaded is read from the cache, not "
             "the path; a decorator's effect precedes the body it decorates",
             import_check(["hooks/a.py"], shapes["starred_positional"][0])
@@ -3211,16 +3274,11 @@ def selftest():
         chk("mutation proof: preferring the module file to the package reports the package case's bad module",
             import_check(["hooks/a.py", "hooks/lib.py", "hooks/lib/__init__.py"], shapes["package_over_module"][0],
                          fn=module_first.hook_import_problems) != [])
-        binds_anywhere = private_copy("            for statement in " + "module.body:\n",
+        binds_anywhere = private_copy("            for statement in " + "statements:\n",
                                       "            for statement in ast.walk(module):\n")
         chk("mutation proof: counting a binding anywhere in the module clears a conditional binding",
             import_check(["hooks/a.py", "hooks/mod.py"], {"hooks/a.py": "from mod import x\n", "hooks/mod.py": "if False:\n    x = 1\n"},
                          owned=["a.py"], fn=binds_anywhere.hook_import_problems) == [])
-        self_import_counts = private_copy('            if source == "stdlib":\n                ' + 'return True\n',
-                                          '            if source == "stdlib" or statement.level > 0:\n                return True\n')
-        chk("mutation proof: a package's own `from . import mod` taken as a binding hides the broken submodule",
-            import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/pkg/mod.py"], shapes["package_self_import_broken"][0],
-                         owned=["a.py"], fn=self_import_counts.hook_import_problems) == [])
         headers_skipped = private_copy("                elif isinstance(value, ast.AST):\n                    scan(relative, " + "value)\n",
                                        "                elif False:\n                    pass\n")
         chk("mutation proof: skipping a statement's header expressions clears the default-argument import",
@@ -3299,11 +3357,6 @@ def selftest():
         chk("mutation proof: one snapshot for every branch lets a false branch's boot serve the else branch",
             import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes["else_after_false_boot"][0], owned=["a.py"],
                          fn=one_snapshot.hook_import_problems) == [])
-        alias_counts = private_copy("                            bound = bound or import_provides(module_file, statement, " + "alias.name, visiting)\n",
-                                    "                            bound = bound or alias.asname is not None or import_provides(module_file, statement, alias.name, visiting)\n")
-        chk("mutation proof: the identity alias taken as a binding hides the broken submodule",
-            import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/pkg/sub.py"], shapes["self_import_alias"][0], owned=["a.py"],
-                         fn=alias_counts.hook_import_problems) == [])
         reads_bind = private_copy("                if isinstance(target, ast.Starred):\n                    return stores(target.value)\n"
                                   "                return " + "set()\n",
                                   "                if isinstance(target, ast.Starred):\n                    return stores(target.value)\n"
@@ -3390,6 +3443,51 @@ def selftest():
             and import_check(["hooks/a.py"], shapes["comp_target_checked"][0], fn=comp_target_unchecked.hook_import_problems) == []
             and import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes["comp_filter_before_elt"][0], owned=["a.py"],
                              fn=comp_elt_first.hook_import_problems) == [])
+        later_generators_unchecked = private_copy("                for generator in node.generators[1:]:\n                    later += [generator.iter, generator.target] + " + "list(generator.ifs)\n",
+                                                 "                for generator in node.generators[1:]:\n                    pass\n")
+        later_target_unchecked = private_copy("                    later += [generator.iter, generator.target] + " + "list(generator.ifs)\n",
+                                              "                    later += [generator.iter] + list(generator.ifs)\n")
+        key_after_value = private_copy('                later += [getattr(node, f) for f in ("elt", "key", ' + '"value") if hasattr(node, f)]\n',
+                                       '                later += [getattr(node, f) for f in ("elt", "value", "key") if hasattr(node, f)]\n')
+        target_after_filter = private_copy("                later = [node.generators[0].target] + " + "list(node.generators[0].ifs)\n",
+                                           "                later = list(node.generators[0].ifs) + [node.generators[0].target]\n")
+        chk("mutation proofs: skipping later generators, a later generator's target, the key-before-value order or the "
+            "target-before-filter order each changes a comprehension verdict",
+            import_check(["hooks/a.py"], shapes["comp_later_filter_checked"][0], fn=later_generators_unchecked.hook_import_problems) == []
+            and import_check(["hooks/a.py"], shapes["comp_later_target_checked"][0], fn=later_target_unchecked.hook_import_problems) == []
+            and import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes["dict_key_before_value"][0], owned=["a.py"],
+                             fn=key_after_value.hook_import_problems) != []
+            and import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes["comp_target_before_filter"][0], owned=["a.py"],
+                             fn=target_after_filter.hook_import_problems) != [])
+        whole_module_binds = private_copy("            statements = module.body[:executed[module_file]] if module_file in " + "executed else module.body\n",
+                                          "            statements = module.body\n")
+        chk("mutation proof: a binding lookup blind to execution position clears the import that reaches back too early",
+            import_check(["hooks/a.py", "hooks/pkg/__init__.py", "hooks/pkg/helper.py", "hooks/dep.py"], shapes["late_binding_partial"][0],
+                         owned=["a.py"], fn=whole_module_binds.hook_import_problems) == [])
+        later_filters_omitted = private_copy("                    later += [generator.iter, generator.target] + " + "list(generator.ifs)\n",
+                                             "                    later += [generator.iter, generator.target]\n")
+        later_target_before_iter = private_copy("                    later += [generator.iter, " + "generator.target] + list(generator.ifs)\n",
+                                                "                    later += [generator.target, generator.iter] + list(generator.ifs)\n")
+        later_filters_before_target = private_copy("                    later += [generator.iter, generator.target] + list(" + "generator.ifs)\n",
+                                                   "                    later += [generator.iter] + list(generator.ifs) + [generator.target]\n")
+        generators_reversed = private_copy("                for generator in " + "node.generators[1:]:\n", "                for generator in reversed(node.generators[1:]):\n")
+        filters_reversed = private_copy("                later = [node.generators[0].target] + list(" + "node.generators[0].ifs)\n",
+                                        "                later = [node.generators[0].target] + list(reversed(node.generators[0].ifs))\n")
+        parts_isolated = private_copy("                speculative(lambda: [scan(relative, part) for part in " + "later])\n",
+                                      "                for part in later:\n                    speculative(lambda part=part: scan(relative, part))\n")
+        chk("mutation proofs: each comprehension ordering rule has a shape it decides (later filters omitted, target "
+            "before iterable, filters before target, generators reversed, filters reversed, parts isolated)",
+            import_check(["hooks/a.py"], shapes["comp_later_filter_checked"][0], fn=later_filters_omitted.hook_import_problems) == []
+            and import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes["comp_later_iter_before_target"][0], owned=["a.py"],
+                             fn=later_target_before_iter.hook_import_problems) != []
+            and import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes["comp_later_filter_before_target"][0], owned=["a.py"],
+                             fn=later_filters_before_target.hook_import_problems) != []
+            and import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes["comp_generators_in_order"][0], owned=["a.py"],
+                             fn=generators_reversed.hook_import_problems) != []
+            and import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes["comp_first_filters_in_order"][0], owned=["a.py"],
+                             fn=filters_reversed.hook_import_problems) != []
+            and import_check(["hooks/a.py", "hooks/boot.py", "hooks/g/lib.py"], shapes["comp_first_filters_in_order"][0], owned=["a.py"],
+                             fn=parts_isolated.hook_import_problems) != [])
         first_operand_speculative = private_copy("                scan(relative, " + "node.values[0])\n", "                speculative(lambda: scan(relative, node.values[0]))\n")
         first_iterable_speculative = private_copy("                scan(relative, " + "node.generators[0].iter)\n", "                speculative(lambda: scan(relative, node.generators[0].iter))\n")
         lambda_args_speculative = private_copy("                scan(relative, " + "node.args)\n", "                speculative(lambda: scan(relative, node.args))\n")

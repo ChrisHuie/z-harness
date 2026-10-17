@@ -152,7 +152,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 419
+SELFTEST_FLOOR = 427
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -182,7 +182,7 @@ SELFTEST_SUITES = [
     ("verify-review-publication",
      ["tools/verify-review-publication.py", "--selftest"], 94),
     ("run-skill-evals", ["tools/run-skill-evals.py", "--selftest"], 53),
-    ("install-claude", ["tools/install-claude.py", "--selftest"], 294),
+    ("install-claude", ["tools/install-claude.py", "--selftest"], 298),
     ("render-packages", ["tools/render-packages.py", "--selftest"], 192),
     ("ci-gate", ["tools/ci-gate.py", "--selftest"], 345),
     ("write-mutation-receipt",
@@ -275,7 +275,7 @@ SELFTEST_TIMEOUTS = {
     "ci-gate": 120,
     "fuzz-judge-diff": 25,
     # Stages and activates several temporary trees, runs three reviewer reproductions as
-    # subprocesses and 103 fixture hooks in fresh interpreters; measured 21.1s at 294 proofs.
+    # subprocesses and 120 fixture hooks in fresh interpreters; measured 23.3s at 298 proofs.
     "install-claude": 60,
 }
 DEFAULT_SELFTEST_TIMEOUT = 15
@@ -6111,10 +6111,23 @@ def selftest():
                                for block in ("# Heading", "---", "<div>", "<!-- c -->"))
                    and claims_in("- para\n```\n```\n    ```\n  " + fence_claim) == fence_base + 1
                    and claims_in("- para\nlazy\n    ```\n  " + fence_claim) == fence_base)
+        expect_red("C12 ends an item on a tilde fence and on an HTML block of the first six kinds, but not on an "
+                   "inline backtick run or a tag standing alone, which continue the item's paragraph",
+                   lambda: claims_in("- para\n~~~\n~~~\n    ```\n  " + fence_claim) == fence_base + 1
+                   and all(claims_in("- para\n" + block + "\n    ```\n  " + fence_claim) == fence_base + 1
+                           for block in ("<pre></pre>", "<script></script>", "<?x?>", "<!X>", "<![CDATA[]]>", "<!-- c -->"))
+                   and claims_in("- para\n<div>\n\n    ```\n  " + fence_claim) == fence_base + 1
+                   and claims_in("- para\n```a```\n    ```\n  " + fence_claim) == fence_base
+                   and claims_in("- para\n<custom>\n    ```\n  " + fence_claim) == fence_base)
         expect_red("C12 opens no paragraph after indented code, so a tag standing alone after it starts a block",
                    lambda: claims_in("    code\n<custom>\n```\n</custom>\n\n" + fence_claim) == fence_base + 1
                    and claims_in("\t# H\n<custom>\n```\n</custom>\n\n" + fence_claim) == fence_base + 1
                    and claims_in("para\n    continued\n<custom>\n```\n" + fence_claim) == fence_base)
+        expect_red("C12 reads indented code only from four columns past its container: three spaces at the top "
+                   "level, or four columns from the page but two from a list item, open a paragraph",
+                   lambda: claims_in("   para\n<custom>\n```\n" + fence_claim) == fence_base
+                   and claims_in("- item\n\n    para\n  <custom>\n  ```\n  " + fence_claim) == fence_base
+                   and claims_in("- item\n\n      code\n  <custom>\n  ```\n  </custom>\n\n  " + fence_claim) == fence_base + 1)
         expect_red("C12 reads a fence opener inside an item up to three columns past the item's offset",
                    lambda: claims_in("- item\n     ```\n     " + fence_claim) == fence_base
                    and claims_in("- item\n      ```\n     " + fence_claim) == fence_base + 1)
@@ -7033,6 +7046,39 @@ def selftest():
         expect_red("mutation: a lazy exemption blind to interrupting blocks keeps the item open past a heading "
                    "(the interruption proof goes red)",
                    lambda: claims_in("- para\n# Heading\n    ```\n  " + fence_claim, lazy_ignores_interrupts) == fence_base)
+        tilde_not_interrupt = private_copy('        top_run = re.match(r"`{3,}|' + '~{3,}", top_stripped)\n',
+                                           '        top_run = re.match(r"`{3,}", top_stripped)\n')
+        expect_red("mutation: a tilde fence that does not interrupt keeps the item open and hides the claim "
+                   "(the tilde-interruption proof goes red)",
+                   lambda: claims_in("- para\n~~~\n~~~\n    ```\n  " + fence_claim, tilde_not_interrupt) == fence_base)
+        inline_run_interrupts = private_copy('                          or (top_run and not (top_run.group()[0] == "`" and "`" in ' + 'top_stripped[top_run.end():]))\n',
+                                             '                          or bool(top_run)\n')
+        expect_red("mutation: an inline backtick run read as an interruption ends the item and exposes the claim "
+                   "(the inline-run proof goes red)",
+                   lambda: claims_in("- para\n```a```\n    ```\n  " + fence_claim, inline_run_interrupts) == fence_base + 1)
+        tag_alone_interrupts = private_copy('                          or (top_stripped.startswith("<") and html_block_end(top_stripped, ' + 'True) is not None))\n',
+                                            '                          or (top_stripped.startswith("<") and html_block_end(top_stripped, False) is not None))\n')
+        expect_red("mutation: a tag standing alone read as an interruption ends the item and exposes the claim "
+                   "(the tag-alone proof goes red)",
+                   lambda: claims_in("- para\n<custom>\n    ```\n  " + fence_claim, tag_alone_interrupts) == fence_base + 1)
+        html_not_interrupt = private_copy('                          or (top_stripped.startswith("<") and html_block_end(top_stripped, True) is not ' + 'None))\n',
+                                          '                          )\n')
+        expect_red("mutation: an HTML block that does not interrupt keeps the item open and hides the claim "
+                   "(the HTML-interruption proof goes red)",
+                   lambda: claims_in("- para\n<!-- c -->\n    ```\n  " + fence_claim, html_not_interrupt) == fence_base)
+        code_threshold_five = private_copy("        indented_code = line.strip() and not paragraph_open and indent - (item_offset or 0) >= " + "4\n",
+                                           "        indented_code = line.strip() and not paragraph_open and indent - (item_offset or 0) >= 5\n")
+        expect_red("mutation: indented code recognised only from five columns opens a paragraph at four and hides the "
+                   "claim (the indented-code proof goes red)",
+                   lambda: claims_in("    code\n<custom>\n```\n</custom>\n\n" + fence_claim, code_threshold_five) == fence_base)
+        code_threshold_three = private_copy("        indented_code = line.strip() and not paragraph_open and indent - (item_offset or 0) " + ">= 4\n",
+                                            "        indented_code = line.strip() and not paragraph_open and indent - (item_offset or 0) >= 3\n")
+        code_ignores_container = private_copy("        indented_code = line.strip() and not paragraph_open and indent - " + "(item_offset or 0) >= 4\n",
+                                              "        indented_code = line.strip() and not paragraph_open and indent >= 4\n")
+        expect_red("mutation: indented code from three columns, or measured from the page inside an item, closes a "
+                   "paragraph that is open and exposes the claim (the boundary proof goes red)",
+                   lambda: claims_in("   para\n<custom>\n```\n" + fence_claim, code_threshold_three) == fence_base + 1
+                   and claims_in("- item\n\n    para\n  <custom>\n  ```\n  " + fence_claim, code_ignores_container) == fence_base + 1)
         code_opens_paragraph = private_copy("        indented_code = line.strip() and not paragraph_open and " + "indent - (item_offset or 0) >= 4\n",
                                             "        indented_code = False\n")
         expect_red("mutation: indented code opening a paragraph hides the claim after the next HTML block "

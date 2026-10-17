@@ -51,6 +51,12 @@ Runs from either clone (repo root auto-detected from this file's location). Chec
   C15 hook envelope fixtures decode: every Codex envelope under hooks/fixtures_codex/
       carries every field its event's input schema requires, host paths are scrubbed,
       the synthetic fixture is labeled, and the Claude Stop fixture decodes
+  C16 banned-method tripwire: the vocabulary of the method AGENTS.md bans under
+      Verification mechanics -- its name, machinery, tools and removed identifiers --
+      appears in no tracked file outside the exemptions declared beside C16_PATTERNS,
+      each of which must match exactly once and span its declared lines; zero inputs
+      and an undeclared exemption marker are failures; an installed surface is stated
+      out of scope and not read
 
 Exit codes: 0 all checks pass · 1 one or more checks failed · 2 usage error or
 zero inputs (an empty scan set is an error, never a clean verdict).
@@ -87,7 +93,7 @@ import tempfile
 import time
 import tokenize
 
-VERSION = "3.5.0"
+VERSION = "3.6.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOLS_DIR = os.path.join(ROOT, "tools")
 if TOOLS_DIR not in sys.path:
@@ -151,7 +157,7 @@ C11_MATCH_DECLARATION = (
 # The aggregated suites carry per-suite floors; this is the same ratchet for the meta-suite
 # that proves each check can go red. It cannot live in SELFTEST_SUITES without recursing, so
 # the count is asserted at the end of its own run. Raise it in the commit that adds proofs.
-SELFTEST_FLOOR = 387
+SELFTEST_FLOOR = 405
 # This pin gives the current package a reviewable release identity. Update it with the
 # manifest when the next release is deliberately cut; C9 rejects a one-sided edit.
 CURRENT_PLUGIN_VERSION = "0.3.3"
@@ -328,6 +334,7 @@ PRODUCTION_CHECKS = (
     ("C13", "c13_eval_coverage"),
     ("C14", "c14_budget_ceilings"),
     ("C15", "c15_envelope_fixtures"),
+    ("C16", "c16_banned_method"),
 )
 
 # C2: basenames shared verbatim across skills. A same-basename file NOT listed in
@@ -431,6 +438,61 @@ SCAN_EXCLUSIONS = (
     "*.jsonl",                  # recorded transcript fixtures, not authored prose
     "**/__pycache__/**",
 )
+
+# C16-EXEMPT-BEGIN: patterns
+# C16: AGENTS.md (Verification mechanics) bans mutation testing. Each pattern names the
+# testing sense only -- the method, its machinery, its vocabulary, its tools and the
+# identifiers of the machinery this tree removed -- and none of the other senses this tree
+# uses: shell identity, alias, option or PATH mutation, GitHub and GraphQL mutations,
+# sys.path mutation, a file or state change, a value that survives parsing, a killed or
+# unkillable process, survivor bias. Matched case-insensitively, line by line, over every
+# tracked file outside the declared exemptions; it is lexical, so a paraphrase is out of
+# scope.
+C16_PATTERNS = (
+    ("the method", r"(?<![\w-])mutation[- ]?test\w*"),
+    ("its machinery", r"(?<![\w-])mutation[- ](?:scor\w*|coverage|operators?|sweeps?|plans?|"
+                      r"receipts?|polic(?:y|ies)|proofs?|analysis|frameworks?|engines?|"
+                      r"kills?|sites?|workers?|agents?|survivors?|campaigns?|generators?|"
+                      r"budgets?|outcomes?|evidence)\b"),
+    ("a mutant", r"(?<![\w-])mutants?(?![\w-])"),
+    ("a survivor", r"(?<![\w-])survivors?(?![\w-])(?!\s+bias)"),
+    ("a kill rate", r"(?<![\w-])kill[- ]rates?(?![\w-])"),
+    ("a mutate-each instruction", r"(?<![\w-])(?:re-)?mutate (?:each|every) |(?<![\w-])re-mutat\w*"),
+    ("a mutation-proof label", r"(?<![\w-])mutation:\s+(?:without|with|a|an|the|any|\w+ing)\b|"
+                               r"(?:call-?site|argv|boundary|composition|classification|scanner|"
+                               r"table|limit|traversal|recursion|reducer|checkpoint|deadline|"
+                               r"fallback)\s+mutation\s+(?:loses|drops|bypasses|transfers|exposes|"
+                               r"accepts|skips|parses|misclassifies|lets|leaks|inherits|survives|"
+                               r"fails|turns)\b"),
+    ("a mutation tool", r"(?<![\w./-])(?:mutmut|cosmic[-_]ray|mutatest|mutpy|mutahunter|"
+                        r"stryker(?:-mutator)?|pitest|cargo[- ]mutants|go-mutesting|"
+                        r"universalmutator|mull-(?:runner|cxx)|dextool mutate)(?![\w-])"),
+    ("the removed machinery", r"write-mutation-receipt|enumerate_survivors|mutation-policy\.json|"
+                              r"mutation-proof\.yml|allowed_survivors|count_only_kills|"
+                              r"unswept_guards|EXPECTED_MUTATION_\w+|MUTATION_PLAN_FLOOR|"
+                              r"MUTATION_PROBES"),
+    ("a removed identifier", r"(?<![A-Za-z0-9])_?mutation_(?:plan|polic|sweep|site|evidence|"
+                             r"generator|score|receipt|kill|survivor|writer)\w*|"
+                             r"(?<![A-Za-z0-9])mutant_\w+|\w+_mutator\b"),
+)
+# Reviewed exemptions. Each must match exactly once -- a file that is tracked, one BEGIN and
+# one END marker line, an anchor that occurs once -- and must span exactly the number of
+# lines declared beside it, so a moved or doubled anchor, a moved END marker or a paragraph
+# that absorbed the next one fails loudly instead of silently widening the hole. A marker
+# line no entry declares is a failure too. A blank or whitespace-only line ends a paragraph.
+C16_EXEMPT_FILES = {
+    "hooks/guards/mutation_testing_guard.py": "the Bash guard that denies these tools names them",
+    "contracts/goldens/guard-decisions.json": "the reviewed verdicts of that guard's fixture commands",
+}
+C16_EXEMPT_REGIONS = {      # (file, name) -> (reason, lines from BEGIN to END inclusive)
+    ("hooks/harness_check.py", "patterns"): ("this pattern and exemption table", 54),
+    ("hooks/harness_check.py", "selftest"): ("C16's planted-input proofs", 184),
+}
+C16_EXEMPT_PARAGRAPHS = {   # (file, anchor) -> (reason, lines in the paragraph)
+    ("AGENTS.md", "Mutation testing is banned in every project and runtime"): ("the ban itself", 12),
+}
+C16_MARKER = re.compile(r"^[ \t]*# C16-EXEMPT-(BEGIN|END): (\S+)[ \t]*$", re.M)
+# C16-EXEMPT-END: patterns
 
 ROUTING_SKILLS = ["git-workflow", "pr-review-method", "testing-ci", "agent-dispatch",
                   "ground-claims", "prebid-adcp", "system-design", "outbound-drafts",
@@ -2954,6 +3016,115 @@ class Run:
                     f"{decoded} of {len(CODEX_FIXTURES)} Codex envelope fixtures decode against "
                     f"their event's required-field list ({len(present)} json file(s) present)")
 
+    # ---- C16 ---------------------------------------------------------------
+    def c16_banned_method(self, scan_floor=None, exemptions=None):
+        """The method AGENTS.md bans stays out of every tracked file but its exemptions.
+
+        The scan set is every tracked file (`git ls-files`, without C6's SCAN_EXCLUSIONS),
+        read whole, with three exemption kinds declared beside the patterns. Each exemption
+        must match exactly once and span exactly its declared lines. Zero inputs, a scan set
+        below the floor, an exemption that does not match or whose span moved, and an
+        undeclared exemption marker are failures, never a clean verdict. An installed
+        surface is not scanned: it holds this checkout's shipped copies beside host files
+        and none of the exempt files, so C16 states that and reads nothing there.
+        `exemptions` replaces the three tables for planted fixture trees.
+        """
+        files, regions, paragraphs = exemptions or (
+            C16_EXEMPT_FILES, C16_EXEMPT_REGIONS, C16_EXEMPT_PARAGRAPHS)
+        surface, paths, error = package_paths(self.root)
+        if error:
+            self.result("C16", False, f"cannot enumerate scan set: {error}")
+            return
+        if surface != "source":
+            self.counters["C16"] = {"files": 0, "hits": [], "surface": surface}
+            self.result("C16", True, f"C16 reads a source checkout only; {self.root} is an "
+                                     f"{surface} surface and was not scanned")
+            return
+        problems, texts, exempt_files = [], {}, 0
+        for rel in paths:
+            absolute = os.path.join(self.root, rel)
+            if os.path.islink(absolute) or not os.path.isfile(absolute):
+                continue
+            if rel in files:
+                exempt_files += 1
+                continue
+            texts[rel] = open(absolute, encoding="utf-8", errors="replace").read()
+        for rel in sorted(set(files) - set(paths)):
+            problems.append(f"exempt file {rel} is not in the scan set")
+        for rel, text in sorted(texts.items()):
+            for match in C16_MARKER.finditer(text):
+                if (rel, match.group(2)) not in regions:
+                    problems.append(f"{rel}: undeclared exemption marker {match.group(0).strip()!r}")
+        exempt_regions = 0
+        for (rel, name), (_reason, span) in sorted(regions.items()):
+            text = texts.get(rel)
+            lines = text.split("\n") if text is not None else []
+            begins = [i for i, line in enumerate(lines)
+                      if line.strip() == f"# C16-EXEMPT-BEGIN: {name}"]
+            ends = [i for i, line in enumerate(lines)
+                    if line.strip() == f"# C16-EXEMPT-END: {name}"]
+            if len(begins) != 1 or len(ends) != 1 or begins[0] > ends[0]:
+                problems.append(f"exempt region {rel}:{name} needs one BEGIN before one END "
+                                f"(found {len(begins)} and {len(ends)})")
+                continue
+            if ends[0] - begins[0] + 1 != span:
+                problems.append(f"exempt region {rel}:{name} spans {ends[0] - begins[0] + 1} "
+                                f"line(s), declared {span}")
+                continue
+            for i in range(begins[0], ends[0] + 1):
+                lines[i] = ""
+            texts[rel] = "\n".join(lines)
+            exempt_regions += 1
+        exempt_paragraphs = 0
+        for (rel, anchor), (_reason, span) in sorted(paragraphs.items()):
+            text = texts.get(rel)
+            count = 0 if text is None else text.count(anchor)
+            if count != 1:
+                problems.append(f"exempt paragraph anchor in {rel} occurs {count} time(s), not once")
+                continue
+            lines = text.split("\n")
+            start = end = text[:text.index(anchor)].count("\n")
+            while start > 0 and lines[start - 1].strip():
+                start -= 1
+            while end + 1 < len(lines) and lines[end + 1].strip():
+                end += 1
+            if end - start + 1 != span:
+                problems.append(f"exempt paragraph in {rel} spans {end - start + 1} line(s), "
+                                f"declared {span}")
+                continue
+            for i in range(start, end + 1):
+                lines[i] = ""
+            texts[rel] = "\n".join(lines)
+            exempt_paragraphs += 1
+        floor = C6_SCAN_FLOOR if scan_floor is None else scan_floor
+        hits = []
+        compiled = [(label, re.compile(pattern, re.I)) for label, pattern in C16_PATTERNS]
+        for rel, text in sorted(texts.items()):
+            for number, line in enumerate(text.split("\n"), 1):
+                for label, pattern in compiled:
+                    if pattern.search(line):
+                        hits.append((rel, number, label))
+        self.counters["C16"] = {"files": len(texts), "hits": hits, "exempt_files": exempt_files,
+                                "exempt_regions": exempt_regions,
+                                "exempt_paragraphs": exempt_paragraphs, "problems": problems,
+                                "surface": surface}
+        if not texts:
+            self.result("C16", False, "cannot enforce: zero files in the scan set")
+            return
+        if len(texts) < floor:
+            self.result("C16", False, f"scan set shrank to {len(texts)}, floor {floor}")
+            return
+        for problem in problems:
+            self.result("C16", False, f"cannot enforce an exemption: {problem}")
+        for label, _pattern in compiled:
+            found = [(rel, number) for rel, number, hit in hits if hit == label]
+            self.result("C16", not found,
+                        f"banned-method pattern {label!r}: {len(found)} hit(s)"
+                        + (f" e.g. {found[0][0]}:{found[0][1]}" if found else ""))
+        self.result("C16", not hits and not problems,
+                    f"banned-method tripwire over {len(texts)} {surface} files at {self.root} "
+                    f"(git ls-files; {exempt_files} exempt file(s), {exempt_regions} exempt "
+                    f"region(s), {exempt_paragraphs} exempt paragraph(s)): {len(hits)} hit(s)")
 
     def run(self):
         print(f"harness_check {VERSION}  root={self.root}  mode={'ci' if self.ci else 'local'}")
@@ -3625,8 +3796,9 @@ def selftest():
             ("C10", "c10_delivery_contract"), ("C11", "c11_claim_vocabulary"),
             ("C12", "c12_claim_binding"), ("C13", "c13_eval_coverage"),
             ("C14", "c14_budget_ceilings"), ("C15", "c15_envelope_fixtures"),
+            ("C16", "c16_banned_method"),
         )
-        expect_red("production check registry is exact through C15",
+        expect_red("production check registry is exact through C16",
                    lambda: PRODUCTION_CHECKS == expected_registry)
         method_names = [method_name for _check_id, method_name in expected_registry]
         for method_name in method_names:
@@ -6879,6 +7051,191 @@ def selftest():
         else:
             expect_red("the top-level suite run launched each of this module's four reproductions once",
                        lambda: sorted(launched) == [4294811805, 4294811820, 4294811833, 4298561325])
+
+        # C16-EXEMPT-BEGIN: selftest
+        # ---- C16: the banned method stays out of every tracked file ----------------------------
+        # Every proof below reads a planted tree through the production entry point, with
+        # planted exemption tables whose spans fit the planted files. The first 24 sense lines
+        # are copied verbatim from this repository's own files, where each uses the word in a
+        # sense the ban does not reach; the last 12 are kept-sense phrasings written for this
+        # proof. The method lines are former lines of this tree.
+        c16_base = {
+            "AGENTS.md": ("Intro.\n\nMutation testing is banned in every project and runtime: no mutant.\n"
+                          "Second line names a mutation sweep.\n\nPlain prose.\n"),
+            "hooks/harness_check.py": ("x = 1\n# C16-EXEMPT-BEGIN: patterns\nmutmut\n"
+                                       "# C16-EXEMPT-END: patterns\n# C16-EXEMPT-BEGIN: selftest\n"
+                                       "fence mutants\n# C16-EXEMPT-END: selftest\n"),
+            "hooks/guards/mutation_testing_guard.py": "TOOLS = ('mutmut', 'stryker')\n",
+            "contracts/goldens/guard-decisions.json": '{"mutmut run": "deny"}\n',
+        }
+        c16_planted = (dict(C16_EXEMPT_FILES),
+                       {key: (reason, 3) for key, (reason, _span) in C16_EXEMPT_REGIONS.items()},
+                       {key: (reason, 2) for key, (reason, _span) in C16_EXEMPT_PARAGRAPHS.items()})
+        c16_roots = []
+
+        def c16_on(files=None, drop=(), floor=1, git=True):
+            root = os.path.join(td, f"banned-method-{len(c16_roots)}")
+            c16_roots.append(root)
+            os.makedirs(root)
+            if git:
+                subprocess.run(["git", "init", "--quiet", root], check=True)
+            planted = dict(c16_base, **(files or {}))
+            for rel in drop:
+                planted.pop(rel)
+            for rel, text in planted.items():
+                path = os.path.join(root, rel)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                open(path, "w", encoding="utf-8").write(text)
+            if planted and git:
+                subprocess.run(["git", "-C", root, "add", "-A"], check=True)
+            run = Run(root, ci=True)
+            with contextlib.redirect_stdout(io.StringIO()):
+                run.c16_banned_method(scan_floor=floor, exemptions=c16_planted)
+            return run
+
+        def c16_failed(run, text):
+            return any(c == "C16" and text in d for c, d in run.failures)
+
+        c16_clean = c16_on()
+        expect_red("C16 control: a planted tree whose only method vocabulary sits in its declared "
+                   "exemptions is green over 2 files, 2 exempt files, 2 regions and 1 paragraph",
+                   lambda: not c16_clean.failures and c16_clean.counters["C16"]["hits"] == []
+                   and (c16_clean.counters["C16"]["files"], c16_clean.counters["C16"]["exempt_files"],
+                        c16_clean.counters["C16"]["exempt_regions"],
+                        c16_clean.counters["C16"]["exempt_paragraphs"]) == (2, 2, 2, 1))
+        c16_senses = (
+            "other outward mutations still require an explicit user instruction aimed at that operation. Local",
+            '    ("GREEN WRAPPER: builtin printf bypasses shell identity mutation",',
+            '        ("ASK EQUALS: a conditional option mutation is not unconditional authority",',
+            "            == [\"hooks/a.py line 4: sys.path mutated outside a top-level call statement; "
+            "the search path cannot be ordered\",",
+            '                "whether a `rev:path` argument survives shell expansion. Run Git "',
+            "# from. Plain `git clean -fd` is safe; ignored files survive it. Never use -x here.",
+            "Personal tooling that **reviews** others' work must never mutate the shared repo or gate",
+            "Answers and notes grounded in code citations; mutates nothing. Any findings are notes for "
+            "the next stance, not edits.",
+            "  kill the process *group*.",
+            '        planted("verification rejects a post-render payload mutation", "claude", touch_payload)',
+            '    ("GREEN ALIAS: helper defined after its caller runs cannot mutate alias state",',
+            "subject followed by a fresh install/session check, not a mutation of old artifact evidence.",
+            "        def c9_after(mutated_hooks=None, mutated_manifest=None, mutated_marketplace=None):",
+            "        with identity_mutation_scope(scan_command, _deadline), \\",
+            '    ("GREEN SENSE: Mutagen file sync", "mutagen sync list", "allow"),',
+            "    (\"GREEN SENSE: a GraphQL mutation\", \"gh api graphql -f query='mutation { addStar(input: "
+            "{starrableId: \\\"x\\\"}) { clientMutationId } }'\", \"allow\"),",
+            "Do not mutate a shared machine's policy merely to run an experiment.",
+            "- Intent changes things (write, fix, refactor, generate artifacts that persist — code, files, "
+            "configs) → implement. When a verb matches both this and the transform rule above, the "
+            "state-mutation test decides.",
+            "| 13 | Volatile tokens in stable blocks | timestamps/run-values kill prefix caching | ✅ regex |",
+            "- Seeded-defect corpus: ≥1 fixture per row of the current catalog (concepts M9 — the corpus "
+            "tracks catalog growth).",
+            "  idempotency rule and survived three rounds because it was grounded in an SDK error code: two",
+            '    "Does not run git push or another outward mutation."',
+            "A successful write proves mutation, not prior observation.",
+            '        ("an outer dash break survives a following inline-code group",',
+        ) + (
+            "the addStar mutation fails when the token lacks scope",
+            "a GraphQL mutation runs only after the read query",
+            "the gh api graphql mutation tool needs -f query=",
+            "    ('ASK ALIAS: an alias mutation leaks out of the subshell', 'alias git=x; (git status)', 'ask'),",
+            "a sys.path mutation leaks into the importer's later imports",
+            "an option mutation inherits into eval",
+            "mutation: addLabelsToLabelable",
+            "beware survivor bias when sampling only merged PRs",
+            "an unkillable D-state child holds the pipe open",
+            "a killable background job",
+            "the setopt mutation turns EQUALS off for the rest of the source",
+            "PATH mutation exposes a different git",
+        )
+        c16_sense_run = c16_on({"notes/senses.md": "\n".join(c16_senses) + "\n"})
+        expect_red(f"C16 finds nothing in {len(c16_senses)} lines that use the word in a sense the ban "
+                   "does not reach",
+                   lambda: not c16_sense_run.failures and c16_sense_run.counters["C16"]["hits"] == [])
+        c16_method = (
+            ("the method", "proves anything — mutation-testing a call site, a suite that passed suspiciously,"),
+            ("its machinery", "image contents behind those labels. No workflow runs the mutation sweep."),
+            ("a mutant", "# --- fence mutants, each failing one shape proof above by name; search strings are"),
+            ("a survivor", "measurement exits 0 and reports survivors in JSON rather than treating coverage debt"),
+            ("a kill rate", "the guard reached a 92% kill rate on that head"),
+            ("a mutate-each instruction", "  same case neuters it. Re-mutate after any change to the guarded path."),
+            ("a mutation-proof label", '    print("  %-4s EQUALS-state callsite mutation loses noequals uncertainty"'),
+            ("a mutation tool", "run `mutmut run` on the parser before review"),
+            ("the removed machinery", "python3 instruments/enumerate_survivors.py --selftest"),
+            ("a removed identifier", "def mutation_plan_error(plan=None, exclusions=None, policy=None) -> str:"),
+        )
+        c16_method_run = c16_on({"notes/method.md": "\n".join(line for _label, line in c16_method) + "\n"})
+        expect_red("C16 reports each method line by file, line and the one pattern it matches",
+                   lambda: c16_method_run.counters["C16"]["hits"]
+                   == [("notes/method.md", index, label)
+                       for index, (label, _line) in enumerate(c16_method, 1)]
+                   and sorted(label for label, _pattern in C16_PATTERNS)
+                   == sorted(label for label, _line in c16_method)
+                   and c16_failed(c16_method_run, "10 hit(s)"))
+        c16_copy = c16_on({"notes/copy.py": "TOOLS = ('mutmut', 'stryker')\n"})
+        expect_red("C16 exempts a declared file by path only: the same bytes elsewhere are reported",
+                   lambda: c16_copy.counters["C16"]["hits"] == [("notes/copy.py", 1, "a mutation tool")])
+        c16_outside = c16_on({"hooks/harness_check.py": c16_base["hooks/harness_check.py"] + "mutmut run\n"})
+        expect_red("C16 exempts a marked region only between its markers",
+                   lambda: c16_outside.counters["C16"]["hits"]
+                   == [("hooks/harness_check.py", 8, "a mutation tool")])
+        c16_open = c16_on({"hooks/harness_check.py": c16_base["hooks/harness_check.py"].replace(
+            "# C16-EXEMPT-END: selftest\n", "")})
+        expect_red("C16 goes red on a declared region whose END marker is missing",
+                   lambda: c16_failed(c16_open, "exempt region hooks/harness_check.py:selftest needs one "
+                                                "BEGIN before one END (found 1 and 0)"))
+        c16_moved = c16_on({"hooks/harness_check.py": c16_base["hooks/harness_check.py"].replace(
+            "mutmut\n# C16-EXEMPT-END: patterns\n",
+            "mutmut\nmutmut run --paths-to-mutate src\n# C16-EXEMPT-END: patterns\n")})
+        expect_red("C16 goes red when a region's END marker moves down over another line",
+                   lambda: c16_failed(c16_moved, "exempt region hooks/harness_check.py:patterns spans 4 "
+                                                 "line(s), declared 3")
+                   and ("hooks/harness_check.py", 4, "a mutation tool") in c16_moved.counters["C16"]["hits"])
+        c16_rogue = c16_on({"README.md": "# C16-EXEMPT-BEGIN: other\nmutmut\n# C16-EXEMPT-END: other\n"})
+        expect_red("C16 goes red on an exemption marker no entry declares, and still reads the region",
+                   lambda: c16_failed(c16_rogue, "README.md: undeclared exemption marker")
+                   and ("README.md", 2, "a mutation tool") in c16_rogue.counters["C16"]["hits"])
+        c16_after = c16_on({"AGENTS.md": c16_base["AGENTS.md"] + "\nRun mutmut on it.\n"})
+        expect_red("C16 exempts only the paragraph holding the ban's anchor",
+                   lambda: c16_after.counters["C16"]["hits"] == [("AGENTS.md", 8, "a mutation tool")])
+        c16_joined = c16_on({"AGENTS.md": c16_base["AGENTS.md"].replace(
+            "mutation sweep.\n\nPlain prose.\n", "mutation sweep.\nRun mutmut on the parser.\n")})
+        expect_red("C16 goes red when the ban's paragraph absorbs the next one through a removed blank line",
+                   lambda: c16_failed(c16_joined, "exempt paragraph in AGENTS.md spans 3 line(s), declared 2"))
+        c16_spaced = c16_on({"AGENTS.md": c16_base["AGENTS.md"].replace(
+            "mutation sweep.\n\nPlain prose.\n", "mutation sweep.\n \nRun mutmut on the parser.\n")})
+        expect_red("C16 ends the ban's paragraph at a whitespace-only line and reads the next one",
+                   lambda: not c16_spaced.counters["C16"]["problems"]
+                   and c16_spaced.counters["C16"]["hits"] == [("AGENTS.md", 6, "a mutation tool")])
+        c16_twice = c16_on({"AGENTS.md": c16_base["AGENTS.md"] + "\nMutation testing is banned in every "
+                                                                 "project and runtime: again.\n"})
+        expect_red("C16 goes red when the ban's anchor occurs twice",
+                   lambda: c16_failed(c16_twice, "exempt paragraph anchor in AGENTS.md occurs 2 time(s), not once"))
+        c16_unanchored = c16_on({"AGENTS.md": "Intro.\n"})
+        expect_red("C16 goes red when the ban's anchor is gone",
+                   lambda: c16_failed(c16_unanchored, "exempt paragraph anchor in AGENTS.md occurs 0 time(s), not once"))
+        c16_missing = c16_on(drop=("contracts/goldens/guard-decisions.json",))
+        expect_red("C16 goes red when a declared exempt file is not tracked",
+                   lambda: c16_failed(c16_missing, "exempt file contracts/goldens/guard-decisions.json is not in "
+                                                   "the scan set"))
+        c16_empty = c16_on(drop=tuple(c16_base))
+        expect_red("C16 treats zero files as an error, not a clean verdict",
+                   lambda: c16_failed(c16_empty, "cannot enforce: zero files in the scan set")
+                   and len(c16_empty.failures) == 1)
+        c16_small = c16_on(floor=50)
+        expect_red("C16 goes red when the scan set falls below its floor",
+                   lambda: c16_failed(c16_small, "scan set shrank to 2, floor 50"))
+        c16_installed = c16_on({"notes/run.md": "mutmut run\n"}, git=False)
+        expect_red("C16 states an installed surface out of scope in one verdict and reads none of it",
+                   lambda: c16_installed.checks == 1 and not c16_installed.failures
+                   and c16_installed.counters["C16"] == {"files": 0, "hits": [], "surface": "installed"})
+        c16_real = Run(ROOT, ci=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            c16_real.c16_banned_method()
+        expect_red("C16 on this tree is green with no hit over at least the C6 floor of tracked files",
+                   lambda: not c16_real.failures and c16_real.counters["C16"]["hits"] == []
+                   and c16_real.counters["C16"]["files"] >= C6_SCAN_FLOOR)
+        # C16-EXEMPT-END: selftest
 
 
     # +1 for this assertion's own increment, so SELFTEST_FLOOR is the number the receipt

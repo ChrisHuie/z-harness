@@ -120,7 +120,7 @@ same shared policy at both user and project scope.
 | `hooks/announced_work_guard.py` | Claude | Stop hook that blocks a final message which announces work that has not begun; no claimed Codex equivalent |
 | `hooks/codex_session_start.py` | Codex | injects mandatory shared policy, resolved adapter commands, and optional host-local context |
 | `$CODEX_HOME/z-harness/AGENTS.local.md` | local Codex host | optional non-packaged machine instructions appended by the session adapter |
-| `hooks/harness_check.py` | shared | mechanical gate over skills, hooks, context files, plugin packaging, claim binding, eval coverage, budget ceilings, and envelope fixtures; `--verify-runtime` reads the installed binaries |
+| `hooks/harness_check.py` | shared | mechanical gate over skills, hooks, context files, plugin packaging, claim binding, eval coverage, budget ceilings, envelope fixtures, and the banned-method tripwire; `--verify-runtime` reads the installed binaries |
 | `hooks/harness_health.sh` | Claude | weekly health run; exits non-zero when the gate or the runtime verifier fails |
 | `hooks/harness_report.py` | Claude | transcript evidence for Claude skill firing/reference reads; capture is a per-context intersection, timestamps are UTC |
 | `hooks/fixtures_codex/` | Codex | six hook envelopes captured from codex-cli 0.154.0 plus one labeled synthetic Stop with a null message |
@@ -318,7 +318,9 @@ same baseline to its coverage receipt. An empty list makes the check an ordinary
 C14 holds `AGENTS.md` and the generated instruction file at or under the sizes recorded in
 `contracts/budget-ceilings.json`, and pins the dynamic hook block (7,500 characters, 190 lines) and
 per-turn carrier (600 bytes) ceilings under the runtime caps. C15 decodes every committed hook
-envelope against its event's required-field list.
+envelope against its event's required-field list. C16 keeps the vocabulary of the method the
+`AGENTS.md` verification ban names out of every tracked file outside the exemptions declared
+beside its patterns, and prints the scan set and file count it read.
 
 `harness_check.py --verify-runtime` reads the installed Claude CLI, every installed desktop build,
 and the installed Codex binary for the anchored contracts (Stop fields, `afkTimeoutMs`, the hook

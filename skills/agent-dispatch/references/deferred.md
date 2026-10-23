@@ -73,6 +73,15 @@ and cannot vary per worker, and `--agents` carries a per-agent-type prompt that 
 per type. No channel assigns a distinct directory per worker, so the parent assigns it in the
 worker's prompt. A CLI claim is version-bound; re-verify it after an upgrade.
 
+**R288 — power-validate a prioritiser BEFORE dispatching on it, not after.** The body's
+power-validation rule covers believing a *null*; a *ranking* you act on needs the same proof
+and gets it far less often, because a ranking produces work rather than silence and so never
+looks suspicious. Score it against a hand-labelled sample before it decides anything.
+Observed: a five-file ranking measured **26% recall** only after three agents were already
+dispatched against it, and the file it deprioritised produced both of that round's
+refutations. *Displaced because the `agent-dispatch` body is at its 5000-char cap with 7
+characters spare; this belongs beside the null rule and there is no room for it there.*
+
 ## MACHINE rows judged non-dispatch
 
 The MACHINE ruling put the machine facts that are dispatch/environment knowledge into the

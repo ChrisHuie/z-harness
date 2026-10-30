@@ -6717,8 +6717,8 @@ def selftest():
         reproduction_case(4294811833, "the forward elision binds, the reversed one is stale",
                           "'AGENTS.md \"trailers to commits ... Do not add AI co-author\"' findings= 1 bound= 0")
         reproduction_case(4298561325, "a claim after a mixed, shorter or inline run is found, scan set "
-                          "fixed at 86 governed files",
-                          "mixed_fence_then_claim governed_files= 86 failures, claims = (2, 13)")
+                          "fixed at 118 governed files",
+                          "mixed_fence_then_claim governed_files= 118 failures, claims = (2, 13)")
         expect_red("C12 on this tree prints the known stale citations as its worklist",
                    lambda: all(any(rel in d for d in real_c12.worklists.get("C12", [])) for rel in (
                        "skills/agent-dispatch/references/deferred.md:88",

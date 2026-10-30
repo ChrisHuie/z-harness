@@ -33,7 +33,7 @@ with tempfile.TemporaryDirectory() as raw:
         with contextlib.redirect_stdout(output):
             run.c12_claim_binding()
         count = int(re.search(r'over (\d+) governed file', output.getvalue()).group(1))
-        assert count == 86
+        assert count == 118
         observed[name] = (len(run.failures), run.counters['C12']['claims'])
         print(name, 'governed_files=', count, 'failures, claims =', observed[name])
     base_claims = observed['baseline'][1]

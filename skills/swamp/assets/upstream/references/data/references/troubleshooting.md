@@ -1,0 +1,362 @@
+# Data Troubleshooting
+
+## Table of Contents
+
+- [Common Errors](#common-errors)
+  - ["No such key: resource" in CEL Expressions](#no-such-key-resource-in-cel-expressions)
+  - ["No such key: attributes" after data.latest()](#no-such-key-attributes-after-datalatest)
+  - ["No data found for behavior"](#no-data-found-for-behavior)
+  - ["Ownership validation failed"](#ownership-validation-failed)
+  - ["Version not found"](#version-not-found)
+  - ["GC deleted data I needed"](#gc-deleted-data-i-needed)
+- [Rename Issues](#rename-issues)
+- [Expression Debugging](#expression-debugging)
+- [Data Recovery](#data-recovery)
+
+## Common Errors
+
+### "No such key: resource" in CEL Expressions
+
+**Symptom**: Expression `model.<name>.resource.<spec>` fails with "No such key:
+resource"
+
+**Causes**:
+
+1. **Behavior never executed** — the `resource` key only exists after a method
+   writes data
+
+2. **Wrong spec or instance name** — the path must match exactly what
+   `writeResource(specName, instanceName, data)` used
+
+3. **Spec name contains hyphens** — CEL interprets `-` as subtraction
+
+**Solutions**:
+
+```bash
+# 1. Verify data exists
+swamp data list <model-name> --json
+
+# 2. Check exact spec and instance names
+swamp data query 'modelName == "<model-name>"' --select '{"name": name, "specName": specName}'
+
+# 3. Run the create method first
+swamp behavior run <model-name> create
+```
+
+**CEL path anatomy**:
+
+```
+model.my-vpc.resource.vpc.main.attributes.VpcId
+      ──────         ─── ───
+      model name     |   └── instanceName (from writeResource 2nd arg)
+                     └── specName (from writeResource 1st arg)
+```
+
+### "No such key: attributes" after data.latest()
+
+**Symptom**: `data.latest("<model>", "<data>").attributes.<field>` fails with
+"No such key: attributes", with the caret under `.attributes`. The same shape
+fails identically in a workflow `assert` step, a step's `task.inputs`, and a
+guard — it is not specific to any one of them.
+
+**Cause**: `data.latest()` and `data.version()` return null when no record
+matches, and a plain `.` select off null raises this error. The caret points at
+the field, but the field is not the problem — the record is missing. swamp
+appends a line naming the lookup that found nothing:
+
+```
+data.latest("race-comparison", "comparison") found no data record — check the
+model and data names, or use .?attributes if the record may not exist yet.
+```
+
+**Solutions**:
+
+When the name passed is an output spec name rather than a data name, swamp adds
+a second paragraph naming the data written under that spec:
+
+```
+"syncRunSummary" is an output spec name, but data.latest() takes a data name.
+mirror has 2 records of spec "syncRunSummary": "sync-2026-01-02T…",
+"sync-2026-01-01T…" (newest first). Pass one of those names to data.latest(),
+or use data.findBySpec("mirror", "syncRunSummary") to get every record of that
+spec.
+```
+
+```bash
+# 1. Confirm the record exists under the name the expression uses
+swamp data list <model-name> --json
+
+# 2. The data name is not always the spec name — a spec that varies is stored
+#    under a composite name, which data.latest() takes as a third argument
+swamp data query 'modelName == "<model-name>" && specName == "<spec-name>"' --select 'name'
+```
+
+```
+data.latest("scanner", "result", ["us-east-1", "prod"])
+```
+
+If the record legitimately may not exist yet — a guard probing for work, or an
+assert that runs before the producing step — use optional selection instead of a
+plain select:
+
+```
+data.latest("model", "result").?attributes.?ready.orValue(false)
+```
+
+### "No data found for behavior"
+
+**Symptom**: `swamp data list <model>` returns empty or error
+
+**Causes**:
+
+1. Behavior exists but no method has been run yet
+2. Behavior was deleted
+3. Wrong behavior name (typo or case mismatch)
+
+**Solutions**:
+
+```bash
+# List all behaviors to verify name
+swamp behavior search --json
+
+# Run a method to produce data
+swamp behavior run <model-name> <method>
+
+# Check if behavior input exists
+swamp behavior get <model-name> --json
+```
+
+### "Ownership validation failed"
+
+**Symptom**:
+`Ownership validation failed for "<data-name>": existing owner "<type>:<ref>" does not match new owner "<type>:<ref>"`
+
+**Causes**:
+
+1. A different behavior with the same data name is trying to overwrite data
+2. The same name is written under a different owner type (for example `manual`
+   data later written by a method)
+3. Manual data manipulation
+
+Ownership is checked on `ownerType` and `ownerRef` only. A legacy
+`definitionHash` on older data plays no part.
+
+**Solutions**:
+
+```bash
+# View the existing item's owner type and ref
+swamp data query 'modelName == "<model-name>" && name == "<data-name>"' --select '{"ownerType": ownerType, "ownerRef": ownerRef}'
+
+# If intentional: delete the old data first
+swamp behavior delete <old-model-name> --json
+```
+
+**Prevention**: Use unique, behavior-specific data names. Avoid generic names
+like "output" or "state" across multiple behaviors.
+
+### "Version not found"
+
+**Symptom**: `data.version("model", "name", N)` returns null or error
+
+**Causes**:
+
+1. Version number never existed
+2. GC deleted the version
+3. Typo in behavior or data name
+
+**Solutions**:
+
+```bash
+# List all versions
+swamp data versions <model-name> <data-name> --json
+
+# Check the GC setting: a number keeps that many versions, a duration
+# keeps versions created within it
+swamp data query 'modelName == "<model-name>" && name == "<data-name>"' --select garbageCollection
+```
+
+### "GC deleted data I needed"
+
+**Symptom**: Data that was previously accessible is now gone
+
+**Causes**:
+
+1. Lifetime expired (e.g., `7d`, `ephemeral`)
+2. GC setting pruned old versions
+3. Manual GC run
+
+**Solutions**:
+
+1. **Prevent future issues** — adjust behavior's resource spec:
+
+```typescript
+resources: {
+  "state": {
+    schema: StateSchema,
+    lifetime: "infinite",    // Never auto-expire
+    garbageCollection: 20,   // Keep more versions
+  },
+},
+```
+
+2. **Always preview GC** before running:
+
+```bash
+swamp data gc --dry-run --json
+```
+
+3. **Restore from backup** if available (`.swamp/data/` directory)
+
+## Rename Issues
+
+### "Old name and new name must be different"
+
+**Symptom**: `swamp data rename` fails with this error
+
+**Solution**: Provide a different new name. The old and new names cannot be
+identical.
+
+### Forward reference not resolving after rename
+
+**Symptom**: `data.latest("model", "old-name")` returns null after rename, or
+`swamp data query 'model("model") && name == "old-name"'` returns no results
+
+**Causes**:
+
+1. A behavior re-ran and wrote new data to the old name, overwriting the forward
+   reference tombstone
+2. The rename chain is too deep (more than 5 levels)
+3. (`data query` only) The predicate names `version` or `isLatest`, or tests the
+   name other than with a plain `name == "old-name"` term — only latest reads by
+   exact name follow a rename
+
+**Solutions**:
+
+```bash
+# Check if the forward reference still exists
+swamp data versions <model> <old-name> --json
+# Look for the latest version — it should have lifecycle: "deleted" and renamedTo set
+
+# If overwritten, re-run the rename
+swamp data rename <model> <old-name> <new-name>
+```
+
+### Data appears twice in list after rename
+
+**Symptom**: `swamp data list` shows the same data under both old and new names
+
+**Solution**: This is a bug — the deduplication logic should prevent this. File
+a bug report with `swamp issue`.
+
+### "Behavior not found" during rename
+
+**Symptom**: `swamp data rename <model> old new` fails with "Behavior not found"
+
+**Solution**: The first argument must be a valid behavior ID or name. Check
+available behaviors:
+
+```bash
+swamp behavior search --json
+```
+
+## Expression Debugging
+
+### Step 1: Verify Data Exists
+
+```bash
+# Check if behavior has any data
+swamp data list <model-name> --json
+
+# Get specific data item
+swamp data query 'modelName == "<model-name>" && name == "<data-name>"' --select content --json
+```
+
+### Step 2: Verify Path Components
+
+For expression `model.my-vpc.resource.vpc.main.attributes.VpcId`:
+
+| Component | Check Command                                                                                    |
+| --------- | ------------------------------------------------------------------------------------------------ |
+| `my-vpc`  | `swamp behavior get my-vpc --json`                                                               |
+| `vpc`     | `swamp data list my-vpc --json` (check specName in tag)                                          |
+| `VpcId`   | `swamp data query 'modelName == "my-vpc" && name == "main"' --select content` (check attributes) |
+
+### Step 3: Validate Behavior Definition
+
+```bash
+swamp behavior validate <model-name> --json
+```
+
+Look for expression validation errors in the output.
+
+### Step 4: Test Expression in Isolation
+
+Create a test behavior that uses the expression and run validate:
+
+```yaml
+name: test-expression
+globalArguments:
+  testValue: ${{ model.my-vpc.resource.vpc.main.attributes.VpcId }}
+```
+
+```bash
+swamp behavior validate test-expression --json
+```
+
+## Data Recovery
+
+### From Version History
+
+If data was overwritten but older versions exist:
+
+```bash
+# List versions
+swamp data versions <model-name> <data-name> --json
+
+# Access specific version in CEL
+oldValue: ${{ data.version("model-name", "data-name", 1).attributes.field }}
+```
+
+### From Workflow Run
+
+If data was produced by a workflow:
+
+```bash
+# Find the workflow run
+swamp workflow history search --json
+
+# List data from that run
+swamp data list --workflow <workflow-name> --run <run-id> --json
+```
+
+### From File System
+
+Data is stored in `.swamp/data/`. Structure:
+
+```
+.swamp/data/{normalized-type}/{model-id}/{data-name}/
+  1/raw           # Version 1 content
+  1/metadata.yaml # Version 1 metadata
+  2/raw           # Version 2 content
+  2/metadata.yaml # Version 2 metadata
+  latest → 2/     # Symlink to latest
+```
+
+## Data Not Appearing After Method Run
+
+**Symptom**: Method succeeded but `swamp data list` doesn't show new data
+
+**Solutions**:
+
+1. **Check method output** — verify dataHandles were returned:
+
+```bash
+swamp behavior output get <model-name> --json
+# Look for artifacts in output
+```
+
+2. **Check data directory directly**:
+
+```bash
+ls -la .swamp/data/<type>/<model-id>/
+```

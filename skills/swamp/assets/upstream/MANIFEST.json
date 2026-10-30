@@ -1,0 +1,515 @@
+{
+  "files": {
+    "SKILL.md": {
+      "bytes": 9219,
+      "rewrites": 0,
+      "sha256": "32e16a248d2943881951a84db94d56fc42a5621b967f119da830e3e7d328d560"
+    },
+    "references/architecture/guide.md": {
+      "bytes": 5900,
+      "rewrites": 0,
+      "sha256": "af5bf141f2470918db73319e8210fdee102beb9b7c6f2e886bf0e2685d8d47d0"
+    },
+    "references/behavior/guide.md": {
+      "bytes": 6148,
+      "rewrites": 0,
+      "sha256": "71fd50937174df5755b01a6e67255ed04a0c2510885f37329f879a5bb6f0d6d1"
+    },
+    "references/behavior/reference.md": {
+      "bytes": 27383,
+      "rewrites": 0,
+      "sha256": "a92046a0b23cf1e8618ccb64483c301b143dacfbb5250504028f01bfd4c5fbec"
+    },
+    "references/behavior/references/concurrency.md": {
+      "bytes": 4029,
+      "rewrites": 0,
+      "sha256": "5f12c644105177120aa8f886c4b8ed1a411ce17f9e82adf33de55fbbe29a2062"
+    },
+    "references/behavior/references/data-chaining.md": {
+      "bytes": 4378,
+      "rewrites": 0,
+      "sha256": "11e12aff99ecb9a6cfc5e68b1a389b0c129a397e312707c810fcc871affa2700"
+    },
+    "references/behavior/references/data-ownership.md": {
+      "bytes": 964,
+      "rewrites": 0,
+      "sha256": "96f176e53a6e03453f1fd57d4f803c702fdd1f3278479e1ee5e56e7c5cc8dda1"
+    },
+    "references/behavior/references/direct-execution.md": {
+      "bytes": 2140,
+      "rewrites": 0,
+      "sha256": "ebfffe419153a938bdc2a04c0d90a224a7e2829541b70794d3768207973b0350"
+    },
+    "references/behavior/references/disposable-instances.md": {
+      "bytes": 3405,
+      "rewrites": 0,
+      "sha256": "080316080f81904608b5c6a5c7113bf3bdeb70d0495879d003d7ad31b4876888"
+    },
+    "references/behavior/references/examples.md": {
+      "bytes": 10918,
+      "rewrites": 0,
+      "sha256": "a69e177c4917c0924edc5d906f6262d2d43f9ef274433e98709da04204e9b403"
+    },
+    "references/behavior/references/expressions.md": {
+      "bytes": 4911,
+      "rewrites": 0,
+      "sha256": "3c7be18d480eed3f9412827c3fb3f385c293c7be4cb051a47e6f1c1b048f59b0"
+    },
+    "references/behavior/references/outputs.md": {
+      "bytes": 2228,
+      "rewrites": 0,
+      "sha256": "178a02f8e227c5f6aa345b33ccc3cb7a54cf02d1056abec847f015d7af01cfd3"
+    },
+    "references/behavior/references/scenarios.md": {
+      "bytes": 18396,
+      "rewrites": 0,
+      "sha256": "914e80d60364632e7b6e7fe2ed4d8a31aace7ee8b5a8dac21805f2ad85d6bcbb"
+    },
+    "references/behavior/references/troubleshooting.md": {
+      "bytes": 17145,
+      "rewrites": 0,
+      "sha256": "d11a8836ab068b01c6eced695727a1aff6db47a0c6f71950c2fdea80690f0285"
+    },
+    "references/data/guide.md": {
+      "bytes": 9158,
+      "rewrites": 0,
+      "sha256": "d331968b8d446787dd6fd0fead8eb758d989dbab00a5de5d7d87207af5930fcb"
+    },
+    "references/data/reference.md": {
+      "bytes": 13489,
+      "rewrites": 0,
+      "sha256": "860847753d97ed739409a4f28001e95bbc47a4b300ba953eb75854e0d8aa953c"
+    },
+    "references/data/references/concepts.md": {
+      "bytes": 2044,
+      "rewrites": 0,
+      "sha256": "244cf4833409fa566a05027316faf19fcd81acf9a151efdf62e5d1aabe2bc164"
+    },
+    "references/data/references/data-ownership.md": {
+      "bytes": 1983,
+      "rewrites": 0,
+      "sha256": "7c7b8cfe8516a7071cf11d49426d1924ed639792acff6ef60d200eccdac5032e"
+    },
+    "references/data/references/examples.md": {
+      "bytes": 11946,
+      "rewrites": 0,
+      "sha256": "10a830ed59d60c3ad24a81aad17a1e050b003bd9fd02afaca337b2c72b809886"
+    },
+    "references/data/references/expressions.md": {
+      "bytes": 5226,
+      "rewrites": 0,
+      "sha256": "ab91d8483013807a6ff96e5d7998bcb6e1a27ca77b433afd093840af51d42749"
+    },
+    "references/data/references/fields.md": {
+      "bytes": 8735,
+      "rewrites": 0,
+      "sha256": "174de5fe9be5da008f1e6a8c03bbfd2b47dc266bbc4d4dba0301ce06ae87271d"
+    },
+    "references/data/references/output-shapes.md": {
+      "bytes": 3149,
+      "rewrites": 0,
+      "sha256": "c44570af4e5153264d9232b7566b7de04eaf679726390996db7cff28b7cbad7c"
+    },
+    "references/data/references/troubleshooting.md": {
+      "bytes": 10311,
+      "rewrites": 0,
+      "sha256": "26836f4d1362b053dc708593ad3e35d5a0b58a08952bf1075e6a1df85240236d"
+    },
+    "references/extension-publish/guide.md": {
+      "bytes": 1772,
+      "rewrites": 0,
+      "sha256": "32660dc3c85a6173b351dbc2f01398ce195ac49b4e4f28649b178ed456ac55d0"
+    },
+    "references/extension-publish/reference.md": {
+      "bytes": 14133,
+      "rewrites": 0,
+      "sha256": "2a97439134f338edee8ce479add02552bfaa6f4fb615c12ce7512da679fd6dc0"
+    },
+    "references/extension-publish/references/publishing.md": {
+      "bytes": 66416,
+      "rewrites": 0,
+      "sha256": "af0bc9ee8e710957c222c7cadfed772ff7b391720f02595088942c0b4c6d807f"
+    },
+    "references/extension/guide.md": {
+      "bytes": 8666,
+      "rewrites": 0,
+      "sha256": "653f7b1bae06444b6f61b4c1716b66de40e0d67b1c83e2664914a0e7beb95286"
+    },
+    "references/extension/reference.md": {
+      "bytes": 15159,
+      "rewrites": 0,
+      "sha256": "378a830e19c01a126fc018538e65e94aab4d7d4af9afd2cc780528d928106e64"
+    },
+    "references/extension/references/adversarial-review.md": {
+      "bytes": 14379,
+      "rewrites": 0,
+      "sha256": "f0b1190325f5f3bf267bed9806ac87b2451a35fb1790df2b3c0ac150cce37c7e"
+    },
+    "references/extension/references/datastore/api.md": {
+      "bytes": 17392,
+      "rewrites": 0,
+      "sha256": "d3300736a65d3f8e4613cb5bbc1e0be5ee5cd2186efd60e0011d8db513a04047"
+    },
+    "references/extension/references/datastore/examples.md": {
+      "bytes": 11244,
+      "rewrites": 0,
+      "sha256": "758b62dc61e5722094a02fa871ebcbf8f8f3eb03263344433e10f93dee4919c8"
+    },
+    "references/extension/references/datastore/testing.md": {
+      "bytes": 15947,
+      "rewrites": 0,
+      "sha256": "2004b211c82a931a853256a9259e585990e9892d6a0963c743f3706fc8ef3d61"
+    },
+    "references/extension/references/datastore/troubleshooting.md": {
+      "bytes": 3303,
+      "rewrites": 0,
+      "sha256": "3d1e0a8d7d6f013360e486d1fd8aafb99f55f48eb5e64db134564228ecbae4f5"
+    },
+    "references/extension/references/model/api.md": {
+      "bytes": 37620,
+      "rewrites": 0,
+      "sha256": "4a22eddc0f64f1a6dd8469b7e3ad8c0a97cb68a12674f6ff0b434fa7b37346d7"
+    },
+    "references/extension/references/model/checks.md": {
+      "bytes": 4107,
+      "rewrites": 0,
+      "sha256": "602b16976d57374263aa5e5933228163a217bf90f875e49c076666413fddd25e"
+    },
+    "references/extension/references/model/examples.md": {
+      "bytes": 57630,
+      "rewrites": 0,
+      "sha256": "172e81aa6829d73c901019b68bfcacb348bc4d43ab93bd4d5df415224c10a731"
+    },
+    "references/extension/references/model/scenarios.md": {
+      "bytes": 24679,
+      "rewrites": 0,
+      "sha256": "51122bdc326a3c0866bc752ddda355193aeec8276ab783eae2d98179e0e9d6e1"
+    },
+    "references/extension/references/model/skills.md": {
+      "bytes": 7106,
+      "rewrites": 0,
+      "sha256": "38874a10c0828edffe381b77d7e3049cfc72ed1e5198939ecb088e5771231921"
+    },
+    "references/extension/references/model/smoke_testing.md": {
+      "bytes": 7912,
+      "rewrites": 0,
+      "sha256": "fb66d576661b1399f1d6ac0616cf600ee01c5dc3e1eb8aeffae5e088e21b676b"
+    },
+    "references/extension/references/model/testing.md": {
+      "bytes": 5195,
+      "rewrites": 0,
+      "sha256": "ef846e121cd338583c9de6833f785e216da2ed60088f73f5f6f820d23faa19a6"
+    },
+    "references/extension/references/model/troubleshooting.md": {
+      "bytes": 14912,
+      "rewrites": 0,
+      "sha256": "b3f9b163e9744482bea0a641c55bc5ad25596e8e4abfd4158b5fe59e1edcd567"
+    },
+    "references/extension/references/model/typing.md": {
+      "bytes": 6895,
+      "rewrites": 0,
+      "sha256": "1fcb1d0e20744700cea093ee6da20c5126325b3e6a5252852fcfbc20df933fea"
+    },
+    "references/extension/references/model/upgrades.md": {
+      "bytes": 7713,
+      "rewrites": 0,
+      "sha256": "b2ac3c4ae3fe1684ca299d71572dea4be9fa0eb26838a70c1b7582ba56262163"
+    },
+    "references/extension/references/quality/rubric.md": {
+      "bytes": 12930,
+      "rewrites": 0,
+      "sha256": "5bf7c37672e1ae313fbe37c61c1cb8412eb4c7074eec39498737067fc6c0d5cf"
+    },
+    "references/extension/references/quality/templates.md": {
+      "bytes": 10298,
+      "rewrites": 0,
+      "sha256": "df372aff6f46c232c23b3106ca3accfd64b7513dca11aff64684d93e5da64ff1"
+    },
+    "references/extension/references/report/api.md": {
+      "bytes": 4192,
+      "rewrites": 0,
+      "sha256": "ef37ac0f08c4824c6788b19e915b9b9f0126741321c8c7f693ab6074de913367"
+    },
+    "references/extension/references/report/report-types.md": {
+      "bytes": 8212,
+      "rewrites": 0,
+      "sha256": "c98dc5ccddf8fcf550cb02132d5917a90a738b767bb05387d60a868ae240d685"
+    },
+    "references/extension/references/report/testing.md": {
+      "bytes": 7082,
+      "rewrites": 0,
+      "sha256": "9ce229cd6615f47d99a29a7138bccf6afec4a35a817cf6b0c078ec6c22ffadf6"
+    },
+    "references/extension/references/vault/api.md": {
+      "bytes": 4623,
+      "rewrites": 0,
+      "sha256": "46571cff87b8aaf2902b2bf2ddbdf03f820aaadef2eb4903dd5c8751f01566ef"
+    },
+    "references/extension/references/vault/examples.md": {
+      "bytes": 7002,
+      "rewrites": 1,
+      "sha256": "73b3a7a9094ca10096c131aa67899445837834119bdbe1cb6ecc558ae41ffd99"
+    },
+    "references/extension/references/vault/testing.md": {
+      "bytes": 11883,
+      "rewrites": 0,
+      "sha256": "109fc8304575fdb12667f03b51a79e49609d84ea42a63fb8bba84ab6f28d12d1"
+    },
+    "references/extension/references/vault/troubleshooting.md": {
+      "bytes": 3542,
+      "rewrites": 0,
+      "sha256": "19b57319efd56b13e0549275a1784f080d2991cab0c8e25d97602972a19dbc7b"
+    },
+    "references/extension/references/webhook/api.md": {
+      "bytes": 5475,
+      "rewrites": 0,
+      "sha256": "918d1a6389adda18827bf9f990b29841cfbd4f16e0ecbb0648170136aab291e4"
+    },
+    "references/issue/guide.md": {
+      "bytes": 4935,
+      "rewrites": 0,
+      "sha256": "45e7b4ccb25668948f38752f880dec22e445c496f06fae869f4212c686dc09b6"
+    },
+    "references/issue/reference.md": {
+      "bytes": 9490,
+      "rewrites": 0,
+      "sha256": "d2474025682f1af0deb04b0c9c1bbe43fff8a7e068c294b0e8f91b13012c08e7"
+    },
+    "references/issue/references/extension_routing.md": {
+      "bytes": 1370,
+      "rewrites": 0,
+      "sha256": "c03286bba2f1062dff20e8e2dbbf439028467ac90158267d6d9f3d7992f0728a"
+    },
+    "references/issue/references/formatting.md": {
+      "bytes": 2882,
+      "rewrites": 0,
+      "sha256": "c80c2ab44095008dda2388aa48c201538cad1749b602db4d9b4a2a7f00805d34"
+    },
+    "references/issue/references/output_shapes.md": {
+      "bytes": 2324,
+      "rewrites": 0,
+      "sha256": "d82345fbba26d7a1888188f92414327bb372f15775968877f7a65ea7219831fb"
+    },
+    "references/issue/references/sanitization.md": {
+      "bytes": 3336,
+      "rewrites": 3,
+      "sha256": "bb332e7a3fbce54790f1281caf7938b554b392009b740c2f35f0e27240fc26b6"
+    },
+    "references/issue/references/security_routing.md": {
+      "bytes": 1003,
+      "rewrites": 0,
+      "sha256": "7542ff8803f8f23dce1f0b7cc77bb1f36e1d7af97a3115e07a421912248902b5"
+    },
+    "references/issue/references/version_check.md": {
+      "bytes": 2591,
+      "rewrites": 0,
+      "sha256": "5ba6c0961b823b7a1f73ba9e80ebc965728e2d5d02f5b94d424dc03b8cc43bf9"
+    },
+    "references/repo/guide.md": {
+      "bytes": 3077,
+      "rewrites": 0,
+      "sha256": "092c39a1c03faf1d2baa68545d23e3df4a9a8bbb5ee0e6f29d34bfe52c5a0cff"
+    },
+    "references/repo/reference.md": {
+      "bytes": 23938,
+      "rewrites": 4,
+      "sha256": "c61bd3188daa81cf0798bbc1f3aa6c252d7336268f5d46d47dc333fe21abc0d8"
+    },
+    "references/repo/references/ci-integration.md": {
+      "bytes": 2004,
+      "rewrites": 0,
+      "sha256": "a978c4b5f161c2c4cd3e19ea4154473e5be9cf0ba3c150d19c763a7adbc51e68"
+    },
+    "references/repo/references/namespaces.md": {
+      "bytes": 6560,
+      "rewrites": 0,
+      "sha256": "feb6ff09b23947fe3597e0f699f9b077f6a8196fb77685d87b1283a7c07e5e3f"
+    },
+    "references/repo/references/structure.md": {
+      "bytes": 8465,
+      "rewrites": 0,
+      "sha256": "31b9b83676daa38c7eed34749b3e5c5b440d7a5183a7ff015267d93f9c67b265"
+    },
+    "references/repo/references/troubleshooting.md": {
+      "bytes": 6506,
+      "rewrites": 0,
+      "sha256": "bd747d830c5a95b33e8a43d3bf4a17c17a0c615c2e94acc7acdfba1e888e25b8"
+    },
+    "references/report/guide.md": {
+      "bytes": 2434,
+      "rewrites": 0,
+      "sha256": "971384faa0e53cbf0b744790bca5420197ce255c6272dbfc23c8ef9bd1ebd91a"
+    },
+    "references/report/reference.md": {
+      "bytes": 6885,
+      "rewrites": 0,
+      "sha256": "3293e78397939b20ec43063beb9fbb541a95687b526c88f0bb28a5f57d3c5b18"
+    },
+    "references/report/references/control-model.md": {
+      "bytes": 1905,
+      "rewrites": 0,
+      "sha256": "200a77e1e8802321bcd85a4728ba62ec57c6a7616d81dbc5dd49f07e85d20f13"
+    },
+    "references/report/references/filtering.md": {
+      "bytes": 1192,
+      "rewrites": 0,
+      "sha256": "c917fee2445964b6cee6ced724bae62b7fa8f2951c512108a5b5796b06215b8b"
+    },
+    "references/report/references/report-types.md": {
+      "bytes": 8965,
+      "rewrites": 0,
+      "sha256": "5935700cccc74cf55ba9d6f6f9b56340566b1087ed3db81e55bdad6226d99f6a"
+    },
+    "references/report/references/testing.md": {
+      "bytes": 7070,
+      "rewrites": 0,
+      "sha256": "0e2a0b1fd639ce7b1f545ee3c22828fc76b2169832dee77f0465f438d30b8897"
+    },
+    "references/serve/guide.md": {
+      "bytes": 32841,
+      "rewrites": 0,
+      "sha256": "db984d430b4d8a782aeae391575d2ae8ad0fe64405556ff5a94e1b890a9e4d99"
+    },
+    "references/share/guide.md": {
+      "bytes": 9065,
+      "rewrites": 0,
+      "sha256": "89974bd7bd97ca8fc892a3a69dbabdbb602ccdd73b28fdb249faf4ca0f713e1a"
+    },
+    "references/share/reference.md": {
+      "bytes": 5906,
+      "rewrites": 0,
+      "sha256": "48f936ce8fe719a058e37b150e343920e0892efcf80565518a0f3a6309078f17"
+    },
+    "references/share/references/joiner-instructions.md": {
+      "bytes": 3292,
+      "rewrites": 0,
+      "sha256": "a4ae48cf9858cec2bf91d8487696f2fc5499506fbf4934df332b64366d8fb32d"
+    },
+    "references/share/references/troubleshooting.md": {
+      "bytes": 4454,
+      "rewrites": 0,
+      "sha256": "24e9bec45a65fc7db9b06e6c2762d15640eedd7c8792247131ab070fe47d5346"
+    },
+    "references/troubleshooting/guide.md": {
+      "bytes": 8588,
+      "rewrites": 0,
+      "sha256": "a0d7e305c1715caf0ca4013794d0fc9b10311f4fa406d128e7c2fa409a01dde4"
+    },
+    "references/troubleshooting/reference.md": {
+      "bytes": 6601,
+      "rewrites": 0,
+      "sha256": "3f3b9448bab76aebe1d8b227d46d2388dee5478cbc164319e7a0edd7ea45bf0c"
+    },
+    "references/troubleshooting/references/checks.md": {
+      "bytes": 2403,
+      "rewrites": 0,
+      "sha256": "d63c5c4ab8303a79eb346e855807d4d9c409552243b20ffefb0e1918b21dd3bd"
+    },
+    "references/troubleshooting/references/error-inspection.md": {
+      "bytes": 9161,
+      "rewrites": 0,
+      "sha256": "89265c127add1a69bd00f0f44fb010538ee00296c2f9acabec3da105490490f9"
+    },
+    "references/troubleshooting/references/health-checks.md": {
+      "bytes": 17848,
+      "rewrites": 0,
+      "sha256": "dbd979c56cfff4d84584b1299e611072e17621d38ed792eb08764faa7c601596"
+    },
+    "references/troubleshooting/references/source-reading.md": {
+      "bytes": 5801,
+      "rewrites": 3,
+      "sha256": "438060f1964c3f73efaf846b8e484fa69a3a66954db3e9fea8f6b2d60487536d"
+    },
+    "references/troubleshooting/references/tracing.md": {
+      "bytes": 15887,
+      "rewrites": 0,
+      "sha256": "ac76b6e3df9b923cadf70319fc212b8bd09491dd2237dd7dbab66577919b4334"
+    },
+    "references/troubleshooting/references/version-check.md": {
+      "bytes": 2100,
+      "rewrites": 0,
+      "sha256": "221af285c6d62554c7a9614daf5b580a88b75b31c10dfd81868a291415ed948e"
+    },
+    "references/vault/guide.md": {
+      "bytes": 6052,
+      "rewrites": 0,
+      "sha256": "d065966e7fc650a4407a44992d78bbd7d73edb1dbd8b473a62df053e71b0be75"
+    },
+    "references/vault/reference.md": {
+      "bytes": 17225,
+      "rewrites": 0,
+      "sha256": "2119a15495a2efaff374278e77e5a2097afee9a9c96a9ee1d1546b7fab5bc327"
+    },
+    "references/vault/references/examples.md": {
+      "bytes": 11421,
+      "rewrites": 0,
+      "sha256": "31cc0bc4e81a5d85168723b073d055202cf2653655c449de11027aea08194ebc"
+    },
+    "references/vault/references/providers.md": {
+      "bytes": 6634,
+      "rewrites": 0,
+      "sha256": "3e1d57939d908ee2efae22b41d4d1266663c1b04841ee138a6b7b5192b775b6e"
+    },
+    "references/vault/references/troubleshooting.md": {
+      "bytes": 6693,
+      "rewrites": 0,
+      "sha256": "4f3a0440ae9c1755edd95097125f59df223f5df2a9cc730d9f8182a6e1c42e3f"
+    },
+    "references/vault/references/user-defined-vaults.md": {
+      "bytes": 7459,
+      "rewrites": 0,
+      "sha256": "ebfa19449aaa27afbbfc9ef3bdbd0fe742e3ba3e74820e8806666e2b8c1f87ce"
+    },
+    "references/workflow/guide.md": {
+      "bytes": 6659,
+      "rewrites": 0,
+      "sha256": "cb3e9d824ac983f57603bafed90ca0fb4f98e8157b990907a2d4c96de744e11d"
+    },
+    "references/workflow/reference.md": {
+      "bytes": 64201,
+      "rewrites": 0,
+      "sha256": "137e90af2a72258249636d8793e2e397d1754c7d69a265ce777fca96a721de5a"
+    },
+    "references/workflow/references/data-chaining.md": {
+      "bytes": 24941,
+      "rewrites": 0,
+      "sha256": "2941d6c04e2138ad3e199b554b9afe07716d347889d25cd90bcc1877b01b9436"
+    },
+    "references/workflow/references/direct-execution.md": {
+      "bytes": 2618,
+      "rewrites": 0,
+      "sha256": "386693d4d115f86abe7d9d8a704c87646eb7c9eddeeb4e93a347bb0bbfa7022f"
+    },
+    "references/workflow/references/execution-semantics.md": {
+      "bytes": 15480,
+      "rewrites": 0,
+      "sha256": "1f4d7777a33a15731938bbc10d15c463d7d80a5ce88bac2f23cb6c8d88bba4ce"
+    },
+    "references/workflow/references/expressions-and-foreach.md": {
+      "bytes": 13539,
+      "rewrites": 0,
+      "sha256": "23902d8d13fe37610eaf69714077f1f3c2eef9e318a75157fcc515761f30edec"
+    },
+    "references/workflow/references/nested-workflows.md": {
+      "bytes": 11169,
+      "rewrites": 0,
+      "sha256": "960e53721d449f292ad66631105cbcd4bff4613d4dee20d376b9e742510d485c"
+    },
+    "references/workflow/references/remote-execution.md": {
+      "bytes": 8659,
+      "rewrites": 0,
+      "sha256": "2bf175d8422731e2182dcdddc3b1a658a762695284ea71668ee5da7ef470e276"
+    },
+    "references/workflow/references/scenarios.md": {
+      "bytes": 21859,
+      "rewrites": 0,
+      "sha256": "8e863fd052963722912329bdb7473e867c169789a792d4cac52abfe5471038d7"
+    }
+  },
+  "rewrite": {
+    "pattern": "(?<![A-Za-z0-9/])/(?:Users|home|Volumes)/[^/\\s]+/",
+    "replacement": "$HOME/"
+  },
+  "source": "~/.claude/skills/swamp",
+  "swampVersion": "20261030.195233.0-sha.713d92e4"
+}

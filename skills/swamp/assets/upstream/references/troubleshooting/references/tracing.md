@@ -1,0 +1,322 @@
+# Tracing (Tier 3)
+
+Reach for tracing when the question is about timing, flow, or where a slow
+operation is spending its time. Tier 1 (health checks) and Tier 2 (error
+inspection) handle most failures; tracing is for everything where the answer is
+"how long" or "what ran when." Tracing is opt-in via environment variables and
+has zero overhead when disabled.
+
+## Quick Setup
+
+```bash
+# Local Jaeger (run once)
+docker run -d --name jaeger -p 16686:16686 -p 4318:4318 jaegertracing/all-in-one:latest
+
+# Enable tracing for any swamp command
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 swamp workflow run my-workflow
+
+# View traces at http://localhost:16686 — search for service "swamp"
+```
+
+## When to Use Tracing
+
+Tracing is most useful when:
+
+- A workflow run is slow and you need to identify which step/method is the
+  bottleneck
+- Extension methods are timing out and you need to see the full execution
+  timeline
+- Datastore sync (S3 pull/push) is slow and you want to measure lock acquisition
+  and transfer times
+- `data gc` is taking too long and you want to see how many entries are being
+  processed
+- Extension pull/push is failing and you want to see which network phase fails
+- You need to trace context across remote workers (including containerized ones)
+  to connect their method spans to the parent workflow
+
+## Configuration
+
+| Variable                              | Purpose                                   | Default                |
+| ------------------------------------- | ----------------------------------------- | ---------------------- |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`         | Shared collector base URL                 | _(none)_               |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`  | Complete traces URL; overrides shared URL | shared + `/v1/traces`  |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`    | Complete logs URL; overrides shared URL   | shared + `/v1/logs`    |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | Complete future metrics URL               | shared + `/v1/metrics` |
+| `OTEL_EXPORTER_OTLP_HEADERS`          | Shared headers (`key=val,key=val`)        | _(none)_               |
+| `OTEL_EXPORTER_OTLP_TRACES_HEADERS`   | Trace headers; replace shared headers     | shared headers         |
+| `OTEL_EXPORTER_OTLP_LOGS_HEADERS`     | Log headers; replace shared headers       | shared headers         |
+| `OTEL_EXPORTER_OTLP_METRICS_HEADERS`  | Future metrics headers; replace shared    | shared headers         |
+| `OTEL_TRACES_EXPORTER`                | `otlp`, `console`, or `none`              | `otlp`                 |
+| `OTEL_LOGS_EXPORTER`                  | `otlp`, `console` (stderr), or `none`     | `otlp`                 |
+| `OTEL_SERVICE_NAME`                   | Service name for traces and logs          | `swamp`                |
+| `OTEL_BLRP_USE`                       | Batch log exports (`1` to enable)         | _(per-record)_         |
+
+Signal-specific endpoints are complete URLs and take precedence over the shared
+base URL. Signal-specific headers replace, rather than merge with, shared
+headers. Empty signal-specific values fall back to the shared setting. The
+metrics variables reserve the same contract for future native metrics support;
+swamp currently emits traces and logs only.
+
+### Logs Signal
+
+With a shared or logs-specific OTLP endpoint set, swamp also exports its
+structured log lines as OTel log records, each correlated with the active
+`trace_id`/`span_id` so logs sit next to their spans in the backend. Run secrets
+are redacted before export. Disable with `OTEL_LOGS_EXPORTER=none` (traces stay
+on); batch with `OTEL_BLRP_USE=1` for long-running `swamp serve`. If logs aren't
+arriving, check that the endpoint is set, `OTEL_LOGS_EXPORTER` is not `none`,
+and the collector accepts the configured logs URL.
+
+### Console Exporter (No Collector Needed)
+
+For quick debugging without running a collector:
+
+```bash
+OTEL_TRACES_EXPORTER=console swamp workflow run my-workflow
+```
+
+Spans are printed to stderr in a readable format showing traceId, parentId,
+name, duration, and attributes.
+
+### Cloud Providers
+
+```bash
+# Honeycomb
+export OTEL_EXPORTER_OTLP_ENDPOINT=https://api.honeycomb.io
+export OTEL_EXPORTER_OTLP_HEADERS="x-honeycomb-team=YOUR_API_KEY"
+
+# Grafana Cloud
+export OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp-gateway-prod-us-east-0.grafana.net/otlp
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic YOUR_BASE64_TOKEN"
+
+# Axiom with separate trace and log datasets
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://api.axiom.co/v1/traces
+export OTEL_EXPORTER_OTLP_TRACES_HEADERS="Authorization=Bearer YOUR_TOKEN,X-Axiom-Dataset=swamp-traces"
+export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=https://api.axiom.co/v1/logs
+export OTEL_EXPORTER_OTLP_LOGS_HEADERS="Authorization=Bearer YOUR_TOKEN,X-Axiom-Dataset=swamp-logs"
+
+# Reserved for future native metrics export
+export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=https://api.axiom.co/v1/metrics
+export OTEL_EXPORTER_OTLP_METRICS_HEADERS="Authorization=Bearer YOUR_TOKEN,X-Axiom-Metrics-Dataset=swamp-metrics"
+```
+
+## What Gets Traced
+
+### Workflow Execution Hierarchy
+
+```
+swamp.cli "workflow run"
+  ├─ swamp.cli.bootstrap
+  │    └─ swamp.cli.configure_extension_loaders
+  ├─ swamp.workflow.run.command
+  │    └─ swamp.workflow.run "deploy"
+  │         ├─ swamp.workflow.evaluate
+  │         ├─ swamp.workflow.job "build"
+  │         │    ├─ swamp.workflow.step "compile" (20ms)
+  │         │    │    └─ swamp.model.method
+  │         │    └─ swamp.workflow.step "test" (parallel, 45ms)
+  │         │         └─ swamp.model.method
+  │         └─ swamp.workflow.job "deploy" (starts after build)
+  │              └─ swamp.workflow.step "apply"
+  │                   └─ swamp.model.method
+  └─ swamp.cli.teardown
+       └─ swamp.datastore.sync (push)
+```
+
+One CLI invocation is one trace: `swamp.cli` is the root and covers startup, the
+command, and shutdown. A `TRACEPARENT` env var parents the whole invocation; the
+`--traceparent` flag parents only the workflow or method run it is passed to.
+Long-running commands (`swamp serve`, `worker connect`) never end `swamp.cli`,
+so work they do later starts its own trace instead — see
+[Traces in `swamp serve` and workers](#traces-in-swamp-serve-and-workers).
+
+### All CLI Operations
+
+Every libswamp generator is traced. Key span names:
+
+- `swamp.model.method.run` — standalone method execution
+- `swamp.data.gc` — garbage collection (attributes: entries expired, bytes
+  reclaimed)
+- `swamp.extension.pull` / `.push` — registry network operations
+- `swamp.datastore.sync` — S3 pull/push (attributes: direction, file count)
+- `swamp.lock.acquire` — distributed lock acquisition
+- `swamp.vault.put` / `.get` — secret storage/retrieval
+- `swamp.model.create` / `.edit` / `.delete` — definition changes (attributes:
+  `model.name`, `model.type`; edit and delete add `model.id`, and a renaming
+  edit adds `model.renamed_to`)
+- `swamp.workflow.create` / `.edit` / `.delete` — workflow changes (attributes:
+  `workflow.name`; edit and delete add `workflow.id`, and a renaming edit adds
+  `workflow.renamed_to`)
+
+On `swamp serve`, the create, edit and delete spans also carry
+`auth.principal.id` (for example `user:alice`) when the request was
+authenticated, so a person's change can be told apart from an automated one.
+Edit and delete record the target only once it resolves; a not-found request has
+no target attributes.
+
+## Diagnosing Common Issues
+
+### Slow Workflow Runs
+
+1. Enable tracing and run the workflow
+2. In Jaeger, find the trace and look at the waterfall view
+3. Identify which `swamp.workflow.step` spans are longest
+4. Drill into `swamp.model.method` to see if the method itself is slow or if
+   it's lock/sync overhead
+
+### Slow Data GC
+
+Look at the `swamp.data.gc` span attributes:
+
+- `gc.entries_expired` — how many entries were processed
+- `gc.versions_deleted` — how many versions were cleaned up
+- `gc.bytes_reclaimed` — total bytes freed
+
+### Extension Pull/Push Failures
+
+The `swamp.extension.pull` and `swamp.extension.push` spans show the full
+network operation. Push has three phases (initiate → upload → confirm) — the
+span status and error message indicate which phase failed.
+
+### Lock Contention
+
+If `swamp.lock.acquire` spans are long, another process is holding the lock.
+Check with `swamp datastore lock status` to see the current holder.
+
+### Traces in `swamp serve` and Workers
+
+Serve's background work is never a child of serve's `swamp.cli`. Each unit of
+work is the root of its own trace:
+
+- **HTTP request**: a SERVER span named `{method} {route}` (below).
+- **Dashboard read over WebSocket**: a SERVER span named `swamp.serve.request`
+  (below).
+- **Poll cycle**: `swamp.serve.poll`, with `swamp.serve.poller` set to `config`,
+  `access_data`, `runtime_data` or `grants_directory`. The cycle's
+  `swamp.serve.sync_gate.wait`, `swamp.datastore.sync` and datastore extension
+  spans (for example S3 `getObject`) nest under it. Filter on
+  `swamp.serve.poller` to find slow pulls.
+- **Scheduled fire**: `swamp.scheduled.fire`, with the workflow run under it.
+- **WebSocket or queued webhook run without `traceparent`**: the run's own top
+  span. With `traceparent`, the run joins the caller's trace.
+- **Other loops** (heartbeats, GC, audit flushes, token revalidation): no span
+  per tick. Anything a tick traces starts its own trace.
+
+A worker dispatch joins the run's trace when serve sends trace headers. Look for
+`swamp.remote.dispatch` under the step's `swamp.model.method`, then the runner's
+`swamp.cli`, and `swamp.serve.data_plane` spans (`swamp.data_plane.operation`)
+for the runner's reads and writes. A write's children split its time:
+`swamp.serve.data_plane.mark_writes` (the dispatch's first write waiting to mark
+its step lease) and `swamp.serve.data_plane.persist` (the write itself).
+
+Serve records leases, pending dispatches, workers and enrollment tokens one at a
+time, on a dispatch chain and a gateway chain. Each record runs in a
+`swamp.serve.transition` span under the work waiting on it, with
+`swamp.transition.tail` (`dispatch` or `gateway`), `swamp.transition.operation`
+(e.g. `step_lease.mark_writes`, `enroll`), `swamp.transition.queue_wait_ms` and
+`swamp.transition.queue_depth` (transitions ahead of it). A slow write or a
+timed-out `worker.enroll` with a large `queue_wait_ms` is waiting its turn on
+the chain, not writing. A runner never inherits `TRACEPARENT` from the worker's
+environment, and serve does not ship its `OTEL_*` settings or trace context to
+workers, so a runner exports with the worker host's own OTel settings. Console
+span output from a runner goes to stderr, because its stdout carries the frames
+it sends to the worker.
+
+### Slow `swamp serve` Requests
+
+Every HTTP request to `swamp serve` gets a root SERVER span named
+`{method} {route}` (for example `POST /auth/device/token`), following the
+OpenTelemetry HTTP conventions rather than the `swamp.` prefix. Attributes are
+`http.request.method`, `http.response.status_code` and, for known routes,
+`http.route`. The request path itself is never recorded, so unknown paths —
+including webhook routes — are named by method alone. Non-standard methods are
+reported as `_OTHER`. Only 5xx responses are ERROR. WebSocket upgrades get no
+request span. A span ends when the response headers are sent, so streamed bodies
+(SSE, bundle downloads) are not counted in its duration.
+
+For a slow `swamp auth server-login`, `POST /auth/device` has one child,
+`swamp.serve.auth.device_start` (the upstream device grant). Then open the
+`POST /auth/device/token` span that returned 200. Its children are:
+
+- `swamp.serve.auth.poll_token` — upstream token poll (`oauth.poll.outcome`;
+  pending polls are not errors)
+- `swamp.serve.auth.userinfo` — upstream userinfo call
+- `swamp.serve.auth.mint`, which contains:
+  - `swamp.serve.sync_gate.wait`
+  - `swamp.serve.auth.mint.vault_put`
+  - `swamp.serve.auth.mint.definition_save`
+  - `swamp.serve.auth.mint.token_write`
+  - `swamp.serve.auth.mint.push` — the datastore's own push span nests under it
+  - `swamp.serve.auth.mint.verify`
+- `swamp.serve.auth.store_access_token`
+
+A long `swamp.serve.sync_gate.wait` means the login queued behind a datastore
+pull or another mutation. `sync_gate.acquired=false` means the 150s wait timed
+out and the unit ran without the gate.
+
+### Slow Dashboard Reads
+
+Five WebSocket requests each get a root SERVER span named `swamp.serve.request`:
+`workflow.history.get`, `workflow.history.logs`, `workflow.run.search`,
+`workflow.run.summary` and `workflow.approvals`. Other requests get none, and
+runs started over WebSocket keep their own traces. Attributes:
+
+- `swamp.serve.request.type` — the request type
+- `swamp.serve.connection.id` — random per WebSocket; group on it to see one
+  dashboard tab's requests, which are separate traces
+- `swamp.serve.active_requests` — requests in flight on this connection, not the
+  whole server; a high value means the client is stacking requests
+- `auth.principal.kind` (`user`, `worker`, `service` or `anonymous`) and
+  `auth.principal.id`
+- `datastore.type` and `datastore.engine` (`v2` or `v3`)
+- `swamp.serve.response.error_code` — the code of an error reply; only server
+  failures (`internal_error`, `<operation>_failed`) mark the span ERROR
+- `swamp.serve.response.error_reason` — the client reason (`not_found`,
+  `validation_failed`, ...) an `<operation>_failed` reply carries; such a reply
+  is the caller's error and leaves the span unset
+- `swamp.serve.event_loop.lag_max_ms` — the largest event-loop lag in the last
+  10s; high values on requests that all end together mean a blocked loop, not
+  slow I/O
+
+Under it:
+
+- `swamp.workflow.run_reference.resolve` (history reads) — the run lookup, with
+  `workflow.lookup` (`id`, `prefix` or `name`) and `workflow.lookup.result`. A
+  `prefix` lookup scans every run.
+- `swamp.serve.authorize` — collecting the resources to authorize
+  (`authorize.resources`), or filtering rows for approvals
+- the libswamp span (`swamp.workflow.history.get`, `.history.logs`,
+  `.run_search`, `.run_summary`, `.approvals`) with `workflow.name`,
+  `workflow.id`, `workflow.run_id` and counts. Its children:
+  `swamp.workflow.step_outputs.resolve` (`step_outputs.resources_read`,
+  `step_outputs.resources_denied`), `swamp.workflow.run_selection`
+  (`workflow_runs.workflows`, `.workflows_denied`, `.scanned`, `.matched`) and
+  `swamp.workflow.definitions.load` (`workflows.count`)
+- `swamp.serve.redact` and `swamp.serve.response.send` (serializing and
+  compressing the reply)
+
+Run-record reads appear only on their slow paths:
+`swamp.workflow_runs.scan_all`, `.read_summaries`, `.index.repair`,
+`.index.rebuild` and `.index.load` (a run index cache miss,
+`run_index.joined_inflight=true` when it waited on another load). They record
+`workflow_runs.records_read` and `workflow_runs.bytes_read` (characters of the
+records read). Repair and rebuild record `workflow_runs.index.queue_wait_ms`,
+the wait behind other index work on the same workflow, such as run saves.
+Growing `records_read` across builds points to history growth; a fast index hit
+has no span at all.
+
+## Reference
+
+See https://swamp.club/manual/reference/opentelemetry for the full span
+hierarchy, instrumentation points, and attribute reference.
+
+## Escalating to other tiers
+
+If tracing shows the timing but not the cause:
+
+- **Span attributes hint at a known integration failure** → Tier 1:
+  [health-checks.md](health-checks.md).
+- **Span error messages need decoding, or `--json` output would say more** →
+  Tier 2: [error-inspection.md](error-inspection.md).
+- **The span is fast but the result is still wrong** → Tier 4:
+  [source-reading.md](source-reading.md) — read the implementation directly.

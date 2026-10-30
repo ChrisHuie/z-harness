@@ -1,0 +1,1147 @@
+# Publishing Extensions
+
+Publish extension behaviors, workflows, vaults, and datastores to the swamp
+registry so others can install and use them.
+
+## Repository Prerequisite
+
+The extension directory **must be an initialized swamp repository** before
+`swamp extension fmt` or `swamp extension push` will work. Both commands require
+a `.swamp.yaml` marker file (created by `swamp repo init`).
+
+If you see `Not a swamp repository` errors, run:
+
+```bash
+swamp repo init --json
+```
+
+This creates `.swamp.yaml` and the standard directory structure. For monorepos
+with multiple extensions, each subdirectory that needs to publish independently
+must have its own `swamp repo init`.
+
+## Manifest Schema (v1)
+
+Create a `manifest.yaml` in your repository root (or any directory):
+
+```yaml
+manifestVersion: 1
+name: "@myorg/my-extension"
+version: "2026.02.26.1"
+license: MIT
+description: "Optional description of the extension"
+repository: "https://github.com/myorg/my-extension"
+behaviors:
+  - my_behavior.ts
+  - utils/helper_behavior.ts
+workflows:
+  - my_workflow.yaml
+additionalFiles:
+  - README.md
+platforms:
+  - darwin-aarch64
+  - linux-x86_64
+labels:
+  - aws
+  - security
+dependencies:
+  - "@other/extension"
+```
+
+### Field Reference
+
+| Field             | Required | Description                                                                                                                                              |
+| ----------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `manifestVersion` | Yes      | Must be `1`                                                                                                                                              |
+| `name`            | Yes      | Scoped name: `@collective/name` or `@collective/name/sub/path` (lowercase, hyphens, underscores)                                                         |
+| `version`         | Yes      | CalVer format: `YYYY.MM.DD.MICRO`                                                                                                                        |
+| `description`     | No       | Human-readable description                                                                                                                               |
+| `license`         | No       | SPDX license expression (e.g. `MIT`, `MIT OR Apache-2.0`). Optional; a valid one earns a quality point. See "License".                                   |
+| `visibility`      | No       | `public` (registry default) or `private`. Optional `--visibility` overrides this field; omitting both preserves registry defaults.                       |
+| `repository`      | No       | HTTPS URL of the upstream repository. Required for users to file issues via `swamp issue --extension` — `swamp extension push` warns when absent.        |
+| `paths.base`      | No       | Path resolution mode for typed keys + `additionalFiles`. `typedDir` (default) or `manifest`. See "Path resolution".                                      |
+| `behaviors`       | No*      | Behavior file paths. Resolved via `paths.base`. `models` is the model spelling of this key; a manifest with `models` ignores `behaviors`.                |
+| `workflows`       | No*      | Workflow file paths. Resolved via `paths.base`. Under `manifest`, resolves from manifest dir first, then the extensions root and repo-root fallbacks.    |
+| `vaults`          | No*      | Vault file paths. Resolved via `paths.base`.                                                                                                             |
+| `datastores`      | No*      | Datastore file paths. Resolved via `paths.base`.                                                                                                         |
+| `reports`         | No*      | Report file paths. Resolved via `paths.base`.                                                                                                            |
+| `skills`          | No*      | Skill directory names. Honours `paths.base: manifest` (manifest-relative first, then the extensions root, then project-local; never `~/.claude/skills`). |
+| `include`         | No       | Helper TypeScript files copied alongside behaviors without bundling. Resolved via `paths.base`.                                                          |
+| `additionalFiles` | No       | Extra files (README, LICENSE, etc.) relative to the manifest's own directory.                                                                            |
+| `platforms`       | No       | OS/architecture hints (e.g. `darwin-aarch64`, `linux-x86_64`)                                                                                            |
+| `labels`          | No       | Categorization labels (e.g. `aws`, `kubernetes`, `security`)                                                                                             |
+| `dependencies`    | No       | Other extensions this one depends on                                                                                                                     |
+
+*At least one of `behaviors` (or `models`), `workflows`, `vaults`, `datastores`,
+`reports`, or `skills` must be present with entries.
+
+`behaviors:`, `extensions/behaviors/` and `export const behavior` are the
+behavior spelling of `models:`, `extensions/models/` and `export const model`.
+Push packs the behavior files under the archive's `models/` and writes `models:`
+into the pushed manifest. See
+[Behavior and model spellings](../../extension/guide.md#behavior-and-model-spellings)
+for the compatibility rules.
+
+### License
+
+The license is optional, for public and private extensions alike. Nothing is
+refused without one. Each of these earns one quality point:
+
+- `license:` in the manifest, a valid SPDX expression: SPDX ids in their
+  canonical case, joined with `AND`/`OR`, `WITH` an SPDX exception, and
+  parentheses (`has-license`, "License declared").
+- A non-empty `LICENSE`, `LICENSE.md` or `LICENSE.txt` listed in
+  `additionalFiles:` as a bare file name (`license-file`, "LICENSE file
+  included").
+
+Only SPDX identifiers count. A malformed expression, an id not on the SPDX
+License List, a deprecated id (`GPL-2.0`, a trailing `+`), or any `LicenseRef-`
+or `AdditionRef-` earns no point and prints a warning; it never blocks. The
+warning is `licenseWarnings` in `swamp extension quality --json` and
+`warnings.license` in `swamp extension push --json`.
+
+### Private publication
+
+To require private publication, set `visibility: private` in the manifest or use
+the optional flag on both preview and publish:
+
+```bash
+swamp extension push manifest.yaml --visibility private --dry-run --json
+swamp extension push manifest.yaml --visibility private --yes --json
+```
+
+Use CLI choice > manifest > registry default. Accept `public` or `private` as
+explicit values. `visibility: public` and `--visibility public` select the
+existing registry behavior: new extensions follow the collective's default and
+existing extensions keep their visibility. Use `--visibility public` to override
+a private manifest; it does not convert an already-private extension to public.
+Only private intent is sent to the registry; public omits the request field.
+
+Preview/dry-run `visibility` is `public`, `private` or `default` (registry
+decides); successful publication reports applied `public` or `private`. With
+credentials, a dry run runs the registry checks read-only, including
+private-entitlement for private intent (see "What the dry run checks"). An
+explicit private publish requires a private confirmation response. On a
+confirmation error, check registry state before retrying: publication may
+already have completed.
+
+Use a registry fully upgraded for private publication (Lab #2200), on every
+replica. Older servers ignore the field; confirmation validation cannot prevent
+that exposure. Complete rollout before explicit-private publication and pause it
+during service rollback. The registry supports private extensions in public
+collectives and checks permissions/entitlements. An already-public extension
+returns a conflict; change its visibility through the registry before publishing
+privately. Omitting both field and flag retains existing defaults.
+
+### additionalFiles — directory structure and runtime access
+
+`additionalFiles` preserves directory structure through push/pull. An entry
+`prompts/review.md` lands in the archive at `files/prompts/review.md`, and
+pulled consumers find it at
+`.swamp/pulled-extensions/<name>/files/prompts/review.md`.
+
+Push rejects:
+
+- **Duplicate entries** (case-insensitive, NFC-normalized). Two entries that
+  would resolve to the same archive path fail with a clear error — fix the
+  manifest before re-running push.
+- **Symlinks**. An entry that is a symlink, or is reached through a symlinked
+  directory, is refused by the `symlink` safety rule. Copy the target file into
+  the extension tree instead.
+- **Directories and other non-regular files**. Each entry names one file;
+  `additionalFiles: [docs]` fails with "Additional file is a directory: docs".
+  List the files under `docs/` individually. `binaries` and `include` entries
+  are checked the same way, and `extension quality` and `extension fmt` report
+  the same error as push.
+
+At runtime, behaviors and reports receive `ctx.extensionFile(relPath)` which
+returns the absolute path to a bundled asset. The helper works identically
+whether the extension is source-loaded or pulled, so the same code runs in both
+local development and production:
+
+```ts
+export const behavior = {
+  type: "@myorg/ext/demo",
+  version: "2026.04.22.1",
+  methods: {
+    run: {
+      arguments: z.object({}),
+      execute: async (_args, ctx) => {
+        const path = ctx.extensionFile("prompts/review.md");
+        return { dataHandles: [] };
+      },
+    },
+  },
+};
+```
+
+Use `ctx.extensionFile()` instead of hardcoding `.swamp/pulled-extensions/`
+paths — hardcoding breaks smoke tests run against a source-loaded extension.
+
+### Path resolution — `paths.base`
+
+This is the canonical reference for path resolution semantics across all
+extension-type skills (behavior, vault, datastore, report). Other skills link
+here.
+
+> **The default is the existing path resolution. Omit `paths.base` and nothing
+> about your manifest changes — paths resolve exactly as before.** The
+> implementation is a single ternary: when `paths.base: manifest` is set, the
+> resolver and archive layout switch to a manifest-relative base; otherwise they
+> use the configured typed dir as before. There is no implicit detection, no
+> fallback, no "best guess" — opt in to opt in.
+
+`paths.base` selects which directory typed-key entries (`behaviors` or `models`,
+`vaults`, `datastores`, `reports`, `include`) and `additionalFiles` resolve
+against during push. Two modes:
+
+| Mode                 | Typed keys resolve relative to                                            | `additionalFiles` resolves relative to |
+| -------------------- | ------------------------------------------------------------------------- | -------------------------------------- |
+| `typedDir` (default) | Typed directory (`extensions/behaviors/`, `modelsDir`, `vaultsDir`, etc.) | Manifest's own directory               |
+| `manifest`           | Manifest's own directory                                                  | Manifest's own directory               |
+
+Under `typedDir`, `behaviors:` entries (and `include`, beside them) resolve from
+`extensions/behaviors/` while the models directory is the default
+`extensions/models/`. Once `SWAMP_MODELS_DIR` (or `SWAMP_BEHAVIORS_DIR`) or
+`.swamp.yaml` `modelsDir` moves the models directory there is no behaviors
+directory, and `behaviors:` entries resolve from the configured models
+directory. `models:` entries always resolve from the models directory.
+
+Existing manifests without an explicit `paths.base` keep their semantics
+unchanged — every published extension on the registry today is on the `typedDir`
+path and stays there. The opt-in is purely additive.
+
+Pick `manifest` for **per-extension-subdir layouts**: each extension lives in
+its own subdirectory under the configured typed dir, with manifest, source,
+README, and LICENSE all alongside each other. This is the layout the quality
+rubric rewards (README and LICENSE land at the archive root via
+`additionalFiles`) without requiring directory prefixes on `behaviors:` or other
+typed entries.
+
+#### Side-by-side example
+
+Default (`paths.base: typedDir`) — manifest sits inside the behaviors directory
+or at a per-extension repo root with code under `./extensions/behaviors/`:
+
+```
+extensions/behaviors/manifest.yaml       # or:    my-ext/manifest.yaml
+extensions/behaviors/echo.ts             #        my-ext/extensions/behaviors/echo.ts
+extensions/behaviors/utils/helper.ts     #        my-ext/extensions/behaviors/utils/helper.ts
+```
+
+```yaml
+# manifest.yaml
+manifestVersion: 1
+name: "@me/my-ext"
+version: "2026.04.29.1"
+license: MIT
+behaviors:
+  - echo.ts
+  - utils/helper.ts
+additionalFiles:
+  - README.md # alongside manifest
+```
+
+Opt-in (`paths.base: manifest`) — each extension is a self-contained directory
+under the behaviors directory:
+
+```
+extensions/behaviors/my-ext/manifest.yaml
+extensions/behaviors/my-ext/echo.ts
+extensions/behaviors/my-ext/utils/helper.ts
+extensions/behaviors/my-ext/README.md
+```
+
+```yaml
+# manifest.yaml
+manifestVersion: 1
+name: "@me/my-ext"
+version: "2026.04.29.1"
+license: MIT
+paths:
+  base: manifest
+behaviors:
+  - echo.ts
+  - utils/helper.ts
+additionalFiles:
+  - README.md
+```
+
+#### What does NOT change with `paths.base: manifest`
+
+- The on-wire manifest in the archive keeps your path strings as written — no
+  path rewriting, no normalization. Only the key changes: `behaviors:` is
+  written as `models:`.
+- The archive layout under each typed dir mirrors your manifest entries
+  verbatim: `behaviors: [echo.ts]` lands at `extension/models/echo.ts` in the
+  archive (not at `extension/models/my-ext/echo.ts`). Write entries without the
+  archive prefix: a `behaviors:` entry starting with `behaviors/` or `models/`
+  is refused.
+- Workflows honour `paths.base: manifest` — the manifest's own directory is
+  searched first, falling back to `workflows/` and `extensions/workflows/` under
+  the extensions root and the repo dir.
+- Skills honour `paths.base: manifest` — manifest-relative directories are
+  searched first, then the extensions root, then project-local. All enrolled
+  tools are searched at each level. The global `~/.claude/skills` directory is
+  never searched, so a skill is not packaged from a locally installed copy by
+  name.
+
+#### Pushing from outside the extension directory
+
+`push`, `quality` and `fmt` accept a manifest file or an extension directory
+(`swamp extension push extensions/behaviors/x` means
+`extensions/behaviors/x/manifest.yaml`), relative to `--extensions-dir` when
+set, then the current directory, then the repo dir. Without `--extensions-dir`,
+the extensions root is inferred from the manifest's location (the nearest
+ancestor holding `extensions/` or `.swamp.yaml`) when nothing resolves under the
+repo dir, so a sub-directory extension in the swamp-extensions layout pushes
+from a sibling repo or from its monorepo root without flags. `--extensions-dir`
+names the directory that _contains_ `extensions/`; swamp appends
+`extensions/behaviors`, `extensions/models` (and the other typed directories) to
+it, and the flag covers workflows and skills too. Without the flag, an entry
+that exists under both the repo dir and the inferred root is refused rather than
+guessed; with the flag, the flag's root wins. Every not-found error lists the
+paths it looked in and names the flag or `paths.base: manifest` as the fix.
+
+### Name Rules
+
+- Must match pattern `@collective/name` or `@collective/name/sub/path` (e.g.,
+  `@myorg/s3-tools`, `@myorg/aws/ec2`)
+- Collective must match your authenticated username
+- Reserved collectives (`@swamp`, `@si`) cannot be used
+- Allowed characters: lowercase letters, numbers, hyphens, underscores
+
+### Collective Validation
+
+| Type                        | Valid? | Notes                       |
+| --------------------------- | ------ | --------------------------- |
+| `@user/my-model`            | Yes    | Valid collective            |
+| `@myorg/deploy`             | Yes    | Custom collective allowed   |
+| `myorg/my-model`            | Yes    | Non-@ format allowed        |
+| `digitalocean/app-platform` | Yes    | Non-@ multi-segment allowed |
+| `@user/aws/s3`              | Yes    | Nested paths allowed        |
+| `swamp/my-model`            | No     | Reserved collective         |
+| `si/my-model`               | No     | Reserved collective         |
+
+### Import Rules
+
+`import { z } from "npm:zod@4";` is the canonical zod import for entrypoint
+files. Two distinct constraints make this the right form:
+
+- **Hermeticity at score time.** The swamp-club scorer and the local
+  `swamp extension quality` command both run in a sandbox that strips the
+  tarball's `deno.json` and writes its own with `nodeModulesDir: "auto"` and no
+  imports map. Push therefore rewrites each bare import to the specifier Deno
+  resolves it to from that module under the repo's Deno config (`deno.json` or
+  `deno.jsonc` imports, an `importMap` file it references, the scope covering
+  the module, or a workspace root's imports), when that is an `npm:`, `jsr:`,
+  `node:` or URL specifier, pinned to the exact version the bundle holds. In a
+  `package.json` project, it writes `npm:<name>@<installed version>` for each
+  bare import of a registry dependency installed in `node_modules/` (the version
+  the bundle inlines). Any other bare import ships as written and fails at score
+  time: `deno doc --json` cannot find the bare name and the command throws
+  before factor scoring begins.
+- **Zod externalization.** Zod is the sole import that is NOT inlined into the
+  published bundle. The extension must share swamp's zod instance so schema
+  `instanceof` checks work across the module boundary — that is why zod in
+  particular is called out as the canonical inline form, not merely a
+  consequence of hermeticity.
+
+Other Deno-compatible imports (`npm:`, `jsr:`, `https://`) are inlined into the
+bundle by the swamp packager. A `deno.json` that maps zod to any 4.x version or
+range (`npm:zod@^4`) ships it as `npm:zod@4`, still shared, provided every
+module resolves `"zod"` to zod 4: a scope that sends it to zod 3 anywhere keeps
+it bundled. `swamp extension quality` and `swamp extension push` report the same
+`bare-specifiers` warning for each bare import that ships as written; fix it by
+adding an imports entry for the name to the Deno config, declaring and
+installing it as a `package.json` dependency, or writing the specifier inline.
+Quality still prints the rubric but fails, because the registry cannot resolve
+the import and would score the documentation factors 0; push warns. A push also
+fails when an import-map target it would write holds a quote, backslash,
+backtick, line break or `${`. The finding cannot be accepted. Swamp's lint never
+applies Deno's `no-import-prefix` rule, so a `deno.json` needs no exclude for
+the `npm:`/`jsr:` form.
+
+- All imports must be static top-level imports — dynamic `import()` calls are
+  rejected during push
+- Commit a lock or pin exact versions. Push ships every `npm:` and `jsr:` import
+  pinned exact either way (see "Dependency inputs and what ships"), but without
+  a lock a range resolves to the registry's newest match at push time, so the
+  published version changes across pushes and costs the `loose-specifier` point.
+  Examples:
+  - `npm:lodash-es@4.17.21` (inline), or via `deno.json` import map, or in
+    `package.json` dependencies
+  - `jsr:@std/assert@1.0.0` (inline) or via `deno.json` import map
+  - `https://deno.land/std@0.224.0/async/delay.ts` (the version lives in the
+    URL)
+- Use `include` in the manifest for helper scripts executed via `Deno.Command`
+  that shouldn't be bundled
+
+See the extension behavior
+[examples](../../extension/references/model/examples.md) for import style
+examples and helper script details.
+
+### How Content Maps to Manifest
+
+- `behaviors` paths resolve relative to `extensions/behaviors/` (`models` paths
+  relative to `extensions/models/`)
+- `vaults` paths resolve relative to `extensions/vaults/`
+- `datastores` paths resolve relative to `extensions/datastores/`
+- Only list entry-point files — every local module an entry point imports is
+  packaged, wherever it lives in the repo. A module more than one level above
+  the typed directory is copied to `_shared/` and the archived copies' imports
+  are rewritten to it. A missing local module fails the push, a literal dynamic
+  `import("./x.ts")` included, even inside `try`/`catch` (the bundle would fail
+  on it too)
+- Pull installs these shared modules beside the typed directories, so the pulled
+  source resolves as yours does. Push refuses a shared module pull would not
+  install: a hidden path, `node_modules`, or a `deno.json`, `deno.jsonc` or
+  `package.json` imported from outside the typed directory
+- Each entry-point is bundled into a standalone JS file for the registry
+- The registry catalog lists a behavior only when its entry point exports a
+  plain `export const behavior = { ... }` (or `export const model = { ... }`)
+  object with string-literal `type` and `version`. A behavior built by a shared
+  factory must repeat both literals after the spread
+  (`{ ...definition, type: "@acme/thing", version: "2026.09.25.1" }`), and the
+  export takes no type annotation (put `satisfies ModelDefinition` after the
+  object instead). A behavior that misses this still installs and runs, but
+  `extension search --content-type models` and `extension info` do not list it;
+  push and `extension quality` report it as `uncatalogued-model`.
+
+## Examples
+
+### Behaviors-only (simplest)
+
+```yaml
+manifestVersion: 1
+name: "@myorg/s3-tools"
+version: "2026.02.26.1"
+license: MIT
+behaviors:
+  - s3_bucket.ts
+```
+
+### Behaviors + workflows
+
+```yaml
+manifestVersion: 1
+name: "@myorg/deploy-suite"
+version: "2026.02.26.1"
+license: MIT
+description: "Deployment automation behaviors and workflows"
+behaviors:
+  - ec2_instance.ts
+  - security_group.ts
+workflows:
+  - deploy_stack.yaml
+additionalFiles:
+  - README.md
+```
+
+### Multi-behavior with dependencies
+
+```yaml
+manifestVersion: 1
+name: "@myorg/monitoring"
+version: "2026.02.26.1"
+license: MIT
+behaviors:
+  - cloudwatch_alarm.ts
+  - sns_topic.ts
+  - dashboard.ts
+dependencies:
+  - "@myorg/aws-core"
+```
+
+### Behavior + report
+
+```yaml
+manifestVersion: 1
+name: "@myorg/ports"
+version: "2026.03.01.1"
+license: MIT
+behaviors:
+  - ports.ts
+reports:
+  - port_whisperer.ts
+```
+
+## Pre-Push Checklist
+
+0. **Verify swamp repository**: Confirm `.swamp.yaml` exists — run
+   `swamp repo init --json` if missing
+1. **Get next version**:
+   `swamp extension version --manifest manifest.yaml --json`
+2. **Bump version** in `manifest.yaml` — use `nextVersion` from the output above
+3. **Format & lint**: `swamp extension fmt manifest.yaml`
+4. **(Optional) Quality score**: `swamp extension quality manifest.yaml --json`
+   — see the `swamp-extension` skill for the rubric. Packages and caches the
+   tarball at `.swamp/cache/packages/<hash>/`; the cache is reused by the
+   dry-run and push below if source hasn't changed.
+5. **Dry-run push**: `swamp extension push manifest.yaml --dry-run --json`
+6. **Push**: `swamp extension push manifest.yaml --yes --json`
+
+### What the dry run checks
+
+With credentials present, the dry run runs the registry checks a real push runs,
+read-only, and reports each one in the `dry_run` document's `registryChecks`
+array with the wording the push would fail with:
+
+| Check                   | Passed when                                                                                                                                    |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `authentication`        | the stored key is accepted by the registry; the message and the row's `credential` name it (username, or API token collective and fingerprint) |
+| `reserved-collective`   | `@swamp` / `@si` membership was verified by the registry                                                                                       |
+| `collective-membership` | the manifest's collective is one of yours                                                                                                      |
+| `private-entitlement`   | (private intent only) the collective's reported plan allows private extensions: a paid plan, or a free plan with an active trial               |
+| `version-exists`        | the manifest version is not published on any channel                                                                                           |
+
+A `failed` check exits non-zero after the summary. A `not-run` check names the
+missing prerequisite in `message` and `cause`: `no-credentials` leaves the run
+green, since the registry was never asked; `registry-unavailable` exits
+non-zero, since the registry never confirmed what the push needs;
+`entitlement-undecided` leaves the run green, since the registry answered but
+what it reported does not settle private entitlement (no entitlement reported
+for the collective). The dry run never prompts and never writes to the registry.
+
+`private-entitlement` follows the registry's `privateExtensions` verdict for the
+extension's collective: `allowed` passes, `trial-ended` and `paywalled` fail, an
+unknown value is `entitlement-undecided`. A personal namespace covered by
+another collective's paid plan or trial passes even though its own trial ended.
+A failure carries the message the push throws, e.g.
+`Collective "@acme"'s 30-day free trial has ended. Private extensions need a
+paid plan; upgrade at https://swamp-club.com/o/acme/billing.`
+or `Private extensions in "@acme" need a paid plan; upgrade at …`. A real push
+the registry refuses on entitlement reports the registry's sentence followed by
+what it had reported for the collective at sign-in.
+
+`apiCalls` lists every HTTP call the run made (registry, OSV, npm) with its
+method, URL and outcome; the log summary says "No API calls were made." only
+when that list is empty. `contentHash` is the hash the adversarial-review report
+path is keyed by. `declaredAcceptances` and `unresolvedWarnings` close the
+document: what the author accepted, and each remaining warning with its fix and
+the acceptance that would declare it (see
+[Declaring acceptances](#declaring-acceptances)).
+
+### Reproducing the CI layout
+
+The content hash labels files by their path from the extensions root, not from
+the swamp repo dir. CI publishes from a swamp repo initialised inside the
+extension directory, so a dry run reproduces CI's hash whenever the extensions
+root is the extension directory: from inside it, or from a sibling or monorepo
+swamp repo that infers the root from the manifest or names it with
+`--extensions-dir`:
+
+```bash
+swamp extension push path/to/extension --dry-run --json
+```
+
+Compare `contentHash` in the output with the hash CI reports. Any byte change in
+a packaged file, or a version bump, moves the hash. If the hashes differ only by
+layout, the extensions root resolved elsewhere (an extension whose typed entries
+resolve under the swamp repo dir keeps the repo dir as its root): pass
+`--extensions-dir path/to/extension`, or run the dry run inside the extension
+directory (`swamp repo init --quiet --tool none` there first if it has no
+`.swamp.yaml`).
+
+### Opportunistic package cache
+
+`swamp extension quality`, `swamp extension push --dry-run`, and
+`swamp extension push` all consult a content-hash-keyed cache at
+`.swamp/cache/packages/<hash>/`. The hash is derived from the manifest, every
+referenced source file, and the deno/package-json configuration — so any source
+change invalidates the entry by construction. An entry is reused only by the
+swamp version that wrote it, since a reused archive skips the fmt/lint gate; a
+cache hit still runs every other gate. Quality writes the cache only when every
+gate passed. The cache is a pure optimization: a cache miss falls back to fresh
+packaging. The cache is never load-bearing for correctness and can be deleted
+safely at any time.
+
+## Version-Drift Check
+
+An advisory (non-blocking) check that runs during `swamp extension push` and
+`--dry-run`. It compares current behavior versions against the last-published
+version in the registry to catch a common mistake:
+
+- **Behavior version bumped, manifest not** — one or more behavior `version`
+  fields changed compared to the published version but the manifest `version`
+  did not. The manifest version must be bumped whenever a behavior version
+  changes so the registry reflects that a new release is available.
+
+The check fetches the last-published version's metadata from the registry. This
+works on any machine with registry credentials — no local state is required.
+
+When there is nothing to compare against, the check says why rather than
+silently skipping. Each such warning carries a `cause` in `--json`:
+
+| `cause`                 | When                                     | Message says                                                            |
+| ----------------------- | ---------------------------------------- | ----------------------------------------------------------------------- |
+| `never-published`       | the registry has no version (first push) | "no previously published version found ... (expected on first publish)" |
+| `no-credentials`        | not signed in                            | "no credentials; run 'swamp auth login' to sign in"                     |
+| `authentication-failed` | the registry rejected the key (401/403)  | "authentication failed: <reason>"                                       |
+| `registry-unavailable`  | no network, a 5xx, any other failure     | "registry lookup failed: <reason>" (names the HTTP status)              |
+
+Only `never-published` means a first publish; the others are transient or
+credential problems, and note that the version-bump upgrade check was skipped
+too. A real drift finding has no `cause`. None of these block the push.
+
+### Dependency inputs and what ships
+
+Push accepts what Deno resolves and ships one form: every `npm:` and `jsr:`
+import in the archive's source (static, side-effect, dynamic and type imports,
+re-exports and import-map targets) names the exact version its bundle holds,
+`npm:ms@2.1.3` or `jsr:@std/assert@1.0.19/equals`. The version comes from the
+same `deno info` graph the bundle is built from. zod, which the host provides,
+ships as written. An import the graph cannot resolve fails the push, so a range
+never ships.
+
+| Input                                                        | What ships                                                                       |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------- |
+| exact `npm:` / `jsr:`                                        | as written                                                                       |
+| range, npm dist-tag or unpinned, with a lock                 | the locked version (push bundles `--frozen`)                                     |
+| the same, with no lock                                       | the registry's newest match today, with a `loose-specifier` warning              |
+| `deno.json` / `deno.jsonc` `imports`, `importMap`, scopes    | the exact target Deno resolves for that module                                   |
+| workspace member                                             | resolved under the member's config, against the workspace root's lock            |
+| `package.json` + `node_modules/`                             | the installed version                                                            |
+| `deno.json` + `package.json`                                 | the installed copy: one graph read, so bundle, shipped specifier and audit agree |
+| JSR dist-tag (`jsr:@std/assert@latest`)                      | refused before bundling: JSR has no dist-tags; drop the tag or pin a version     |
+| URL import, git, `package.json` `file:`/`link:`/`workspace:` | as today; the bundle inlines it and the record lists it under `unaudited`        |
+
+- **Locks.** A non-exact spec costs the `loose-specifier` point only when no
+  valid lock fixed its version; the warning reads
+  `no lock: ^2 resolved to 2.1.3 today; commit a lock or pin exact versions (costs 1 point)`.
+  A `deno.lock` always counts. A `package-lock.json` counts only when
+  `node_modules/` matches it, transitive packages included; otherwise push warns
+  `package-lock-mismatch`.
+- **Workspaces.** A workspace member's lock is the workspace root's: the root's
+  `lock` setting, else the `deno.lock` beside the root config, as Deno reads it.
+  Deno ignores a member's own `deno.lock` or `lock` setting, and push warns
+  `workspace-member-lock` naming it.
+- **Installed copies.** In a `package.json` project, each installed copy under
+  one declared range is audited and recorded separately, and a written `npm:`
+  import of the same package does not hide one.
+- **Nothing from above the repository.** With no `deno.json` or `deno.jsonc`
+  inside the repository, push, quality and the bundle run with `--no-config`, so
+  a config Deno would discover above it (one in `$HOME`, say) never applies.
+  Push refuses, naming the file and the fix, when:
+  - a `deno.json` or `deno.jsonc` above the repository would map one of the
+    extension's bare imports, or a `package.json` above it declares one (fix:
+    add a `deno.json`, or `package.json`, inside the repository, or write the
+    specifier in full);
+  - a workspace root above the repository lists the repository's config (fix:
+    move the workspace root inside the repository);
+  - a bare import resolves from a `node_modules/` above the repository (fix:
+    declare the package in the project's `package.json` and install it). A
+    `node_modules/` inside the repository, including a monorepo's hoisted
+    install at its root, is fine.
+
+  With every import written in full, a config above the repository is ignored
+  without a warning.
+- **Config files never ship.** A `deno.json`, `deno.jsonc`, `deno.lock`,
+  `package.json`, `package-lock.json`, `.npmrc` or `node_modules/` file listed
+  in `additionalFiles` or `include` is left out with an `archive-project-file`
+  warning.
+- **The record.** `dependency-audit.json` (v2) has one entry per shipped package
+  version (`spec` equals `version`; `from` is `exact`, `lockfile`, `registry` or
+  `installed`; `locked`; `writtenAs`), a SHA-256 per bundle file, and an
+  `unaudited` list giving the origin and per-module hashes of URL imports and
+  non-registry `package.json` dependencies. It holds no local absolute path.
+
+The dependency trust audit checks each `npm:` and `jsr:` import at the version
+the push ships, including a bare import the extension's Deno config resolves to
+one (its findings end `(imported as "<name>" through the project's Deno config)`
+and block the same way), or, in a `package.json` project, a bare import of an
+installed dependency (`through package.json`). npm license, maintainers and
+deprecation are read from that version; OSV is asked about it. A JSR import's
+package and version must exist on jsr.io.
+
+Push and `extension quality` never write the extension's lockfile. With a lock,
+they bundle under `--frozen`, so a `deno.lock` that no longer matches
+`deno.json`, `package.json` or an import fails the push
+(`<lock> is out of date
+with <config>`) instead of being rewritten; the locked
+version is then always the one that ships. Fix it with
+`deno install --entrypoint <file>` in the project directory, commit the lock,
+and push again. Without a lock they bundle with `--no-lock` and create none.
+`extension fmt` and `fmt --check` never write the lock either. On a stale lock
+they still pass: each entry point the lock refused is formatted alone, and fmt
+warns with the same `deno install --entrypoint` command (`staleLockfiles` in
+`--json`). Fix the lock before pushing.
+
+Findings with a `cause` in `warnings.dependencyTrust`:
+
+| Cause                | Means                                                                                                                                                                                                | Severity |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| `not-audited`        | an OSV, npm or JSR lookup failed, no published version matches the specifier, or the code comes from outside npm and JSR (a URL import, a git or local package.json dependency, named by its origin) | warning  |
+| `deprecated-version` | the shipped npm version is deprecated while the package's latest is not                                                                                                                              | warning  |
+| `loose-specifier`    | unpinned, range or dist-tag; names the version this push resolves                                                                                                                                    | warning  |
+| `jsr-yanked`         | the shipped JSR version is yanked                                                                                                                                                                    | warning  |
+| `jsr-missing`        | the JSR package or version does not exist (or the name is invalid)                                                                                                                                   | error    |
+
+A deprecated package (the shipped version and latest both deprecated) stays an
+error. A `deprecated-version` warning also loses the `dependency-trust` quality
+factor. Pin exact, supported versions to clear both warnings.
+
+An unaudited dependency is never passed; in `swamp extension quality` it is
+marked `?` and loses the `dependency-trust` factor. Every warning with a cause
+is gated like safety and review warnings: an interactive push prompts, `--yes`
+waives them, and the summaries list them under
+`acceptedWarnings.dependencyTrust`. A log-mode push without a terminal and
+without `--yes` fails at the prompt. Re-run an unaudited push when OSV, npm and
+JSR are reachable. Code from outside npm and JSR (`notAuditedFix: "origin"`)
+still ships; replace it with an `npm:` or `jsr:` package to earn the factor
+back.
+
+The version-drift check is **not** run during `swamp extension fmt` — it
+requires registry access that the fmt command does not use.
+
+Manifest and behavior versions are independent — a multi-behavior extension can
+have each behavior at a different version. The check never requires behavior
+versions to match the manifest version. It only checks directionality: if a
+behavior version moved, the manifest version must also move.
+
+## Push Workflow
+
+> **Before you push:** Your extension directory must be an initialized swamp
+> repository (`.swamp.yaml` must exist). Your extension must also pass
+> `swamp extension fmt <manifest> --check`. The push command enforces formatting
+> automatically — if your code has formatting or lint issues, the push will be
+> rejected. Run `swamp extension fmt <manifest>` to auto-fix before pushing.
+
+### Commands
+
+```bash
+# Full push to registry (stable channel, the default)
+swamp extension push manifest.yaml --json
+
+# Push to a prerelease channel (beta or rc)
+swamp extension push manifest.yaml --channel beta --json
+
+# Validate locally without pushing (builds archive, runs safety checks and
+# the registry checks read-only; lists the API calls it made)
+swamp extension push manifest.yaml --dry-run --json
+
+# Skip all confirmation prompts
+swamp extension push manifest.yaml -y --json
+
+# Specify a different repo directory
+swamp extension push manifest.yaml --repo-dir /path/to/repo --json
+```
+
+### What Happens During Push
+
+1. **Parse manifest** — validates schema, checks required fields
+2. **Registry checks** — authentication, reserved collective, collective
+   membership (the manifest's collective is one of yours), private entitlement
+   (private intent only: the collective's reported plan allows private
+   extensions) and version exists (on any channel). A dry run reports them; a
+   push stops at the first failure.
+3. **Resolve files** — collects behavior entry points, reads each one's module
+   graph with `deno info` to find every local import, resolves workflow
+   dependencies. Files from `extensions/behaviors/` are packed under the
+   archive's `models/`; two files that would pack to the same `models/` path
+   fail the push ("would both be packed as").
+4. **Detect project config** — walks up from manifest directory to repo root
+   looking for `deno.json` (takes priority) then `package.json`. If found and
+   the extension uses bare specifiers, it is used for bundling. A `deno.json`
+   that is a workspace member bundles against the workspace root's lock. Nothing
+   above the repository applies (see "Dependency inputs and what ships").
+   `deno.json` is also used for quality checks, by push, `extension quality` and
+   `extension fmt` alike; `package.json` projects use default lint/fmt rules.
+   Push, quality and fmt read a `package.json` project's `node_modules/` as
+   installed (`--node-modules-dir=manual`) and never write it; a dependency
+   `package.json` declares that is not installed, or is installed outside its
+   range, fails push and quality — run `npm install` or `deno install`.
+5. **Resolve include files** — collects files from the manifest's `include`
+   field (if present). These are copied to the archive alongside behavior
+   sources but not bundled or quality-checked.
+6. **Safety analysis** — scans all files (including `include` files) for
+   disallowed patterns and limits
+7. **Quality checks** — runs `deno fmt --check` and `deno lint` on behavior,
+   vault, datastore, and report files (using the project's `deno.json` config if
+   present, otherwise default rules). Lint never applies `no-import-prefix`,
+   which would forbid the `npm:`/`jsr:` imports swamp requires. Include files
+   are excluded.
+8. **Bare specifier check** — scans source files for bare import specifiers
+   (e.g. `from "zod"` instead of `from "npm:zod@4"`). The server-side scorer
+   cannot resolve bare specifiers, so a warning naming each import-map
+   replacement is added to the review warnings, prompting the user to confirm
+   before push. It cannot be accepted. An `uncatalogued-model` warning is added
+   the same way for each behavior entry point the registry catalog would leave
+   out (see "How Content Maps to Manifest"). A `behavior-spelling` warning is
+   added once when the extension uses the behavior spelling (see "Warnings
+   (prompted)").
+9. **Bundle TypeScript** — compiles each entry point (behaviors, vaults,
+   datastores) to standalone JS. Include files are not bundled. If a `deno.json`
+   is present, the import map governs dependency resolution.
+10. **Version-drift check** — advisory check comparing current behavior versions
+    against the last-published version in the registry. Warns when a behavior
+    version was bumped but the manifest `version` was not. When it cannot
+    compare — never published, no credentials, or a failed registry lookup — it
+    reports which, rather than silently skipping. See "Version-Drift Check"
+    below.
+11. **Version check** — verifies version doesn't already exist (offers to bump)
+12. **Build archive** — creates tar.gz with all content types and their bundles
+13. **Upload** — three-phase push: initiate, upload archive, confirm
+
+## Extension Formatting
+
+Format and lint extension files before publishing. The `extension fmt` command
+resolves all TypeScript files referenced by the manifest (behavior entry points
+and their local imports), then runs `deno fmt` and `deno lint --fix` on them
+under the project `deno.json` that push uses (found the same way), or Deno's
+defaults when there is none, so `fmt --check` and push give the same verdict.
+
+### Commands
+
+```bash
+# Auto-fix formatting and lint issues
+swamp extension fmt manifest.yaml --json
+
+# Check-only mode (exit non-zero if issues exist, does not modify files)
+swamp extension fmt manifest.yaml --check --json
+
+# Specify a different repo directory
+swamp extension fmt manifest.yaml --repo-dir /path/to/repo --json
+```
+
+### What Happens During Fmt
+
+1. **Parse manifest** — reads the manifest and resolves behavior/workflow file
+   paths
+2. **Resolve files** — collects all TypeScript files (entry points + local
+   imports) referenced by the manifest
+3. **Run `deno fmt`** — formats all resolved files (or checks in `--check` mode)
+4. **Run `deno lint --fix`** — auto-fixes lint issues (or checks in `--check`
+   mode)
+5. **Re-check** — if any unfixable lint issues remain, reports them and exits
+   non-zero
+
+### Relationship to Push
+
+`swamp extension push` automatically runs the equivalent of `--check` before
+uploading. If formatting or lint issues are detected, the push is blocked with a
+message directing you to run `swamp extension fmt <manifest-path>` to fix them.
+
+## Safety Rules
+
+The safety analyzer scans all files before push. Issues are classified as
+**errors** (block the push) or **warnings** (prompt for confirmation). `--yes`
+(or `--force`) answers that prompt along with the push confirmation; the dry-run
+and push summaries then list what it waived under `acceptedWarnings`, in log and
+JSON output. A warning the author has judged acceptable is better declared where
+it is than waived for the run: see
+[Declaring acceptances](#declaring-acceptances).
+
+Every finding carries a `ruleId` (the ids below), the `file`, the 1-based `line`
+when it has one, a `remediation` (how to fix it properly) and, for a rule that
+can be accepted, an `acceptance` object describing the edit (see
+[Applying an acceptance](#applying-an-acceptance)).
+
+### Errors (block push)
+
+| Rule                        | Detail                                                                                                                                                                                                                                                                                                                                |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `eval()` / `new Function()` | Dynamic code execution not allowed in `.ts` files: global `eval` in any form, the `Function` constructor, `.constructor(...)` calls, and members named `eval` or `Function` (`x.eval(...)`). Methods _defined_ with those names, and text in strings, comments and regexes, are fine. The error lists each location as `line:column`. |
+| Symlinks                    | Any symlink on a file's path, including a symlinked directory such as `extensions/` or a skill directory, is refused                                                                                                                                                                                                                  |
+| Hidden files                | Files starting with `.` are not allowed                                                                                                                                                                                                                                                                                               |
+| Disallowed extensions       | Only `.ts`, `.json`, `.md`, `.yaml`, `.yml`, `.txt` in `additionalFiles`. Files in the `binaries` manifest field are exempt — use `binaries` for executables and files with other extensions.                                                                                                                                         |
+| File too large              | Individual files must be under 1 MB                                                                                                                                                                                                                                                                                                   |
+| Total size exceeded         | All files combined must be under 10 MB                                                                                                                                                                                                                                                                                                |
+| Too many files              | Maximum 150 files per extension                                                                                                                                                                                                                                                                                                       |
+| Manifest too large          | `manifest.yaml` must be at most 1 MiB                                                                                                                                                                                                                                                                                                 |
+| Manifest list too long      | Each manifest list (`models`, `workflows`, `include`, `additionalFiles`, ...) holds at most 1000 entries                                                                                                                                                                                                                              |
+| Archive too large           | The built `.tar.gz` (after bundling) must be at most 50 MiB — larger archives cannot be installed                                                                                                                                                                                                                                     |
+
+### Warnings (prompted)
+
+One finding per offending line, so each can be accepted on its own.
+
+| Rule id                 | Detail                                                              |
+| ----------------------- | ------------------------------------------------------------------- |
+| `deno-command`          | A `Deno.Command` use in code, including aliases of `Deno`           |
+| `long-line`             | A line with 500+ non-whitespace characters                          |
+| `base64-run`            | A line with a run of 100+ base64 characters                         |
+| `ipv4-address-literals` | An IPv4 literal in `.md` or `.txt` outside the documentation ranges |
+| `secret-unsafe-docs`    | Docs that put a secret in plaintext or use vault syntax swamp lacks |
+
+`secret-unsafe-docs` reads the packaged Markdown, the manifest `description` and
+describe strings. It flags `vault://`, `<vault:`, `{{ vault ... }}` and
+`swamp vault set`; a `--global-arg` or `--input` secret set to anything but a
+`${{ ... }}` expression; `swamp vault put` with the value on the command line
+(except with `--server`, or a `$VAR` value); and credential-shaped literals.
+Each unaccepted finding costs the `secret-safe-docs` rubric point. Fix the docs
+to use `swamp vault put <vault> <key>` (it prompts) and
+`${{ vault.get(<vault>, <key>) }}`.
+
+The review rules (`credentials-sensitive-field`, `schema-strictness`,
+`testing-completeness`), the extension-scoped `bare-specifiers` and
+`behavior-spelling` findings and the file-scoped `uncatalogued-model` finding
+are warnings too. `bare-specifiers` cannot be accepted: the registry cannot
+score the extension however it is justified, and the fix is to write each
+import's `npm:`/`jsr:` target. `uncatalogued-model` cannot be accepted either:
+it names a behavior entry point the registry catalog would not list (a
+type-annotated or non-object export, or no string-literal `type` or `version` in
+it), and the fix is to write those literals in a plain
+`export const behavior = { ... }` object. `behavior-spelling` can be accepted
+(`--yes`, or a `quality.yaml` entry with no `file`): swamp clients and workers
+older than the release that added the behavior spelling cannot load the
+extension. Keep the model spelling when older clients or workers must install
+it. `testing-completeness` reports once per extension when more than one entry
+point has no sibling `_test.ts`, naming the files. The
+`adversarial-review-report` family is evidence, not a lint, and has no
+acceptance form.
+
+Error-level rule ids (`dynamic-code`, `hidden-file`, `file-type`, `symlink`,
+`file-size`, `total-size`, `file-count`, `unreadable-file`, `fmt`, `lint`,
+`dynamic-import`, `upgrade-chain`) can never be accepted.
+
+## Declaring acceptances
+
+An acceptance is the author's decision that one warning-level finding is
+acceptable for this extension. It lives where the finding is, like a lint
+ignore, is reviewed in the pull request with the code, and is reported in
+`quality`, in the push summary and `--json`, and to the registry. Push writes
+nothing: the summaries describe each acceptance as an edit.
+
+**Offer the fix first.** Add an acceptance only when the user decides the
+finding is not right for this extension. A reason after a colon is optional; ask
+the user for one only when it would help a reviewer.
+
+**Site-scoped rules** (`credentials-sensitive-field`, `schema-strictness`,
+`deno-command`, `base64-run`, `long-line`, `ipv4-address-literals`,
+`secret-unsafe-docs`) take a comment on the finding's line, or on the line
+directly above (one blank line in between is allowed; several directives may
+stack), with an optional reason. Directive text inside a fenced code block or a
+`/* ... */` block is documentation and is ignored:
+
+```typescript
+apiKey: z.string(), // swamp-quality-ignore credentials-sensitive-field: holds the name of a vault key
+```
+
+In Markdown the comment is an HTML comment on the line above:
+
+```markdown
+<!-- swamp-quality-ignore ipv4-address-literals: documented lab gateway -->
+
+Gateway: 10.0.0.1
+```
+
+**File-scoped** `testing-completeness` takes the same comment anywhere in the
+file (the top is conventional):
+
+```typescript
+// swamp-quality-ignore testing-completeness: thin wrapper covered by the integration suite
+```
+
+A site rule in a `.txt` file or `manifest.yaml` (no comment form), a Markdown
+line inside a fenced code block (named by `file` and `line`), and the
+`generated` declaration for a codegen package live in a `quality.yaml` sidecar
+beside `manifest.yaml`. It is discovered by location, never named in the
+manifest (most manifests are regenerated), packaged into the archive root beside
+`manifest.yaml`, and part of the content hash:
+
+```yaml
+version: 1
+generated: # a codegen package: accepts testing-completeness for every behavior
+  by: swamp-extensions/codegen
+  source: https://api.example.com/openapi.yaml
+  commit: 0123abcd
+accept:
+  - rule: ipv4-address-literals
+    file: docs/hosts.txt
+    reason: documented lab addresses # optional
+  - rule: secret-unsafe-docs # one line inside a README code block
+    file: README.md
+    line: 42
+```
+
+A `line` entry needs this swamp release or later; older releases refuse the
+sidecar.
+
+Rules, enforced by construction:
+
+- An acceptance names one finding by file, rule and line. A new match elsewhere
+  still warns. The sidecar refuses site-scoped rules in source files, and in
+  Markdown files without a `line`, and refuses files outside the manifest's
+  directory.
+- A comment naming an unknown, error-level or otherwise non-acceptable rule
+  (`bare-specifiers`, the `adversarial-review-report` family), text after the
+  rule id with no colon, or more than 50 per file, is a blocking
+  `invalid-acceptance` error naming the comment. So is every comment in a source
+  file that does not parse: fix the syntax error first. A reason, when given, is
+  capped at 200 characters, and in source files may not contain `Deno.Command(`
+  or a base64 run: the long-line and base64 checks scan every line as written,
+  so a directive can never trigger or hide a finding. Quotes are fine
+  (`// swamp-quality-ignore deno-command: butler is itch.io's upload tool`);
+  releases before this one refuse them. An empty `reason:` in `quality.yaml` is
+  a schema error; omit the key instead.
+- An acceptance whose rule no longer fires there is a `stale-acceptance` warning
+  at the comment, so acceptances do not accumulate.
+- A malformed `quality.yaml` blocks the push before any gate runs, like a
+  malformed manifest.
+
+**Reporting.** The dry-run and completed push summaries, and
+`swamp extension quality`, end with two blocks: `Accepted warnings:` (each
+declared acceptance with its reason when one was given, and the generated
+declaration) and `Unresolved warnings:` (each warning neither fixed nor
+accepted, with `fix:` and, when the rule can be accepted, one `or accept ...`
+line). In `--json` they are `declaredAcceptances`
+(`{ accepted: [...], generated? }`, each `file` relative to the manifest's
+directory) and `unresolvedWarnings`
+(`[{ ruleId, file, line?, message, remediation?, acceptance? }]`, `file`
+absolute), beside `acceptedWarnings` and omitted when empty. Every finding in
+`warnings.review` and `warnings.safety` carries `remediation` and the same
+`acceptance` object, except a collapsed `testing-completeness` finding, which
+`unresolvedWarnings` expands to one entry per file. The acceptances also travel
+to the registry in `contentMetadata.acceptances` (`reason` omitted when none was
+given).
+
+### Applying an acceptance
+
+Each `acceptance` is an edit, never prose to parse. `file` is the absolute path
+to edit:
+
+```json
+{
+  "form": "comment",
+  "file": "/abs/ext/behaviors/b.ts",
+  "line": 9,
+  "position": "line-above",
+  "text": "    // swamp-quality-ignore deno-command"
+}
+```
+
+```json
+{
+  "form": "sidecar",
+  "file": "/abs/ext/quality.yaml",
+  "entry": { "rule": "ipv4-address-literals", "file": "docs/hosts.txt" }
+}
+```
+
+- `line-above`: insert `text` verbatim (it is the whole line, indented like line
+  `line`) as a new line before line `line`. Apply these bottom-up within a file,
+  since each insert moves the lines below it; two findings on one line take two
+  stacked lines, which both name that line.
+- `file-header` (`line` is 1): insert `<text>` at the top of the file, after a
+  `#!` shebang if there is one.
+- `sidecar`: append `entry` to the `accept` list of the existing `quality.yaml`;
+  create the file as `version: 1` plus `accept:` only when it is absent. Never
+  write a second `version:` header. `entry.file` is already relative to the
+  manifest's directory; an extension-scoped rule has no `file`. A Markdown file
+  with a finding inside a fenced code block takes `entry.line` for every one of
+  its findings and no comments, so no inserted line moves the lines the entries
+  name.
+
+A warning with no `acceptance` cannot be declared where it is: its rule has no
+acceptance form, or its line sits inside a multi-line string, template literal
+or block comment, where a comment would be ignored or would change the string;
+log mode says `cannot be accepted here`. Offer the fix.
+
+After editing source files, run `swamp extension fmt manifest.yaml` so the
+formatting gate passes.
+
+Add a reason only when the user gives one, after a colon on the comment or as
+`reason:` on the sidecar entry.
+
+## CalVer Versioning
+
+Extensions use Calendar Versioning: `YYYY.MM.DD.MICRO`
+
+- `YYYY` — four-digit year
+- `MM` — two-digit month (zero-padded)
+- `DD` — two-digit day (zero-padded)
+- `MICRO` — incrementing integer (starts at 1)
+
+**Examples:** `2026.02.26.1`, `2026.02.26.2`, `2026.03.01.1`
+
+The date must be today or earlier. If you push a version that already exists,
+the CLI will offer to bump the `MICRO` component automatically.
+
+### Determining the Next Version
+
+Use `swamp extension version` to query the registry and compute the correct next
+version:
+
+```bash
+# By extension name
+swamp extension version @myorg/my-ext --json
+
+# By manifest file
+swamp extension version --manifest manifest.yaml --json
+```
+
+**JSON output:**
+
+```json
+{
+  "extensionName": "@myorg/my-ext",
+  "currentPublished": "2026.03.25.3",
+  "publishedAt": "2026-03-25T14:30:00Z",
+  "nextVersion": "2026.03.30.1"
+}
+```
+
+- Use `nextVersion` as the new `version` in your behavior and manifest
+- Use `currentPublished` as the `fromVersion` in upgrade chain entries
+- If `currentPublished` is `null`, the extension has never been published
+
+## Common Errors and Fixes
+
+| Error                             | Fix                                                                                                                                |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| "Not a swamp repository"          | Run `swamp repo init --json` in the extension directory                                                                            |
+| "Not authenticated"               | Run `swamp auth login` first                                                                                                       |
+| "collective does not match"       | Manifest `name` must use `@your-username/...`                                                                                      |
+| "CalVer format" error             | Use `YYYY.MM.DD.MICRO` (e.g., `2026.02.26.1`)                                                                                      |
+| "at least one model, workflow…"   | Add a `behaviors` (or `models`), `workflows`, `vaults`, `datastores`, or `skills` array                                            |
+| "Behavior file not found"         | Check path is relative to `extensions/behaviors/` ("Model file not found": `extensions/models/`)                                   |
+| "would both be packed as"         | A file under `extensions/behaviors/` and one under `extensions/models/` pack to the same archive path; rename or move one          |
+| "Workflow file not found"         | Check path is relative to `workflows/`                                                                                             |
+| "would both be packaged as"       | Two workflow entries map to one archive file name; rename one file, or move it into its own directory                              |
+| "is listed twice in the manifest" | The same workflow file appears twice in `workflows`; remove one entry                                                              |
+| "eval() or new Function()"        | Remove dynamic code at the listed `line:column` locations; rename a method called as `x.eval(...)`, or import the library from npm |
+| "Version already exists"          | Bump the MICRO component or let CLI auto-bump                                                                                      |
+| "Missing manifestVersion"         | Add `manifestVersion: 1` to your manifest                                                                                          |
+| "Bundle compilation failed"       | Fix TypeScript errors in your behavior files                                                                                       |
+| "Extension is already deprecated" | Already deprecated — use `undeprecate` first if re-deprecating with new reason                                                     |
+| "Extension is not deprecated"     | Nothing to undeprecate — extension is not currently deprecated                                                                     |
+
+## Related Skills
+
+| Need                               | Use Skill                 |
+| ---------------------------------- | ------------------------- |
+| Create custom behaviors            | `swamp-extension`         |
+| Create custom vaults               | `swamp-extension`         |
+| Create custom datastores           | `swamp-extension`         |
+| Repository setup and management    | `swamp-repo`              |
+| Create reports                     | `swamp-report`            |
+| Quality scorecard & best practices | `swamp-extension`         |
+| Deprecate/undeprecate extensions   | `swamp-extension-publish` |
+
+## Quality Self-Check
+
+Run between formatting (State 6) and dry-run (State 7):
+
+```bash
+swamp extension quality manifest.yaml --json
+```
+
+Scores the extension against the 10 client-earnable Swamp Club quality factors
+(README, LICENSE, JSDoc coverage, repository URL, manifest completeness,
+supported platform list, etc.) and prints per-factor results with remediation
+hints. A bundle failure prints each compilation error as push does
+(`compilationErrors` in `--json`). It runs the same gates push runs; when one
+fails (safety, fmt/lint, collectives, upgrade chain, dependency trust, review
+errors, size) it still prints the rubric, then each failure with its details,
+and exits non-zero (`gateFailures` in `--json`; `excludedFromArchive` lists
+files a check rejected and left out of the scored archive).
+`registryScorable: false` means the registry cannot resolve the extension's bare
+imports and would score its documentation factors 0. `docAnalysisError` (null
+when it ran) says why `deno doc` could not analyse the source; quality scores
+the documentation factors 0 as the registry does, and fails. When every gate
+passes, the packaged tarball is written to `.swamp/cache/packages/<hash>/` and
+reused by dry-run and push while the source tree and swamp version are
+unchanged.
+
+This step is optional — skipping does not block the push. See the
+`swamp-extension` skill for the full rubric and per-factor guidance.

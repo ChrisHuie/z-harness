@@ -1,0 +1,149 @@
+# Unit Testing Extension Behaviors
+
+The `@swamp-club/swamp-testing` package provides `createModelTestContext()` for
+unit testing extension behavior `execute` functions without real infrastructure.
+
+Install: `deno add jsr:@swamp-club/swamp-testing`
+
+> **If your `_test.ts` imports the behavior source directly and fails with
+> TS7006 under strict mode**, see [typing.md](typing.md) for the
+> `satisfies ModelDefinition<...>` escape hatch.
+
+## createModelTestContext Options
+
+| Option            | Default             | Description                               |
+| ----------------- | ------------------- | ----------------------------------------- |
+| `globalArgs`      | `{}`                | Global arguments for the execute function |
+| `definition`      | auto-generated      | `{ name, id, version, tags }` overrides   |
+| `methodName`      | `"run"`             | Name of the executing method              |
+| `repoDir`         | `"/tmp/swamp-test"` | Repository directory path                 |
+| `signal`          | never-aborted       | AbortSignal for cancellation testing      |
+| `storedResources` | `{}`                | Pre-seed data for `readResource` calls    |
+| `onEvent`         | captures only       | Callback for domain events                |
+
+`globalArgs` accepts any object type, including an interface, and
+`context.globalArgs` comes back as that type, so the context passes to an
+`execute` typed with the same global arguments.
+
+## Inspection Helpers
+
+```typescript
+const {
+  context, // MethodContext to pass to execute()
+  getWrittenResources, // Array<{ specName, name, data, handle }>
+  getWrittenFiles, // Array<{ specName, name, content, text?, handle }>
+  getLogs, // Array<{ level, message, args }>
+  getLogsByLevel, // (level) => filtered logs
+  getEvents, // Array<{ type, ...fields }>
+} = createModelTestContext();
+```
+
+`getWrittenFiles()` entries hold the written bytes in `content` (a
+`Uint8Array`). Files written with `writeText`, or with `writeLine` and then
+`finalize`, also carry the string in `text`; for `writeAll` and `writeStream`,
+decode `content` with `new TextDecoder().decode(content)`.
+
+## Testing CRUD Lifecycle Behaviors
+
+Seed stored resources to test methods that read existing state:
+
+```typescript
+Deno.test("sync refreshes state from API", async () => {
+  const { context, getWrittenResources } = createModelTestContext({
+    storedResources: {
+      "main": { instanceId: "i-abc123", status: "running" },
+    },
+  });
+
+  await behavior.methods.sync.execute({}, context);
+  assertEquals(getWrittenResources()[0].data.instanceId, "i-abc123");
+});
+```
+
+## Injectable Client Pattern
+
+Accept an optional client parameter in the method arguments so tests can inject
+a stub instead of the live SDK:
+
+```typescript
+// In the behavior execute function
+execute: (async (
+  args: z.infer<typeof ArgsSchema> & { _s3Client?: S3Client },
+  context: { globalArgs: { region: string; bucket: string } },
+) => {
+  const s3 = args._s3Client ??
+    new S3Client({ region: context.globalArgs.region });
+  await s3.send(new CreateBucketCommand({ Bucket: context.globalArgs.bucket }));
+  // ...
+});
+```
+
+```typescript
+// In the test
+const mockS3 = { send: () => Promise.resolve({}) };
+const { context } = createModelTestContext({
+  globalArgs: { region: "us-east-1", bucket: "my-bucket" },
+});
+
+await behavior.methods.create.execute({ _s3Client: mockS3 }, context);
+```
+
+### Alternative: Extract Logic Into Testable Functions
+
+Extract business logic into a separate function with explicit dependencies. This
+keeps the `execute` function thin:
+
+```typescript
+// extensions/behaviors/_lib/vpc_ops.ts
+export async function createVpc(
+  client: { send: (cmd: unknown) => Promise<unknown> },
+  cidr: string,
+) {
+  const result = await client.send({ CidrBlock: cidr });
+  return { vpcId: result.Vpc.VpcId, cidr, status: "available" };
+}
+```
+
+```typescript
+// Test the extracted function directly — no createModelTestContext needed
+const mockClient = {
+  send: () => Promise.resolve({ Vpc: { VpcId: "vpc-123" } }),
+};
+const result = await createVpc(mockClient, "10.0.0.0/16");
+assertEquals(result.vpcId, "vpc-123");
+```
+
+## Testing deleteResource
+
+Use `getDeletedResources()` to verify which resources a method deletes:
+
+```typescript
+Deno.test("sync cleans up stale error data on recovery", async () => {
+  const { context, getDeletedResources } = createModelTestContext({
+    storedResources: {
+      "status": { state: "healthy" },
+      "last-error": { message: "connection refused" },
+    },
+  });
+
+  await behavior.methods.sync.execute({}, context);
+  assertEquals(getDeletedResources(), ["last-error"]);
+});
+```
+
+## Other Testing Patterns
+
+**Logs**: Use `getLogs()` or `getLogsByLevel("info")` to assert on logged
+messages.
+
+**Cancellation**: Pass `signal: controller.signal` and call `controller.abort()`
+to test abort handling.
+
+**Events**: Use `getEvents()` to inspect domain events emitted via
+`context.onEvent`.
+
+**Handle metadata**: Assert on `handle.metadata.lifetime`,
+`handle.metadata.contentType`, etc. to verify data lifecycle properties.
+
+**In-repo extensions**: Import directly from `../../packages/testing/mod.ts`
+instead of the JSR package.

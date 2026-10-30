@@ -1,0 +1,17 @@
+{
+  "skills": ["swamp", "swamp-getting-started"],
+  "query": "Read tasks/2026-10-30-look-up-a-vendor.md and get started on it.",
+  "files": [
+    {
+      "path": "tasks/2026-10-30-look-up-a-vendor.md",
+      "content": "<!-- swamp start brief v1 -->\n\n# Task\n\nGiven a vendor id from the IAB Global Vendor List, return the vendor's name.\n"
+    }
+  ],
+  "expected_behavior": [
+    "treats the file as a swamp start brief because its first line is the marker, and confirms the task in one line",
+    "follows the swamp skill's brief entry point and first-run runbook; no separate onboarding state machine is run",
+    "searches for a type with `swamp behavior type search` and then `swamp extension search` before proposing command/shell or a custom extension",
+    "does not run `swamp repo init` or `swamp auth login`, since the brief path means both are done",
+    "chooses a read method such as lookup, get or list for the first run, not sync"
+  ]
+}

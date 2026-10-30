@@ -1,0 +1,12 @@
+{
+  "skills": ["swamp"],
+  "query": "Which flags does `swamp workflow run` take for JUnit output, and can I combine them with --json?",
+  "files": [],
+  "expected_behavior": [
+    "fires the swamp skill and loads references/cli/workflow.md rather than answering from memory",
+    "names --junit and --out, and states that --out requires --junit",
+    "states that --junit cannot be combined with --json, or runs `swamp help workflow run --json` to confirm",
+    "names the swamp version the reference was generated from, or the schema it consulted",
+    "invents no flag that is absent from the schema"
+  ]
+}

@@ -1,0 +1,374 @@
+## State 1: repo_verified
+
+Confirm the extension directory is an initialized swamp repository.
+
+**Gate:** The user has a directory containing extension code and a
+`manifest.yaml`.
+
+**Action:**
+
+```bash
+ls .swamp.yaml
+```
+
+**Verify:** The file exists and is valid YAML. If you are in a subdirectory,
+check parent directories up to the filesystem root.
+
+**On Failure:** Run `swamp repo init --json`, then re-verify.
+
+## State 2: auth_verified
+
+Confirm the user is authenticated with the swamp registry.
+
+**Gate:** State 1 passed (`.swamp.yaml` exists).
+
+**Action:**
+
+```bash
+swamp auth whoami --json
+```
+
+**Verify:** The output contains a `username` field and `authenticated: true`.
+
+**On Failure:** Run `swamp auth login`, then re-verify.
+
+## State 3: manifest_validated
+
+Confirm `manifest.yaml` exists and is structurally valid.
+
+**Gate:** State 2 passed (authenticated).
+
+**Action:** Read `manifest.yaml` and validate the 4 required checks documented
+in [references/publishing.md](references/publishing.md#manifest-schema-v1)
+(`manifestVersion`, `name` format, content arrays, file paths).
+
+**Verify:** All 4 checks pass.
+
+**On Failure:** Report which checks failed. See
+[references/publishing.md](references/publishing.md#manifest-schema-v1) for the
+checklist and common fixes.
+
+## State 4: collective_verified
+
+Confirm the manifest collective matches the authenticated user.
+
+**Gate:** State 3 passed (manifest is valid).
+
+**Action:** Extract the collective from the manifest `name` field (the part
+between `@` and `/`). Compare it against the `username` from
+`swamp auth whoami --json`.
+
+**Verify:** The collective matches the authenticated username, or the user has
+confirmed they have permission to publish under this collective.
+
+**On Failure:** Collective mismatch — ask the user to update the manifest `name`
+or confirm publishing rights. Do not proceed until resolved.
+
+## State 5: versioned
+
+Get the next version and bump the manifest.
+
+**Gate:** State 4 passed (collective verified).
+
+**Action:**
+
+```bash
+swamp extension version --manifest manifest.yaml --json
+```
+
+**Verify:** The command succeeds and returns a `nextVersion` field. Update
+`manifest.yaml` with this version. If the behavior source file also contains a
+`version` field, update it to match.
+
+**On Failure:** If `currentPublished` is `null`, use `nextVersion` as-is (first
+publish). Otherwise check manifest `name` and registry connectivity. See
+[references/publishing.md](references/publishing.md#calver-versioning) for
+CalVer details.
+
+## State 6: formatted
+
+Format and lint all extension files.
+
+**Gate:** State 5 passed (version bumped).
+
+**Action:**
+
+```bash
+swamp extension fmt manifest.yaml --json
+```
+
+**Verify:** The command exits successfully (exit code 0). Run the check mode to
+confirm:
+
+```bash
+swamp extension fmt manifest.yaml --check --json
+```
+
+**On Failure:** Fix lint errors reported by `--check`, then re-run fmt. See
+[references/publishing.md](references/publishing.md#extension-formatting) for
+details.
+
+## State 6b: quality_checked
+
+Show the extension's quality score before proceeding. This step is
+**non-blocking** — it does not gate the next state. The score is informational
+so the author sees where they stand before publishing.
+
+**Gate:** State 6 passed (formatting clean).
+
+**Action:**
+
+```bash
+swamp extension quality manifest.yaml --json
+```
+
+**Present:** Show the score and grade to the user from `earnedPoints`,
+`maxEarnablePoints`, `percentage` and `grade` (e.g. "Quality: 14/16 (87%), Grade
+B"). When `ifProvisionalEarned` is not null, say `provisionalPoints` are pending
+server verification and would raise the score to its `percentage` and `grade` if
+the registry verifies them (e.g. "+2 pending: 100%, Grade A once verified"). If
+any factors are unearned, list them so the author can decide whether to address
+them. Do not require or suggest they must fix anything — these are the author's
+choices.
+
+**Advance:** Always proceed to State 7 regardless of the score.
+
+## State 7: dry_run_passed
+
+Validate the extension can be pushed without actually uploading.
+
+**Gate:** State 6 passed (formatting clean).
+
+**Action:**
+
+```bash
+swamp extension push manifest.yaml --dry-run --json
+```
+
+**Verify:** Exit code 0. Confirm any warnings with the user. The output is one
+JSON document: `status` (`dry_run`), `resolved` (the extension's contents, file
+paths absolute), `warnings` grouped by family (`safety`, `review`,
+`dependencyTrust`, `versionDrift`, `versionBumpUpgrade`; omitted when empty; a
+`dependencyTrust` entry with `cause: "not-audited"` is a dependency whose OSV,
+npm or JSR lookup failed, whose specifier no published version matches, or code
+from outside npm and JSR named by its origin; `deprecated-version`,
+`loose-specifier` and `jsr-yanked` entries describe the version the push ships),
+then the run summary. It lists `registryChecks` (authentication, reserved
+collective, collective membership, version exists) with the wording the real
+push uses; a `failed` check exits non-zero and a `not-run` check names the
+missing prerequisite (no credentials). `apiCalls` lists every HTTP call the run
+made, and `contentHash` is the hash the adversarial-review report is keyed by.
+`unresolvedWarnings` lists each remaining warning with its `remediation` and,
+for rules that can be accepted, an `acceptance` object describing the edit: a
+comment (`file`, `line`, `position`, `text`) or one `entry` for the `accept`
+list of `quality.yaml` beside the manifest; `declaredAcceptances` lists what the
+extension already accepts. Offer the user the fix first and apply the acceptance
+only when they decide the finding is not right for this extension; add sidecar
+entries to the existing `accept` list rather than writing a new file. The reason
+is optional; ask for one only when it helps a reviewer. See
+[applying an acceptance](references/publishing.md#applying-an-acceptance).
+
+A dry run prints the same `contentHash` CI's publish computes whenever the
+extensions root is the extension directory, including from a sibling swamp repo
+(`swamp extension push path/to/extension --dry-run --json`). See
+[reproducing the CI layout](references/publishing.md#reproducing-the-ci-layout).
+
+If private publication is requested, retain `visibility: private` in the
+manifest or pass optional `--visibility private` in both this dry run and
+State 8. Verify the requested visibility in preview, and use a fully upgraded
+registry. See
+[private publication](references/publishing.md#private-publication) for
+precedence and registry requirements.
+
+Optional `--visibility public` selects the registry default and overrides a
+private manifest. Keep the same choice in State 8; it preserves existing
+extension visibility rather than converting an already-private extension to
+public.
+
+**On Failure:** If the dry-run reports a missing or incomplete adversarial
+review report, the review gate is unsatisfied. Complete the **Adversarial Review
+Gate** in the `swamp-extension` skill (write the content-hash-bound review
+report at the path the dry-run prints), then re-run. For other failures see
+[references/publishing.md](references/publishing.md#safety-rules).
+
+## State 8: pushed
+
+Publish the extension to the registry.
+
+**CRITICAL: Do NOT push automatically.** Present summary and wait for explicit
+user confirmation.
+
+**Gate:** ALL prior states (1–7) passed. Ask: "Ready to push
+`@collective/name@YYYY.MM.DD.MICRO`. Shall I proceed?"
+
+**Action:** Only after explicit user approval:
+
+```bash
+swamp extension push manifest.yaml --yes --json
+```
+
+**Verify:** The command exits successfully and reports the published version.
+
+Check the completed summary for a `Registry warnings:` block
+(`warnings.registry` in JSON, one `{ "message": ... }` per warning;
+`registryWarningsOmitted` counts any beyond the first 20). The push succeeded,
+but the registry discarded something the client sent — typically
+`contentMetadata` over a registry limit, so the listing was extracted from the
+archive instead. Relay each warning to the user.
+
+`--yes` also waives safety and review warnings; the completed summary records
+them under `acceptedWarnings` so the user can see what was waived, and its
+`Unresolved warnings:` block (`unresolvedWarnings` in JSON) says how to fix or
+accept each one so the next push carries no waiver.
+
+For explicit-private publication, verify the successful output reports
+`visibility: "private"`. A dry run proves intent, not applied registry
+visibility.
+
+**On Failure:** If the push fails:
+
+- Version already exists on the channel you pushed to → bump the MICRO component
+  and retry
+- Version already exists on a lower channel (e.g. on `beta`, pushed with
+  `--channel stable`) → the error gives the exact `swamp extension promote`
+  command; promote that version instead of bumping, which would discard the
+  tested version and its review report
+- Version already exists on a higher channel → a version cannot move down a
+  channel; bump and publish a new version
+- Version already exists and has been yanked (the error gives the reason) → the
+  number stays taken and the version cannot be promoted; bump and publish a new
+  version
+- Network error → check connectivity and retry
+- Auth error → re-run `swamp auth login` (go back to State 2)
+
+## Post-Publication: Release Channels
+
+Release channels let you publish prerelease versions (beta, rc) before promoting
+to stable. Channels are **entirely optional** — omitting `--channel` publishes
+straight to stable, which is the default and most common flow. The state machine
+above does not change when using channels.
+
+See the
+[prerelease publishing manual](https://swamp-club.com/manual/how-to/extensions/publish-prerelease)
+for the full guide.
+
+### Publishing to a channel
+
+Add `--channel` to the push command from State 8:
+
+```bash
+# Publish a beta
+swamp extension push manifest.yaml --channel beta --yes --json
+
+# Publish a release candidate
+swamp extension push manifest.yaml --channel rc --yes --json
+```
+
+Valid channel values are `beta` and `rc`. Omitting `--channel` publishes to
+stable. The dry-run in State 7 also accepts `--channel` for validation; its
+`version-exists` registry check names the channel a published version is on
+(`existingChannel`) and the one requested (`requestedChannel`).
+
+An interactive push (no `--yes`, no `--json`) names the channel in its final
+confirmation and, when the version is already on a lower channel, offers
+promote, bump or stop. `--yes` never promotes; it fails with the promote command
+instead. A yanked version is never offered for promotion: the push offers bump
+or stop and names the yank.
+
+### Promoting between channels
+
+Promote an existing version to a higher channel without re-publishing:
+
+```bash
+# Promote beta to rc
+swamp extension promote @collective/name 2026.06.10.1 --channel rc --json
+
+# Promote rc to stable
+swamp extension promote @collective/name 2026.06.10.1 --channel stable --json
+
+# Explicit source channel (skips direction validation)
+swamp extension promote @collective/name 2026.06.10.1 \
+  --channel stable --from-channel rc --json
+
+# From a manifest: name and version come from the manifest, and the registry
+# is asked which channel the version is on before promoting
+swamp extension promote manifest.yaml --channel stable --json
+```
+
+With a manifest, promote fails with "Nothing to promote" when the version is on
+no channel, or already on the target channel or above it.
+
+A yanked version cannot be promoted: promote fails with "has been yanked" and
+the reason. Publish a new version instead.
+
+| Option           | Required | Description                                                                         |
+| ---------------- | -------- | ----------------------------------------------------------------------------------- |
+| `--channel`      | Yes      | Target channel: `rc` or `stable`                                                    |
+| `--from-channel` | No       | Source channel (`beta` or `rc`); inferred when omitted; not allowed with a manifest |
+
+Promotion direction must go upward: beta → rc → stable.
+
+### Channel-aware pull and search
+
+```bash
+# Pull a specific channel
+swamp extension pull @collective/name --channel beta --json
+
+# Search with channel filter (repeatable; omitting returns stable only)
+swamp extension search query --channel beta --channel rc --json
+```
+
+The lockfile records the channel preference so subsequent `pull` and `outdated`
+checks use it automatically.
+
+`swamp extension search --licensed` lists only extensions that declare a
+license.
+
+### Channel fields in extension info
+
+`swamp extension info` shows `latestBeta` and `latestRc` fields when prerelease
+versions exist, alongside the stable `latestVersion`.
+
+## Post-Publication: Deprecation
+
+Deprecate or undeprecate a published extension. Deprecated extensions remain
+pullable — this is a soft lifecycle signal, not a deletion.
+
+**Prerequisites:** Authenticated (`swamp auth whoami`) and authorized for the
+extension's collective.
+
+### Deprecate
+
+```bash
+swamp extension deprecate @collective/name --reason "No longer maintained" --json
+
+# Point users to a replacement
+swamp extension deprecate @collective/name \
+  --reason "Merged into collective extension" \
+  --superseded-by @other/replacement --json
+```
+
+| Option            | Required | Description                     |
+| ----------------- | -------- | ------------------------------- |
+| `--reason`        | Yes      | Why the extension is deprecated |
+| `--superseded-by` | No       | Replacement extension name      |
+| `-y, --yes`       | No       | Skip confirmation prompt        |
+
+### Undeprecate
+
+```bash
+swamp extension undeprecate @collective/name --json
+```
+
+Removes deprecation status. Accepts `-y, --yes` to skip confirmation.
+
+### Where deprecation surfaces
+
+`search` shows `[deprecated]`, `info` shows reason/successor/timestamp, `pull`
+prints a warning, `outdated` and `list --check-updates` flag the extension.
+
+## References
+
+See [references/publishing.md](references/publishing.md) for manifest schema,
+field reference, CalVer versioning, safety rules, related skills, and common
+errors.

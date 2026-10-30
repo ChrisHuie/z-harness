@@ -1,0 +1,605 @@
+## Repository Structure
+
+```
+my-swamp-repo/
+├── models/                  # Behavior definitions (YAML)
+├── workflows/               # Workflow definitions (YAML)
+├── vaults/                  # Vault configurations (YAML)
+├── extensions/              # Custom extensions
+│   ├── models/              # TypeScript behavior types (behaviors/ also loads)
+│   ├── vaults/              # TypeScript vault implementations
+│   └── datastores/          # TypeScript datastore implementations
+├── .swamp/                  # Runtime data (datastore)
+│   ├── data/                # Versioned behavior data
+│   ├── outputs/             # Method execution outputs
+│   ├── workflow-runs/       # Workflow execution records
+│   └── ...                  # Other runtime artifacts
+├── .swamp.yaml              # Repository metadata
+└── CLAUDE.md                # Agent instructions
+```
+
+**Top-level directories** (`models/`, `workflows/`, `vaults/`): Source-of-truth
+YAML files. These are committed to git and reviewed in PRs.
+
+**`.swamp/` directory**: Runtime data only. Can be gitignored entirely. When an
+external datastore is configured, this data lives elsewhere (see Datastores
+section below).
+
+## Initialize a Repository
+
+Create a new swamp repository with all required directories and configuration.
+
+```bash
+swamp repo init --json
+swamp repo init ./my-automation --json
+```
+
+### The default vault
+
+Init creates a `local_encryption` vault named `default`
+(`vaults/local_encryption/<id>.yaml`, config `auto_generate: true`) and sets
+`defaultVault: default` in `.swamp.yaml`, so secrets and sensitive outputs work
+without creating a vault first. The `--json` output reports it as
+`"vault": { "name": "default", "type": "local_encryption", "created": true }`.
+
+```bash
+# Skip the default vault ("vault": null)
+swamp repo init --no-vault --json
+```
+
+`--force` keeps an existing vault named `default` (`"created": false`) and the
+`defaultVault` already in `.swamp.yaml`. `swamp repo upgrade` never adds the
+vault, or `defaultVault`, to an existing repo. The vault's key and secrets stay
+on the machine (`.swamp/secrets/`), so a clone starts with an empty `default`
+vault.
+
+Without `defaultVault`, sensitive outputs go to the first vault by type, then
+id; `swamp doctor vaults` warns when a repo has several vaults and no
+`defaultVault`.
+
+### Multi-tool repos
+
+`--tool` is repeatable to enroll multiple AI agent tools (Claude Code, Kiro,
+Cursor, OpenCode, Codex, Copilot) in the same repo. Each tool's scaffolding
+(skills directory, instructions file, settings/hooks) is written independently
+since the paths don't overlap. The marker stores the full enrolled list as
+`tools: [...]`.
+
+```bash
+# Enroll one tool (default: claude)
+swamp repo init --json
+
+# Enroll multiple tools at once
+swamp repo init --tool claude --tool kiro --json
+
+# Skip tool scaffolding
+swamp repo init --tool none --json
+```
+
+The **primary tool** is the first entry in `marker.tools` — it's used by
+commands that still operate on a single tool (audit recording, extension skills
+directory resolution). Order is preserved; appending a tool keeps the existing
+primary stable.
+
+Duplicate `--tool` values are silently collapsed. `--tool none` cannot be
+combined with other `--tool` values.
+
+### Instructions mode
+
+Each tool's instructions file uses one of two modes that control how
+`repo upgrade` handles the file:
+
+- **`shared`** — swamp manages a marked section
+  (`<!-- BEGIN swamp managed
+  section -->` / `<!-- END ... -->`) inside the
+  file, preserving any user content outside the markers. Used by all built-in
+  tools (Claude, Cursor, Kiro, OpenCode, Codex, Copilot).
+- **`owned`** — swamp fully controls the file and overwrites it on every
+  `repo upgrade`. No user content is preserved. Used when you explicitly want
+  swamp to own the entire file.
+
+For custom tools defined via `swamp agent setup`, the wizard asks which mode to
+use. The default is derived from the filename: root-level files matching a known
+set (`AGENTS.md`, `AGENT.md`, `CLAUDE.md`, `CONVENTIONS.md`) default to
+`shared`; all other paths default to `owned`.
+
+To override the mode after setup, edit `.swamp-custom-tools.yaml` directly:
+
+```yaml
+tools:
+  - name: mytool
+    instructionsFile: .mytool/rules/swamp.md
+    instructionsMode: shared # or "owned"
+    skillsDir: .mytool/skills
+    skillReferenceStyle: path
+```
+
+Use `swamp agent list` to see the current mode for each custom tool.
+
+**Output shape:**
+
+```json
+{
+  "path": "$HOME/my-automation",
+  "version": "0.1.0",
+  "created": [".swamp/", "extensions/models/", ".swamp.yaml", "CLAUDE.md"]
+}
+```
+
+**What gets created:**
+
+- `.swamp/` directory structure for internal storage
+- `extensions/models/` directory for custom behavior types (swamp also loads
+  `extensions/behaviors/` if you create it)
+- `.swamp.yaml` configuration file with version metadata
+- `CLAUDE.md` with agent instructions and skill references (with
+  `--tool claude`; in a repo that already keeps its own rules in `AGENTS.md`,
+  swamp writes `.claude/rules/swamp.md` instead, so Claude Code still reads
+  `AGENTS.md`)
+- `.gitignore` entries for `.swamp/` and `.swamp-sources.yaml`
+
+### Verify the audit integration
+
+Run `swamp doctor audit` after `init --tool <name>` and after upgrading the
+external AI tool. Exits 1 on any check fail — safe to gate in CI. For the full
+diagnostic flow (preflight checks, output shapes, common failures, escalation to
+other tiers), see the `swamp-troubleshooting` skill's
+`references/health-checks.md`.
+
+## Upgrade a Repository
+
+Update an existing repository to the latest swamp version. This updates skills,
+configuration files, and migrates data if necessary.
+
+```bash
+swamp repo upgrade --json
+swamp repo upgrade ./my-automation --json
+```
+
+**Output shape:**
+
+```json
+{
+  "path": "$HOME/my-automation",
+  "previousVersion": "0.0.9",
+  "newVersion": "0.1.0",
+  "updated": [".claude/skills/swamp-model/", "CLAUDE.md"]
+}
+```
+
+Run `swamp repo upgrade` after updating the swamp binary to ensure your
+repository has the latest skill files and configuration.
+
+`--tool` on `swamp repo upgrade` has **replace semantics** — the value(s) you
+pass become the full enrolled tool list. Plain `swamp repo upgrade` with no
+`--tool` flag preserves `marker.tools` and just bumps the version, re-syncing
+scaffolding for every enrolled tool.
+
+```bash
+# Just bump the version, preserve the enrolled tools
+swamp repo upgrade
+
+# Add kiro to a [claude] repo (must list the full intended set)
+swamp repo upgrade --tool claude --tool kiro
+
+# Drop kiro from a [claude, kiro] repo
+swamp repo upgrade --tool claude
+
+# Clear all enrolled tools (drops scaffolding files stay on disk)
+swamp repo upgrade --tool none
+```
+
+Dropping a tool from the list does **not** delete its on-disk files (`.kiro/`,
+etc.) — remove them by hand if desired. Adding a tool that didn't share a skills
+directory with the previous primary surfaces an `extensionsToReinstall` warning
+naming pulled extensions that need to be re-installed for the new tool.
+
+Legacy extension layouts are automatically migrated during upgrade. See
+[references/troubleshooting.md](references/troubleshooting.md) for details on
+legacy layout migration.
+
+## Start Web Interface
+
+Launch a local web server for browsing and managing the repository.
+
+```bash
+swamp repo webapp --json
+swamp repo webapp ./my-automation --json
+```
+
+**Output shape:**
+
+```json
+{
+  "url": "http://localhost:8080",
+  "path": "$HOME/my-automation"
+}
+```
+
+## Datastores
+
+Runtime data (behavior data, workflow runs, outputs, audit logs) is stored in a
+configurable **datastore**. By default, this is the local `.swamp/` directory.
+
+### Checking Status
+
+```bash
+swamp datastore status --json
+```
+
+**Output shape:**
+
+```json
+{
+  "type": "filesystem",
+  "path": "$HOME/my-repo/.swamp",
+  "healthy": true,
+  "message": "OK",
+  "latencyMs": 1,
+  "directories": ["data", "outputs", "workflow-runs", "..."]
+}
+```
+
+On a format 2 datastore, `swamp doctor datastores --repair --json` (add `-y` to
+apply) prints one object with a key per repair stage: `unmigrated`, `catalog`,
+`duplicateLatest` and `contamination`. Each holds that stage's `status` object,
+or `null` when the stage did not run (no namespace, or the datastore has no
+contamination repair).
+
+### Setting Up a Filesystem Datastore
+
+Move runtime data to an external directory (e.g. shared NFS mount):
+
+```bash
+swamp datastore setup filesystem --path /mnt/shared/swamp-data --json
+```
+
+Migrates existing `.swamp/` runtime data to the new path and updates
+`.swamp.yaml`. Use `--skip-migration` to skip the data copy.
+
+### Durable Writes
+
+By default a v2 data write is atomic (it survives a process crash) but is not
+synced to disk, so a power cut can lose it or publish an empty version. To sync
+every write before it is published, set `durable: true` in the datastore block,
+or `SWAMP_DATASTORE_DURABLE=1` when the block does not set it. This costs
+several fsyncs per write, roughly doubling write time on a local SSD and more on
+macOS or network disks, so enable it where data must survive a power cut:
+
+```yaml
+datastore:
+  type: filesystem
+  path: .swamp
+  durable: true
+```
+
+With it on, a write whose sync fails exits with
+`Could not sync <path> to disk: <reason>`. A version whose own files could not
+be synced is not published; when only the final sync of its `latest` marker
+fails, the version is already latest and the marker may not survive a power cut.
+Treat `EIO` or `ENOSPC` as a disk problem, not a reason to turn syncing off.
+
+### Setting Up a v3 Filesystem Datastore
+
+`--format 3` creates a v3 datastore: every change is committed to a commit log
+(`commits.db`) and each checkout keeps its records in its own `.swamp/`.
+
+```bash
+swamp datastore setup filesystem --path /mnt/shared/swamp-v3 --format 3 --json
+```
+
+- The path must be new or an empty directory, and the repo must hold no data
+  yet: existing data is not migrated to v3.
+- Teammates join by pulling the committed `.swamp.yaml`. A checkout whose
+  `.swamp/` already holds records is refused at its first v3 command with
+  `v3_checkout_holds_records`, and nothing is changed. Run
+  `swamp doctor datastores --repair` to preview, then add `-y`. This moves the
+  records into `.swamp/pre-v3-records/<stamp>/`, and the next command catches up
+  from the datastore. The moved records are not in the v3 datastore. With
+  `--json` the repair prints one object whose `status` is one of:
+  `pre_v3_records_preview` (with `swampDir`, `recordDirs` and
+  `preV3RecordsDir`), `pre_v3_records_moved` (adds `destination`), or
+  `pre_v3_records_not_needed`. The same applies on S3 and GCS.
+- For v3 on S3 or GCS, see "Setting Up a v3 Datastore on S3 or GCS" below.
+- One writing process at a time. A write command fails while another process
+  (e.g. `swamp serve`) writes the datastore; run it through serve instead.
+- `swamp datastore gc --json` deletes content chunks no commit names; on a v2
+  datastore it reports there is nothing to collect.
+- `swamp datastore status --json` shows `format: 3` and the commit log.
+- A refusal with `datastore_claimed` means `swamp datastore claim` made serve
+  the datastore's owner: write through serve by setting `serverAddress` (or
+  `SWAMP_SERVE_URL`) to the address the error names and running
+  `swamp auth server-login --server <url>`. Reads still work. An admin claims
+  with `swamp datastore claim --address <url>` (through the running serve with
+  `--server`, or in serve's checkout with serve stopped) and removes the claim
+  with `swamp datastore release`. Serve must run with `--address <url>` to write
+  a datastore claimed for that address.
+- A run cancelled by Ctrl+C or SIGTERM commits its `cancelled` record and the
+  outputs it wrote. After a hard kill, a crash or a second Ctrl+C, the next
+  command in that checkout removes the run's uncommitted files and logs a
+  warning. Only a file holding content the datastore refused to store again is
+  moved aside instead of removed; `swamp doctor datastores` lists such copies
+  and how to store or discard them.
+- After a crash or power loss, a record whose content chunk is missing or
+  damaged fails reads with `datastore_v3_record_unreadable` (it does not read as
+  absent) while other records keep working. `swamp doctor datastores --json`
+  lists such records, checkout files moved aside and short chunks (check
+  `v3_content`) with the way out for each. If the checkout's content cannot be
+  inspected at all (e.g. a read-only `.swamp/` state directory), `v3_content`
+  fails and the command exits 1.
+- A refusal with `datastore_v3_replica_root_mismatch` names two replica roots:
+  this checkout's datastore names another bucket or prefix than the checkout
+  that wrote the newest lineage (the S3 endpoint spelling need not match). Fix
+  the checkout's datastore config; nothing was changed. A failing
+  `v3_kept_lineages` check, or `swamp datastore gc` refusing because lineages
+  are kept, means older swamps forked the datastore across endpoint spellings:
+  the listed lineages may hold commits the current state lacks, and chunk
+  collection waits until an operator recovers and removes them by hand.
+- A refusal with `datastore_format_mismatch` or
+  `datastore_format_marker_invalid` saying a crash may have lost the format
+  marker: run `swamp doctor datastores --repair` (preview), then add `-y` to
+  restore it. A `setup --format 3` that stopped part-way is simply re-run. The
+  repair's `--json` output is one object whose `status` is
+  `format_marker_preview` (no `-y`; also `datastorePath`, `markerPath`, and
+  `marker`: `absent` or `blank`), `format_marker_restored` (same fields), or
+  `format_marker_not_needed` (`datastorePath` only). A failed restore exits 1
+  with its own error code, or `format_marker_repair_failed`.
+
+### Setting Up a v3 Datastore on S3 or GCS
+
+`--format 3` on `datastore setup extension` creates a v3 datastore on a bucket.
+Each checkout keeps its own copy of the commit log, which Litestream replicates
+to the bucket; one machine writes at a time.
+
+```bash
+swamp extension pull @swamp/s3-datastore   # the latest release first
+swamp datastore setup extension @swamp/s3-datastore --format 3 \
+  --config '{"bucket":"my-bucket","prefix":"swamp","region":"us-east-1"}' --json
+```
+
+- Needs `@swamp/s3-datastore` or `@swamp/gcs-datastore` 2026.10.16.5 or later,
+  both installed and pinned in the lockfile; an older one is refused (setup, and
+  every command on a v3 bucket) with `swamp extension update <type>`.
+- The bucket prefix must be new and empty (no v2 data, namespaces, chunks or
+  control-plane records), and the repo must hold no data yet.
+- Not on Windows yet, and not through `--server`.
+- Another machine joins by cloning the repo with its `.swamp.yaml`: its first
+  command restores the commit log from the bucket.
+- `swamp datastore sync` is refused: v3 replicates as it commits.
+
+### Setting Up an Extension Datastore (e.g., S3)
+
+Store runtime data in S3 for team collaboration using the `@swamp/s3-datastore`
+extension:
+
+```bash
+swamp datastore setup extension @swamp/s3-datastore \
+  --config '{"bucket":"my-bucket","prefix":"my-project","region":"us-east-1"}' --json
+```
+
+Verifies the backend, migrates local data to the remote, hydrates the local
+cache, and updates `.swamp.yaml`. Subsequent commands automatically sync. See
+[references/troubleshooting.md](references/troubleshooting.md) for
+`--skip-migration` and edge cases.
+
+### Migrating Between Datastores
+
+1. Check current status: `swamp datastore status --json`
+2. Run setup with new backend: `swamp datastore setup <type> ... --json`
+3. Verify health: `swamp datastore status --json` — confirm `healthy: true`
+4. If unhealthy: check error message, fix credentials/paths, re-run setup
+
+### Manual S3 Sync
+
+```bash
+swamp datastore sync --json         # Bidirectional sync
+swamp datastore sync --pull --json  # Pull-only
+swamp datastore sync --push --json  # Push-only
+```
+
+The `filesPulled` and `filesPushed` counts in the output reflect work the sync
+command itself performed — they do not double-count any implicit pre-command
+sync from other commands, and they are not a no-op summary.
+
+### Lock Management
+
+Datastores use a distributed lock to prevent concurrent write access. Locks
+auto-expire after 30 seconds if a process crashes.
+
+```bash
+swamp datastore lock status --json           # Show lock holder
+swamp datastore lock release --force --json  # Force-release stuck lock
+```
+
+After releasing a stuck lock, verify it cleared:
+
+```bash
+swamp datastore lock status --json  # Should return null
+```
+
+See [references/troubleshooting.md](references/troubleshooting.md) for lock
+internals and which commands acquire vs skip the lock.
+
+### Environment Variable Override
+
+For CI/CD, override the datastore without modifying `.swamp.yaml`:
+
+```bash
+export SWAMP_DATASTORE=s3:my-bucket/my-prefix
+export SWAMP_DATASTORE=filesystem:/tmp/swamp-data
+export SWAMP_DATASTORE='@myorg/my-store:{"key":"val"}'
+```
+
+For custom datastore implementations, see the `swamp-extension` skill.
+
+### Config Value Interpolation
+
+String values in the datastore `config` object support `${{ }}` expression
+interpolation, using the same delimiter syntax as behavior and workflow
+definitions. Expressions are resolved during config resolution, before schema
+validation and provider creation.
+
+**Environment variables** — `${{ env.VAR_NAME }}`:
+
+```yaml
+datastore:
+  type: "@myorg/gitlab-datastore"
+  config:
+    token: "${{ env.GITLAB_TOKEN }}"
+    endpoint: "https://${{ env.GITLAB_HOST }}/api/v4"
+```
+
+Resolves to the value of the named environment variable. Throws a startup error
+if the variable is not set or empty.
+
+**Vault secrets** — `${{ vault.get(vaultName, secretKey) }}`:
+
+```yaml
+datastore:
+  type: "@myorg/postgres-datastore"
+  config:
+    connectionString: "${{ vault.get(infra, pg-connection-string) }}"
+```
+
+Resolves to the decrypted value of the named secret. All installed vault types
+work (native `local_encryption` and extension providers like `@swamp/aws-sm`).
+
+**Limitations:**
+
+- Only `env.*` and `vault.get()` are supported — the full CEL evaluation context
+  (behavior references, data lookups) is not available at this bootstrap phase.
+- Vault expressions are not supported when `managedConfig: true` — managed
+  config stores vault configurations in the datastore tier, creating a circular
+  dependency. Use environment variable expressions instead.
+
+### Namespaces (Multi-Repo Datastores)
+
+When multiple repos share a remote datastore, each must own a **namespace** to
+avoid index collisions. Without namespaces, two repos writing to the same prefix
+clobber each other's `.datastore-index.json`.
+
+```bash
+swamp datastore namespace set <slug> --json            # Assign namespace
+swamp datastore namespace migrate --confirm --json     # Move data to namespaced layout
+swamp datastore namespace list --json                  # List all namespaces
+swamp datastore namespace unset --json                 # Remove namespace
+swamp datastore catalog pull --namespaces <list> --json # Pull foreign catalogs
+```
+
+Standard multi-repo flow (new shared setups):
+
+```bash
+swamp datastore setup extension @swamp/s3-datastore \
+  --namespace infra \
+  --config '{"bucket":"shared-bucket","prefix":"swamp","region":"us-east-1"}'
+```
+
+For the full command reference, output shapes, and cross-namespace data access,
+see [references/namespaces.md](references/namespaces.md).
+
+## Extension Sources
+
+Load extensions from external filesystem paths without copying files. Use this
+when testing extensions from a separate development repo, using private
+extensions that can't be published to swamp.club, or composing extensions from
+multiple locations.
+
+### `.swamp-sources.yaml`
+
+A gitignored file at the repo root. Each entry is a **source** — a path (or
+glob) pointing at a directory that contains extensions. Always added to
+`.gitignore` by `swamp repo init` and `swamp repo upgrade`.
+
+```yaml
+sources:
+  - path: ~/code/systeminit/swamp-extensions/model/aws/*
+  - path: ~/code/acme-corp/internal-extensions/model/*
+  - path: ~/code/my-experimental-vault
+    only: [vaults]
+```
+
+**Fields:**
+
+- `path` — filesystem path that contains extensions. Supports `~`, `$VAR`, and
+  glob patterns (`*`, `**`). Two layouts are accepted:
+  1. **Repo root**: a directory with `extensions/<kind>/` subdirectories. Most
+     common — matches how published extensions are structured.
+  2. **Direct content**: a directory whose files declare extension exports
+     (`export const behavior = …`, `export const vault = …`, etc.) or workflow
+     YAML. Useful when you want to point at a single-kind development tree or at
+     an `extensions/<kind>/` directory directly. When both layouts exist in the
+     same directory, the repo-root layout wins — the direct-content files at the
+     root are ignored to prevent double-loading.
+- `only` — optional filter limiting which extension types to load from this
+  source: `models`, `vaults`, `datastores`, `reports`, `workflows`.
+
+### Managing Sources
+
+```bash
+# Add a source (creates .swamp-sources.yaml if needed)
+swamp extension source add ~/code/swamp-extensions/model/aws/ec2
+
+# Add with glob (all AWS extensions)
+swamp extension source add "~/code/swamp-extensions/model/aws/*"
+
+# Add a directory that contains extension files directly (no extensions/ tree)
+swamp extension source add ~/code/my-extensions/vault
+
+# Add with type filter
+swamp extension source add ~/code/my-vaults --only vaults
+
+# List sources with status
+swamp extension source list
+
+# Remove a source
+swamp extension source rm "~/code/swamp-extensions/model/aws/*"
+```
+
+`swamp extension source add` fails with a clear error if the path contributes no
+extensions, so misconfigured paths are caught at add time rather than silently
+ignored. After adding, verify the source loaded:
+
+```bash
+swamp extension source list --json  # Confirm the new source appears
+```
+
+### Load Order
+
+1. **Local extensions** (`extensions/models/`, `extensions/behaviors/`, etc.)
+2. **Source extensions** (from `.swamp-sources.yaml`, in order listed)
+3. **Pulled extensions** (`.swamp/pulled-extensions/`)
+
+Load order is unchanged. Sources override pulled extensions of the same type.
+This means you can pull `@swamp/aws/ec2` from the registry, then add a source
+pointing at your local development copy — your local version loads instead.
+
+## When to Use Other Skills
+
+| Need                               | Use Skill               |
+| ---------------------------------- | ----------------------- |
+| Create/run behaviors               | `swamp-model`           |
+| Create/run workflows               | `swamp-workflow`        |
+| Manage secrets                     | `swamp-vault`           |
+| Manage behavior data               | `swamp-data`            |
+| Create custom TypeScript behaviors | `swamp-extension`       |
+| Create custom datastores           | `swamp-extension`       |
+| Understand swamp internals         | `swamp-troubleshooting` |
+
+## References
+
+- **CI/CD integration**: See
+  [references/ci-integration.md](references/ci-integration.md) for installing
+  swamp in CI, GitHub Actions examples, and version pinning
+- **Structure**: See [references/structure.md](references/structure.md) for
+  complete directory layout reference
+- **Namespaces**: See [references/namespaces.md](references/namespaces.md) for
+  multi-repo shared datastores, namespace commands, and cross-namespace data
+  access
+- **Troubleshooting**: See
+  [references/troubleshooting.md](references/troubleshooting.md) for config
+  problems and recovery procedures
+- **Repository design**: See `design/surfaces/repo.md` in the swamp source repo
+- **Behavior structure**: See `design/primitives/behaviors.md` in the swamp
+  source repo
+- **Datastore design**: See `design/enablers/datastores.md` in the swamp source
+  repo

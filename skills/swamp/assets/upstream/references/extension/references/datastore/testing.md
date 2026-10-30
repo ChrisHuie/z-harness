@@ -1,0 +1,421 @@
+# Testing Datastore Extensions
+
+The `@swamp-club/swamp-testing` package provides conformance suites, mock
+primitives, and test doubles for datastore extensions.
+
+Install: `deno add jsr:@swamp-club/swamp-testing`
+
+## Export Conformance
+
+One call replaces all structural boilerplate tests (metadata, config schema,
+method existence on provider/lock/verifier):
+
+```typescript
+import { assertDatastoreExportConformance } from "@swamp-club/swamp-testing";
+import { datastore } from "./s3.ts";
+
+Deno.test("datastore export conforms", () => {
+  assertDatastoreExportConformance(datastore, {
+    validConfigs: [{ bucket: "my-bucket", region: "us-east-1" }],
+    invalidConfigs: [{}, { bucket: "AB" }],
+  });
+});
+```
+
+This verifies: type matches naming pattern, name/description are non-empty,
+configSchema accepts/rejects configs, createProvider returns a DatastoreProvider
+with createLock/createVerifier/resolveDatastorePath, lock has all required
+methods, verifier has verify().
+
+## Lock Conformance
+
+Test the full DistributedLock contract against your implementation:
+
+```typescript
+import { assertLockConformance } from "@swamp-club/swamp-testing";
+
+Deno.test("lock contract", async () => {
+  const lock = provider.createLock("/test/path");
+  await assertLockConformance(lock);
+});
+```
+
+Tests: acquire/release lifecycle, withLock executes and releases, withLock
+releases on error, inspect when held/not held, forceRelease with correct/wrong
+nonce, release is idempotent.
+
+Works with both real backends and mocked clients (e.g., `createMockS3Client`).
+
+## Verifier Conformance
+
+```typescript
+import { assertVerifierConformance } from "@swamp-club/swamp-testing";
+
+Deno.test("verifier contract", async () => {
+  const verifier = provider.createVerifier();
+  await assertVerifierConformance(verifier);
+});
+```
+
+Validates: verify() returns a result with healthy (boolean), message (string),
+latencyMs (non-negative number), datastoreType (string).
+
+## Sync Service Round-Trip Conformance
+
+Hold a sync service to the `markDirty` contract, delete propagation and
+two-phase push. The factory returns two services on two different cache
+directories over one fresh, empty backend; the suite calls it once per case:
+
+```typescript
+import { assert } from "@std/assert";
+import { assertSyncServiceRoundTripConformance } from "@swamp-club/swamp-testing";
+
+Deno.test("sync service round-trips", async () => {
+  const result = await assertSyncServiceRoundTripConformance(async () => {
+    const bucket = await createTestBucket();
+    const firstCache = await Deno.makeTempDir();
+    const secondCache = await Deno.makeTempDir();
+    return {
+      first: { service: syncFor(bucket, firstCache), cacheDir: firstCache },
+      second: { service: syncFor(bucket, secondCache), cacheDir: secondCache },
+      failNextPush: () => bucket.failNextPut(), // optional transport failure
+      failNextFetch: () => bucket.failNextGet(), // optional, for fetchContent
+      namespace: "conformance-ns", // optional, a namespace both can sync
+      cleanup: async () => {
+        await bucket.destroy();
+        await Deno.remove(firstCache, { recursive: true });
+        await Deno.remove(secondCache, { recursive: true });
+      },
+    };
+  });
+  for (const name of ["round-trip", "push-deletes", "failed-push-retry"]) {
+    assert(result.passed.includes(name), `${name} did not run`);
+  }
+  for (const { name, reason } of result.skipped) {
+    console.log(`skipped ${name}: ${reason}`);
+  }
+});
+```
+
+Cases: `round-trip`, `push-deletes`, `pull-deletes`, `bulk-mark`,
+`failed-push-retry`, `two-phase`, `pull-nothing-new`, `forward-slash-paths`,
+`fetch-content`, `fetch-content-error`, `fetch-content-namespace`. A failing
+case rejects naming the case. Skips come back in `result.skipped` with a reason
+rather than failing:
+
+- `pull-deletes` unless `{ expectPullDeletes: true }` — S3/GCS pulls never
+  delete local files;
+- `failed-push-retry` without `failNextPush`;
+- `two-phase` without `preparePush`/`commitPush`;
+- all three `fetch-content` cases when `second.service` has no `fetchContent`;
+- `fetch-content-error` without `failNextFetch`, which makes the next
+  `second.service.fetchContent()` fail with a transport error;
+- `fetch-content-namespace` without `namespace`.
+
+The `fetch-content` cases hold `fetchContent` to its contract: the remote's
+bytes or `null`, a `..` or absolute path rejected, nothing written to the cache,
+a pending push kept, and a rejection (never `null`) when the remote cannot be
+read. `fetch-content-namespace` passes `namespace` to every call it makes, its
+warm-up pulls included, and reads a cache-relative path that already starts with
+the namespace, so it fails an implementation that adds the namespace twice.
+
+Experimental: like `createInMemoryRemote`, its defaults (such as skipping
+`pull-deletes`) follow what the S3 and GCS datastore extensions do today and may
+change as those extensions change. New cases may be added, and some may skip, so
+assert on the cases you rely on and log the skips rather than pinning the exact
+skipped list.
+
+## Datastore-Wide Control-Plane Conformance
+
+For a provider that implements `datastoreControlPlaneStore()`:
+
+```typescript
+import { assertDatastoreControlPlaneStoreConformance } from "@swamp-club/swamp-testing";
+
+Deno.test("datastore-wide control-plane store conformance", async () => {
+  await assertDatastoreControlPlaneStoreConformance({
+    openDatastoreStore: () => provider.datastoreControlPlaneStore!(),
+    // A fresh, never-pulled service with its own cache each call.
+    openSyncService: async () =>
+      provider.createSyncService!("/repo", await Deno.makeTempDir()),
+  });
+});
+```
+
+It checks that `get` reads the datastore-wide record, returns `null` for a
+missing key, never sees a namespace-only record, rejects on an aborted signal,
+and leaves a sync service free to bind its namespace afterwards.
+
+For a writable store, run `assertWritableDatastoreControlPlaneStoreConformance`
+instead (options and example in the `@swamp-club/swamp-testing` README). A
+provider that declares `datastoreWideLease: true` must run its namespaced-push
+case: pass `openNamespacedSyncFixture` and `markNamespaceUpgradedFromSolo`, use
+an empty bucket or prefix, and assert `result.namespacedPushSkipped` is
+`undefined`. That case checks a `writer/` and a `lineage/` record stay at the
+root.
+
+## Storage Conformance
+
+For a provider that implements `storage()`:
+
+```typescript
+import { assertStorageConformance } from "@swamp-club/swamp-testing";
+
+Deno.test("storage/1 conformance", async () => {
+  await assertStorageConformance(() => provider.storage!(), {
+    // Optional: backdate a chunk so touch and put refreshes are checked.
+    setLastModified: (ns, sha256, date) => backdate(ns, sha256, date),
+  });
+});
+```
+
+It checks the contract and capabilities, put/get/has/delete, namespace isolation
+(including `_default`, the namespace of an unnamespaced datastore), `list`, that
+`put` copies its input, `touch` reporting missing hashes, concurrent puts of one
+hash, a second handle seeing the first's writes, and rejection on an aborted
+signal. It writes under namespaces of its own and deletes what it wrote. Without
+`setLastModified` (e.g. against a real bucket) the refresh checks are skipped.
+`createInMemoryRemote({ storage: true })` gives a conforming in-memory
+`storage()` for tests.
+
+## Replica Target Conformance
+
+For a provider that implements `replicaTarget()`:
+
+```typescript
+import { assertReplicaTargetConformance } from "@swamp-club/swamp-testing";
+
+Deno.test("replica target conformance", async () => {
+  await assertReplicaTargetConformance({
+    replicaTarget: () => provider.replicaTarget!(),
+    bucket: config.bucket,
+    openStorage: () => provider.storage!(),
+    openDatastoreStore: () =>
+      provider
+        .datastoreControlPlaneStore!() as WritableDatastoreControlPlaneStore,
+    // Read with your own client, not through the provider.
+    objectExists: (key) => headObject(config.bucket, key),
+  });
+});
+```
+
+It checks the target is one swamp accepts (no credential fields, a clean
+`prefix`, a plain http(s) `endpoint`), names `bucket`, and that a control-plane
+record and a chunk it writes land at `<prefix>/_control/…` and
+`<prefix>/_blobs/…`. It deletes both. `replicaTargetProblem(value)` returns
+swamp's reason for refusing a target, for unit tests of your own.
+
+## Replica Path Conformance
+
+For a provider that implements `replicaPaths()`:
+
+```typescript
+import { assertReplicaPathConformance } from "@swamp-club/swamp-testing";
+
+Deno.test("replica path conformance", async () => {
+  await assertReplicaPathConformance({
+    replicaTarget: () => provider.replicaTarget!(),
+    openReplicaPaths: () => provider.replicaPaths!(),
+    openStorage: () => provider.storage!(),
+    // Write, delete and read with your own client, as Litestream would.
+    writeObject: (key, bytes) => putObject(config.bucket, key, bytes),
+    deleteObject: (key) => deleteObject(config.bucket, key),
+    objectExists: (key) => headObject(config.bucket, key),
+    // Above the backend's listing page size, against an emulator.
+    objectsPerFence: 1001,
+  });
+});
+```
+
+It writes objects under two fences of its own, a look-alike directory and a
+chunk, then checks `list` returns both fences, `removePath` deletes exactly one
+fence's objects (every page of them), and malformed fences are refused without
+deleting anything. It removes what it wrote. `replicaPathFenceProblem(value)`
+returns swamp's reason for refusing a fence.
+
+For tests, the in-memory remote's `replicaPaths` option gives a conforming
+`replicaPaths()`, with `putReplicaObject` to seed what Litestream would write.
+
+## Mocking External Calls
+
+Test the exact production code path by intercepting at the runtime boundary.
+
+### S3/AWS-based datastores
+
+Datastores that accept an `endpoint` config can point at a local mock server to
+test the verifier and sync without real AWS credentials:
+
+```typescript
+import { assertVerifierConformance } from "@swamp-club/swamp-testing";
+import { datastore } from "./s3.ts";
+
+Deno.test({
+  name: "s3 verifier reports healthy",
+  sanitizeResources: false,
+  fn: async () => {
+    const server = Deno.serve({ port: 0, onListen() {} }, (req) => {
+      if (req.method === "HEAD") return new Response(null, { status: 200 });
+      return new Response(null, { status: 404 });
+    });
+
+    const addr = server.addr as Deno.NetAddr;
+    Deno.env.set("AWS_ACCESS_KEY_ID", "test");
+    Deno.env.set("AWS_SECRET_ACCESS_KEY", "test");
+
+    try {
+      const provider = datastore.createProvider({
+        bucket: "my-bucket",
+        region: "us-east-1",
+        endpoint: `http://localhost:${addr.port}`,
+        forcePathStyle: true,
+      });
+      const verifier = provider.createVerifier();
+      await assertVerifierConformance(verifier);
+    } finally {
+      Deno.env.delete("AWS_ACCESS_KEY_ID");
+      Deno.env.delete("AWS_SECRET_ACCESS_KEY");
+      await server.shutdown();
+    }
+  },
+});
+```
+
+### Lock testing with mock clients
+
+For testing lock semantics, create an in-memory mock of your storage client and
+pass it to your lock implementation. The S3 datastore uses this pattern:
+
+```typescript
+import { assertLockConformance } from "@swamp-club/swamp-testing";
+import { S3Lock } from "./_lib/s3_lock.ts";
+
+function createMockS3Client() {
+  const storage = new Map<string, Uint8Array>();
+  return {
+    storage,
+    putObjectConditional(key, body) {
+      if (storage.has(key)) return Promise.resolve(false);
+      storage.set(key, body);
+      return Promise.resolve(true);
+    },
+    getObject(key) {
+      const data = storage.get(key);
+      if (!data) return Promise.reject(new Error("NoSuchKey"));
+      return Promise.resolve(data);
+    },
+    deleteObject(key) {
+      storage.delete(key);
+      return Promise.resolve();
+    },
+    // ... other methods
+  };
+}
+
+Deno.test("S3Lock passes conformance", async () => {
+  const mock = createMockS3Client();
+  const lock = new S3Lock(mock, { ttlMs: 5000 });
+  await assertLockConformance(lock);
+});
+```
+
+### CLI-based datastores
+
+Use `withMockedCommand` for datastores that shell out to CLI tools:
+
+```typescript
+import { withMockedCommand } from "@swamp-club/swamp-testing";
+
+await withMockedCommand((cmd, args) => {
+  if (cmd === "rclone" && args.includes("sync")) {
+    return { stdout: "Transferred: 3 files", code: 0 };
+  }
+  return { stdout: "", code: 1 };
+}, async () => {
+  const sync = provider.createSyncService!("/repo", "/cache");
+  await sync.pullChanged();
+});
+```
+
+### REST API-based datastores
+
+Use `withMockedFetch` for datastores that call `fetch()` directly:
+
+```typescript
+import { withMockedFetch } from "@swamp-club/swamp-testing";
+
+await withMockedFetch((req) => {
+  if (req.method === "HEAD") return new Response(null, { status: 200 });
+  return new Response(null, { status: 404 });
+}, async () => {
+  const verifier = provider.createVerifier();
+  const result = await verifier.verify();
+  assertEquals(result.healthy, true);
+});
+```
+
+## In-Memory Test Double
+
+For testing code that _consumes_ a datastore (not the datastore itself):
+
+```typescript
+import { createDatastoreTestContext } from "@swamp-club/swamp-testing";
+
+const { provider, isLockHeld } = createDatastoreTestContext();
+```
+
+| Option             | Default                       | Description                      |
+| ------------------ | ----------------------------- | -------------------------------- |
+| `datastorePath`    | `"/tmp/swamp-test-datastore"` | Path from `resolveDatastorePath` |
+| `cachePath`        | `undefined`                   | Path from `resolveCachePath`     |
+| `healthResult`     | healthy                       | Override health check result     |
+| `lockAcquireFails` | `false`                       | Make lock acquire reject         |
+| `withSyncService`  | `false`                       | Enable `createSyncService`       |
+
+### Shared remote across machines
+
+Experimental: the defaults track the current S3/GCS extension releases and will
+change with them and during the datastore rework.
+
+`createInMemoryRemote()` holds remote content in memory; each
+`remote.connect(cacheDir)` is one simulated machine's sync service. Its defaults
+reproduce the current S3/GCS sync gaps (bare marks disable deletes, unmarked
+writes are never pushed, pulls overwrite dirty files, and a peer's deletion is
+removed locally only while the copy is unchanged and unmarked), so do not expect
+it to be friendlier than production. Switch a gap off through `semantics`; to
+model an older extension release, pass `EXTENSION_2026_10_01_SEMANTICS` or
+`LEGACY_EXTENSION_SEMANTICS` (2026.09.24.1 and earlier). A service keeps the
+namespace of its first pull or push and rejects a later one with a different
+namespace, so pass the same `namespace` to every call on it.
+
+```typescript
+import { createInMemoryRemote } from "@swamp-club/swamp-testing";
+
+const remote = createInMemoryRemote();
+const a = remote.connect(aCache, { instance: "a" });
+const b = remote.connect(bCache, { instance: "b" });
+await a.markDirty({ relPath: "note" }); // after writing aCache/note
+await a.pushChanged();
+await b.pullChanged(); // bCache/note now exists
+await b.fetchContent("note"); // the remote's bytes or null; bCache untouched
+remote.failNext("push"); // also "pull" | "prepare" | "commit" | "fetch"; remote.offline(true)
+remote.ops(); // ordered { instance, op, paths, deleted, removed? }
+```
+
+`remote.connect(cacheDir, { fetchContent: false })` gives a service without
+`fetchContent`, for code that must work with an extension that lacks it.
+
+To assert only which paths core marks, use `createRecordingSyncService()`, which
+returns `{ service, marks, events }` and does nothing else.
+
+## In-Repo Extensions
+
+Import directly from the testing package source:
+
+```typescript
+import {
+  assertDatastoreExportConformance,
+  assertLockConformance,
+  assertSyncServiceRoundTripConformance,
+  withMockedCommand,
+} from "../../packages/testing/mod.ts";
+```

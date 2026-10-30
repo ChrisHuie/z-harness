@@ -1,0 +1,102 @@
+# Swamp Vault Skill
+
+Manage secure secret storage through swamp vaults. All commands support `--json`
+for machine-readable output.
+
+## CRITICAL: Vault Creation Rules
+
+- **Never generate vault IDs** — no `uuidgen`, `crypto.randomUUID()`, or manual
+  UUIDs. Swamp assigns IDs automatically via `swamp vault create`.
+- **Never write a vault YAML file from scratch** — always use
+  `swamp vault create <type> <name> --json` first, then edit the scaffold at the
+  returned `path`, preserving the assigned `id`.
+- **Never modify the `id` field** in an existing vault file.
+- **Verify CLI syntax**: Always run `swamp help vault` to confirm exact flags
+  before executing — the output is structured JSON.
+
+Correct flow: `swamp vault create <type> <name> --json` → edit config if needed
+→ store secrets.
+
+## The `default` Vault
+
+`swamp repo init` creates a `local_encryption` vault named `default` and sets
+`defaultVault: default` in `.swamp.yaml` (unless run with `--no-vault`). Check
+with `swamp vault search --json` before creating one: to store a secret in a new
+repo, use `swamp vault put default KEY` and reference it as
+`${{ vault.get(default, KEY) }}`. Create another vault only for a different
+provider or to keep secrets apart. The `default` vault's key and secrets stay on
+the machine, so a clone starts with it empty. `swamp vault remove` refuses the
+vault `defaultVault` names.
+
+## Quick Reference
+
+| Task              | Command                                                                  |
+| ----------------- | ------------------------------------------------------------------------ |
+| List vault types  | `swamp vault type search --json`                                         |
+| Create a vault    | `swamp vault create <type> <name> --json`                                |
+| Search vaults     | `swamp vault search [query] --json`                                      |
+| Get vault details | `swamp vault get <name_or_id> --json`                                    |
+| Edit vault config | `swamp vault edit <name_or_id>`                                          |
+| Store a secret    | `swamp vault put <vault> KEY` (prompts for value)                        |
+| Store from stdin  | `echo "$VAL" \| swamp vault put <vault> KEY --json`                      |
+| Store inline      | `swamp vault put <vault> KEY=VALUE --json` (insecure)                    |
+| Auto-refresh      | `swamp vault put <vault> KEY --refresh-from "<cmd>" --refresh-ttl <dur>` |
+| Clear refresh     | `swamp vault put <vault> KEY --clear-refresh`                            |
+| Read a secret     | `swamp vault read-secret <vault> <key> --force --json`                   |
+| List secret keys  | `swamp vault list-keys <vault> --json`                                   |
+| Annotate a secret | `swamp vault annotate <vault> <key> --url <u>`                           |
+| Remove a label    | `swamp vault annotate <vault> <key> --remove-label <k>`                  |
+| Inspect metadata  | `swamp vault inspect <vault> <key> --json`                               |
+| Clear annotation  | `swamp vault annotate <vault> <key> --clear`                             |
+| Migrate backend   | `swamp vault migrate <vault> --to-type <type>`                           |
+| Delete a secret   | `swamp vault delete <vault> <key> --json`                                |
+| Remove a vault    | `swamp vault remove <vault> --yes --json` (deletes its secrets)          |
+
+For detailed walkthroughs of each operation, see [reference.md](reference.md).
+
+## Limiting Vault Access
+
+- Over `swamp serve`, grant vault access on `vault:<name>` (e.g.
+  `--allow read --on 'vault:prod-*'`); a vault allow also limits which vaults
+  that principal's runs can resolve. See
+  [../serve/guide.md](../serve/guide.md#vault-access).
+- In a workflow, a top-level `vaults:` list caps the vaults any run may touch,
+  locally too; include the vault sensitive outputs land in. See
+  [../workflow/reference.md](../workflow/reference.md#vaults-allow-list).
+
+## Secrets in expressions
+
+Use `vault.get(vault, KEY)` or a tagged sensitive data field as a reference:
+pass it to a method, concatenate it with text, or compare it to `null`. `type()`
+reveals only the Secret type. Do not use equality to another value, `size`,
+conversions, string operations, map keys or container-to-text interpolation on a
+secret: these fail with `secret_operation_unsupported`. Pass containers as
+structured arguments. Call `vault.get` directly; aliases are unsupported.
+
+Keep secrets out of routing fields, placement, paths, `workingDir`, environment
+keys and guard/assert results; those destinations fail with
+`secret_destination_refused`. Use shell environment values for secret delivery.
+A tagged data secret in a quoted-delimiter heredoc or PowerShell single quotes
+also refuses before loading. Validate behaviors and workflows for static misuse;
+dynamic misuse is checked during execution.
+
+Expect plaintext only at trusted delivery, loaded once per reference per
+attempt. Resume/replay load the current value under current access permissions.
+Caches and run records contain references or masks. A provider without `has()`
+still makes one existence probe at evaluation. Remote wire transport remains
+unchanged until the separate remote-reference release.
+
+## Version control
+
+Vault definition files, by default `vaults/<type>/<id>.yaml` in the repo, are
+safe to commit. A definition holds the vault's `id`, `name`, `type`,
+`createdAt`, an optional `auditReads` flag and the type's `config`, such as
+`auto_generate: true`; Swamp never writes a secret value into it. Values live in
+the vault's backend. For `local_encryption` that store is per machine, so a
+clone starts with the vault empty. Behavior and workflow files that use
+`${{ vault.get(<vault>, KEY) }}` store the reference, not the resolved value,
+and are safe to commit too.
+
+`config` is stored as plain text. Give an extension vault type its credentials
+through the source its documentation names (environment, IAM role, CLI login),
+never in `config`.

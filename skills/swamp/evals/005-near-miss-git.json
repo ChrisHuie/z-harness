@@ -1,0 +1,10 @@
+{
+  "skills": ["swamp", "git-workflow"],
+  "query": "Commit the changes in my swamp repository and open a PR.",
+  "files": [],
+  "expected_behavior": [
+    "routes the commit and PR work to git-workflow, not to the swamp skill",
+    "runs no swamp command for the git operation",
+    "does not describe swamp behaviors, workflows or vaults as part of the answer"
+  ]
+}

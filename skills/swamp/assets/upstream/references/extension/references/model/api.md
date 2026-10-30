@@ -1,0 +1,942 @@
+# Extension Behavior API Reference
+
+Detailed API documentation for extension behavior development.
+
+## Table of Contents
+
+- [Resource & File Specs](#resource--file-specs)
+- [Reading Bundled Assets](#reading-bundled-assets)
+- [writeResource API](#writeresource-api)
+- [deleteResource API](#deleteresource-api)
+- [createFileWriter API](#createfilewriter-api)
+- [DataWriter Methods](#datawriter-methods)
+- [DataHandle Structure](#datahandle-structure)
+- [Reading Stored Data](#reading-stored-data)
+- [Cross-Behavior Access](#cross-behavior-access)
+- [Lifetime Values](#lifetime-values)
+- [Standard Tags](#standard-tags)
+- [Error Handling](#error-handling)
+- [Custom CEL Evaluation](#custom-cel-evaluation)
+- [Logging API](#logging-api)
+
+---
+
+## Resource & File Specs
+
+Behaviors declare their data outputs using `resources` and/or `files` on the
+behavior export.
+
+### Resource Specs
+
+Resources are structured JSON data validated against a Zod schema:
+
+```typescript
+resources: {
+  "state": {
+    description: "Deployment state",
+    schema: z.object({
+      status: z.string(),
+      endpoint: z.string().url(),
+    }),
+    lifetime: "infinite",
+    garbageCollection: 10,
+  },
+},
+```
+
+**Spec naming:** Resource spec keys must not contain hyphens (`-`). Use
+camelCase or single words (e.g., `igw` not `internet-gateway`).
+
+**Sensitive fields:** Mark fields containing secrets with
+`z.meta({ sensitive: true })`. Values are stored in a vault and replaced with
+vault references before persistence:
+
+```typescript
+resources: {
+  "keypair": {
+    schema: z.object({
+      keyId: z.string(),
+      keyMaterial: z.string().meta({ sensitive: true }),
+    }),
+    lifetime: "infinite",
+    garbageCollection: 10,
+  },
+},
+```
+
+Set `sensitiveOutput: true` on the spec to treat all fields as sensitive. Set
+`vaultName` on the spec to override which vault stores the values. Fields marked
+inside arrays, records and unions are stored too, one vault key per element.
+
+**Schema requirement:** If your resource will be referenced by other behaviors
+via CEL expressions, declare the referenced properties explicitly in the Zod
+schema:
+
+```typescript
+// Wrong — expression validator can't resolve attributes.VpcId
+schema: z.object({}).passthrough(),
+
+// Correct — VpcId is declared so expressions can reference it
+schema: z.object({ VpcId: z.string() }).passthrough();
+```
+
+### File Specs
+
+Files are binary or text content (including logs):
+
+```typescript
+files: {
+  "log": {
+    description: "Execution log",
+    contentType: "text/plain",
+    lifetime: "7d",
+    garbageCollection: 5,
+    streaming: true,
+  },
+},
+```
+
+---
+
+## Reading Bundled Assets
+
+Behaviors shipped via an extension manifest can declare runtime assets in
+`additionalFiles`. These paths resolve relative to the manifest's own directory
+in both modes — no migration needed for existing manifests (default mode is
+unchanged):
+
+```yaml
+# manifest.yaml
+additionalFiles:
+  - prompts/review.md
+  - templates/summary.txt
+```
+
+Read them at runtime via `ctx.extensionFile()`:
+
+```ts
+execute: async (
+  _args: Record<string, never>,
+  ctx: { extensionFile: (path: string) => string },
+) => {
+  const promptPath = ctx.extensionFile("prompts/review.md");
+  const prompt = await Deno.readTextFile(promptPath);
+  // ...
+},
+```
+
+Do **not** hardcode `.swamp/pulled-extensions/<name>/files/...` — that layout
+only exists for pulled extensions. Source-loaded extensions
+(`swamp extension source add`) resolve the same relative path against the
+manifest directory, which `ctx.extensionFile()` handles for you. Hardcoded paths
+pass smoke tests in source mode but break when consumers pull the extension.
+
+---
+
+## writeResource API
+
+Write structured JSON data:
+`context.writeResource(specName, instanceName, data, overrides?)`.
+
+**Parameters:**
+
+| Parameter      | Description                                                     |
+| -------------- | --------------------------------------------------------------- |
+| `specName`     | Must match a key in the behavior's `resources`                  |
+| `instanceName` | The instance name (must be unique across all specs — see below) |
+| `data`         | JSON data to write (validated against the resource's Zod schema |
+| `overrides`    | Optional overrides (see below)                                  |
+
+Data is validated against the resource's Zod schema (warns on mismatch, doesn't
+throw). The `instanceName` you pass here is used in CEL:
+`model.<defName>.resource.<specName>.<instanceName>.attributes.<field>`.
+
+**Instance name uniqueness:** Instance names map directly to storage paths on
+disk. If two different specs use the same instance name (e.g.,
+`writeResource("summary", "bixu", ...)` and
+`writeResource("repo", "bixu", ...)`), the second write overwrites the first.
+When a behavior has multiple resource specs, prefix instance names with the spec
+name or use another strategy to ensure uniqueness across all specs within a
+method execution.
+
+**Portable instance names:** Because instance names become directory names, keep
+them valid on Windows too: no `< > : " | ? *` or control characters, no reserved
+device name (`CON`, `NUL`, `COM1`, …), and no trailing dot or space. Swamp warns
+about such a name on Linux and macOS and refuses one with a forbidden character
+on Windows. Join parts with `-`, not `:` (e.g. `owner-repo-branches`).
+
+```typescript
+// Wrong — "bixu" collides across specs on disk
+await context.writeResource("summary", "bixu", summaryData);
+await context.writeResource("repo", "bixu", repoData); // overwrites!
+
+// Correct — prefix ensures unique storage paths
+await context.writeResource("summary", `summary-${user}`, summaryData);
+await context.writeResource("repo", `repo-${repo}`, repoData);
+```
+
+**ResourceWriteOverrides** (optional):
+
+| Field               | Description                                    |
+| ------------------- | ---------------------------------------------- |
+| `lifetime`          | Override lifetime (default from spec)          |
+| `garbageCollection` | Override version retention (default from spec) |
+| `tags`              | Additional tags                                |
+
+**Example:**
+
+```typescript
+// Single-instance resource (use descriptive instance name)
+const handle = await context.writeResource("state", "current", {
+  status: "active",
+  updatedAt: new Date().toISOString(),
+});
+
+// Factory behavior (use dynamic instance names)
+for (const item of items) {
+  await context.writeResource("item", item.id, item);
+}
+```
+
+---
+
+## deleteResource API
+
+Delete a previously stored resource by instance name:
+`context.deleteResource(instanceName)`.
+
+**Signature:**
+
+```typescript
+deleteResource(instanceName: string): Promise<void>
+```
+
+Removes all versions of the named resource. Use this to clean up stale data when
+a target recovers or a reconciliation loop detects orphaned entries.
+
+**Example — reconciliation cleanup:**
+
+```typescript
+const existing = await context.readResource!("target-status");
+if (existing && existing.state === "recovered") {
+  await context.deleteResource!("error-details");
+}
+```
+
+**Notes:**
+
+- Not available in pre-flight checks (same restriction as `writeResource`)
+- No-op if the named resource does not exist
+- For lower-level control (e.g., deleting a specific version), use
+  `context.dataRepository.delete(context.modelType, context.modelId, name, version?)`
+  directly
+
+---
+
+## createFileWriter API
+
+Create a file writer:
+`context.createFileWriter(specName, instanceName, overrides?)`.
+
+**Parameters:**
+
+| Parameter      | Description                                |
+| -------------- | ------------------------------------------ |
+| `specName`     | Must match a key in the behavior's `files` |
+| `instanceName` | The instance name (any non-empty string)   |
+| `overrides`    | Optional overrides (see below)             |
+
+Returns a `DataWriter` for binary/streaming content. The `instanceName` you pass
+here is the data name in CEL: `data.latest("<defName>", "<instanceName>").path`
+gives the stored file's local path.
+
+**FileWriterOverrides** (optional):
+
+| Field               | Description                                    |
+| ------------------- | ---------------------------------------------- |
+| `contentType`       | Override MIME type (default from spec)         |
+| `lifetime`          | Override lifetime (default from spec)          |
+| `garbageCollection` | Override version retention (default from spec) |
+| `streaming`         | True for line-oriented streaming               |
+| `tags`              | Additional tags                                |
+
+---
+
+## DataWriter Methods
+
+| Method                      | Description                                      |
+| --------------------------- | ------------------------------------------------ |
+| `writeAll(content)`         | Write complete binary content (`Uint8Array`)     |
+| `writeText(text)`           | Write text content (encoded as UTF-8)            |
+| `writeLine(line)`           | Append a single line (for streaming/incremental) |
+| `writeStream(stream, opts)` | Pipe a `ReadableStream<Uint8Array>`              |
+| `getFilePath()`             | Get the file path for direct I/O                 |
+| `finalize()`                | Finalize after using `writeLine`/`getFilePath`   |
+
+**Example:**
+
+```typescript
+// Write text file
+const logWriter = context.createFileWriter("log", "execution");
+const handle = await logWriter.writeText(JSON.stringify({
+  timestamp: new Date().toISOString(),
+  message: "Operation completed",
+}));
+
+// Streaming log (line by line)
+const streamWriter = context.createFileWriter("log", "stream", {
+  streaming: true,
+});
+await streamWriter.writeLine("Starting process...");
+await streamWriter.writeLine("Step 1 complete");
+await streamWriter.writeLine("Done");
+const handle = await streamWriter.finalize();
+```
+
+---
+
+## DataHandle Structure
+
+Returned by `writeResource` and writer methods:
+
+| Field        | Description                                                  |
+| ------------ | ------------------------------------------------------------ |
+| `name`       | Data artifact name                                           |
+| `specName`   | The declared spec name                                       |
+| `kind`       | `"resource"` or `"file"`                                     |
+| `dataId`     | Unique ID for this data                                      |
+| `version`    | Version number of this write                                 |
+| `size`       | Size of the written content in bytes                         |
+| `tags`       | Tags from the writer options                                 |
+| `metadata`   | Metadata for the data artifact (see below)                   |
+| `attributes` | Top-level resource attributes (resource kind only, optional) |
+
+**`metadata` sub-fields:**
+
+| Field               | Type                      | Description                                              |
+| ------------------- | ------------------------- | -------------------------------------------------------- |
+| `contentType`       | `string`                  | MIME type (e.g. `"application/json"`)                    |
+| `lifetime`          | `Lifetime`                | TTL from the spec (e.g. `"7d"`, `"infinite"`)            |
+| `garbageCollection` | `GarbageCollectionPolicy` | Version retention count or duration                      |
+| `streaming`         | `boolean`                 | Whether the data was written as streaming                |
+| `tags`              | `Record<string, string>`  | Tags (e.g. `type`, `specName`, `modelName`)              |
+| `ownerDefinition`   | `OwnerDefinition`         | Owner type and ref (model-method, workflow-step, manual) |
+| `lifecycle`         | `"active" \| "deleted"`   | Current lifecycle state                                  |
+| `renamedTo`         | `string?`                 | New name if the data was renamed                         |
+
+**UserMethodResult:**
+
+The execute function returns `{ dataHandles?: DataHandle[] }`.
+
+---
+
+## Reading Stored Data
+
+Delete and update methods need to read back previously stored resource data
+(e.g., to get a resource ID for cleanup). Use `context.readResource()`:
+
+```typescript
+// Define a type alias from your resource schema for type-safe access:
+type VpcData = z.infer<typeof VpcSchema>;
+const data = await context.readResource!("vpc") as VpcData | null;
+if (!data) {
+  throw new Error("No data found - nothing to delete");
+}
+// data is now typed — access properties without `as any`
+data.VpcId; // ← type-safe
+```
+
+**Signature:**
+
+```typescript
+readResource(
+  instanceName: string,  // instance name used when writing
+  version?: number,      // optional specific version (defaults to latest)
+): Promise<Record<string, unknown> | null>
+```
+
+- Returns the parsed JSON object, or `null` if no data exists
+- Vault reference expressions are automatically resolved when a vault service is
+  available
+- Cast the result using `z.infer<typeof YourSchema>` to get type-safe access
+  (the data was already validated against the schema on write)
+
+**Low-level alternative for binary data:**
+
+For non-JSON content (binary files, raw bytes), use `context.dataRepository`
+directly:
+
+```typescript
+const content = await context.dataRepository.getContent(
+  context.modelType,
+  context.modelId,
+  "<instanceName>",
+);
+// Returns Uint8Array | null
+```
+
+**Key dataRepository methods for behavior authors:**
+
+| Method                                      | Returns              | Description                               |
+| ------------------------------------------- | -------------------- | ----------------------------------------- |
+| `getContent(type, modelId, dataName, ver?)` | `Uint8Array \| null` | Get raw content bytes                     |
+| `findByName(type, modelId, dataName, ver?)` | `Data \| null`       | Get data metadata (tags, version, etc)    |
+| `findAllForModel(type, modelId)`            | `Data[]`             | List all data for this behavior instance  |
+| `delete(type, modelId, dataName, version?)` | `void`               | Delete data (all versions if unspecified) |
+
+---
+
+## Cross-Behavior Access
+
+To read or call **another** behavior from a method, use these context APIs.
+Never shell out to the `swamp` CLI from a method — every subprocess reloads the
+extensions and syncs the datastore, which can take tens of seconds per call.
+
+### readModelData — read another behavior's data by name
+
+```typescript
+const records = await context.readModelData!("my-vpc", "state");
+const vpc = records[0]?.attributes as { VpcId: string } | undefined;
+```
+
+- Signature: `(modelName: string, specName?: string) => Promise<DataRecord[]>`
+- Returns the **latest** version of each matching data item; an empty array when
+  the behavior has no data or does not exist.
+- Includes data written before the behavior instance was renamed: the read
+  matches the behavior's current definition as well as the name recorded on each
+  item.
+- Each `DataRecord` carries the parsed JSON in `attributes`, plus `name`,
+  `version`, `specName`, `modelId`, `modelType` and `tags`.
+
+### queryData — CEL query across all behaviors
+
+```typescript
+const subnets = await context.queryData!(
+  'modelType == "@myorg/subnet" && attributes.vpcId == "vpc-123"',
+);
+```
+
+- Signature:
+  `(predicate: string, select?: string) => Promise<DataRecord[] | unknown[]>`
+- Same predicate language as `swamp data query` (see
+  [data reference](../../../data/reference.md#query-data)). Latest versions
+  only, unless the predicate mentions `version` or `isLatest`.
+- Without `select` it returns `DataRecord[]`; with `select` it returns the
+  projected values.
+
+### runModel — call another behavior's method
+
+```typescript
+// Existing definition, by name
+const result = await context.runModel!({
+  definition: "my-vpc",
+  method: "read",
+});
+
+// Direct type execution — auto-creates the definition if missing
+const created = await context.runModel!({
+  modelType: "@myorg/vpc",
+  name: "my-new-vpc",
+  method: "create",
+  arguments: { cidrBlock: "10.0.0.0/16" },
+});
+
+// Check every result — runModel reports failure in the value, it does not throw
+for (const r of [result, created]) {
+  if (!r.ok) throw new Error(r.error.message);
+}
+// result.resources: DataHandle[] written by the target
+```
+
+- Returns `{ ok: true, resources: DataHandle[] }` or
+  `{ ok: false, error: { message, stack? } }`. It does not throw — check `ok`.
+- `arguments` is split between the target's global and method arguments by their
+  schemas (method arguments win on ambiguous keys; unknown keys fail). Values
+  apply to this call only and are passed literally, never evaluated: a global
+  argument holding `${{ ... }}` swamp could evaluate (`vault.get`, `self.*`,
+  `data.*`, ...), at any depth, returns `{ ok: false }`; so does `${{ }}` text
+  that does not parse. Resolve values in your own method instead. Another
+  system's text (`${{ github.sha }}`) passes.
+- A `modelType` + `name` call that creates the definition saves its global
+  arguments with each `${{ ... }}` wrapped in `literal()`, so later runs of that
+  definition receive the same text, never an evaluated value. Any `${{ ... }}`
+  in a `sensitive` global argument returns `{ ok: false }` there instead.
+- The target definition's own `${{ ... }}` expressions (`vault.get`, `self.*`,
+  CEL) resolve as in a standalone run, within the caller's vault scope (a
+  workflow's `vaults` list still applies); if that run would fail, the call
+  returns `{ ok: false }`.
+- The target's data belongs to the target definition, not the caller. The
+  caller's vault secrets do not propagate.
+- **Authorization:** to call a behavior type from another extension, list that
+  extension under `dependencies` in your `manifest.yaml`. Same-extension,
+  built-in and user-authored behavior types need no declaration.
+- **Limits:** 10 nested levels, 100 `runModel` calls per top-level execution,
+  and cycles are rejected.
+
+### Where each API is available
+
+| API             | Local method | Remote worker                                                    | Checks |
+| --------------- | ------------ | ---------------------------------------------------------------- | ------ |
+| `readModelData` | Yes          | Yes                                                              | No     |
+| `queryData`     | Yes          | Yes — no `select`; errors if it matches access or worker records | No     |
+| `runModel`      | Yes          | No — returns `{ ok: false }`                                     | No     |
+
+To orchestrate behaviors on workers, chain `model_method` steps in a workflow
+instead of calling `runModel` (see
+[remote execution](../../../workflow/references/remote-execution.md#placing-steps-on-workers)).
+
+---
+
+## Lifetime Values
+
+| Value       | Behavior                                     |
+| ----------- | -------------------------------------------- |
+| `ephemeral` | Deleted after method/workflow completes      |
+| `job`       | Persists while creating job runs             |
+| `workflow`  | Persists while creating workflow runs        |
+| Duration    | Expires after time (e.g., `1h`, `7d`, `1mo`) |
+| `infinite`  | Never expires (default)                      |
+
+---
+
+## Standard Tags
+
+Tags are auto-applied based on the spec kind:
+
+| Tag                  | Applied to | Description                              |
+| -------------------- | ---------- | ---------------------------------------- |
+| `type: "resource"`   | resources  | Auto-added to all resource data outputs  |
+| `type: "file"`       | files      | Auto-added to all file data outputs      |
+| `specName: "<name>"` | both       | Auto-added with the output spec key name |
+
+---
+
+## Error Handling
+
+Behaviors should throw when execution fails. Throw **before** writing data —
+failed executions should not persist incorrect or misleading data.
+
+**Pattern: check for failure first, only write data on success.**
+
+```typescript
+execute: async (
+  args: z.infer<typeof RequestArgsSchema>,
+  context: {
+    writeResource: (
+      specName: string,
+      name: string,
+      data: Record<string, unknown>,
+    ) => Promise<{ name: string }>;
+  },
+) => {
+  const result = await callExternalApi(args);
+
+  // Throw BEFORE writing data — don't persist failure data
+  if (result.status >= 400) {
+    throw new Error(`API request failed with status ${result.status}`);
+  }
+
+  const handle = await context.writeResource("result", "main", {
+    statusCode: result.status,
+    response: result.body,
+    timestamp: new Date().toISOString(),
+  });
+
+  return { dataHandles: [handle] };
+},
+```
+
+**Workflow integration:** When a behavior method throws, the workflow engine
+automatically marks the step as failed. Use `allowFailure: true` on a workflow
+step to catch exceptions and allow continued execution of subsequent steps.
+
+---
+
+## Custom CEL Evaluation
+
+Behavior methods can evaluate Google CEL expressions against data the behavior
+already holds — useful for selector predicates over a fleet, filter expressions
+over a list of records, or any user-supplied predicate.
+`ctx.createCelEnvironment()` returns a fresh, isolated `cel-js` `Environment`
+seeded with swamp's baseline arithmetic-overload registrations.
+
+### Basic usage
+
+```typescript
+execute: async (
+  args: z.infer<typeof SelectorArgsSchema>,
+  ctx: {
+    globalArgs: GlobalArgs;
+    createCelEnvironment: () => Environment;
+  },
+) => {
+  const env = ctx.createCelEnvironment();
+
+  // Compile once, evaluate many.
+  const predicate = env.parse(args.selector);
+
+  const matched = ctx.globalArgs.hosts.filter((h) =>
+    predicate({ name: h.name, region: h.region, tags: h.tags }) === true
+  );
+
+  // ... write resource with matched ...
+},
+```
+
+The example above takes a selector like
+`tags.role == "web" && region.startsWith("us-")` and applies it to each host in
+the fleet. `unlistedVariablesAreDyn: true` is enabled in the baseline, so any
+keys passed in the evaluation context resolve without pre-registration.
+
+### Custom function registration
+
+```typescript
+const env = ctx.createCelEnvironment();
+env.registerFunction(
+  "matchesRegex(string, string): bool",
+  (value: string, pattern: string) => new RegExp(pattern).test(value),
+);
+const predicate = env.parse('matchesRegex(region, "^us-.*")');
+```
+
+Registrations on one returned Environment do NOT affect any other — each
+`ctx.createCelEnvironment()` call returns a fresh instance.
+
+### Typing the Environment
+
+You almost never need to import `Environment` as a named type — inference from
+`ctx.createCelEnvironment()` carries the type through everything chained on the
+result. This matches the convention every existing extension follows for typing
+`MethodContext` (declared inline at the `execute` callsite, never imported).
+
+If a helper signature inside the extension needs the named type, use
+`ReturnType<typeof ctx.createCelEnvironment>` — no external import is required:
+
+```typescript
+execute: async (
+  args: z.infer<typeof SelectorArgsSchema>,
+  ctx: { createCelEnvironment: () => Environment },
+) => {
+  type CelEnv = ReturnType<typeof ctx.createCelEnvironment>;
+  return runPredicate(ctx.createCelEnvironment(), args.selector);
+
+  function runPredicate(env: CelEnv, selector: string) {
+    return env.parse(selector)({/* ... */});
+  }
+},
+```
+
+Do NOT import `Environment` from `@swamp-club/swamp-testing` in production
+source — testing-named packages don't belong in production code. Do NOT import
+from `cel-js` directly unless your extension already pins cel-js for other
+runtime use; pinning a library just for a type is unnecessary churn.
+
+### Boundary caveat: no `instanceof Environment`
+
+The `Environment` _instance_ returned by `ctx.createCelEnvironment()` comes from
+swamp-host's bundled cel-js. If your extension also bundles its own cel-js
+(e.g., you import a value from it for another purpose), the two `Environment`
+class identifiers are different objects. Method calls dispatch correctly via
+prototypes, but `instanceof Environment` will return `false` across that
+boundary. Don't write identity checks against the class — duck-type against the
+methods you call.
+
+---
+
+## Method execute Signature
+
+```typescript
+execute: (async (
+  args: z.infer<typeof MethodArgsSchema>,
+  context: {/* only the fields you use */},
+) => Promise<{ dataHandles?: Array<{ name: string }> }>);
+```
+
+### Context Fields Available in Methods
+
+| Field                          | Type                                                                                           | Description                                          |
+| ------------------------------ | ---------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| `context.signal`               | `AbortSignal`                                                                                  | Cancellation signal for async operations             |
+| `context.repoDir`              | `string`                                                                                       | Repository root path                                 |
+| `context.globalArgs`           | `z.infer<typeof GlobalArgsSchema>`                                                             | Validated global arguments from the definition       |
+| `context.definition`           | `{ id: string; name: string; version: string; tags: Record<string, string> }`                  | Behavior instance metadata                           |
+| `context.methodName`           | `string`                                                                                       | Name of the method being invoked                     |
+| `context.logger`               | LogTape Logger (trace/debug/info/warning/error/fatal)                                          | Structured logging                                   |
+| `context.writeResource`        | `(specName: string, name: string, data: Record<string, unknown>) => Promise<{ name: string }>` | Write structured JSON data                           |
+| `context.readResource`         | `(instanceName: string, version?: number) => Promise<Record<string, unknown> \| null>`         | Read previously stored data                          |
+| `context.createFileWriter`     | `(specName: string, name: string) => DataWriter`                                               | Create binary/streaming file writer                  |
+| `context.createCelEnvironment` | `() => Environment`                                                                            | Fresh CEL environment for expression evaluation      |
+| `context.readModelData`        | `(modelName: string, specName?: string) => Promise<DataRecord[]>`                              | Read another behavior's data by name                 |
+| `context.queryData`            | `(predicate: string, select?: string) => Promise<DataRecord[] \| unknown[]>`                   | CEL query across all behaviors' data                 |
+| `context.runModel`             | `(options: RunModelOptions) => Promise<RunModelResult>`                                        | Call another behavior's method                       |
+| `context.dataRepository`       | Low-level data API                                                                             | For reading non-JSON content                         |
+| `context.modelType`            | `string`                                                                                       | The behavior type string (e.g. `@myorg/my-behavior`) |
+| `context.modelId`              | `string`                                                                                       | The behavior instance ID                             |
+| `context.traceHeaders`         | `Readonly<Record<string, string>> \| undefined`                                                | This execution's W3C trace headers                   |
+
+For the cross-behavior APIs, see
+[Cross-Behavior Access](#cross-behavior-access). Locally,
+`dataRepository.getContent` and `findAllForModel` also accept a definition name
+in place of the behavior ID; on remote workers they need the ID, so prefer
+`readModelData` for by-name reads.
+
+Type only the fields your method body actually uses — don't declare the full
+interface. See [typing.md](typing.md) for the complete typing guide.
+
+### Propagating Trace Context to Subprocesses
+
+When tracing is enabled, `context.traceHeaders` holds this execution's
+`traceparent` (and `tracestate`, if any). Pass them to any subprocess the method
+spawns so its spans join the trace:
+
+```typescript
+const env: Record<string, string> = {};
+if (context.traceHeaders?.traceparent) {
+  env.TRACEPARENT = context.traceHeaders.traceparent;
+}
+if (context.traceHeaders?.tracestate) {
+  env.TRACESTATE = context.traceHeaders.tracestate;
+}
+await new Deno.Command("my-tool", { args, env }).output();
+```
+
+Prefer this over reading `TRACEPARENT` from `Deno.env`. The process env holds a
+method's trace context only while no unrelated method is running in the same
+process. A method awaiting `context.runModel` still gets its own context back
+once the nested method finishes. When unrelated methods run at the same time,
+such as parallel workflow steps or parallel `runModel` calls, the env falls back
+to the run's inbound context until they have all finished.
+
+### Arguments Holding Another Service's Template Syntax
+
+`swamp behavior validate` (and every workflow step) checks `{{ ... }}` and
+`${ ... }` text. Text on a swamp root (`self`, `env`, `inputs`, `model`, `data`,
+...) is treated as a dropped `$` and fails, even when it belongs to a vendor
+(Datadog `{{env.name}}`, Terraform `${data.x.id}`). Other text warns. If a
+global or method argument carries a vendor's template language, mark the field
+so neither happens:
+
+```typescript
+const GlobalArgsSchema = z.object({
+  message: z.string().meta({ foreignTemplate: true }).describe("Alert body"),
+  query: z.string(), // still checked
+});
+```
+
+- Only the check is silenced: `${{ ... }}` in the field is still validated and
+  evaluated, and the method receives the vendor text unchanged. A vendor's own
+  `${{ ... }}` (GitHub Actions `${{ github.sha }}`) is not warned about in a
+  declared field.
+- Put `.meta()` on the field itself (wrapping it in `.optional()`, `.nullable()`
+  or `.default()` is fine), not before a `.transform()`.
+- Older swamp versions ignore the metadata, so no version gate is needed.
+- Without the declaration, a definition author can still keep vendor text
+  literal with `${{ literal('{{env.name}}') }}`. `literal()` exists only in
+  swamp's own evaluator, not in `ctx.createCelEnvironment()`. It cannot pass
+  through `${{ ... }}` text that names a swamp namespace (GitHub Actions
+  `${{ inputs.version }}`): the method then gets
+  `Unresolved expression in globalArguments.<field>`, so a field that must carry
+  such text belongs in the method's arguments rather than its global arguments.
+
+---
+
+## CheckDefinition API
+
+Pre-flight checks are defined in the behavior's `checks` field and run
+automatically before every method except read and list methods (see
+[checks.md](checks.md) for how a method's kind is decided).
+
+### execute Signature
+
+```typescript
+execute: async (context: MethodContext): Promise<CheckResult>
+```
+
+### MethodContext Fields Available in Checks
+
+| Field                    | Description                                    |
+| ------------------------ | ---------------------------------------------- |
+| `context.globalArgs`     | Validated global arguments from the definition |
+| `context.definition`     | `{ id, name, version, tags }`                  |
+| `context.methodName`     | Name of the method being invoked               |
+| `context.repoDir`        | Repository root path                           |
+| `context.logger`         | LogTape Logger for diagnostic output           |
+| `context.dataRepository` | For reading previously stored data             |
+| `context.modelType`      | The behavior type string                       |
+| `context.modelId`        | The behavior instance ID                       |
+
+**Important:** `context.writeResource` and `context.createFileWriter` are **NOT
+available** in check execute functions. Checks must not produce data output —
+they only inspect state and return a pass/fail result.
+
+`context.readModelData`, `context.queryData` and `context.runModel` are also
+**not available** in checks. To read another behavior's data from a check, use
+`context.dataRepository` with that behavior's definition name (see pattern 2
+below).
+
+### CheckResult
+
+```typescript
+interface CheckResult {
+  pass: boolean;
+  errors?: string[]; // required when pass is false; human-readable reasons
+}
+```
+
+### Three Common Patterns
+
+**1. Value/policy validation** — inspect `context.globalArgs` directly:
+
+```typescript
+execute: async (context) => {
+  if (context.globalArgs.budget < 0) {
+    return { pass: false, errors: ["budget must be non-negative"] };
+  }
+  return { pass: true };
+},
+```
+
+**2. Cross-behavior validation** — read other behavior's stored data via
+`context.dataRepository`. The second argument accepts the other behavior's
+definition name or its ID:
+
+```typescript
+execute: async (context) => {
+  const content = await context.dataRepository.getContent(
+    "aws/vpc",
+    context.globalArgs.vpcName, // definition name of the VPC behavior
+    "state",
+  );
+  if (!content) {
+    return { pass: false, errors: [`VPC ${context.globalArgs.vpcName} has no stored state`] };
+  }
+  return { pass: true };
+},
+```
+
+**3. Live API checks** — call an external API to verify conditions:
+
+```typescript
+execute: async (context) => {
+  const res = await fetch(`https://api.example.com/quotas/${context.globalArgs.region}`);
+  const quota = await res.json();
+  if (quota.remaining < 1) {
+    return { pass: false, errors: [`No quota remaining in region ${context.globalArgs.region}`] };
+  }
+  return { pass: true };
+},
+```
+
+Label live checks with `labels: ["live"]` so users can skip them in offline
+environments using `--skip-check-label live`.
+
+### Extension Checks via modelRegistry.extend()
+
+The `modelRegistry.extend()` method accepts an optional third parameter
+`checks?: Record<string, CheckDefinition>` to add checks to an existing behavior
+type:
+
+```typescript
+modelRegistry.extend("aws/ec2/vpc", {}, {
+  "my-custom-check": {
+    description: "Custom policy check added by extension",
+    labels: ["policy"],
+    execute: async (context) => {
+      return { pass: true };
+    },
+  },
+});
+```
+
+Check names must be unique -- conflicts with existing checks on the target
+behavior throw an error at registration time.
+
+### Extension Resources via export const extension
+
+Extensions can declare new resource specs that are merged into the target
+behavior type. Add an optional `resources` field to the extension object:
+
+```typescript
+export const extension = {
+  type: "aws/ec2/vpc",
+  resources: {
+    "audit": {
+      description: "Audit results for the VPC",
+      schema: z.object({
+        findings: z.array(z.string()),
+        summary: z.string(),
+      }),
+      lifetime: "infinite",
+      garbageCollection: 5,
+    },
+  },
+  methods: [
+    {
+      audit: {
+        description: "Audit the VPC",
+        arguments: z.object({}),
+        execute: async (args, context) => {
+          const handle = await context.writeResource("audit", "audit", {
+            findings: ["all good"],
+            summary: "No issues found",
+          });
+          return { dataHandles: [handle] };
+        },
+      },
+    },
+  ],
+};
+```
+
+The `resources` field uses the same `Record<string, ResourceOutputSpec>` shape
+as base behavior definitions.
+
+**Name collisions in `export const extension`.** When a method, check, or
+resource spec name is already taken on the target type, only one definition is
+registered and each loser gets a `swamp-warning` naming both files. Precedence:
+the base behavior's own member always wins; then a local or source-mounted
+extension beats a pulled one (`.swamp/pulled-extensions/`); within one origin
+the smaller file path wins. So to override a pulled package's method, add a
+local extension with the same method name. `swamp doctor extensions` lists every
+collision and its winner.
+
+---
+
+## Logging API
+
+Behavior methods have access to a pre-configured LogTape logger via
+`context.logger`. The logger category is set automatically based on the behavior
+type and method name.
+
+### Log Levels
+
+From low to high severity: `trace`, `debug`, `info`, `warning`, `error`,
+`fatal`.
+
+### Structured Placeholders (Preferred)
+
+Use named `{placeholder}` tokens with a properties object:
+
+```typescript
+context.logger.info("Processing {name}", { name: context.definition.name });
+context.logger.error("Request failed: {error}", { error: err.message });
+```
+
+Use `{*}` to inline all properties from the object:
+
+```typescript
+context.logger.info("Bucket created: {*}", {
+  bucket: "my-bucket",
+  region: "us-east-1",
+});
+// Output: Bucket created: bucket=my-bucket region=us-east-1
+```
+
+### Additional Features
+
+| Method/Feature                    | Description                                    |
+| --------------------------------- | ---------------------------------------------- |
+| `context.logger.with({ ... })`    | Returns logger with extra properties           |
+| `context.logger.getChild("name")` | Creates child logger with sub-category         |
+| Flag handling                     | Respects `--log-level`, `--verbose`, `--quiet` |
+| JSON mode                         | Non-fatal suppressed; fatal goes to stderr     |

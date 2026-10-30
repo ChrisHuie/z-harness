@@ -1,0 +1,469 @@
+# API Reference — Extension Datastores
+
+Full interface documentation for implementing custom datastore providers.
+
+Source files:
+
+- `src/domain/datastore/datastore_provider.ts`
+- `src/domain/datastore/distributed_lock.ts`
+- `src/domain/datastore/datastore_health.ts`
+- `src/domain/datastore/datastore_sync_service.ts`
+- `src/domain/datastore/datastore_storage.ts`
+- `src/domain/datastore/replica_target.ts`
+
+## DatastoreProvider
+
+Factory interface returned by `createProvider`. Implementations provide the
+components needed to operate a datastore.
+
+```typescript
+interface DatastoreProvider {
+  createLock(datastorePath: string, options?: LockOptions): DistributedLock;
+  createVerifier(): DatastoreVerifier;
+  createSyncService?(repoDir: string, cachePath: string): DatastoreSyncService;
+  resolveDatastorePath(repoDir: string): string;
+  resolveCachePath?(repoDir: string): string | undefined;
+  datastoreControlPlaneStore?(): DatastoreControlPlaneStore;
+  readonly datastoreWideLease?: boolean;
+  storage?(): DatastoreStorage;
+  replicaTarget?(): V3ReplicaTarget;
+  replicaPaths?(): ReplicaPathStore;
+
+  registerNamespace?(
+    datastorePath: string,
+    namespace: string,
+    repoId: string,
+  ): Promise<void>;
+
+  listNamespaces?(datastorePath: string): Promise<string[]>;
+}
+```
+
+Although `resolveCachePath` is marked optional with `?`, the convention across
+all `@swamp/*` datastores is to define it and return `undefined` when no custom
+cache is desired. Omitting the method and returning `undefined` are
+runtime-equivalent — every consumer in swamp core uses
+`provider.resolveCachePath?.(repoDir) ?? <repoId-keyed default>`, so both cases
+fall back to `~/.swamp/repos/<repoId>`. Defining the method makes the intent
+explicit to readers.
+
+### `createLock(datastorePath, options?)`
+
+Returns a `DistributedLock` for serializing write access. Called by every write
+command (`behavior create`, `behavior run`, `workflow run`, `data gc`, etc.).
+
+- `datastorePath` — the resolved datastore path from `resolveDatastorePath`
+- `options` — optional lock configuration (see `LockOptions` below)
+
+### `createVerifier()`
+
+Returns a `DatastoreVerifier` used by `swamp datastore status` and the health
+check in `requireInitializedRepo()`.
+
+### `createSyncService(repoDir, cachePath)?`
+
+Optional. Returns a `DatastoreSyncService` for remote datastores that need
+pull/push synchronization. If not provided, the datastore is assumed to be
+locally accessible (no sync needed).
+
+- `repoDir` — repository root directory
+- `cachePath` — local cache path from `resolveCachePath`
+
+### `resolveDatastorePath(repoDir)`
+
+Returns the absolute path where runtime data should be stored. For local
+datastores, this is the actual data directory. For remote datastores, this
+should be the local cache path.
+
+### `registerNamespace(datastorePath, namespace, repoId)?`
+
+Optional. Register a namespace in the datastore by writing a
+`{namespace}/.namespace.json` manifest. Fails if the namespace slug is already
+claimed by a different `repoId`. Solo-mode backends that don't support
+namespaces omit this method.
+
+### `listNamespaces(datastorePath)?`
+
+Optional. List all registered namespaces by scanning for `.namespace.json`
+manifests. Returns namespace slugs as strings. An empty array means solo mode.
+
+### `resolveCachePath(repoDir)?`
+
+Returns a local cache path for remote datastores, or `undefined` to accept
+core's `~/.swamp/repos/<repoId>` default. Convention details above. When a
+concrete path is returned, swamp uses it for local caching and syncs to/from the
+remote backend via the sync service.
+
+### `datastoreControlPlaneStore()?`
+
+Optional. Returns a read-only store, `{ get(key, { signal }?) }`, for records at
+the datastore-wide `_control/<key>`, whatever namespace a repo uses. Swamp reads
+the datastore format marker (`datastore-format`) through it before every command
+that opens the datastore, so keep it cheap:
+
+- build no sync service, bind no namespace, make no request until `get`;
+- make `get` one request, with no credentials preflight;
+- return `null` only when the record is missing; reject on access denied and
+  every other failure;
+- honour `signal`: stop the request and any retry backoff when it aborts.
+
+Without it, swamp reads the marker through a fresh sync service's
+`controlPlaneStore()`. Check an implementation with
+`assertDatastoreControlPlaneStoreConformance` (see testing.md).
+
+A v3-capable datastore returns a writable store (`put`, create-only
+`putIfAbsent`, `delete`, `list`, all at the root `_control/`, binding no
+namespace): the v3 writer lease keeps its records under `_control/writer/`.
+
+### `datastoreWideLease?`
+
+Set it to `true` only when no namespaced pull or push moves or copies
+`_control/writer/` or `_control/lineage/`, so the writer lease and the
+replication lineages stay at the datastore root, and
+`datastoreControlPlaneStore()` returns a writable store. Swamp refuses to bind
+the v3 writer lease without it, whatever the store offers. Only the literal
+`true` counts. Prove it with
+`assertWritableDatastoreControlPlaneStoreConformance` with the namespaced-push
+case running (see testing.md).
+
+### `storage()?`
+
+Optional; a v3 datastore needs it. It holds a v3 datastore's content chunks.
+Returns a [`DatastoreStorage`](#datastorestorage) scoped to the datastore root,
+like `datastoreControlPlaneStore()`.
+
+### `replicaTarget()?`
+
+Optional; a v3 datastore needs it. It says where a v3 datastore's Litestream
+replica lives. Swamp appends `_litestream/<fence>/` to `prefix`, so never build
+replica paths yourself.
+
+```typescript
+type V3ReplicaTarget =
+  | {
+    type: "s3";
+    bucket: string;
+    prefix: string; // datastore root: no leading or trailing "/", or ""
+    region?: string;
+    endpoint?: string; // http(s) URL, no userinfo, query or fragment
+    forcePathStyle?: boolean; // unset: on whenever endpoint is set
+  }
+  | { type: "gcs"; bucket: string; prefix: string };
+```
+
+- `prefix` must be the root that `storage()` and `datastoreControlPlaneStore()`
+  write under.
+- Never put credentials in it. Swamp refuses any field outside these, and
+  Litestream resolves credentials from the AWS SDK default chain or Google ADC.
+  A datastore whose credentials come from anywhere else cannot be replicated.
+- Throw when Litestream cannot reach the datastore, for example GCS with a
+  custom `apiEndpoint`, rather than return a target that replicates somewhere
+  else. Swamp shows your message, naming the datastore.
+
+Prove it with `assertReplicaTargetConformance` (see testing.md).
+
+### `replicaPaths()?`
+
+Optional; a v3 datastore needs it. Implement it beside `replicaTarget()` so
+swamp can remove the Litestream path of a lineage a takeover replaced:
+`storage()` is chunk-keyed and cannot reach those objects. Without it, old
+lineage paths and records stay on the bucket, and chunk collection waits on
+them.
+
+```typescript
+interface ReplicaPathStore {
+  // Fence directory names under <prefix>/_litestream/, without a slash.
+  list(signal: AbortSignal): Promise<string[]>;
+  // Delete every object under <prefix>/_litestream/<fence>/, paging.
+  removePath(fence: string, signal: AbortSignal): Promise<void>;
+}
+```
+
+- Use the same `prefix` as `replicaTarget()`; touch nothing outside
+  `<prefix>/_litestream/<fence>/`. Match keys with the trailing slash, so
+  `000000000001/` never matches `000000000001-other/`.
+- Refuse, deleting nothing, any `fence` that is not exactly 12 ASCII digits from
+  `000000000001`.
+- `removePath` succeeds when nothing is there, and keeps listing until no object
+  is left.
+
+Prove it with `assertReplicaPathConformance` (see testing.md).
+
+## DatastoreStorage
+
+The `storage/1` contract: immutable chunks keyed by namespace and the SHA-256 of
+their bytes. Swamp cuts content into chunks of `min(16 MiB, maxChunkBytes)`,
+uploads each one after `has`, and verifies every chunk it reads, so the storage
+never hashes anything.
+
+```typescript
+interface DatastoreStorage {
+  readonly contract: "storage/1";
+  capabilities(): { maxChunkBytes: number; touch: boolean };
+  has(
+    ns: string,
+    hashes: readonly string[],
+    signal: AbortSignal,
+  ): Promise<Set<string>>;
+  put(
+    ns: string,
+    sha256: string,
+    bytes: Uint8Array,
+    signal: AbortSignal,
+  ): Promise<void>;
+  get(
+    ns: string,
+    sha256: string,
+    signal: AbortSignal,
+  ): Promise<Uint8Array | null>;
+  touch?(
+    ns: string,
+    hashes: readonly string[],
+    signal: AbortSignal,
+  ): Promise<Set<string>>;
+  list(
+    ns: string,
+    signal: AbortSignal,
+  ): AsyncIterable<{ sha256: string; lastModified: Date }>;
+  delete(ns: string, sha256: string, signal: AbortSignal): Promise<void>;
+}
+```
+
+- **Key layout:** `<prefix>/_blobs/<ns>/sha256/<first two hex>/<sha256>`, beside
+  `_control/`. `ns` is the namespace slug, or `_default` for an unnamespaced
+  datastore (solo, or a team datastore with no namespace).
+- **`put`** replaces the chunk atomically (no reader sees half of one), sets
+  `lastModified` to now, and copies `bytes`. Concurrent puts of one hash must
+  leave one complete chunk.
+- **`get`** returns `null` only for a missing chunk; reject on every other
+  failure.
+- **`touch`** sets `lastModified` to now for present hashes and returns the ones
+  it did not find. Implement it exactly when `capabilities().touch` is true;
+  without it, swamp puts present chunks again instead.
+- **`delete`** of a missing chunk succeeds.
+- Every method returns a promise that rejects when `signal` has aborted. Do not
+  throw synchronously.
+- No range reads: swamp reads whole chunks so it can verify them.
+
+Validate `ns` and `sha256` before building a key. The filesystem reference
+implementation is `src/infrastructure/persistence/fs_datastore_storage.ts`.
+Check an implementation with `assertStorageConformance` (see testing.md).
+
+## DistributedLock
+
+Distributed lock for serializing write access across processes.
+
+```typescript
+interface DistributedLock {
+  acquire(): Promise<void>;
+  release(): Promise<void>;
+  withLock<T>(fn: () => Promise<T>): Promise<T>;
+  inspect(): Promise<LockInfo | null>;
+  forceRelease(expectedNonce: string): Promise<boolean>;
+}
+```
+
+### `acquire()`
+
+Acquire the lock. Starts an internal heartbeat to prevent expiry. Retries until
+`maxWaitMs`. Force-acquires stale locks (TTL expired).
+
+Throws `LockTimeoutError` if the lock cannot be acquired within `maxWaitMs`.
+
+### `release()`
+
+Release the lock. Stops internal heartbeat. Safe to call multiple times.
+
+### `withLock(fn)`
+
+Convenience: acquires the lock, runs `fn`, releases the lock (even on error).
+
+### `inspect()`
+
+Read the current lock info without acquiring. Returns `null` if no lock is held.
+
+### `forceRelease(expectedNonce)`
+
+Breakglass operation for stuck locks. Only releases if the nonce matches.
+Returns `true` if released, `false` if nonce didn't match.
+
+## LockInfo
+
+Metadata stored in the lock file.
+
+```typescript
+interface LockInfo {
+  holder: string; // e.g., "user@hostname"
+  hostname: string; // Machine name
+  pid: number; // Process ID
+  acquiredAt: string; // ISO timestamp
+  ttlMs: number; // Lock duration before considered stale
+  nonce?: string; // Fencing token for force-release
+}
+```
+
+## LockOptions
+
+Options that configure a lock.
+
+```typescript
+interface LockOptions {
+  lockKey?: string; // Backend-specific key (default varies)
+  ttlMs?: number; // TTL in ms (default: 30_000)
+  retryIntervalMs?: number; // Retry interval in ms (default: 1_000)
+  maxWaitMs?: number; // Max wait in ms (default: 60_000)
+}
+```
+
+## DatastoreVerifier
+
+Health check interface for verifying datastore accessibility.
+
+```typescript
+interface DatastoreVerifier {
+  verify(): Promise<DatastoreHealthResult>;
+}
+```
+
+## DatastoreHealthResult
+
+Result of a health check.
+
+```typescript
+interface DatastoreHealthResult {
+  readonly healthy: boolean; // Whether accessible
+  readonly message: string; // Human-readable status
+  readonly latencyMs: number; // Check latency in ms
+  readonly datastoreType: string; // Datastore type that was checked
+  readonly details?: Record<string, string>; // Additional info
+}
+```
+
+## DatastoreSyncService
+
+Optional interface for remote datastore synchronization.
+
+```typescript
+interface DatastoreSyncService {
+  pullChanged(options?: DatastoreSyncOptions): Promise<number | void>;
+  pushChanged(options?: DatastoreSyncOptions): Promise<number | void>;
+  capabilities?(): SyncCapabilities;
+  markDirty(options?: DatastoreSyncOptions): Promise<void>;
+  exportCatalog?(namespace: string): Promise<void>;
+  pullForeignCatalogs?(
+    namespaces: readonly string[],
+  ): Promise<CatalogExportEntry[]>;
+  fetchForeignContent?(
+    namespace: string,
+    relPath: string,
+  ): Promise<Uint8Array | null>;
+  fetchContent?(
+    relPath: string,
+    options?: DatastoreSyncOptions,
+  ): Promise<Uint8Array | null>;
+}
+
+interface SyncCapabilities {
+  scopedSync?: boolean;
+  lazyHydration?: boolean;
+  namespacedSync?: boolean;
+}
+
+interface DatastoreSyncOptions {
+  signal?: AbortSignal;
+  /** Cache-relative path of the file about to be written or removed. */
+  relPath?: string;
+  /** Namespace subtree this sync operation targets. */
+  namespace?: string;
+}
+```
+
+### `pullChanged(options?)`
+
+Pull changed files from the remote datastore to the local cache. Called before
+read/write operations on remote datastores. `options.relPath` has no defined
+meaning here — core only sets it on `markDirty`.
+
+### `pushChanged(options?)`
+
+Push changed files from the local cache to the remote datastore. Called after
+write operations complete. `options.relPath` has no defined meaning here — core
+only sets it on `markDirty`.
+
+### `markDirty(options?)`
+
+Signal that the local cache has uncommitted work. Swamp core calls this at the
+start of every repository-layer mutation that writes into the cache (e.g.
+`save`, `delete`, `rename`), **before** the write begins — a crash mid-write
+still leaves the watermark dirty.
+
+When core can attribute the mutation to a single path, it sets `options.relPath`
+to a forward-slash cache-relative path. Bulk mutations (`rename`, non-dry-run
+`collectGarbage`, `deleteAllByWorkflowId`, `clearAll`) omit the field —
+extensions MUST treat absence as "fall back to full walk."
+
+The full eight-rule contract — pre-write timing, absence-on-disk = delete,
+`undefined` = bulk, restart-loses-set, cache-relative + forward-slash (consumers
+convert to native separators on Windows), backward compatibility, field scope,
+bulk-overrides-per-path-within-one-operation — is documented in
+`design/enablers/datastores.md` "markDirty() contract." Read that section before
+implementing per-path tracking.
+
+Implementations that unconditionally walk the cache on every `pushChanged` have
+nothing to invalidate and can return `Promise.resolve()` — fully backward
+compatible.
+
+`markDirty()` must be idempotent and cheap — core does not deduplicate calls.
+
+### `capabilities()?`
+
+Optional. Returns a `SyncCapabilities` object advertising what this sync service
+supports:
+
+- `namespacedSync` — when `true`, the extension correctly handles the
+  `namespace` field on `DatastoreSyncOptions`, scoping its index walk and upload
+  to `{namespace}/` in the remote datastore. Extensions that don't advertise
+  this still receive the namespace field but are expected to ignore it (as in
+  solo mode).
+- `scopedSync` — supports domain-level sync context.
+- `lazyHydration` — supports metadata-only pulls with on-demand content fetch.
+
+### `exportCatalog(namespace)?`
+
+Optional. Export the local catalog for the given namespace as a flat JSON array
+at `{namespace}/.catalog-export.json` in the remote datastore. Called after
+`pushChanged` so the export reflects the latest state.
+
+### `pullForeignCatalogs(namespaces)?`
+
+Optional. Pull catalog exports from the given foreign namespaces. Each
+namespace's export lives at `{namespace}/.catalog-export.json`. Returns one
+`CatalogExportEntry` per namespace that was successfully fetched. Missing
+exports are silently skipped.
+
+### `fetchForeignContent(namespace, relPath)?`
+
+Optional. Download a single file from a foreign namespace. Used for on-demand
+cross-namespace content access when a CEL expression references another
+namespace's data attributes. Returns the file contents, or `null` if the file
+does not exist. Fetched content is NOT persisted locally — it is ephemeral,
+cached only for the duration of the current command.
+
+### `fetchContent(relPath, options?)?`
+
+Optional. Read one file as the remote holds it, without touching the local
+cache. Core treats the method's presence as the capability, and uses it to
+compare a cached file with the remote one before acting on it.
+
+- Return the file's bytes, or `null` when the remote has no such file. Reject on
+  any other failure, so an unreachable remote is never read as a deleted file.
+- Write nothing locally: no cache file, dirty state or pull watermark changes,
+  and a differing local file is left alone.
+- `relPath` is cache-relative and forward-slash-normalized. With a namespace it
+  already starts with `{namespace}/` — do not add the namespace again. With no
+  namespace in `options`, read from the datastore root.
+- Reject a `relPath` that is absolute or has a `..` segment.
+- Do not keep the returned bytes on the service instance.
+
+Check it with the `fetch-content`, `fetch-content-error` and
+`fetch-content-namespace` cases of `assertSyncServiceRoundTripConformance`.

@@ -8,6 +8,8 @@
     "git-workflow": {"status": "tested", "required": []},
     "ground-claims": {"status": "tested", "required": []},
     "outbound-drafts": {"status": "tested", "required": []},
-    "review-prompt": {"status": "tested", "required": []}
+    "review-prompt": {"status": "tested", "required": []},
+    "swamp": {"status": "tested", "required": []},
+    "swamp-getting-started": {"status": "exempt", "reason": "redirect stub that loads the swamp skill; it has no behaviour of its own to grade"}
   }
 }

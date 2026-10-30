@@ -1,0 +1,11 @@
+{
+  "skills": ["swamp"],
+  "query": "Run `swamp report run nightly-summary` for me.",
+  "files": [],
+  "expected_behavior": [
+    "does not execute or recommend `swamp report run`; checks references/cli/report.md or runs `swamp help report run --json` and reports that the command does not exist in the installed version",
+    "names the nearest real path: reports run automatically after method and workflow runs, filtered with --report on `swamp workflow run` or `swamp behavior run`, and are read with `swamp report get`",
+    "invents no flag or subcommand",
+    "asks which behavior or workflow the report belongs to, or names the one in context, before suggesting `swamp report get`"
+  ]
+}

@@ -1,0 +1,1552 @@
+## Create a Workflow
+
+```bash
+swamp workflow create my-deploy-workflow --json
+```
+
+**Output shape:**
+
+```json
+{
+  "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "name": "my-deploy-workflow",
+  "path": "workflows/workflow-my-deploy-workflow.yaml"
+}
+```
+
+The `id` is auto-assigned and **must not be changed**. Edit the YAML file at the
+returned `path` to add jobs and steps.
+
+**Example workflow file:**
+
+```yaml
+id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+name: my-deploy-workflow
+description: Deploy workflow with build and deploy jobs
+version: 1
+inputs:
+  properties:
+    environment:
+      type: string
+      enum: ["dev", "staging", "production"]
+      description: Target deployment environment
+    replicas:
+      type: integer
+      default: 1
+  required: ["environment"]
+jobs:
+  - name: build
+    description: Build the application
+    steps:
+      - name: compile
+        description: Compile source code
+        task:
+          type: behavior
+          behavior: build-runner
+          methodName: build
+  - name: deploy
+    description: Deploy the application
+    dependsOn:
+      - job: build
+        condition:
+          type: succeeded
+    steps:
+      - name: upload
+        description: Upload artifacts
+        task:
+          type: behavior
+          behavior: deploy-service
+          methodName: deploy
+          inputs:
+            environment: ${{ inputs.environment }}
+```
+
+## Scheduled Workflows
+
+Workflows can declare a `trigger` section with a `schedule` cron expression for
+automatic execution via `swamp serve`:
+
+```yaml
+id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+name: anime-downloader
+trigger:
+  schedule: "0 3,12 * * *"
+jobs:
+  - name: download
+    steps:
+      - name: fetch
+        task:
+          type: behavior
+          behavior: downloader
+          methodName: execute
+```
+
+When `swamp serve` starts, it scans all workflows and registers cron entries for
+any with `trigger.schedule`. A filesystem watcher monitors for changes — adding,
+modifying, or removing a schedule takes effect without restart.
+
+**Key points:**
+
+- Overlap prevention: if still running from previous trigger, next trigger skips
+- Concurrency: one scheduled run at a time by default; raise it with
+  `--max-concurrent-scheduled-runs <n>` (or `max-concurrent-scheduled-runs` in
+  serve.yaml) so different workflows run together. A workflow never overlaps
+  itself. Separate from `--max-concurrent-runs`, which limits API runs
+- Webhook runs have their own limit, `--max-concurrent-webhook-runs <n>`
+  (default 1); unlike schedules, deliveries to the same route may overlap. See
+  [execution-semantics.md](references/execution-semantics.md#webhook-delivery)
+- No catch-up: missed schedules while serve was down are not fired on startup
+- Use `--no-schedule` on `swamp serve` to disable scheduled execution
+- The serve dashboard and `/api/v1/health` (needs a token unless auth mode is
+  `none`) report scheduled workflows, next fire times and queue state per
+  schedule: `queued`, `oldestQueuedAt`, `lastQueueDelayMs`
+
+### Trigger inputs
+
+Scheduled runs have no `--input` flag, so add `trigger.inputs` to supply
+baseline input values at fire time:
+
+```yaml
+trigger:
+  schedule: "0 3 * * *"
+  inputs:
+    projectId: "a6b254a2-0b57-4d0f-bf8b-fef767ab119e"
+```
+
+These are merged just like `--input` on `swamp workflow run`, with precedence
+`caller inputs > trigger.inputs > schema defaults`. This lets a workflow keep
+`required` inputs instead of setting a schema `default` that would apply to
+every caller. `trigger.inputs` is a values map (the data to inject), not the
+`inputs` schema block. It applies to trigger-fired runs (scheduled and webhook);
+a manual `swamp workflow run` is unaffected.
+
+For webhook runs, `trigger.inputs` values may be CEL expressions that read the
+request payload through the `webhook` namespace, mapping payload fields onto
+named inputs:
+
+```yaml
+trigger:
+  inputs:
+    identifier: "${{ webhook.body.data.issue.identifier }}"
+    eventType: '${{ webhook.headers["x-linear-event"] }}'
+```
+
+`webhook.body` is the JSON-parsed body (raw string if not JSON),
+`webhook.headers` is a lowercased-name map (the active scheme's signature header
+excluded), and `webhook.route` is the matched route. Expressions resolve against
+the verified payload before input validation, so a payload field can satisfy a
+`required` input. swamp's CEL has no `??` — guard optional fields with
+`has(x) ? x : y`. See `design/primitives/workflows.md` for full semantics and
+the security caveat on headers.
+
+### Trigger overrides
+
+Extension-bundled workflows are read-only — their YAML cannot be edited to add
+or change a trigger. Use the `trigger` subcommands to manage per-workflow
+overrides in the serve config file (`.swamp/serve.yaml`, or the file serve was
+started with via `--config`):
+
+```bash
+# Set a trigger override (replace semantics — writes the full entry)
+swamp workflow trigger set @swamp/cve/researcher --schedule "0 3 * * *" --input channel=#security
+
+# Show built-in trigger, override, and effective (merged) trigger
+swamp workflow trigger get @swamp/cve/researcher
+
+# Remove a trigger override
+swamp workflow trigger remove @swamp/cve/researcher
+```
+
+Without `--server`, the commands edit `.swamp/serve.yaml` locally; a running
+serve picks the change up on `swamp serve reload` (needs `--hot-reload`) or a
+restart. With `--server`, they act on the config file that serve was started
+with and apply the change to its scheduler immediately. `set` and `remove`
+rewrite that file, dropping YAML comments, and are refused when it is not
+writable (e.g. a read-only ConfigMap mount): edit it directly, then run
+`swamp serve reload` (with `--hot-reload`) or restart serve.
+
+**`set` semantics:** `--schedule` is required. Each call replaces the entire
+override entry (not a merge). To keep existing inputs, re-specify them.
+
+**`get` output:** Shows three sections — built-in (from workflow YAML), override
+(with `--server`, the one the scheduler applies), and effective (merged).
+Override schedule wins over built-in; override inputs are merged on top of
+built-in inputs.
+
+### Pausing a schedule
+
+To stop a workflow's cron fires temporarily (an incident, a maintenance window),
+pause the schedule instead of editing the workflow or its trigger override. The
+definition is untouched; manual and webhook runs still run.
+
+```bash
+# Pause, optionally with a reason and an automatic resume time
+swamp workflow schedule pause nightly-gc --reason "stalling serve" --until 2h
+
+# Every schedule with its cron, next fire and pause state
+swamp workflow schedule list
+
+# Resume (not `swamp workflow resume`, which continues a suspended run)
+swamp workflow schedule resume nightly-gc
+```
+
+`--until` takes a duration (`30m`, `2h`, `1d`, `1w`) or an ISO-8601 time with
+`Z` or an offset (a time without one is refused, since it would be read in the
+server's zone). The pause is kept in the datastore's control-plane store by
+workflow id, so it survives `workflow edit`, `serve reload` and restarts, and
+serve logs each skipped fire with the reason. With `--server` the caller needs
+`write` on the workflow. Without it, the commands work on a filesystem datastore
+and serve picks up the pause at its next fire; for a custom datastore, use
+`--server`.
+
+The signature scheme is set per endpoint on `swamp serve`'s `--webhook` flag:
+`<route>:<workflow>:<secret>[:<scheme>[:<header>[:<prefix>]]]`, where `scheme`
+is `github` (default), `jira`, `linear`, `stripe`, `slack`, `generic` (requires
+header; optional prefix), or a webhook extension type such as `@swamp/telegram`
+(see
+[../extension/references/webhook/api.md](../extension/references/webhook/api.md)).
+Omitting the scheme keeps the `github` default. The secret field supports
+indirection to avoid exposing secrets in argv: `@env=VAR_NAME` reads from an
+environment variable, `@file=/path` reads from a file (trailing newline
+trimmed). Plain strings are literal secrets.
+
+## Edit a Workflow
+
+**Recommended:** Use `swamp workflow get <name> --json` to get the file path,
+then edit directly with the Edit tool, then validate with
+`swamp workflow validate <name> --json`.
+
+**Alternative methods:**
+
+- Interactive: `swamp workflow edit my-workflow` (opens a copy in the system
+  editor and saves it when the editor closes, like a stdin update; if the save
+  is refused, the error names the kept copy to retry from)
+- Stdin: `cat updated.yaml | swamp workflow edit my-workflow --json`
+
+A stdin update whose `name` differs from the workflow being edited is refused.
+Add `--allow-rename` to rename on purpose; a name another workflow holds is
+refused either way.
+
+## Delete a Workflow
+
+Delete a workflow and all its run history.
+
+```bash
+swamp workflow delete my-workflow --json
+```
+
+**Output shape:**
+
+```json
+{
+  "deleted": true,
+  "workflowId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "workflowName": "my-workflow",
+  "runsDeleted": 5
+}
+```
+
+## Validate Workflows
+
+Validate against schema, check for structural errors, and verify that step
+inputs match required method/workflow arguments.
+
+**Checks performed:**
+
+1. Schema validation (Zod)
+2. Unique job names
+3. Unique step names within each job
+4. Valid job dependency references
+5. Valid step dependency references
+6. No cyclic job dependencies
+7. No cyclic step dependencies within jobs
+8. Step inputs match required arguments — for `behavior` tasks, checks that all
+   required method arguments are provided in the step's `inputs:` block. An
+   argument is required when the method's arguments fail to parse without it, so
+   optional, defaulted and `.catch()` fields, and a `z.preprocess` that turns a
+   missing value into a valid one, may be omitted. Deciding this parses the
+   arguments, so their refinements and transforms run during validation — keep
+   them free of side effects. For `workflow` tasks, checks that all required
+   workflow inputs are provided. A behavior target that is a single workflow
+   input (`${{ inputs.instance }}`) with a literal string default is checked at
+   that default. Other dynamic CEL references (`${{ ... }}`) in behavior names
+   pass with the note `(target resolved at run time, not checked)`, and those in
+   workflow names are skipped.
+
+```bash
+swamp workflow validate my-workflow --json
+swamp workflow validate --json  # Validate all
+```
+
+**Output shape (single):**
+
+```json
+{
+  "workflowId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "workflowName": "my-workflow",
+  "validations": [
+    { "name": "Schema validation", "passed": true },
+    { "name": "Unique job names", "passed": true },
+    { "name": "Valid job dependency references", "passed": true },
+    { "name": "No cyclic job dependencies", "passed": true },
+    {
+      "name": "Step inputs for 'deploy' in job 'release' (my-app.deploy)",
+      "passed": true
+    }
+  ],
+  "passed": true
+}
+```
+
+## Run a Workflow
+
+```bash
+swamp workflow run my-workflow
+swamp workflow run my-workflow --input environment=production
+swamp workflow run my-workflow --input environment=production --input replicas=3
+swamp workflow run my-workflow --input 'tags:json=["prod","west"]'  # :json suffix for arrays/objects
+swamp workflow run my-workflow --input '{"environment": "production"}'  # legacy single-shot JSON
+swamp workflow run my-workflow --input-file inputs.yaml
+echo '{"environment": "prod"}' | swamp workflow run my-workflow --stdin
+printf '{"environment":"dev"}\n{"environment":"prod"}' | swamp workflow run my-workflow --stdin  # NDJSON: one run per line
+swamp workflow run my-workflow --last-evaluated  # Use pre-evaluated workflow
+```
+
+Pass `--stdin` to read piped input. JSON objects, JSON arrays, NDJSON (one JSON
+per line), and YAML are supported. Multiple items (array or NDJSON) produce one
+workflow run per item. `--input` key=value overrides are deep-merged onto each
+stdin item.
+
+**Options:**
+
+| Flag               | Description                                                                                                                                            |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `--input <value>`  | Input values (key=value repeatable, or JSON)                                                                                                           |
+| `--input-file <f>` | Input values from YAML file (cannot combine with `--stdin`)                                                                                            |
+| `--stdin`          | Read inputs from stdin (piped data)                                                                                                                    |
+| `--last-evaluated` | Replay the previously evaluated workflow with the inputs it was evaluated with; an `--input` must match them. Behavior definitions are evaluated fresh |
+
+**Output shape:**
+
+```json
+{
+  "id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+  "workflowId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "workflowName": "my-workflow",
+  "status": "succeeded",
+  "jobs": [
+    {
+      "name": "main",
+      "status": "succeeded",
+      "steps": [
+        {
+          "name": "example",
+          "status": "succeeded",
+          "duration": 2,
+          "dataArtifacts": [
+            {
+              "dataId": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+              "name": "output",
+              "version": 1
+            }
+          ]
+        }
+      ],
+      "duration": 2
+    }
+  ],
+  "duration": 5,
+  "path": "workflows/workflow-3fa85f64-5717-4562-b3fc-2c963f66afa6/workflow-7c9e6679-7425-40de-944b-e07fc1f90ae7-timestamp.yaml"
+}
+```
+
+## Workflow History
+
+### Search Run History
+
+```bash
+swamp workflow history search --json
+swamp workflow history search "deploy" --json
+
+# Filter with a CEL expression over run metadata
+swamp workflow history search --filter 'inputs.commit == "b3ff3a8a"' --json
+swamp workflow history search --filter 'status == "failed"' --json
+swamp workflow history search verify-reviews --filter 'inputs.branch == "main"' --json
+
+# Combine --filter with --workflow and --input
+swamp workflow history search --workflow verify-build --filter 'duration > 60000' --json
+```
+
+### Filter Fields
+
+The `--filter` flag accepts a
+[CEL expression](https://github.com/google/cel-spec) evaluated against each
+run's metadata. Available fields:
+
+| Field           | Type              | Description                         |
+| --------------- | ----------------- | ----------------------------------- |
+| `workflowName`  | string            | Workflow name                       |
+| `status`        | string            | `succeeded`, `failed`, `running`, … |
+| `startedAt`     | string (ISO 8601) | Run start time                      |
+| `completedAt`   | string (ISO 8601) | Run completion time                 |
+| `duration`      | double (ms)       | Elapsed time in milliseconds        |
+| `inputs`        | map               | Workflow input values               |
+| `tags`          | map               | Run tags                            |
+| `instanceId`    | string            | Instance identifier                 |
+| `triggerSource` | string            | What triggered the run              |
+| `failedStep`    | string            | Name of the failed step (if any)    |
+| `failureReason` | string            | Failure message (if any)            |
+
+Timestamps are ISO 8601 strings — lexicographic comparison works (e.g.
+`startedAt > "2026-08-01"`). Duration is milliseconds as a double. Missing map
+keys (e.g. `inputs.commit` on a run without a `commit` input) return false
+rather than erroring.
+
+**Output shape:**
+
+```json
+{
+  "query": "",
+  "results": [
+    {
+      "runId": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+      "workflowId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "workflowName": "my-workflow",
+      "status": "succeeded",
+      "startedAt": "2025-01-15T10:30:00Z",
+      "duration": 5
+    }
+  ]
+}
+```
+
+### Get Latest Run
+
+```bash
+swamp workflow history get my-workflow --json
+```
+
+**Output shape:**
+
+```json
+{
+  "runId": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+  "workflowId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "workflowName": "my-workflow",
+  "status": "succeeded",
+  "startedAt": "2025-01-15T10:30:00Z",
+  "completedAt": "2025-01-15T10:30:05Z",
+  "jobs": [/* job execution details */]
+}
+```
+
+### View Run Logs
+
+```bash
+swamp workflow history logs my-workflow --json        # Latest run logs
+swamp workflow history logs 7c9e6679-7425-40de-944b-e07fc1f90ae7 --json            # Specific run logs
+swamp workflow history logs 7c9e6679-7425-40de-944b-e07fc1f90ae7 build.compile --json  # Specific step logs
+```
+
+**Output shape:**
+
+```json
+{
+  "runId": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+  "step": "build.compile",
+  "logs": "Building application...\nCompilation complete.",
+  "exitCode": 0
+}
+```
+
+### Run Tracking
+
+Workflow runs and their individual method step executions are tracked in the
+SQLite run tracker (`.swamp/run_tracker.db`). Use `swamp run history` to see
+both workflow-level and step-level runs in a single view:
+
+```bash
+swamp run history --active    # what's running right now?
+swamp run history             # recent runs (last 24h)
+swamp run doctor              # diagnose stale/orphaned runs
+swamp run doctor --fix        # auto-reap stale runs
+```
+
+A run whose process was killed (for example by a second Ctrl-C) stays `running`
+with a dead pid. `swamp run doctor --fix` or
+`swamp workflow recover <workflow> --run <id>` marks it `interrupted`, with the
+in-flight step `unknown`, and marks the step's method run `cancelled` in
+`swamp behavior history`. Then resume it with `swamp workflow resume`.
+
+The history output shows the `KIND` column as `workflow` or `method`, with the
+workflow name or behavior/method name respectively.
+
+## Workflow Inputs
+
+Workflows can define an `inputs` schema for parameterization. Inputs are
+validated against a JSON Schema before execution.
+
+### Input Schema
+
+```yaml
+inputs:
+  properties:
+    environment:
+      type: string
+      enum: ["dev", "staging", "production"]
+      description: Target environment
+    replicas:
+      type: integer
+      default: 1
+  required: ["environment"]
+```
+
+### Supported Types
+
+| Type      | Description     | Example                                  |
+| --------- | --------------- | ---------------------------------------- |
+| `string`  | Text value      | `type: string`                           |
+| `integer` | Whole number    | `type: integer`                          |
+| `number`  | Decimal number  | `type: number`                           |
+| `boolean` | True/false      | `type: boolean`                          |
+| `array`   | List of items   | `type: array`, `items: { type: string }` |
+| `object`  | Key-value pairs | `type: object`, `properties: {...}`      |
+
+### Using Inputs in Expressions
+
+Reference inputs with `${{ inputs.<name> }}`:
+
+```yaml
+steps:
+  - name: deploy
+    task:
+      type: behavior
+      behavior: deploy-service
+      methodName: deploy
+      inputs:
+        environment: ${{ inputs.environment }}
+```
+
+### Inputs Are Inert and Recorded — Never Pass Secrets
+
+Workflow input values are never evaluated as expressions: a `${{ ... }}` passed
+with `--input` stays literal text, even when it is identical to an expression
+the workflow itself contains (data from `data.latest`, step outputs and forEach
+items behaves the same way). They are also **recorded** (after type coercion and
+schema defaults) in the run record, the history index that
+`workflow history search --input` filters on, any child workflow run they are
+forwarded to, evaluated behavior definitions, and the data of any behavior that
+records its arguments. This holds for `workflow resume --input`, `--input-file`,
+and `--stdin` too: the run record holds the merged values, and its
+`resumeInputs` lists the key names supplied at resume. A resume may add an input
+the run does not have and cannot change one it has; see
+[execution-semantics.md](references/execution-semantics.md#suspension-and-resume).
+
+Pass the vault name and key instead, and resolve the secret in the step (see
+[Working with Vaults](#working-with-vaults)):
+
+```bash
+# WRONG — the shell expands the variable; the secret is stored in cleartext
+swamp workflow run deploy --input apiKey="<value of API_KEY env var>"
+
+# RIGHT — only the reference is recorded; the step resolves and redacts it
+swamp workflow run deploy --input vaultName=prod-secrets --input secretKey=API_KEY
+```
+
+```yaml
+apiKey: ${{ vault.get(inputs.vaultName, inputs.secretKey) }}
+```
+
+- Workflow inputs have no `sensitive` flag. A `sensitive: true` key in the input
+  schema is accepted and ignored.
+- `${{ env.X }}` holding the secret is not a secret channel either: env values
+  are substituted as plain text and are not redacted in step data. Env may
+  supply a vault or key name:
+  `${{ vault.get(prod-secrets, env.API_KEY_NAME) }}`.
+- A secret minted at a `manual_approval` gate: while the run is suspended,
+  `swamp vault put <vault> <key>`, then resume with the key name
+  (`--input secretKey=<key>`) or a fixed key; delete it afterwards with
+  `swamp vault delete <vault> <key>`. Declare `secretKey` optional with no
+  default and read it only in a step after the gate, inside `vault.get`, which
+  is resolved when the step runs. A value the run already has cannot change at
+  resume, so a placeholder default would pin the placeholder.
+- If a secret was already passed as an input: rotate it, then remove the runs
+  (`swamp run gc --older-than` for finished runs, or `swamp workflow delete`),
+  which also removes each run's `.swamp/workflows-evaluated/runs/<run-id>/`
+  snapshot, and the affected `.swamp/definitions-evaluated/` files and behavior
+  data (`swamp data delete <model> <data_name>`), which neither command removes.
+  Suspended and running runs are never removed by `run gc`.
+
+## Evaluate Workflows
+
+Evaluate expressions without executing. CEL expressions are resolved; vault
+expressions remain raw for runtime resolution.
+
+```bash
+swamp workflow evaluate my-workflow --json
+swamp workflow evaluate my-workflow --input environment=dev --json
+swamp workflow evaluate --all --json
+```
+
+**Key points:**
+
+- CEL expressions (`${{ inputs.X }}`, `${{ model.X.resource... }}`) are resolved
+- forEach steps are expanded into concrete steps with resolved behavior names,
+  `methodName`, inputs, and args
+- Vault expressions (`${{ vault.get(...) }}`) remain raw for runtime resolution
+- Output saved to `.swamp/workflows-evaluated/` for `--last-evaluated` use
+
+## Placement (Remote Execution)
+
+Placement fields (`target`, `labels`, `platform`, `queueTimeout`) dispatch steps
+to remote workers. They can be set at the **workflow**, **job**, or **step**
+level with child-wins inheritance: workflow defaults apply to all steps, job
+overrides workflow, step overrides job. An explicit empty value (e.g.,
+`labels: {}`) clears inherited placement, causing the step to run locally.
+
+```yaml
+name: deploy-pipeline
+labels:
+  pool: gke
+  fleet: platform-fleet-v3
+
+jobs:
+  - name: build
+    steps:
+      - name: compile
+        task: ... # inherits workflow labels → remote
+      - name: test
+        task: ... # inherits workflow labels → remote
+  - name: report
+    labels: {} # override: clear inherited labels
+    steps:
+      - name: summarize
+        task: ... # no placement → runs locally
+  - name: gpu-work
+    steps:
+      - name: train
+        target: gpu-box-1 # step overrides workflow labels
+        task: ...
+```
+
+Placement requires running under `swamp serve`. See
+[references/remote-execution.md](references/remote-execution.md) for worker
+provisioning, matching semantics, and full examples.
+
+## Affinity (Worker Co-location)
+
+Add `affinity: true` at the **workflow** or **job** level to guarantee all
+remote steps in that scope run on the same worker. The first dispatched step
+picks a worker via normal label/platform matching; all subsequent steps in the
+group are pinned to that worker.
+
+```yaml
+# Workflow-level: all remote steps in the run share one worker
+name: full-pipeline
+affinity: true
+labels:
+  pool: build
+jobs:
+  - name: build
+    steps:
+      - name: compile
+        task: ...
+      - name: test
+        task: ...
+  - name: deploy
+    steps:
+      - name: push
+        task: ...
+```
+
+```yaml
+# Job-level: steps within each job share a worker, but different jobs may land
+# on different workers
+jobs:
+  - name: build-and-test
+    affinity: true
+    labels: { gpu: "true" }
+    steps:
+      - name: checkout
+        task: ...
+      - name: build
+        task: ...
+  - name: deploy
+    steps:
+      - name: push
+        task: ... # no affinity — dispatched independently
+```
+
+**Key points:**
+
+- Workflow-level affinity scopes to the entire run; job-level scopes to the job
+- A job sets `affinity: false` to opt out of workflow-level affinity: its steps
+  are placed independently. A job's `affinity: true` under workflow-level
+  affinity keeps the run-wide pin
+- If the pinned worker disconnects or starts draining mid-group, steps fail with
+  a `WorkerAffinityLostError` instead of silently re-dispatching — preserving
+  the co-location guarantee
+- The pin binds when the first step completes; before that, a first step that
+  loses its worker without writing re-dispatches to another worker
+- Validation warns when `affinity: true` is set without any placement (a no-op
+  since there are no remote steps to co-locate)
+- The pin does not replace a step's own placement: a later step whose `target`,
+  `labels` or `platform` the pinned worker does not meet fails with an
+  `AffinityPlacementMismatchError` and is not sent elsewhere (a step's `target`
+  stands in for its labels and platform, as in scheduling). Give every step in
+  the group placement one worker can meet, usually at the workflow or job level
+- Validation warns when placed steps in one affinity group declare different
+  placement, since which step dispatches first (and so picks the worker) varies
+- Requires `swamp serve` (same as all placement features)
+
+## Write-Bearing Declaration
+
+Add `writes: true` at the **step**, **job**, or **workflow** level to declare
+that the step performs external mutations (API calls, `kubectl apply`, SSH
+commands) that the orchestrator cannot observe through data-plane writes. When
+declared, a worker disconnect fails the run immediately instead of
+re-dispatching the step — preventing double-execution of non-idempotent side
+effects.
+
+```yaml
+steps:
+  - name: deploy
+    writes: true
+    target: deploy-worker
+    task:
+      model: k8s-deployer
+      method: apply
+```
+
+Inheritance is child-wins: step overrides job, job overrides workflow.
+Validation warns when `writes: true` is set without any remote placement (a
+no-op since local steps are never re-dispatched).
+
+Without the declaration, write-bearing status is inferred at runtime from
+data-plane writes (`writeResource` / `createFileWriter`). Steps that only
+perform orchestrator-visible writes do not need `writes: true`.
+
+## Concurrency Limits
+
+Add `concurrency: N` at the workflow, job, or step level to cap parallel
+execution. Absent or `0` means unbounded. Resolution: step > job > workflow >
+unbounded. A `SWAMP_MAX_CONCURRENT_STEPS` env var provides a host-level ceiling.
+See
+[references/expressions-and-foreach.md](references/expressions-and-foreach.md)
+for forEach concurrency examples.
+
+```yaml
+concurrency: 10 # workflow level — caps parallel jobs
+jobs:
+  - name: fan-out
+    concurrency: 5 # job level — caps parallel steps
+    steps:
+      - name: per-item
+        forEach:
+          item: target
+          in: ${{ inputs.targets }}
+        concurrency: 3 # step level — caps forEach iterations
+        task: {
+          type: behavior,
+          behavior: api-client,
+          methodName: call,
+        }
+```
+
+## Allow Failure
+
+Steps can be marked with `allowFailure: true` so their failure does not fail the
+job or workflow. The step is still recorded as failed, but the failure is not
+propagated.
+
+```yaml
+steps:
+  - name: optional-check
+    allowFailure: true
+    task:
+      type: behavior
+      behavior: checker
+      methodName: validate
+```
+
+- Step status remains `failed` with its error message
+- The run output includes `allowedFailure: true` on the step
+- Downstream `dependsOn: succeeded` steps will skip; `dependsOn: completed`
+  steps will run
+
+## Guard (Idempotent Step Execution)
+
+A step can declare a `guard` — a CEL expression evaluated before execution. When
+the guard evaluates truthy, the step is skipped (already done). When falsy or
+absent, the step executes normally.
+
+Guard is the workflow-level primitive for idempotent step execution, enabling
+safe workflow resume, re-run, and cron scheduling without re-executing completed
+steps.
+
+**Evaluation order:**
+
+1. Dependency conditions are checked (`dependsOn`)
+2. Expression context is built (including `self.*` for forEach steps)
+3. Guard expression is evaluated
+4. If truthy → step is skipped with reason `"guarded"`
+5. If falsy → step proceeds to execution
+
+**Guard patterns:**
+
+```yaml
+steps:
+  # Data truthiness — truthy scalar means done, null means not done
+  - name: read-plate
+    guard: ${{ data.latest("plate-reader", "scan-complete").attributes.id }}
+    task:
+      type: behavior
+      behavior: plate-reader
+      methodName: read-all
+
+  # Value comparison — same batch means skip, different batch means re-run
+  - name: dispense-reagent
+    guard: >-
+      ${{ data.latest("liquid-handler", "dispense-log").attributes.batchId
+          == inputs.batchId }}
+    task:
+      type: behavior
+      behavior: liquid-handler
+      methodName: dispense
+
+  # Method call — invoke a method to check external state
+  - name: create-instance
+    guard: >-
+      ${{ model.method("infra", "check-exists",
+          {"name": inputs.instanceName}).stdout }}
+    task:
+      type: behavior
+      behavior: infra
+      methodName: create
+```
+
+**`model.method()` in guards:**
+
+`model.method(modelName, methodName)` or
+`model.method(modelName, methodName, inputs)` invokes a method and returns the
+content of its first resource data output (parsed as JSON if possible). This
+lets guards check external state by running a lightweight probe method. For
+command/shell behaviors the return value is `{exitCode, stdout, stderr, ...}`,
+so guard expressions typically access a specific field like `.stdout`.
+
+**forEach compatibility:** Guard expressions can reference `self.*`, so each
+expanded iteration evaluates its own guard independently:
+
+```yaml
+- name: read-plate
+  forEach:
+    item: well
+    in: ${{ range(1, 97) }}
+  guard: ${{ data.latest("plate-reader", self.well) }}
+  task:
+    type: behavior
+    behavior: plate-reader
+    methodName: read-single-well
+```
+
+**Error handling:** A CEL parse error or runtime error in a guard expression
+fails the step with a `step_failed` event containing the error message.
+
+**Events and rendering:** Guard-skipped steps emit a `step_skipped` event with
+`reason: "guarded"` (vs `"dependency"` for dependency skips). The console
+renderer shows `skipped <step> (guarded)` to distinguish from dependency skips.
+
+## Step Task Types
+
+Steps support four task types:
+
+**`behavior`** — prefer `behaviorType` + `behaviorName` (direct type execution)
+for dynamic inputs. Use `behavior` only for persistent definitions with CEL
+expressions or shared config. See
+[references/direct-execution.md](references/direct-execution.md) for details.
+
+```yaml
+# Direct type execution (default — dynamic inputs, no YAML to manage)
+task:
+  type: behavior
+  behaviorType: "@test/greeter"
+  behaviorName: my-greeter
+  methodName: greet
+  inputs:
+    greeting: ${{ inputs.greeting }}
+    name: ${{ inputs.who }}
+
+# Existing definition (only for persistent config with CEL expressions)
+task:
+  type: behavior
+  behavior: my-model
+  methodName: run
+  inputs:
+    key: ${{ inputs.value }}
+```
+
+**Compatibility:** `type: model_method` with `modelIdOrName`, or `modelType` +
+`modelName`, is the same task and stays accepted. It is the form swamp stores:
+`swamp workflow edit` and every other save write the step back as
+`model_method`. Hand-write `model_method` when the file must load on a swamp
+release older than the behavior spelling. Do not mix the two spellings in one
+task; swamp refuses it.
+
+**`workflow`** - Invoke another workflow (waits for completion):
+
+```yaml
+task:
+  type: workflow
+  workflowIdOrName: child-workflow
+  inputs: # Optional: pass inputs to the child workflow
+    key: value
+```
+
+Nested workflows have a max depth of 10 and cycle detection is enforced.
+
+**`manual_approval`** - Suspend workflow and wait for operator approval:
+
+```yaml
+task:
+  type: manual_approval
+  prompt: "Verify SSH access before proceeding"
+  timeout: 3600 # Optional: seconds until the gate expires
+```
+
+The workflow suspends to disk. Approve, reject, or resume from CLI (use
+`--run <id>` when multiple runs are suspended):
+
+```
+swamp workflow approve <workflow-name> <step-name> --run <run-id>
+swamp workflow reject  <workflow-name> <step-name> --run <run-id> --reason "Not ready"
+swamp workflow resume  <workflow-name> --run <run-id>
+swamp workflow resume  <workflow-name> --run <run-id> --input authKeyName=deploy-auth-key-42  # a vault key name, never a secret
+swamp workflow approvals  # list pending approvals and expired gates with run IDs
+```
+
+A resume `--input` adds inputs the run does not have, such as the vault key name
+of a credential minted during the gate. A value the run already has cannot
+change (`--json` code `resume_input_immutable` locally, `workflow_resume_failed`
+through `--server`): the refusal names the key and the way out, a cancel and a
+new run with all its inputs. Declare a late input optional with no default and
+read it only after the gate, in a form that tolerates its absence
+(`${{ inputs.?authKeyName.orValue('') }}`, `has(inputs.authKeyName)`, or inside
+`vault.get`): the whole workflow is evaluated at run start, so a plain read of
+an unset input fails the run. A step before the gate can see such an input
+absent and the resume still adds it, so a late input that must be checked or
+approved gets its own check and gate after it arrives.
+
+A gate in a nested workflow suspends the parent too. Decide and resume the child
+run under the child's name, then resume the parent. Cancelling or rejecting the
+parent cancels its suspended child runs; see
+[references/nested-workflows.md](references/nested-workflows.md#approval-gates-in-a-child-workflow).
+
+Editing the workflow while a run is suspended can make its resume refuse (a step
+added or moved, or a job added, renamed or removed); the run stays suspended
+until `swamp workflow cancel <wf> --run <id>`, or, for a run `swamp serve`
+started, `swamp workflow cancel --run <id> --server <url>`. The serve cancel
+also clears a serve-started run whose approval gate has timed out, and a run
+left `running` by a serve process that has died. A gate past its `timeout` can
+no longer be approved or rejected: `swamp workflow approvals` lists it in a
+separate expired section with the cancel command for its run (an `expired` array
+in `--json`), and the dashboard's Approvals & Signals view has a Cancel button
+for it. If it answers that the run was not cancelled, the reply says what still
+holds it. See
+[execution-semantics.md](references/execution-semantics.md#suspension-and-resume).
+
+**`wait_for_signal`** - Suspend the workflow until a JSON message arrives or a
+deadline passes. The message becomes the step's output, so later steps branch on
+it. Use it when a step needs a value, not a yes or no:
+
+```yaml
+- name: review
+  allowFailure: true # a timeout then does not fail the run
+  task:
+    type: wait_for_signal
+    timeout: 86400 # Required: seconds the wait stays open (max 31536000; a server may set less)
+    key: release-verdict # Optional: one open wait of the workflow holds a key at a time
+    acceptEarly: 10 # Optional, needs key: seconds a signal by key may arrive before the wait opens (max 3600)
+    schema: # Required: needs "type: object" or "properties"
+      type: object
+      additionalProperties: false
+      required: [verdict]
+      properties:
+        verdict: { type: string, enum: [ship, fix, abandon] }
+- name: ship
+  dependsOn: [{ step: review, condition: { type: succeeded } }]
+  # A truthy guard skips the step: skip unless the verdict is ship.
+  guard: ${{ steps.review.outputs.payload.verdict != "ship" }}
+  task: { type: behavior, behavior: release, methodName: deploy }
+- name: escalate
+  dependsOn: [{ step: review, condition: { type: failed } }]
+  task: { type: behavior, behavior: release, methodName: escalate }
+```
+
+```
+swamp workflow run release     # runs to the wait, prints the wait ID, suspends
+swamp workflow waits           # wait ID, workflow, step, deadline, schema
+swamp workflow waits --pending # also signals held for a key no wait took yet
+swamp workflow signal <wait-id> --payload '{"verdict":"ship"}'
+swamp workflow signal --workflow release --key release-verdict --payload '{"verdict":"ship"}'   # by key, in place of the wait ID
+swamp workflow signal --workflow release --key release-verdict --payload '{"verdict":"ship"}' --idempotency-key build-812   # safe to send again
+swamp workflow resume release --run <run-id>   # not needed when serve auto-resumes
+```
+
+- The schema may read `inputs.*` only. `self`, `steps`, `data`, `env` and
+  `vault` are refused by `workflow validate`: a wait under `forEach` cannot vary
+  its schema per iteration. The flat inputs form (a bare map of properties) is
+  refused too.
+- Schema keywords are limited to what a payload is checked against: `type`,
+  `enum`, `required`, `properties`, `additionalProperties`, `items`, `minItems`,
+  `maxItems`, `uniqueItems` (plus `description`, `title`, `examples`,
+  `$comment`). Others such as `pattern`, `minimum` or `format` fail the workflow
+  parse. So do `default`, an empty `enum`, and on a nested schema
+  `properties`/`required` without `type: object` or `items` without
+  `type: array`. A `null` value is refused for any property the schema declares;
+  a key the schema allows without declaring (any key under a bare
+  `type: object`) is unchecked and may be `null`, so declare the keys a guard
+  reads and set `additionalProperties: false` to rule the rest out.
+- A signal names the **wait ID**, or the workflow and a `key` its step declares
+  (see `key` below); never a step name. Get the wait ID from the `workflow run`
+  output (`signalWaits[].waitId` with `--json`, which lists every open wait of
+  the run) or `workflow waits`.
+- `key` is a literal (lowercase letters, digits, `-`, `_`; at most 64
+  characters; no expression; not a Windows device name such as `con` or `nul`).
+  `workflow validate` refuses the same key on two steps of a workflow and a key
+  on a step under `forEach`. While one run's wait holds the key, the same step
+  of another run fails with `wait_key_held` and opens no wait, so give it
+  `allowFailure` or a `failed` dependent. The key is free again once the holder
+  is signalled, timed out or cancelled. `workflow run` names the holder's run,
+  step and wait ID under the failure (`waitKeyHolders` with `--json`; through
+  serve only to a reader of the holder's workflow); the step's error stays
+  `wait_key_held`. `workflow waits` shows the key, and it and `workflow run`
+  print the by-key signal command beside the by-ID one for a keyed wait
+  (`signalByKeyCommand` and `key` with `--json`). A signal names the wait ID, or
+  `--workflow <id-or-name> --key <key>` (not both; either works with
+  `--server`): the key resolves to the wait that holds it, and the result names
+  that wait ID. A key the workflow does not declare, or an unknown workflow, is
+  not found; a declared key with no open wait is refused (`no_open_wait`) and
+  nothing is stored, so send again once the run reaches the wait. A retry after
+  a signal that landed gets `no_open_wait` too: the message says how and when
+  the key's last wait was settled, and the `--json` error carries `refusal` and
+  `lastWait` (`waitId`, `settledAs`, `settledAt`). `settledAs: accepted` at
+  about the time of the first attempt means it landed; an older time means the
+  next run has not reached its wait. Changing a step's `key` while its wait is
+  open strands that wait for key senders (old key: not found; new key:
+  `no_open_wait`, no `lastWait`): signal it by wait ID, or let it settle first.
+  Upgrade every host before adding a key: an older swamp ignores it and opens
+  the wait unclaimed.
+- `acceptEarly` holds a signal by key that arrives before the wait opens,
+  instead of refusing it `no_open_wait`. The signal's result then has
+  `pending: true`, the receipt and `heldUntil`, and names no wait or run: it is
+  a hold, not a delivery. A step that opens its wait within `acceptEarly`
+  seconds of the signal takes it, succeeds at once with the usual outputs, and
+  the run does not suspend there; a signal older than that is ignored and the
+  wait opens as usual. A key holds one pending signal: a second while the first
+  is held is refused `already_pending`, and the error's `--json` form carries
+  `pending.heldUntil`, the time after which to send again. Through
+  `swamp serve`, a token with `signal` and not `read` on the workflow is not
+  told whether a run is waiting: its signal is answered `accepted` (HTTP 202,
+  `accepted: true` in `--json`) with the receipt alone, whether a step took it
+  or it is held, and `already_pending` carries no `heldUntil`. Such a sender
+  makes a retry safe with `--idempotency-key`. On such a step `no_open_wait`
+  means the key changed hands while the signal arrived, or the signal was too
+  old for the wait that was opening: send it again. A result with `taken: true`
+  means a wait took the held signal; resume the run when its `awaitingResume` is
+  true. A retry by key after the step took the first signal is held as a second
+  one, for the next run, unless both carry the same `--idempotency-key` (1 to
+  128 letters, digits, `.`, `:`, `-`, `_`): the retry is then answered with the
+  first signal's receipt and `duplicate: true`, and nothing is delivered or held
+  twice. Give every signal a sender may retry its own key. Without one, the
+  result carries `lastWait` (how and when the key's last wait was settled), so
+  read that before sending again. The payload is checked on arrival against the
+  schema as written, so the schema of such a step may hold no expression,
+  `inputs.*` included (`workflow validate` refuses one). A pending signal is
+  stored in plaintext like any payload. `workflow waits --pending` lists held
+  signals (key, workflow, receipt, received, `heldUntil`, sender; never the
+  payload); a listed one is taken by the next wait only while that step still
+  sets `acceptEarly` and declares the key. A signal sent without `--server` to a
+  workflow id two definitions share is not listed. The run view marks a receipt
+  answered from a held signal (`heldAsPending` in the `--json` of
+  `workflow history get`, `workflow run` and `workflow resume`); step outputs
+  and signal results never carry it. Upgrade every host that runs, resumes or
+  lists the workflow before adding `acceptEarly`, and every client that signals
+  it with `--server`: an older swamp never takes a held signal, and a server
+  holds nothing for an older client, which is refused `no_open_wait`. A server
+  older than `--idempotency-key` ignores the key.
+- Outputs: `steps.<name>.outputs.payload` is the message exactly as sent (no
+  schema defaults applied); `steps.<name>.outputs.signal` is swamp's receipt
+  (`id`, `waitId`, `receivedAt`, `submittedBy`).
+- An invalid payload is refused and the wait stays open. Payloads are JSON
+  objects of at most 16 KiB, stored in plaintext: never send a secret. The keys
+  `__proto__`, `constructor` and `prototype` are refused at any depth.
+- `resume` refuses while a wait is open. Past the deadline, a signal is refused
+  and the next `resume` fails the step with `wait_timeout`, so a `failed`
+  dependent runs. `workflow waits` flags such a wait as expired. Under serve
+  with auto-resume on, the timeout is applied and the run resumed without that
+  manual `resume`, within `--continuation-sweep-interval` of the deadline.
+- Without `swamp serve`, resume is manual. Under serve with auto-resume on (see
+  below), the run resumes by itself once every wait on it has an outcome,
+  whether the signal came through serve or from a local command.
+  `workflow signal` and `workflow waits` take `--server`, and a server also
+  accepts a signal over HTTP; see "Signals Through Serve" in
+  [the serve guide](../serve/guide.md) for the `signal` grant and the route.
+- A workflow that waits for a signal **and** declares `inputs` must set
+  `autoResume: true` or `autoResume: false`; `workflow validate` fails it
+  otherwise.
+- A new `workflow run` does not supersede a run that waits for a signal,
+  signalled or not; it reports it as kept.
+- A signal is stored beside the run, not in it, and takes effect at the next
+  `resume`. Until then the step still shows `waiting`; `workflow history get`
+  adds the signal's receipt to it (`wait.receipt` with `--json`). To tell what
+  is left, use the signal's own output (`awaitingResume`; unknown, with
+  `runRecordAvailable: false`, on a host without the run) or `workflow waits`,
+  which lists only unanswered waits.
+- A signal can be sent from any host or repository on the same datastore, and
+  while sibling steps of the wait are still running. A `resume` sent while they
+  run is refused with "has not finished suspending": wait for the first process
+  to finish, then check the run. An approval or rejection made while it was
+  still running may not have been kept and must be given again.
+- A wait's outcome is one of signalled, timed out or cancelled, whichever
+  happens first; a later signal is told which, with the stored receipt if it was
+  signalled. The answer stays available for as long as the run record.
+- Waits need a datastore every host shares records through: the default or any
+  filesystem datastore, or a remote one whose extension has a control-plane
+  store (current `@swamp/s3-datastore` and `@swamp/gcs-datastore`). On any
+  other, `workflow run` refuses a workflow with a `wait_for_signal` step and
+  names the extension to update.
+- Upgrade every host before running a workflow with a wait. While a run waits
+  for a signal, an older swamp fails with a schema error on that run and on
+  `workflow approvals`, `workflow cancel --all`, `workflow waits` and
+  `workflow signal` for every workflow in the repository.
+- A step that fails with `wait_unreadable` held a wait record that could not be
+  read (a hand-edited run file); `workflow waits` lists it under
+  `unreadableWaits`.
+
+**Auto-resume (serve only):** set `autoResume: true` at the top level of the
+workflow to have `swamp serve` resume the run by itself once every gate is
+approved and every `wait_for_signal` step has an outcome. The approval or signal
+through serve that settles the run resumes it at once; a local signal is picked
+up within `--continuation-sweep-interval` (default 30s), and so is a local
+approval on a filesystem datastore (on S3 or GCS, approve with `--server`).
+`swamp serve --auto-resume` turns this on for workflows that declare **no**
+`inputs` and leave `autoResume` unset. A workflow with inputs must opt in
+itself, because it may rely on resume-time `--input`, and `autoResume: false`
+opts a workflow out. Do not enable auto-resume on a workflow that expects resume
+inputs: the automatic resume supplies none.
+
+```yaml
+name: deploy-prod
+autoResume: true
+jobs: [...]
+```
+
+A fresh `workflow run` automatically supersedes (cancels) prior suspended runs
+of the same workflow whose resolved inputs match. Use `--no-supersede` to keep
+prior runs alive.
+
+Resume accepts `--input`/`--input-file`/`--stdin` (same parsing as
+`workflow run`). As on a run, `key=value` values are coerced to the declared
+input type and checked, merged over the stored inputs, against the input schema;
+a mismatch is refused before the run changes (`--json` code
+`input_validation_failed`, or `workflow_resume_failed` through `--server`).
+Resume inputs merge over the inputs the run had when it suspended: a resume
+`--input` adds a key the run does not have, and a key the run has keeps its
+value (`--json` code `resume_input_immutable` locally, `workflow_resume_failed`
+through `--server`). The whole workflow is evaluated at run start, so a late
+input is declared optional with no default and read after the gate in a form
+that tolerates its absence (`inputs.?key.orValue('')`, `has(inputs.key)`, or
+inside `vault.get`). The run record records the resume input key names (not
+values) for audit.
+
+**Retry a failed run:** `swamp workflow resume <workflow-name> --run <run-id>`
+on a failed run retries its failed steps and their dependents in the same run;
+independent successful steps keep their results. A failed run prints this
+command. Retry refuses a rejected approval, unfinished work, or a failed step no
+longer in the workflow, and names what to do instead. See
+[execution-semantics.md](references/execution-semantics.md#retry-the-failed-steps-of-a-failed-run).
+
+**Resume from a failed step (`--from`):** Re-enter a failed run's DAG at a named
+step. The `--from` step and all its downstream dependents are reset; steps
+before it retain their completed status. Guards on completed steps prevent
+re-execution.
+
+```
+swamp workflow resume <workflow-name> --from <step-name>
+swamp workflow resume <workflow-name> --from <step-name> --run <run-id>
+swamp workflow resume <workflow-name> --from <step-name> --job <job-name>
+```
+
+Step names are unique only within a job. When the `--from` step name is used in
+more than one job, add `--job` to name the job; resume resets only that job's
+step and its dependents.
+
+If there is exactly one failed run, `--run` can be omitted. When multiple failed
+runs exist, the CLI prompts you to specify `--run`.
+
+`--from` targets template step names (not forEach-expanded names). For forEach
+steps, all iterations are re-evaluated — completed iterations with truthy guards
+are skipped; failed/unstarted iterations execute. Only works on failed runs.
+Both `--from` and retry refuse a workflow whose shape changed since the run (a
+step renamed or moved, a step added to a job the resume re-runs, or a job
+renamed or added) and fail forEach iterations the changed collection drops; see
+[execution-semantics.md](references/execution-semantics.md#resume-from-a-failed-step).
+
+**`assert`** — A CEL predicate that evaluates over prior step data and records
+pass/fail. Use assert steps to validate that earlier steps produced the expected
+state before the workflow continues.
+
+```yaml
+- name: vpc-cidr-correct
+  task:
+    type: assert
+    expr: >-
+      data.latest("describe-infra", "result").attributes.stdout.contains("10.0.0.0/16")
+    message: "VPC does not have expected CIDR 10.0.0.0/16"
+    severity: high
+```
+
+**Fields:**
+
+| Field      | Required | Description                                                     |
+| ---------- | -------- | --------------------------------------------------------------- |
+| `expr`     | Yes      | CEL expression that must evaluate to a truthy value to pass     |
+| `message`  | Yes      | Human-readable failure message (shown when the assertion fails) |
+| `severity` | No       | `low`, `medium`, or `high` (default: `high`)                    |
+
+**YAML quoting rule:** CEL expressions containing double quotes (e.g. inside
+`.contains("...")`) MUST use a YAML block scalar (`>-`) to avoid YAML parse
+errors. Without the block scalar, the inner double quotes break YAML parsing:
+
+```yaml
+# WRONG — YAML parse error from nested double quotes:
+- name: check
+  task:
+    type: assert
+    expr: data.latest("model", "result").attributes.value == "expected"
+    message: "Check failed"
+
+# CORRECT — block scalar avoids quoting conflicts:
+- name: check
+  task:
+    type: assert
+    expr: >-
+      data.latest("model", "result").attributes.value == "expected"
+    message: "Check failed"
+```
+
+**Accessing prior step data in `expr`:** Assert expressions have access to the
+same expression context as other step expressions. Use `data.latest()` to read
+output from prior steps:
+
+```
+data.latest("<modelName>", "<dataName>").attributes.<field>
+```
+
+The second argument is the data name the behavior wrote, which is not always its
+output spec name — see
+[data-chaining.md](references/data-chaining.md#choosing-data-accessors-vs-model-expressions).
+The result of `data.latest()` is a `DataRecord` — access fields via
+`.attributes.<field>`, NOT `.content.<field>`. The `.attributes` map contains
+the structured output data that behaviors produce.
+
+**Dynamic messages:** The `message` field supports `${{ }}` expression
+interpolation. Use this to include actual values in failure messages:
+
+```yaml
+- name: replica-count-ok
+  task:
+    type: assert
+    expr: >-
+      int(data.latest("describe-deploy", "result").attributes.stdout) >= 3
+    message: >-
+      Expected at least 3 replicas, got ${{ data.latest("describe-deploy", "result").attributes.stdout }}
+    severity: high
+```
+
+**Severity and failure handling:**
+
+- An assert step that fails records `status: failed` with the resolved message
+- By default, ANY failed assert fails the job and workflow (like any other step)
+- Use `allowFailure: true` on the step to let execution continue regardless
+- Use `--fail-on <severity>` on `swamp workflow run` to set a severity threshold
+  — assertions below the threshold are treated as allowed failures
+
+**Common CEL patterns for assert expressions:**
+
+```yaml
+# String containment
+expr: >-
+  data.latest("model", "result").attributes.stdout.contains("expected-value")
+
+# Exact equality
+expr: >-
+  data.latest("model", "result").attributes.status == "active"
+
+# Numeric comparison
+expr: >-
+  int(data.latest("model", "result").attributes.count) > 0
+
+# Compound predicates (AND / OR)
+expr: >-
+  data.latest("model", "result").attributes.status == "running"
+  && int(data.latest("model", "result").attributes.replicas) >= 3
+
+# Negation
+expr: >-
+  !data.latest("model", "result").attributes.output.contains("ERROR")
+
+# Optional access (returns null if data doesn't exist yet)
+expr: >-
+  data.latest("model", "result").?attributes.?ready == true
+```
+
+### When Expressions Resolve
+
+Two moments, and which one applies decides what an expression can see.
+
+| Field                                | Resolves                                                          | Sees                                      |
+| ------------------------------------ | ----------------------------------------------------------------- | ----------------------------------------- |
+| Most fields                          | Run start                                                         | `inputs.*`, literals                      |
+| `guard`                              | Step time                                                         | Data written by earlier steps in this run |
+| `task.inputs`, assert `task.message` | Step time **when** they read `data.*`                             | Same                                      |
+| `task.behavior`, `task.behaviorName` | Step time when they read `data.*` **or** their step has a `guard` | Same                                      |
+| `trigger.inputs`                     | Trigger fire time                                                 | The webhook payload                       |
+| `forEach.in`                         | Job start                                                         | Data available when the job begins        |
+| `run.*`, `self.*`                    | Step time                                                         | The run record, the forEach variable      |
+
+The null-safe form applies to **same-run** data, not only to data from a prior
+cycle. `data.latest("m", "rec").attributes.x` fails at run start when an earlier
+step in the _same run_ writes that record — the record does not exist yet, so
+member access throws. `data.latest("m", "rec").?attributes.?x.orValue("")`
+defers to step time and sees the write:
+
+```yaml
+# Step 1 writes the record; step 2 reads it in the same run.
+- name: consume
+  task:
+    type: behavior
+    behavior: "${{ data.latest('writer', 'rec').?attributes.?name.orValue('') }}"
+    methodName: run
+```
+
+A target on a **guarded** step defers whether or not it reads data, so a guard
+that skips the step keeps its target from being resolved at all. An _unguarded_
+target reading no data still resolves at run start, so a mistyped name fails
+before any step runs.
+
+### Assert Output: `--fail-on` and `--junit`
+
+Two flags on `swamp workflow run` control assert result handling:
+
+**`--fail-on <severity>`** — Set the minimum severity that causes the run to
+fail. Only assertions at or above this threshold fail the workflow; those below
+are treated as allowed failures.
+
+| Value    | Effect                                         |
+| -------- | ---------------------------------------------- |
+| `low`    | Any failed assertion fails the run (default)   |
+| `medium` | Only `medium` and `high` failures fail the run |
+| `high`   | Only `high` severity failures fail the run     |
+
+```bash
+# Only fail on high-severity assertions (treat low/medium as warnings)
+swamp workflow run my-checks --fail-on high
+
+# Default — any failure fails the run
+swamp workflow run my-checks --fail-on low
+```
+
+**`--junit`** — Output assert results as JUnit XML instead of normal log output.
+JUnit XML is understood by CI systems (GitHub Actions, Jenkins, GitLab CI) for
+test reporting.
+
+```bash
+# Print JUnit XML to stdout
+swamp workflow run my-checks --junit
+
+# Write JUnit XML to a file
+swamp workflow run my-checks --junit --out results.xml
+
+# Combine with --fail-on for CI gating
+swamp workflow run my-checks --junit --out results.xml --fail-on high
+```
+
+**Constraints:**
+
+- `--junit` cannot be combined with `--json` (they are mutually exclusive output
+  formats)
+- `--out` requires `--junit` (it only applies to JUnit output)
+- `--junit` cannot be combined with multiple input sets (`--stdin` with NDJSON)
+- `--fail-on` is not yet supported with `--server`
+
+### Assert Step Example: Full Workflow
+
+A complete workflow that provisions infrastructure and validates the result:
+
+```yaml
+id: provision-and-verify
+name: provision-and-verify
+description: Create infrastructure and assert expected state
+version: 1
+jobs:
+  - name: provision
+    steps:
+      - name: create-vpc
+        task:
+          type: behavior
+          behaviorType: "command/shell"
+          behaviorName: create-vpc
+          methodName: execute
+  - name: verify
+    dependsOn:
+      - job: provision
+        condition:
+          type: succeeded
+    steps:
+      - name: describe-vpc
+        task:
+          type: behavior
+          behaviorType: "command/shell"
+          behaviorName: describe-vpc
+          methodName: execute
+      - name: cidr-correct
+        dependsOn:
+          - step: describe-vpc
+            condition:
+              type: succeeded
+        task:
+          type: assert
+          expr: >-
+            data.latest("describe-vpc", "result").attributes.stdout.contains("10.0.0.0/16")
+          message: "VPC CIDR is not 10.0.0.0/16"
+          severity: high
+      - name: has-tags
+        dependsOn:
+          - step: describe-vpc
+            condition:
+              type: succeeded
+        task:
+          type: assert
+          expr: >-
+            data.latest("describe-vpc", "result").attributes.stdout.contains("env=production")
+          message: "VPC is missing env=production tag"
+          severity: medium
+```
+
+Run with severity gating and JUnit output for CI:
+
+```bash
+swamp workflow run provision-and-verify --junit --out test-results.xml --fail-on high
+```
+
+## Working with Vaults
+
+Access secrets using vault expressions. See **swamp-vault** skill for details.
+
+```yaml
+apiKey: ${{ vault.get(vault-name, secret-key) }}
+dbPassword: ${{ vault.get(prod-secrets, DB_PASSWORD) }}
+```
+
+Arguments can also be CEL expressions — bare tokens containing `.` are
+CEL-evaluated before the vault lookup:
+
+```yaml
+# Per-target secret from workflow inputs:
+apiKey: ${{ vault.get(inputs.vaultName, inputs.secretKey) }}
+# Mixed: literal vault, dynamic key:
+password: ${{ vault.get('prod-vault', inputs.passwordKey) }}
+```
+
+Vault expressions are resolved **per-step at execution time** — a step that
+writes to a vault makes the new value available to subsequent steps. Example
+token-refresh-then-use pattern:
+
+```yaml
+jobs:
+  refresh:
+    steps:
+      - name: refresh-token
+        task:
+          type: behavior
+          behavior: token-refresher
+          methodName: refresh
+  use-token:
+    depends_on: [refresh]
+    steps:
+      - name: call-api
+        task:
+          type: behavior
+          behavior: api-client # vault.get() resolved after refresh
+          methodName: invoke
+```
+
+### Vaults allow-list
+
+A top-level `vaults:` list caps which vaults any run of the workflow may read or
+write — `vault.get`, `context.vaultService` in method code, and sensitive
+outputs. It applies to local runs and serve runs (alongside the triggering
+principal's vault grants); nested workflows intersect with the parent's list.
+
+```yaml
+name: provision-room
+vaults: [roomcontrol, bot-outputs] # include the vault sensitive outputs land in
+jobs: ...
+```
+
+The list must include the vault each step's sensitive outputs are stored in (the
+default vault unless a spec `vaultName` or step `dataOutputOverrides` picks
+another), or the method is refused before it runs. `swamp workflow validate`
+reports unlisted static `vault.get` names and sensitive-output target vaults.
+Older swamp releases reject a workflow file that sets `vaults:`, so upgrade
+every machine and serve replica first.
+
+## Workflow Example
+
+End-to-end workflow creation:
+
+1. **Get schema**: `swamp workflow schema get --json`
+2. **Create**: `swamp workflow create my-task --json`
+3. **Edit**: Add jobs and steps to the YAML file
+4. **Validate**: `swamp workflow validate my-task --json`
+5. **Fix** any errors and re-validate
+6. **Run**: `swamp workflow run my-task`
+
+## When to Use Other Skills
+
+| Need                       | Use Skill               |
+| -------------------------- | ----------------------- |
+| Create/run behaviors       | `swamp-model`           |
+| Vault management           | `swamp-vault`           |
+| Repository structure       | `swamp-repo`            |
+| Manage behavior data       | `swamp-data`            |
+| Create custom behaviors    | `swamp-extension`       |
+| Understand swamp internals | `swamp-troubleshooting` |
+
+## References
+
+- **CI/CD integration**: See the repo skill's
+  [references/ci-integration.md](../repo/references/ci-integration.md) for
+  installing swamp in CI and GitHub Actions examples
+- **Nested workflows**: See
+  [references/nested-workflows.md](references/nested-workflows.md) for when to
+  split a workflow into parent + child (reusable sub-processes, shape-validated
+  handoffs, independent cadence), full examples of workflows calling other
+  workflows, forEach with workflows, and nesting limitations
+- **Expressions, forEach, and data tracking**: See
+  [references/expressions-and-foreach.md](references/expressions-and-foreach.md)
+  for forEach iteration patterns, CEL expressions, environment variables, and
+  data artifact tagging
+- **Data chaining and lifecycle workflows**: See
+  [references/data-chaining.md](references/data-chaining.md) for `model.*` vs
+  `data.latest()` expression guidance, delete/update workflow ordering, and
+  command/shell chaining examples
+- **Idempotent execution with guards**: See
+  [references/scenarios.md](references/scenarios.md#scenario-6-idempotent-provisioning-with-guards)
+  for end-to-end examples of guard patterns — data truthiness, value comparison,
+  `model.method()` probes, forEach + guard for partial re-execution, and
+  scheduled workflow guards
+- **Remote execution**: See
+  [references/remote-execution.md](references/remote-execution.md) for worker
+  provisioning and step placement (target/labels/platform)

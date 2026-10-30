@@ -1,0 +1,11 @@
+{
+  "skills": ["swamp"],
+  "query": "I just ran swamp update. Is the swamp skill still current, and what do I run if it is not?",
+  "files": [],
+  "expected_behavior": [
+    "runs scripts/check_install.py from the skill directory, or names it as the check, before answering",
+    "distinguishes the CLI reference stamp from the installed skill's identity (this repository's copy versus the upstream bundled skill)",
+    "names scripts/render_cli_reference.py for a stale reference and scripts/sync_upstream.py --diff before scripts/check_install.py --install for a replaced skill",
+    "does not hand-edit the installed skill directory"
+  ]
+}

@@ -1,0 +1,512 @@
+# Behavior Troubleshooting
+
+## Table of Contents
+
+- [Common Errors](#common-errors)
+  - ["Behavior not found"](#model-not-found)
+  - ["Method not found"](#method-not-found)
+  - ["Validation failed"](#validation-failed)
+  - ["Expression evaluation failed"](#expression-evaluation-failed)
+  - ["No such key" in CEL expressions](#no-such-key-in-cel-expressions)
+  - ["Unsupported vault expression"](#unsupported-vault-expression)
+  - [Sensitive argument set to a literal or constant expression](#marked-sensitive-and-cannot-be-set-to-a-literal-value-or-a-constant-expression)
+  - ["Behavior type not found"](#model-type-not-found)
+- [Expression Debugging](#expression-debugging)
+- [Method Execution Issues](#method-execution-issues)
+  - [Shell step treats an input as one word, or refuses it](#shell-step-treats-an-input-as-one-word-or-refuses-it)
+- [Data and Output Issues](#data-and-output-issues)
+
+## Common Errors
+
+### "Behavior not found"
+
+**Symptom**: `Error: Behavior not found: my-model` (under `swamp model`:
+`Model not found: my-model`)
+
+**Causes and solutions**:
+
+1. **Typo in behavior name** — list available behaviors:
+
+   ```bash
+   swamp behavior search --json
+   ```
+
+2. **Behavior not created** — create it:
+
+   ```bash
+   swamp behavior create <type> my-model --json
+   ```
+
+3. **Using ID instead of name** — both work, but verify:
+
+   ```bash
+   swamp behavior get my-model --json
+   # Check both id and name fields
+   ```
+
+### "Method not found"
+
+**Symptom**: `Error: Method 'deploy' not found on behavior type`
+
+**Causes and solutions**:
+
+1. **Wrong method name** — check available methods:
+
+   ```bash
+   swamp behavior type describe <type> --json
+   # Look at methods array
+   ```
+
+2. **Method not configured in input** — add to behavior input:
+
+   ```yaml
+   methods:
+     deploy:
+       arguments: {}
+   ```
+
+### "Validation failed"
+
+**Symptom**: `swamp behavior validate` returns errors
+
+**Common validation errors**:
+
+| Error                         | Solution                                 |
+| ----------------------------- | ---------------------------------------- |
+| Missing required field        | Add the field to behavior input          |
+| Invalid type for field        | Check schema, fix value type             |
+| Unknown property              | Remove field or check for typo           |
+| Invalid expression syntax     | Fix CEL expression syntax                |
+| Referenced behavior not found | Create the behavior or fix the reference |
+
+**Debug steps**:
+
+```bash
+# 1. Get the type schema
+swamp behavior type describe <type> --json
+
+# 2. Compare with your input
+swamp behavior get my-model --json
+
+# 3. Validate with verbose output
+swamp behavior validate my-model --json
+```
+
+### "Expression evaluation failed"
+
+**Symptom**: `Error evaluating expression: <expression>`
+
+**Common causes**:
+
+1. **Referenced behavior has no data**:
+
+   ```bash
+   # Check if the behavior has run
+   swamp data list <referenced-model> --json
+   ```
+
+2. **Wrong attribute path**:
+
+   ```bash
+   # Get the actual data structure
+   swamp data query 'modelName == "<model>" && name == "<data-name>"' --select content --json
+   # Check the attributes object
+   ```
+
+3. **Syntax error in expression**:
+
+   ```yaml
+   # Wrong — missing instance name
+   value: ${{ model.my-vpc.resource.vpc.attributes.VpcId }}
+
+   # Correct — spec="vpc", instance="main"
+   value: ${{ model.my-vpc.resource.vpc.main.attributes.VpcId }}
+   ```
+
+### "No such key" in CEL expressions
+
+**Symptom**: `Error: No such key: <keyname>`
+
+**Causes**:
+
+1. **Missing instance name in path**:
+
+   ```yaml
+   # Wrong — missing instance name
+   vpcId: ${{ model.my-vpc.resource.vpc.attributes.VpcId }}
+
+   # Correct — include instance name (spec="vpc", instance="main")
+   vpcId: ${{ model.my-vpc.resource.vpc.main.attributes.VpcId }}
+   ```
+
+2. **Behavior never executed** — expressions referencing `model.*.resource` or
+   `model.*.file` are automatically skipped when the referenced behavior has no
+   data. If a method accesses a skipped field, it throws a clear error:
+
+   ```
+   Unresolved expression in globalArguments.ssh_keys: ${{ model.ssh-key.resource... }}
+   ```
+
+   To fix, run the referenced behavior first:
+
+   ```bash
+   swamp behavior run my-vpc create
+   ```
+
+3. **Hyphen in spec name** (CEL interprets as subtraction):
+
+   ```yaml
+   # Wrong — spec name with hyphen
+   resource.internet-gateway.internet-gateway  # Parsed as subtraction
+
+   # Correct — use camelCase or no hyphen
+   resource.igw.igw
+   ```
+
+4. **Wrong attribute name**:
+
+   ```bash
+   # Check actual attribute names
+   swamp data query 'modelName == "my-vpc" && name == "vpc"' --select content --json
+   ```
+
+### "Unresolved expression in globalArguments"
+
+**Symptom**:
+`Error: Unresolved expression in globalArguments.<field>: ${{ ... }}`
+
+**Cause**: A `globalArguments` field contains a CEL expression that couldn't be
+resolved (e.g., the referenced behavior has no resource data), and the method
+tried to use that field. Another templating system's text such as
+`${{ github.sha }}` is passed through and does not cause this. Text whose first
+name is a swamp namespace (`${{ inputs.version }}`, `${{ steps.x }}`,
+`${{ env.X }}`) is treated as swamp's, so a vendor's text of that shape does —
+even when `literal()` produced it (`${{ literal('${{ inputs.version }}') }}`).
+Put such text in a method argument instead, where it passes through unchanged.
+
+**Solutions**:
+
+1. **Run the referenced behavior first** so its data is available:
+
+   ```bash
+   swamp behavior run <referenced-model> create
+   ```
+
+2. **Use a workflow** that runs behaviors in the correct order — dependencies
+   are resolved automatically within a workflow run.
+
+### "Could not read globalArguments.<field>: it holds the stored reference of sensitive field …"
+
+**Symptom**:
+`Error: Could not read globalArguments.ticket: it holds the stored reference of sensitive field ticket, whose vault could not be read (vault 'infra', key '…': <provider error>)`,
+preceded by a `Could not read sensitive field … from vault …` warning. The same
+error names `methodArguments.<field>` when a method argument reads the field.
+
+**Cause**: The argument reads a sensitive field of another behavior's data
+(`data.latest(...)`, `steps.<name>.outputs`), which is stored as a
+`vault.get(...)` reference, and that vault read failed. The provider error at
+the end says why: the key is missing, the vault's CLI is not on `PATH` (e.g.
+`op`), or its authentication timed out. A method that never reads the field
+still runs.
+
+**Solutions**: Fix the vault the error names — sign in, put its CLI on `PATH`,
+or rerun the producing behavior to store the value again — then rerun.
+
+### "Expression in methods.<method>.arguments.<field> could not be evaluated"
+
+**Symptom**:
+`Error: Expression in methods.execute.arguments.run could not be evaluated: Invalid expression: No such key: nope`
+followed by the CEL source with a caret. With `--json`, the code is
+`validation_failed` and `details` carries `path` and `expression`.
+
+**Cause**: An argument of the method being run holds a CEL expression that
+failed — a missing key, `data.latest()` finding no record, a type error, a
+declared input with no value and no default, or `model.<name>.resource` for a
+behavior with no data. The method is not run. Failing expressions in other
+methods, or in global arguments the method never reads, do not stop it. Text for
+another templating system (`${{ github.sha }}`, or `${{ inputs.version }}` when
+`version` is not a declared input) is passed through unchanged.
+
+**Solutions**:
+
+1. **Fix the reference** named in the message (check field names with
+   `swamp data query 'modelName == "<model>" && name == "<name>"' --select content`).
+2. **Run the producing behavior first** if the data does not exist yet, or use
+   `.?field` when the record may legitimately be absent.
+3. **Supply the value directly.** For a declared input, pass it
+   (`--input <input>=<value>`, or the step's `inputs:`). For any other argument,
+   `--input <argument>=<value>` on `behavior run` or the step's `inputs:` in a
+   workflow replaces the failing argument itself.
+
+### "Unsupported vault expression"
+
+**Symptom**:
+`Error: Unsupported vault expression "<expr>". Call vault.get(vaultName, secretKey) directly.`
+
+**Cause**: The expression reads the `vault` namespace in a form other than a
+direct `vault.get(vaultName, secretKey)` call, e.g.
+`cel.bind(v, vault, v.get('aws', 'key'))`. Only direct calls are resolved.
+
+**Solution**: Call `vault.get(...)` directly in the expression. `vault.get` text
+inside a string (`literal('vault.get(a, b)')`) is plain text and never resolved.
+
+### "marked sensitive and cannot be set to a literal value or a constant expression"
+
+**Cause**: A sensitive global argument holds a literal secret, or an expression
+that reads nothing — `${{ literal('hunter2') }}` or `${{ 'hunter2' }}` — which
+stores the secret in cleartext in the definition YAML. Reported on save,
+behavior create, method run, direct execution, `behavior validate`,
+`workflow validate` and workflow steps, including for a hand-edited definition
+and after an upgrade moves a literal into a sensitive field;
+`swamp doctor secrets` finds stored ones. Empty strings and null are allowed.
+Method run output shows a literal value under a sensitive argument as `***`; a
+`vault.get` reference is shown as written. The evaluated cache under
+`.swamp/definitions-evaluated/` holds `***` for it too, so a sensitive argument
+whose resolved value did not come from a vault — an input or a data field not
+marked sensitive — does not sit on disk in clear (text joined to a vault
+reference or an expression still awaiting runtime resolution stays as written);
+`--last-evaluated` cannot replay that cache and reports
+`evaluated_cache_holds_sensitive_arguments`; it checks the global arguments and
+the replayed method's arguments, less any method argument an `--input` override
+replaces. A plain re-run masks the value again, so to make the run replayable
+store the value in a vault and reference it; otherwise run without the flag.
+`${{ env.X }}` stays an expression in the cache and resolves at runtime on each
+run, including replay; its value is never cached.
+
+**Solution**: Store the secret in a vault and reference it:
+`${{ vault.get('my-vault', 'api-key') }}`.
+
+### "Model type not found"
+
+**Symptom**: `Error: Model type '<type>' not found`
+
+**Causes and solutions**:
+
+1. **Typo in type name**:
+
+   ```bash
+   swamp behavior type search --json
+   ```
+
+2. **Extension behavior not loaded** — check for syntax errors:
+
+   ```bash
+   # Look for error messages at startup
+   swamp behavior type search 2>&1 | grep -i error
+   ```
+
+3. **Extension in wrong directory**:
+
+   ```
+   extensions/models/my_model.ts  # Correct
+   extensions/my_model.ts         # Wrong
+   models/my_model.ts             # Wrong
+   ```
+
+4. **Extension not auto-resolved** — types from trusted collectives auto-resolve
+   on first use. Only `@swamp/*` is trusted by default; trust others explicitly
+   with `swamp extension trust add <collective>`. If resolution failed:
+   - Check which collectives are trusted: `swamp extension trust list`
+   - Check network connectivity (registry at swamp.club)
+   - Check if extension exists: `swamp extension search <query>`
+   - Manual fallback: `swamp extension pull @collective/name`
+   - Run `swamp auth whoami` to refresh cached membership collectives
+   - Trust a new collective: `swamp extension trust add <name>`
+
+## Expression Debugging
+
+### Step-by-Step Debug Process
+
+**Step 1: Validate the expression references a real behavior**
+
+```bash
+swamp behavior get <referenced-model> --json
+```
+
+**Step 2: Verify the behavior has data**
+
+```bash
+swamp data list <referenced-model> --json
+```
+
+**Step 3: Check the exact data structure**
+
+```bash
+swamp data query 'modelName == "<referenced-model>" && name == "<data-name>"' --select content --json
+```
+
+**Step 4: Build the expression path**
+
+```
+model.<model-name>.resource.<specName>.<instanceName>.attributes.<field>
+
+Example:
+model.my-vpc.resource.vpc.main.attributes.VpcId
+      └─────┘         └─┘ └──┘            └───┘
+      behavior name   |    |              attribute
+                      |    └── instanceName (from writeResource 2nd arg)
+                      └── specName (from writeResource 1st arg)
+```
+
+### Common Expression Patterns
+
+| Behavior Type   | Spec     | Instance | Expression Pattern                                           |
+| --------------- | -------- | -------- | ------------------------------------------------------------ |
+| command/shell   | result   | result   | `model.<name>.resource.result.result.attributes.stdout`      |
+| Custom behavior | (varies) | (varies) | `model.<name>.resource.<spec>.<instance>.attributes.<field>` |
+
+## Method Execution Issues
+
+### Method Runs But No Output
+
+**Symptom**: Method succeeds but no data artifacts
+
+**Causes**:
+
+1. **Behavior doesn't call writeResource**:
+
+   ```typescript
+   // Must return dataHandles
+   return { dataHandles: [handle] };
+   ```
+
+2. **Method threw after writing** — check logs:
+
+   ```bash
+   swamp behavior output logs <output-id> --json
+   ```
+
+### Method Fails with Timeout
+
+**Symptom**: Method times out
+
+**Solutions**:
+
+1. **Increase timeout for long-running operations**
+
+2. **Check for infinite loops in custom behaviors**
+
+3. **Verify network connectivity for API calls**
+
+### Method Fails with Authentication Error
+
+**Symptom**: AWS/API authentication errors
+
+**Solutions**:
+
+```bash
+# Check environment variables
+echo $AWS_ACCESS_KEY_ID
+echo $AWS_REGION
+
+# Verify credentials work
+aws sts get-caller-identity
+
+# Check vault expressions resolve
+swamp vault read-secret <vault-name> <key> --json
+```
+
+### Shell Step Treats an Input as One Word, or Refuses It
+
+**Symptom**: a `command/shell` value from an input, `data.*`, a step output or
+`env.*` arrives as a single argument (no word splitting, no globbing), the
+recorded `command` shows `"${__SWAMP_IN_0}"`, or the step fails with
+`shell_data_placement_refused`.
+
+**Cause**: data spliced into `run` is passed through a generated environment
+variable so it is never parsed as shell syntax. Authored text, including an
+input equal to its default, is unchanged. Refused: data inside a quoted
+here-document (`<<'EOF'`) or PowerShell single quotes, data inside shell
+arithmetic (`$(( ))`, `(( ))`, `for((`, `$[ ]`, array subscripts,
+`${s:offset}`), and a `run` that is nothing but data.
+
+**Solutions**:
+
+1. Use an unquoted here-document delimiter or double quotes.
+2. For arithmetic, pass the value in `env`, check it is a number, then use it:
+   `case $N in *[!0-9]*|'') exit 1;; esac; echo $((N + 1))`. Check the same way
+   before `[[ -eq ]]`, `let`, or putting a value in command position.
+3. To split a value into words or run it as code, pass it in `env` and choose
+   explicitly in `run`:
+
+   ```yaml
+   env:
+     FLAGS: "${{ inputs.flags }}"
+   run: deploy $FLAGS # unquoted: split into words; `eval "$SCRIPT"` runs code
+   ```
+
+## Data and Output Issues
+
+### Output Shows "succeeded" But Data Missing
+
+**Debug steps**:
+
+```bash
+# 1. Get output details
+swamp behavior output get <model-name> --json
+
+# 2. Check artifacts array
+# Look for "artifacts" in output
+
+# 3. List behavior data
+swamp data list <model-name> --json
+
+# 4. Check data directory directly
+ls -la .swamp/data/
+```
+
+### Cannot Find Previous Output
+
+```bash
+# Search all outputs
+swamp behavior output search --json
+
+# Search by behavior name
+swamp behavior output search "my-model" --json
+
+# Get specific output
+swamp behavior output get <output-id> --json
+```
+
+### Large `.swamp/outputs/` Directory
+
+```bash
+# Preview what run gc would collect (default: older than 30 days)
+swamp run gc --dry-run
+
+# Delete old workflow runs and method outputs
+swamp run gc --force
+
+# Custom retention period
+swamp run gc --older-than 7d
+```
+
+`swamp run gc` cleans `.swamp/outputs/` (workflow-run history and method
+outputs). `swamp data gc` cleans `.swamp/data/` (the data catalog) — they cover
+different storage areas.
+
+To keep history bounded without running these by hand, set retention in
+`.swamp.yaml`; `swamp serve` then applies it hourly, and a CLI-only repo at the
+end of a writing command at most hourly:
+
+```yaml
+garbageCollection:
+  retention: 30d # default for every kind except data
+  automatic: true # off unless set
+  workflowRuns: 14d # optional per kind: evaluatedSnapshots, outputs, audit, bookkeeping
+```
+
+Data retention is opt-in: only an explicit `data: <duration>` key enables it,
+and it also deletes a behavior's latest version once it is older than the
+cutoff. Running and suspended runs, and serve access state (tokens, grants,
+workers), are never removed. Check with `swamp doctor datastores --retention`.
+
+### Data Versions Not Visible
+
+```bash
+# List all versions
+swamp data versions <model-name> <data-name> --json
+
+# Check GC settings haven't pruned them
+swamp data query 'modelName == "<model-name>" && name == "<data-name>"' --select garbageCollection
+```
